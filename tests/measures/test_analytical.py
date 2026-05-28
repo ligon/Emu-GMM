@@ -1,0 +1,204 @@
+"""Tests for emu_gmm.measures.analytical."""
+
+from __future__ import annotations
+
+import haliax as ha
+import jax
+import jax.numpy as jnp
+import jax_dataclasses as jdc
+import pytest
+from emu_gmm._internal import axes as axes_mod
+from emu_gmm.measures.analytical import AnalyticalMeasure
+from emu_gmm.types import Measure
+
+
+@jdc.pytree_dataclass
+class _LinearParams:
+    a: float
+    b: float
+
+
+def _constant_expectation(model, theta):
+    """E[psi] = (1.0, 2.0) regardless of theta."""
+    del model, theta
+    return jnp.array([1.0, 2.0])
+
+
+def _theta_dependent_expectation(model, theta):
+    """E[psi] = (theta.a, theta.b**2)."""
+    del model
+    return jnp.array([theta.a, theta.b**2])
+
+
+def _dummy_psi(x, theta):
+    """A placeholder psi that the analytical measure ignores."""
+    del x, theta
+    return jnp.array([0.0, 0.0])
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestExpectation:
+    def test_satisfies_measure_protocol(self):
+        meas = AnalyticalMeasure(expectation_fn=_constant_expectation)
+        assert isinstance(meas, Measure)
+
+    def test_constant_expectation(self):
+        meas = AnalyticalMeasure(expectation_fn=_constant_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        m = meas.expectation(_dummy_psi, theta)
+        assert m.shape == (2,)
+        assert jnp.allclose(m, jnp.array([1.0, 2.0]))
+
+    def test_theta_dependent_expectation(self):
+        meas = AnalyticalMeasure(expectation_fn=_theta_dependent_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        m = meas.expectation(_dummy_psi, theta)
+        assert m.shape == (2,)
+        assert float(m[0]) == pytest.approx(0.5)
+        assert float(m[1]) == pytest.approx(4.0)
+
+    def test_handles_namedarray_return(self):
+        """expectation_fn may return a haliax NamedArray; expectation strips it."""
+        Moments = axes_mod.moments_axis(2)
+
+        def labelled_expectation(model, theta):
+            del model
+            return ha.named(jnp.array([theta.a, theta.b**2]), (Moments,))
+
+        meas = AnalyticalMeasure(expectation_fn=labelled_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        m = meas.expectation(_dummy_psi, theta)
+        assert m.shape == (2,)
+        assert not isinstance(m, ha.NamedArray)
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestJacobian:
+    def test_shape(self):
+        meas = AnalyticalMeasure(expectation_fn=_theta_dependent_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        G = meas.jacobian(_dummy_psi, theta)
+        assert G.shape == (2, 2)  # M=2, K=2
+
+    def test_against_analytical_via_ad(self):
+        """For f(theta) = (theta.a, theta.b**2):
+        d/da = (1, 0); d/db = (0, 2*b).
+        """
+        meas = AnalyticalMeasure(expectation_fn=_theta_dependent_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        G = meas.jacobian(_dummy_psi, theta)
+        # Row 0 (m_0 = a): d/da = 1, d/db = 0
+        assert float(G[0, 0]) == pytest.approx(1.0)
+        assert float(G[0, 1]) == pytest.approx(0.0)
+        # Row 1 (m_1 = b**2): d/da = 0, d/db = 2*b = 4.0
+        assert float(G[1, 0]) == pytest.approx(0.0)
+        assert float(G[1, 1]) == pytest.approx(4.0)
+
+    def test_constant_expectation_zero_jacobian(self):
+        """A theta-independent expectation has zero Jacobian under AD."""
+        meas = AnalyticalMeasure(expectation_fn=_constant_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        G = meas.jacobian(_dummy_psi, theta)
+        assert G.shape == (2, 2)
+        assert jnp.allclose(G, jnp.zeros((2, 2)))
+
+    def test_user_supplied_jacobian_used(self):
+        """When jacobian_fn is supplied, it is called instead of AD."""
+        sentinel = jnp.array([[7.0, 8.0], [9.0, 10.0]])
+
+        def user_jacobian(model, theta):
+            del model, theta
+            return sentinel
+
+        meas = AnalyticalMeasure(
+            expectation_fn=_theta_dependent_expectation,
+            jacobian_fn=user_jacobian,
+        )
+        theta = _LinearParams(a=0.5, b=2.0)
+        G = meas.jacobian(_dummy_psi, theta)
+        # AD would give [[1, 0], [0, 4]]; sentinel is distinct, so this
+        # confirms jacobian_fn took precedence.
+        assert jnp.allclose(G, sentinel)
+
+    def test_user_supplied_jacobian_handles_namedarray(self):
+        """A NamedArray returned by jacobian_fn is stripped to plain."""
+        Moments = axes_mod.moments_axis(2)
+        Params = axes_mod.params_axis(2)
+        sentinel = jnp.array([[7.0, 8.0], [9.0, 10.0]])
+
+        def user_jacobian(model, theta):
+            del model, theta
+            return ha.named(sentinel, (Moments, Params))
+
+        meas = AnalyticalMeasure(
+            expectation_fn=_theta_dependent_expectation,
+            jacobian_fn=user_jacobian,
+        )
+        theta = _LinearParams(a=0.5, b=2.0)
+        G = meas.jacobian(_dummy_psi, theta)
+        assert not isinstance(G, ha.NamedArray)
+        assert jnp.allclose(G, sentinel)
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestJitCompatibility:
+    def test_expectation_jits(self):
+        meas = AnalyticalMeasure(expectation_fn=_theta_dependent_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+
+        @jax.jit
+        def compute(m, t):
+            return m.expectation(_dummy_psi, t)
+
+        eager = meas.expectation(_dummy_psi, theta)
+        jit_result = compute(meas, theta)
+        assert jnp.allclose(eager, jit_result)
+
+    def test_jacobian_jits(self):
+        meas = AnalyticalMeasure(expectation_fn=_theta_dependent_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+
+        @jax.jit
+        def compute(m, t):
+            return m.jacobian(_dummy_psi, t)
+
+        G_eager = meas.jacobian(_dummy_psi, theta)
+        G_jit = compute(meas, theta)
+        assert jnp.allclose(G_eager, G_jit)
+
+    def test_jacobian_jits_with_user_jacobian_fn(self):
+        sentinel = jnp.array([[7.0, 8.0], [9.0, 10.0]])
+
+        def user_jacobian(model, theta):
+            del model, theta
+            return sentinel
+
+        meas = AnalyticalMeasure(
+            expectation_fn=_theta_dependent_expectation,
+            jacobian_fn=user_jacobian,
+        )
+        theta = _LinearParams(a=0.5, b=2.0)
+
+        @jax.jit
+        def compute(m, t):
+            return m.jacobian(_dummy_psi, t)
+
+        G_jit = compute(meas, theta)
+        assert jnp.allclose(G_jit, sentinel)
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestPyTreeBehaviour:
+    def test_is_pytree(self):
+        meas = AnalyticalMeasure(expectation_fn=_constant_expectation)
+        leaves, _ = jax.tree_util.tree_flatten(meas)
+        # Both expectation_fn and jacobian_fn are static; no traced leaves.
+        assert len(leaves) == 0
