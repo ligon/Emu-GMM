@@ -424,121 +424,122 @@ def estimate(
 
 ---
 
-* Section 5: Worked Example --- Consumption Euler Equation
+* Section 5: Worked Example --- Multi-Asset Euler Equation
 
-The v1 demo uses =SyntheticMeasure=: a generator simulates $(c_t, c_{t+1}, r)$ tuples on demand, and the framework estimates $(\beta, \gamma)$ from the moment condition. This is the architecturally clean way to exercise the pipeline end-to-end without external data, and it commits the framework to the same operator interface ($\mathbb{E}_\mu[\,\cdot\,]$) it will use against real surveys later.
+The v1 demo is the classical Hansen-Singleton 1982 consumption-based asset-pricing setup: with power utility and $J$ risky assets, the Euler equation for each asset is
+\[ \mathbb{E}\!\left[\beta\, (c_{t+1}/c_t)^{-\gamma}\,(1 + r_j)\right] = 1, \]
+which gives $J$ moment conditions in $K = 2$ structural parameters $(\beta, \gamma)$. With $J = 3$ assets, $M = 3$ and the system is over-identified ($J_\text{dof} = 1$), so $\Sigma_{\hat\theta}$ is invertible and the J-test is meaningful.
 
-For the Euler equation the sampler doesn't /need/ to depend on $\theta$: the consumption-and-return process is exogenous to preferences, so $f(z; \theta) = f(z)$. The =SyntheticMeasure= interface accepts this degenerate case; AD through the sampler returns zero and the residual gradient flows entirely through $\psi$. Genuine $\theta$-dependent samplers (SMM matching, indirect inference, where the structural parameters enter the simulator) work the same way and are useful when there's an =EmpiricalMeasure= on the other side --- that combination is v2.
+The DGP is engineered so all $J$ Euler conditions vanish exactly at the truth $(\beta_0, \gamma_0) = (0.96, 2.0)$: a single shock $z \sim \mathcal{N}(0,1)$ drives both consumption growth and asset returns, with asset-specific factor loadings $\nu_j$ and idiosyncratic noise so $\operatorname{Var}_{\mu}[\psi]$ is full rank. See =src/emu_gmm/examples/euler.py= for the closed-form derivation and the shared model definitions.
 
-** v1 Demo: SyntheticMeasure with Pure Simulator
-End-to-end code that compiles against the v1 API:
+** The Model
+#+BEGIN_SRC python
+from emu_gmm.examples.euler import EulerParams, euler_residual
+
+# EulerParams = @jdc.pytree_dataclass(beta: float, gamma: float)
+# euler_residual(x, theta): returns the J moment residuals
+#   psi_j(x, theta) = beta * (c'/c)^{-gamma} * (1 + r_j) - 1
+# where x = (c_t, c_{t+1}, r_1, ..., r_J).
+#+END_SRC
+
+The next three subsections show the same model estimated via three different =Measure= / =CovarianceStrategy= pairings. The =StructuralModel= itself --- =euler_residual= --- is reused unchanged across all three; only the integration and variance strategies change.
+
+** Variant: SyntheticMeasure (the v1 self-contained demo)
+A generator simulates $(c_t, c_{t+1}, r_1, r_2, r_3)$ tuples on demand. No external data file required; Common Random Numbers (frozen =PRNGKey=) makes the objective deterministic in $\theta$.
 
 #+BEGIN_SRC python
 import jax
-import jax.numpy as jnp
-import jax_dataclasses as jdc
-from emu_gmm import (
-    estimate, SyntheticMeasure, SyntheticCovariance, ContinuouslyUpdated,
-    DiagonalTikhonov, optimistix_lm,
+from emu_gmm import estimate
+from emu_gmm.measures import SyntheticMeasure
+from emu_gmm.covariance import SyntheticCovariance
+from emu_gmm.weighting import ContinuouslyUpdated
+from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.examples.euler import (
+    EulerParams, euler_residual, euler_sampler_factory,
 )
 
-# 1. Define parameters.
-@jdc.pytree_dataclass
-class EulerParams:
-    beta: float
-    gamma: float
-
-# 2. Define the structural model.
-def euler_residual(x, theta):
-    c, c_next, r = x
-    return jnp.array([
-        theta.beta * (c_next / c) ** (-theta.gamma) * (1 + r) - 1.0
-    ])
-
-# 3. Define the data-generating process.
-#    Log consumption growth ~ N(MU, SIGMA**2); return rate constant at R.
-#    Sampler ignores theta in this Euler case (Mode C with degenerate
-#    theta-dependence). Same API surface as a genuinely theta-dependent
-#    simulator; AD through the sampler returns zero here.
-MU, SIGMA, R = 0.02, 0.10, 0.03
-N_SIM = 10_000
-
-def consumption_sampler(key, theta):
-    # Returns shape (N_SIM, 3): (c_t, c_{t+1}, r) for each draw.
-    growth = jnp.exp(MU + SIGMA * jax.random.normal(key, (N_SIM,)))
-    c_t = jnp.ones(N_SIM)                  # normalise c_t = 1; only c_{t+1}/c_t matters
-    c_next = growth
-    r = jnp.full(N_SIM, R)
-    return jnp.stack([c_t, c_next, r], axis=-1)
-
-# 4. Construct the synthetic context.
+N_SIM = 5000
 measure = SyntheticMeasure(
-    key=jax.random.PRNGKey(0),            # frozen for CRN
+    key=jax.random.PRNGKey(0),
     n_sim=N_SIM,
-    sampler=consumption_sampler,
+    sampler=euler_sampler_factory(N_SIM),
 )
-covariance = SyntheticCovariance()
 
-# 5. Estimate.
 result = estimate(
     model=euler_residual,
     measure=measure,
-    covariance=covariance,
+    covariance=SyntheticCovariance(),
     weighting=ContinuouslyUpdated(),
-    regularization=DiagonalTikhonov(kappa_target=1e6),
+    regularization=DiagonalTikhonov(),
     optimizer=optimistix_lm(rtol=1e-8),
-    theta_init=EulerParams(beta=0.90, gamma=1.5),
+    theta_init=EulerParams(beta=0.9, gamma=1.0),
 )
 
-# 6. Inspect. With MU=0.02, SIGMA=0.10, R=0.03 fixed, the moment condition
-#    beta * E[(c'/c)^{-gamma}] * (1+R) = 1 has a one-dimensional locus in
-#    (beta, gamma) -- the moment is just-identified, not point-identified.
-#    The diagnostics taxonomy in design.org Section 5.4 should flag this
-#    (gradient zero on a curve; identification failure, not numerical).
-print(f"beta = {result.theta_hat.beta:.4f}")
-print(f"gamma = {result.theta_hat.gamma:.4f}")
+print(f"beta = {result.theta_hat.beta:.4f}    (truth 0.96)")
+print(f"gamma = {result.theta_hat.gamma:.4f}   (truth 2.0)")
 print(f"J-stat = {result.J_stat:.3f}  (dof={result.J_dof}, p={result.J_pvalue:.3f})")
 print(f"Converged: {result.converged} in {result.iterations} iterations")
-if result.diagnostics.binding_ridge:
-    print(f"WARNING: regularization tau={result.diagnostics.tau_realised:.4f} was binding")
 #+END_SRC
 
-To get a properly identified system, add a second moment --- for instance a return-on-equity Euler condition with an excess-return instrument --- so $M > K$. The demo is structured to demonstrate the pipeline rather than recover textbook parameter values; the identification failure surfaced by the diagnostics is itself useful information.
+Recovery in practice (N_SIM=5000, seed 0): $\hat\beta \approx 0.962$, $\hat\gamma \approx 2.08$, both within Monte Carlo error of the truth. See =tests/test_estimator.py= for the acceptance test.
 
-** Variant: Analytical Round-Trip
-The same model can be paired with an =AnalyticalMeasure= for a closed-form identification check that avoids Monte Carlo noise entirely:
+** Variant: AnalyticalMeasure (identification round-trip)
+Pair the same model with the closed-form expectation under the DGP. With no Monte Carlo noise, recovery is exact to floating-point tolerance.
 
 #+BEGIN_SRC python
-from emu_gmm import AnalyticalMeasure, AnalyticalCovariance
+from emu_gmm.measures import AnalyticalMeasure
+from emu_gmm.covariance import AnalyticalCovariance
+from emu_gmm.examples.euler import euler_analytical_expectation
+import jax.numpy as jnp
 
-# Same model and EulerParams as above.
-# E[(c_{t+1}/c_t)^{-gamma}] = exp(-gamma*MU + 0.5*gamma**2 * SIGMA**2)
-def analytical_expectation(model, theta):
-    log_growth_mgf = jnp.exp(-theta.gamma * MU + 0.5 * theta.gamma**2 * SIGMA**2)
-    return jnp.array([theta.beta * log_growth_mgf * (1 + R) - 1.0])
+def identity_covariance(model, theta):
+    return jnp.eye(3)   # any PD V suffices for the identification check
 
-analytic_measure = AnalyticalMeasure(expectation_fn=analytical_expectation)
-analytic_cov = AnalyticalCovariance(
-    covariance_fn=lambda model, theta: closed_form_V(theta),  # user-supplied
-)
-
-round_trip = estimate(
+result = estimate(
     model=euler_residual,
-    measure=analytic_measure,
-    covariance=analytic_cov,
+    measure=AnalyticalMeasure(expectation_fn=euler_analytical_expectation),
+    covariance=AnalyticalCovariance(covariance_fn=identity_covariance),
     weighting=ContinuouslyUpdated(),
-    theta_init=EulerParams(beta=0.90, gamma=1.5),
+    optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+    theta_init=EulerParams(beta=0.8, gamma=1.0),
 )
-
-# round_trip.diagnostics.final_objective should be ~ 0 at any point on
-# the just-identified locus. Non-zero indicates numerical-conditioning
-# trouble. The framework's diagnostics taxonomy (design.org Section 5.4)
-# distinguishes "gradient zero but Q > 0" (identification failure) from
-# "gradient nonzero at known root" (numerical instability).
+# result.theta_hat = (0.96, 2.0) to FP precision; result.diagnostics.final_objective < 1e-10.
 #+END_SRC
 
-** Variant: EmpiricalMeasure (ready for real data)
-=EmpiricalMeasure= remains in v1 for when real survey data is in hand. The signature is identical to what the v1 demo uses for =SyntheticMeasure=, with =x=, =mask=, and =weights= replacing the =sampler= callable. Cluster-robust standard errors via =ClusteredCovariance= require an additional =cluster_ids= array. This variant isn't exercised in the bundled tests --- those rely on synthetic data via =SyntheticMeasure= --- but the path is available and will be the production target once data arrives.
+See =tests/test_estimator_analytical.py=.
+
+** Variant: EmpiricalMeasure (the real-data path; demo on pre-generated data)
+=EmpiricalMeasure= holds fixed observations as plain JAX arrays (or accepts a =pandas.DataFrame= via =EmpiricalMeasure.from_pandas=). Cluster-robust variance via =ClusteredCovariance= needs an extra =cluster_ids= argument; the iid case uses =IIDCovariance=.
+
+#+BEGIN_SRC python
+from emu_gmm.measures import EmpiricalMeasure
+from emu_gmm.covariance import IIDCovariance
+from emu_gmm.optimizer import scipy_lm
+from emu_gmm.examples.euler import euler_data
+import jax.numpy as jnp
+
+N = 5000
+x = euler_data(seed=0, n=N)              # (N, 5) JAX array
+measure = EmpiricalMeasure(
+    x=x,
+    mask=jnp.ones((N, 3)),
+    weights=jnp.ones(N),
+)
+
+result = estimate(
+    model=euler_residual,
+    measure=measure,
+    covariance=IIDCovariance(),
+    optimizer=scipy_lm(),                # see note below
+    theta_init=EulerParams(beta=0.9, gamma=1.0),
+)
+#+END_SRC
+
+/Optimiser note./ The Phase 7 acceptance test uses =scipy_lm()= rather than the default =optimistix_lm()= because optimistix's LM has trouble certifying convergence on this particular empirical surface (the answer is found but the certificate isn't issued; the run hits =max_steps= with the right $\hat\theta$). =scipy_lm()= converges cleanly in ~18 iterations to the same $\hat\theta$. The framework's optimiser modularity is the workaround --- one factory swap. See =tests/test_estimator_empirical.py=.
+
+** What this demonstrates
+The same =StructuralModel= (=euler_residual=) drives all three variants. Only the =Measure= and =CovarianceStrategy= change. This is the framework's central architectural claim made operational: one operator interface ($\mathbb{E}_\mu$), three implementations, one =estimate(...)= call site. The =EulerParams= dataclass round-trips through the optimisation without the user touching a flat parameter vector.
 
 ---
 
