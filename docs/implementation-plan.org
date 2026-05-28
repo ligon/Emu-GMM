@@ -27,15 +27,10 @@ Effort estimates are rough: /S/ ≈ 1-2 hours, /M/ ≈ half-day, /L/ ≈ full da
 
 A small number of choices need to land before code is written.
 
-** TODO Decide Haliax surface depth in v1                                  :S:
-=docs/api-sketch.org= Section 6 question 1.
+** DONE Decide polymorphic-input boundary                                  :S:
+Resolved: option (b) with concrete shape. =estimate(...)= accepts plain JAX arrays, =haliax.NamedArray=, and =pandas.DataFrame= / =pandas.Series= at the input boundary; outputs always carry labels via =haliax.NamedArray=; =result.to_pandas()= converter for pandas workflows. See =docs/api-sketch.org= Section 3 /Label Conventions/. Implementation lives in =_internal/labels.py= (added to Phase 1 below).
 
-Options:
-- (a) Wrap plain arrays into =NamedArrays= internally; present plain arrays on the user-facing boundary.
-- (b) Accept either at the boundary; normalise internally.
-- (c) Require Haliax everywhere.
-
-Current lean (in the API sketch): (a). Confirming this affects every file's type signatures and the test patterns. Decide and write the choice into =CLAUDE.md=.
+The open sub-question is where /moment labels/ enter the system: from a =StructuralModel= returning a =haliax.NamedArray=, from a =moment_names= kwarg on =estimate=, or both. Default policy in the sketch: both supported; model-return path takes precedence over the kwarg, kwarg over positional fallback. Revisit if this proves awkward in practice.
 
 ** TODO Reconcile bibfile gap items                                        :S:
 The bibfile agent's gap list (Hansen-Heaton-Yaron 1996; Cameron-Miller 2015 or Wooldridge 2003; Wolter 2007; Nocedal-Wright 2006; Hayashi 2000; Horn-Johnson; Haliax software cite) needs a pass. Some likely live in =~/bibtex/main.bib= already. A second short agent pass can resolve these.
@@ -77,10 +72,22 @@ Cholesky factor + forward/back substitution wrappers.
 
 /Tests:/ correctness against =scipy.linalg.solve_triangular= on a 5x5 PD matrix; verify =whiten= is the gradient of $\tfrac{1}{2}\|y\|^2$ w.r.t. $m$ equals $\Lambda m$.
 
+** TODO src/emu_gmm/_internal/labels.py                                    :M:
+Polymorphic-input adapter and label tracking.
+
+- =LabelContext= dataclass: =param_names=, =moment_names=, =variable_names=, =obs_names=. Static (non-traced) PyTree leaves so jit/vmap don't re-trace when labels change.
+- =normalise_x(x_in) -> (x_array, variable_names, obs_names)=: dispatches on input type. =pd.DataFrame= → column names → =Variables= labels, index name → =Obs= label. =ha.NamedArray= → coordinate labels. =jnp.ndarray= → positional labels =["v_0", "v_1", ...]=.
+- =normalise_weights(w_in) -> w_array=: =pd.Series= / =ha.NamedArray= / =jnp.ndarray= → plain array.
+- =normalise_mask(mask_in, n, m) -> mask_array=: ditto, with default =jnp.ones((n, m))=.
+- =resolve_moment_names(model_return, kwarg, m) -> moment_names=: applies the precedence policy (model return > kwarg > positional).
+- =label_matrix(arr, row_axis, row_names, col_axis, col_names) -> ha.NamedArray=: convenience for output construction.
+
+/Tests:/ Round-trip on a pandas DataFrame (column names preserved); on a haliax NamedArray (coordinates preserved); on a plain array (positional names assigned); moment-name precedence policy on all three sources.
+
 ** TODO src/emu_gmm/types.py                                               :M:
 Protocols, type aliases, result/diagnostics dataclasses.
 
-- =StructuralModel= type alias = =Callable[[Array, ParamsLike], Float[Array, "M"]]=.
+- =StructuralModel= type alias: =Callable[[Array, ParamsLike], Float[Array, "M"] | ha.NamedArray]= --- the return may be a plain array or a =NamedArray= with a =Moments= axis (used by the label adapter).
 - =ParamsLike= = TypeVar bound to a =@jdc.pytree_dataclass=.
 - =Measure(Protocol)= with =expectation=, =jacobian= methods.
 - =CovarianceStrategy(Protocol)= with =covariance= method.
@@ -88,10 +95,10 @@ Protocols, type aliases, result/diagnostics dataclasses.
 - =RegularizationStrategy(Protocol)= with =apply= method.
 - =Optimizer(Protocol)= callable signature.
 - =OptimizerInfo= dataclass: steps, status, backend-specific fields.
-- =Diagnostics= dataclass: tau_realised, kappa_V, binding_ridge, cholesky_pivot_min, final_objective, final_gradient_norm, optimizer_info.
-- =EstimationResult= dataclass: theta_hat, Sigma_theta, V_X, J_stat, J_dof, J_pvalue, converged, iterations, theta_init, measure, covariance, weighting, regularization, diagnostics.
+- =Diagnostics= dataclass: tau_realised, kappa_V, binding_ridge, cholesky_pivot_min, final_objective, final_gradient_norm, optimizer_info; per-moment labelled fields =N_j= and =moment_residual= as =ha.NamedArray[Moments]=.
+- =EstimationResult= dataclass: theta_hat (user dataclass), Sigma_theta (=ha.NamedArray[Params, ParamsDual]=), V_X (=ha.NamedArray[Moments, MomentsDual]=), J_stat, J_dof, J_pvalue, converged, iterations, theta_init, measure, covariance, weighting, regularization, diagnostics; =to_pandas()= method returning =dict[str, pd.DataFrame | pd.Series]=.
 
-/Tests:/ protocols are runtime-checkable via =isinstance= when annotated with =@runtime_checkable=; dataclasses round-trip through =jax.tree_util.tree_flatten=.
+/Tests:/ protocols are runtime-checkable via =isinstance= when annotated with =@runtime_checkable=; dataclasses round-trip through =jax.tree_util.tree_flatten=; =to_pandas()= materialises the labelled fields with the correct row/column names on a constructed =EstimationResult=.
 
 ---
 
@@ -178,6 +185,10 @@ The =Fixed= constructor takes a $V_0$ array and stores its Cholesky factor, not 
 ** TODO src/emu_gmm/estimator.py                                           :L:
 The =estimate()= entry point.
 
+- Build a =LabelContext= via =_internal/labels= from the inputs:
+  - =param_names= from =theta_init='s dataclass fields.
+  - =variable_names= and =obs_names= from the measure's data input if pandas / NamedArray; positional otherwise.
+  - =moment_names= via the precedence policy: first probe =model(x_sample, theta_init)='s return type for a =NamedArray=; else use a =moment_names= kwarg if supplied; else positional.
 - Flatten =theta_init= to a flat JAX array via =_internal/params=.
 - Build a closure =residual_fn(theta_flat)= that:
   1. Unflattens =theta_flat= back to the user's params dataclass.
@@ -186,17 +197,19 @@ The =estimate()= entry point.
   4. Calls =regularization.apply(V)= → $V^\star$ (anchor-once-then-freeze policy).
   5. Calls =weighting.whitening_residual(m, V_star, theta)= → $y$.
   6. Returns $y$ as the NLLS residual.
+- The =LabelContext= rides as a static closure variable; it does not enter =residual_fn='s traced inputs.
 - Hand =residual_fn= and =theta_init_flat= to =optimizer=.
 - At =theta_hat_flat=:
   - Unflatten to the user's dataclass.
   - Compute =G = measure.jacobian(model, theta_hat)= via AD.
   - Compute =Sigma_theta = inv(G' V^{-1} G)= via Cholesky.
   - Compute =J_stat = ||y_hat||^2=; =J_dof = M - K=; =J_pvalue= via =scipy.stats.chi2.sf=.
+  - Wrap =Sigma_theta=, =V_X=, and per-moment diagnostics into =ha.NamedArray= instances using =LabelContext= via =_internal/labels.label_matrix=.
   - Collect diagnostics; build =EstimationResult=.
 
 The anchor-once-then-freeze policy is implemented by computing $\tau$ at $\theta_{\mathrm{init}}$ and treating it as a non-traced static, so the regularised $V^\star$ at later $\theta$ uses the same $\tau$.
 
-/Acceptance test:/ The Euler example in =docs/api-sketch.org= Section 5 runs and converges to a point on the one-dimensional identified locus. =Diagnostics= report sensible values.
+/Acceptance test:/ The Euler example in =docs/api-sketch.org= Section 5 runs and converges to a point on the one-dimensional identified locus. =Diagnostics= report sensible values. =result.Sigma_theta= and =result.V_X= are =ha.NamedArray= instances with the expected coordinate labels. =result.to_pandas()= returns a sensibly-named dict of DataFrames.
 
 ---
 
@@ -238,8 +251,9 @@ The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
 - Fields: =x= (=(N, D)= array), =mask= (=(N, M)= 0/1), =weights= (=(N,)=).
 - =expectation(psi, theta)=: =vmap= =psi= across =N=, apply =mask= and =weights=, normalise by per-coordinate $N_j = \sum_i d_{ij} w_i$.
 - =jacobian(psi, theta)=: same shape, but using =jacfwd= of =psi=.
+- =from_pandas(df, weights=None, mask_columns=None)= classmethod: construct from a =pandas.DataFrame=, extracting column names as the =Variables= axis labels and the index name (if any) as the =Obs= axis label. Defers to =_internal/labels.normalise_x= and =normalise_weights=.
 
-/Tests:/ Coordinate-wise mean on uniform data matches simple =np.mean=; missingness handled correctly per coordinate; weights of all-ones equivalent to unweighted.
+/Tests:/ Coordinate-wise mean on uniform data matches simple =np.mean=; missingness handled correctly per coordinate; weights of all-ones equivalent to unweighted; =from_pandas= round-trip preserves column names through to a downstream =EstimationResult.V_X.coords=.
 
 ** TODO src/emu_gmm/covariance/iid.py                                      :M:
 =IIDCovariance= pairwise-overlap form.
@@ -302,10 +316,10 @@ Decide once whether =mypy= runs against =src= and =tests= or only =src=. Manifol
 * Section 12: Phase Dependencies Summary
 
 #+BEGIN_SRC text
-Phase 0 (decisions)
+Phase 0 (decisions: polymorphic-input ✓; bibfile gaps)
   |
   v
-Phase 1 (foundations: params, axes, cholesky, types)
+Phase 1 (foundations: params, axes, cholesky, labels, types)
   |
   +----> Phase 2 (synthetic measure + covariance)
   +----> Phase 3 (weighting + regularization)
@@ -315,13 +329,13 @@ Phase 1 (foundations: params, axes, cholesky, types)
         Phase 5 (estimator + diagnostics + FIRST ACCEPTANCE)
               |
               +----> Phase 6 (analytical + SECOND ACCEPTANCE)
-              +----> Phase 7 (empirical + UNIT TESTS)
+              +----> Phase 7 (empirical + UNIT TESTS; pandas inputs work directly)
                             |
                             v
                       Phase 8 (polish)
 #+END_SRC
 
-Phase 1 is the only true bottleneck. Phases 2/3/4 can be parallelised by separate agents working in worktrees; they integrate at Phase 5.
+Phase 1 is the only true bottleneck. Phases 2/3/4 can be parallelised by separate agents working in worktrees; they integrate at Phase 5. =_internal/labels.py= is a new Phase 1 module enabling pandas / Haliax / plain-array polymorphism at the boundary.
 
 ---
 
