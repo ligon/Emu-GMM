@@ -13,10 +13,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-
 from emu_gmm import types as t
 from emu_gmm.optimizer import optimistix_lm, scipy_lm
-
 
 # ---------------------------------------------------------------------------
 

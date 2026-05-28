@@ -28,7 +28,8 @@ architectural context.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -37,7 +38,6 @@ import scipy.optimize as so
 from jaxtyping import Array, Float
 
 from emu_gmm.types import OptimizerInfo
-
 
 # ---------------------------------------------------------------------------
 # Optimistix adapter
