@@ -36,7 +36,7 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 - =optimistix= (NLLS solver; LM and trust-region)
 - =numpy=, =scipy= (numpy for the scipy fallback, scipy.stats for J-test p-values)
 
-No =pandas= in the hot path. Pandas-labelled tensors are valid at the I/O boundary via the workspace's =jax-pandas-bridge=; the framework's =estimate(...)= consumes JAX arrays (and Haliax NamedArrays as a future enhancement).
+No =pandas= /inside/ =jit= / =vmap= / AD boundaries. But at the input boundary, =estimate(...)= accepts any of: plain JAX arrays, =haliax.NamedArray=, or =pandas.DataFrame= / =pandas.Series=. The framework's polymorphic-input adapter normalises to JAX arrays with axis-label tracking. At the output boundary, =EstimationResult= always carries labelled =haliax.NamedArray= for matrix-valued fields (=Sigma_theta=, =V_X=, per-moment =Diagnostics=), with a =result.to_pandas()= convenience converter for pandas-centric workflows. The user's parameter dataclass is preserved on output so =result.theta_hat.beta= continues to work.
 
 * Section 2: Module Layout
 
@@ -112,6 +112,19 @@ class EulerParams:
 
 The framework converts this to a flat JAX array internally (via =jax.tree_util=) for AD operations, and reconstructs the same dataclass on output. Field order is preserved as the canonical parameter order.
 
+** Label Conventions
+The framework accepts labelled inputs and produces labelled outputs.  Labels for each axis come from a defined source:
+
+- *Params*: parameter dataclass field names. Free from the user's =@jdc.pytree_dataclass=.
+- *Moments*: in order of preference:
+  1. If the =StructuralModel= callable returns a =haliax.NamedArray= with a =Moments= axis, those coordinates are used.
+  2. Otherwise, if =estimate(...)= is called with an explicit =moment_names=("euler", "excess_return", ...)= kwarg, those are used.
+  3. Otherwise, positional fallback: =["m_0", "m_1", ...]=.
+- *Variables* (the columns of an observation $x$): for =EmpiricalMeasure=, taken from =pandas.DataFrame= column names if =x= is passed as a DataFrame, or from a =haliax.NamedArray='s coordinates; positional otherwise.
+- *Obs*: positional. Index labels are preserved if the user passes a DataFrame with a named index, but the framework does not rely on observation labels for any computation.
+
+The labels are tracked in a small internal =LabelContext= that rides through the estimation pipeline as a static argument (not traced). All matrix-valued outputs in =EstimationResult= and =Diagnostics= are =haliax.NamedArray= instances carrying the appropriate coordinates.
+
 ** Measure (Protocol)
 #+BEGIN_SRC python
 class Measure(Protocol):
@@ -132,14 +145,23 @@ Concrete implementations:
 #+BEGIN_SRC python
 @jdc.pytree_dataclass
 class EmpiricalMeasure:
-    x: Float[Array, "N D"]              # observations
+    x: Float[Array, "N D"]              # observations (internal type)
     mask: Float[Array, "N M"]           # per-coordinate observability (0/1)
     weights: Float[Array, "N"]          # normalised survey weights
                                         # (defaults to ones if not provided)
 
     # expectation / jacobian: vmap psi across N, mask, weight, normalise
     # by N_j = sum_i d_ij w_i per coordinate.
+
+    @classmethod
+    def from_pandas(cls, df, weights=None, mask_columns=None):
+        """Construct from a pandas DataFrame. Column names become the
+        Variables axis labels; index name (if any) becomes the Obs axis
+        label. The polymorphic-input adapter delegates to this."""
+        ...
 #+END_SRC
+
+The =estimate(...)= entry point accepts =measure = EmpiricalMeasure(x=df, weights=w_series)= directly when =df= is a =pandas.DataFrame=; the polymorphic-input adapter (=_internal/labels.py=) routes through =from_pandas=.
 
 *** AnalyticalMeasure
 #+BEGIN_SRC python
@@ -284,8 +306,8 @@ def scipy_lm(**kw) -> Optimizer:
 class EstimationResult:
     # Estimate
     theta_hat: UserParamsType                     # back in user's dataclass type
-    Sigma_theta: Float[Array, "K K"]              # asymptotic covariance
-    V_X: Float[Array, "M M"]                      # variance at theta_hat
+    Sigma_theta: ha.NamedArray                    # axes [Params, ParamsDual]
+    V_X: ha.NamedArray                            # axes [Moments, MomentsDual]
 
     # J-test
     J_stat: float
@@ -305,6 +327,22 @@ class EstimationResult:
 
     # Diagnostics
     diagnostics: Diagnostics
+
+    def to_pandas(self) -> dict[str, pd.DataFrame | pd.Series]:
+        """Convenience converter. Materialises Sigma_theta, V_X, and
+        per-moment Diagnostics fields as labelled pandas objects for
+        pandas-centric inspection / reporting workflows."""
+        ...
+#+END_SRC
+
+Coordinate labels carried by =Sigma_theta= (parameter names from the user's dataclass) and =V_X= (moment names per the /Label Conventions/ above) make matrix outputs self-documenting:
+
+#+BEGIN_SRC python
+print(result.Sigma_theta)
+# NamedArray[Params, ParamsDual]:
+#              beta      gamma
+# beta       0.00121   -0.00031
+# gamma     -0.00031    0.00452
 #+END_SRC
 
 ** Diagnostics (v1)
@@ -322,6 +360,12 @@ class Diagnostics:
     # Optimisation
     final_objective: float             # ||y||^2 at convergence
     final_gradient_norm: float         # ||grad Q|| at convergence
+
+    # Per-moment (labelled)
+    N_j: ha.NamedArray                 # axis [Moments]; effective sample size per moment
+                                       # (always 1.0 for SyntheticMeasure/AnalyticalMeasure,
+                                       # meaningful for EmpiricalMeasure with missingness)
+    moment_residual: ha.NamedArray     # axis [Moments]; m_hat at theta_hat
 
     # Provenance
     optimizer_info: OptimizerInfo      # backend-specific
@@ -493,11 +537,7 @@ round_trip = estimate(
 
 These are real questions that need answers before code can be written, not architectural redesigns.
 
-1. *Haliax surface in v1.* The design doc commits to Haliax NamedArrays. This sketch shows plain JAX arrays at the user-facing boundary for simplicity. Should v1:
-   - (a) wrap plain arrays into NamedArrays internally, present plain on the boundary; or
-   - (b) accept either at the boundary, normalise internally; or
-   - (c) require Haliax everywhere?
-   My lean: (a) for v1. The named-axis story is a documentation and self-description benefit that doesn't need to leak to first-time users.
+1. *Polymorphic input adapter.* Resolved: the framework accepts plain JAX arrays, =haliax.NamedArray=, and =pandas.DataFrame= / =pandas.Series= at the input boundary; outputs always carry labels via =haliax.NamedArray=, with a =result.to_pandas()= converter for pandas workflows. See the /Label Conventions/ subsection in Section 3 and the =from_pandas= classmethod sketched in =EmpiricalMeasure=. Implementation lives in =_internal/labels.py= (Phase 1 of =docs/implementation-plan.org=). Open sub-question: should moment labels come from a =StructuralModel= returning a =NamedArray=, or from a =moment_names= kwarg on =estimate=, or both? The sketch currently allows both, with the model-return path taking precedence.
 
 2. *Cluster ID representation.* JAX prefers floats. Integer-typed cluster IDs work in =jax.ops.segment_sum= but the static =n_clusters= argument forces recompilation on cardinality changes. Plan: pad cluster IDs to a fixed maximum at construction time and use =n_clusters= as a static upper bound.
 
