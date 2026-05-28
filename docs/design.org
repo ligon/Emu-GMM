@@ -5,18 +5,22 @@
 
 * Section 1: Introduction and Population Primitives
 
-The framework is named for the operator at its centre: =emu= reads as $\mathbb{E}_\mu$, the expectation under a measure $\mu$. The architectural conceit is that this one operator, applied uniformly to empirical, analytical, and synthetic measures, unifies sample estimation, identification analysis, and simulation-based inference inside a single computational interface.
+The framework is named for the operator at its centre: =emu= reads as $\mathbb{E}_\mu$, the expectation under a measure $\mu$. The central design claim is that one operator interface --- implemented against empirical, analytical, or synthetic measures --- drives sample estimation, identification analysis, and simulation-based inference through a single computational pipeline.
 
-This document outlines the foundational architecture. The framework establishes an algebraic symmetry between population identification and sample estimation by embedding both data realizations and the underlying sampling design into the primitives of the =Measure= and =CovarianceStrategy= layers.
+The most important architectural commitment is that variance construction is orthogonal to integration: $\mathbb{E}_\mu[\psi]$ is a property of the measure; $V_\mu(\theta)$ is a property of a separate =CovarianceStrategy= that can be swapped (iid vs cluster-robust vs replicate-weight) without changing what is being integrated. The same =EmpiricalMeasure= drives any covariance strategy on the v1/v2 design-awareness ladder.
+
+This document covers the interface algebra (Section 2), a worked Euler example (Section 3), differentiation (Section 4), estimation and inference (Section 5), and named-tensor boundary tooling (Section 6).
 
 ** Population Primitives
-Let $\Theta \subset \mathbb{R}^K$ denote a compact parameter space. We define the model structure via the following foundational mappings:
+Let $\Theta \subset \mathbb{R}^K$ denote a compact parameter space. The framework's underlying stochastic object is a structural residual function $\psi: \mathcal{X} \times \Theta \to \mathbb{R}^M$, measurable in its first argument, evaluated at observations drawn from a population measure $\mu_\text{pop}$ on $(\mathcal{X}, \mathcal{F})$. The model structure follows from these derived mappings:
 
 - *Parameter Vector*: $\theta \in \Theta$, where $\theta_0$ represents the unique true parameter vector.
-- *Population Moment Function*: $m: \Theta \to \mathbb{R}^M$, an $M \times 1$ deterministic mapping representing the structural equations of the economic model. The fundamental identification restriction satisfies:
-  \[ m(\theta_0) = 0 \]
-  Sections 2-5 generalise this to $m(\theta) \equiv \mathbb{E}_{\mu_\text{pop}}[\psi(\cdot,\theta)]$ under the (unobserved) population measure $\mu_\text{pop}$, and replace $\mu_\text{pop}$ with whatever measure the user supplies.
-- *Variance-Covariance Mapping*: $V(\theta) = E[m(\theta)m(\theta)']$, the $M \times M$ positive-definite covariance matrix of the underlying stochastic moments evaluated at $\theta$.
+- *Population Moment Function*: $m: \Theta \to \mathbb{R}^M$, the population expectation of $\psi$:
+  \[ m(\theta) = \mathbb{E}_{\mu_\text{pop}}[\psi(\cdot, \theta)] \]
+  The fundamental identification restriction is $m(\theta_0) = 0$. Sections 2-5 generalise from $\mu_\text{pop}$ to whatever measure the user supplies.
+- *Variance-Covariance Mapping*: $V(\theta)$, the $M \times M$ population covariance matrix of $\psi$ under $\mu_\text{pop}$:
+  \[ V(\theta) = \operatorname{Var}_{\mu_\text{pop}}[\psi(\cdot, \theta)] = \mathbb{E}_{\mu_\text{pop}}[\psi\,\psi'] - m(\theta)\, m(\theta)' \]
+  Assumed positive definite at $\theta_0$. /Sample-level convention/: $V_X(\theta)$ estimates the variance of the sample moment /estimator/ $\bar m_X(\theta)$ rather than the per-observation variance of $\psi$; the $1/N$ scaling is absorbed into $V_X$ throughout (see /Architectural Core Highlights/ in Section 5).
 - *Optimal Weighting Matrix*: $\Lambda(\theta) = V^{-1}(\theta)$, providing the metric for the parameter space.
 - *Population Jacobian Matrix*: $G(\theta)$, the $M \times K$ matrix of first derivatives:
   \[ G(\theta) = \frac{\partial m(\theta)}{\partial \theta'} \]
@@ -63,6 +67,8 @@ The =Measure= interface ($\mu$) acts strictly as a functional integration operat
    \[ \mathbb{E}_\mu[\psi] = \int_\mathcal{X} \psi(x, \theta) \, d\mu(x) \]
 2. *Jacobian Integration*:
    \[ \mathbb{E}_\mu[\nabla_\theta \psi] = \int_\mathcal{X} \nabla_\theta \psi(x, \theta) \, d\mu(x) \]
+
+The =Measure= is a /computational interface/, not a strict measure-theoretic object. Implementations may glue together coordinate-specific measures or other internal machinery as long as the interface contract is honoured. Whether a particular implementation corresponds to a single $\sigma$-finite measure or, as in the empirical case below, an $M$-tuple of coordinate-specific measures sharing a support, is an implementation detail invisible to the rest of the framework. The architecture is unified by polymorphism over the interface, not by mathematical structure of the underlying measures.
 
 Variance construction is /not/ a responsibility of the =Measure= --- it lives in =CovarianceStrategy=.
 
@@ -126,7 +132,7 @@ Computes $V(\theta)$ directly from the population density $f$:
 typically via the same quadrature grid used by the measure.
 
 *** AnalyticalContext
-Bundles the =AnalyticalMeasure= and =AnalyticalCovariance= for an exhaustive specification of the true data-generating process. This pairing is the workhorse of the identification-verification diagnostic discussed in Section 5: round-tripping a =StructuralModel= through it at known $\theta_0$ must return $Q(\theta_0) = 0$ exactly.
+Bundles the =AnalyticalMeasure= and =AnalyticalCovariance= for an exhaustive specification of the true data-generating process. This pairing is the workhorse of the identification-verification diagnostic discussed in Section 5: at the known true value $\theta_0$ the theoretical criterion satisfies $Q(\theta_0) = 0$ exactly, and the numerical optimizer should converge to $\theta_0$ to within quadrature and floating-point tolerance.
 
 *** SyntheticMeasure
 A stochastic parametric simulator whose law depends on $\theta$. Three design choices keep it well-behaved:
@@ -148,7 +154,7 @@ Bundles =SyntheticMeasure= and =SyntheticCovariance= with the frozen $z_s$ batch
 ** Architectural Utility of Data-Free Measures
 Decoupling the measure from physical data files introduces major diagnostic and theoretical capabilities at the design level:
 
-1. *Deterministic Identification Verifications*: A =StructuralModel= can be integrated over an =AnalyticalContext= parameterised at a known true value $\theta_0$. Because the analytical moment condition satisfies $\int \psi(x, \theta_0) \, d\mu_\text{analytical} = 0$ exactly, passing this pair to the numerical optimizer must return $\theta_0$ with zero objective loss. Any failure to locate $\theta_0$ isolates a global identification failure or an ill-behaved objective surface, completely independent of sample noise --- see the diagnostics taxonomy in Section 5.
+1. *Deterministic Identification Verifications*: A =StructuralModel= can be integrated over an =AnalyticalContext= parameterised at a known true value $\theta_0$. The analytical moment condition satisfies $\int \psi(x, \theta_0) \, d\mu_\text{analytical} = 0$ exactly; numerically, the optimizer should converge to $\theta_0$ within quadrature and floating-point precision. Failures beyond that tolerance isolate a global identification failure or an ill-behaved objective surface, independent of sample noise --- see the diagnostics taxonomy in Section 5.
 2. *Ex-Ante Efficiency Mapping*: Evaluating the system curvature using an =AnalyticalContext= yields the true population information matrix $\mathcal{I}(\theta_0) = G(\theta_0)' \Lambda(\theta_0) G(\theta_0)$. This enables the programmatic evaluation of alternative moment configurations ($\psi$) to maximise the information envelope before field data is ever introduced.
 
 ---
@@ -195,7 +201,7 @@ The same =StructuralModel= instance is evaluated across three orthogonal context
 Three estimation paths, one =StructuralModel=:
 
 - /Empirical/: $\hat\theta = \arg\min_\theta Q_X(\theta)$ on CEX household data with cluster-robust variance.
-- /Analytical/: $\arg\min_\theta Q_\text{analytical}(\theta)$ at the chosen $\theta_0$ must return $\theta_0$ exactly with $Q = 0$. Deviations diagnose identification or numerical conditioning, not sample noise.
+- /Analytical/: the theoretical $\arg\min_\theta Q_\text{analytical}(\theta)$ is $\theta_0$ with $Q = 0$ exactly; numerically, deviations beyond quadrature tolerance diagnose identification or conditioning failures, not sample noise.
 - /Synthetic/: simulate $\{(c_t, c_{t+1}, r_{t+1})\}_{t=1}^{N_\text{sim}}$ from a generative model parameterised at $\theta$, hand to the same estimator paired with the empirical context. SMM falls out.
 
 The same =psi=, the same gradient, the same objective: only the =Context= changes.
@@ -313,6 +319,17 @@ When the variance has been regularised, the limit is a weighted sum of chi-squar
 ** Architectural Core Highlights
 1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the Hansen 1982 / Hayashi textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
 2. *Asymmetric Scale Resolution*: The interaction of the coordinate scaling inside $G_\mu(\theta)$ and the scaling inside $V_\mu(\theta)$ ensures that the sample information matrix properly weighs the relative data density across different variables without requiring listwise deletion.
+
+** Open Theoretical Questions
+The pairwise-overlap covariance machinery introduced in Section 2 sidesteps listwise deletion at the cost of theoretical loose ends that deserve treatment before the framework is leaned on for primary inference:
+
+1. *Asymptotic theory under per-coordinate missingness.* The classical GMM consistency and asymptotic-normality results assume the moment vector $\bar m_X(\theta)$ is the sample mean of an iid (or appropriately mixing) sequence. Under per-coordinate missingness with selection indicators $d_{ij}$, the relevant sequence depends on the missingness mechanism. MCAR (selection independent of $\theta$ and $\psi$) carries the standard results through with $V$ rescaled by per-coordinate effective sample sizes; MAR and MNAR require additional structure. The framework currently makes no claim about consistency outside MCAR.
+
+2. *Asymptotic target of $V_X(\theta)$ under the pairwise-overlap rule.* The per-coordinate normalisation $1/(N_j N_k)$ produces a consistent estimator of $\operatorname{Var}[\bar m_X(\theta)]$ under MCAR with bounded inclusion probabilities. The general case requires showing that overlap fractions $N_{jk}/N$ converge to positive limits --- a condition we can state but have not verified across all design types on the v1/v2 ladder.
+
+3. *Finite-sample versus asymptotic positive-definiteness.* The diagonal-Tikhonov regularisation handles finite-sample PD failure but distorts the J-statistic's limit law. The asymptotic PD of $V_X(\theta_0)$ under standard conditions (MCAR, bounded weights, finite fourth moments) is straightforward; the rate at which finite-sample PD becomes reliable in practice is not characterised here.
+
+These items are deferred to a companion theoretical note. The implementation paths described in this document are unchanged by their resolution --- the items affect what we /claim/ the estimator is doing, not what the code does.
 
 ---
 
