@@ -21,7 +21,8 @@ dependencies = [
   "jax_dataclasses>=1.6.1",
   "optimistix>=0.0.7",
   "numpy>=1.26",
-  "scipy>=1.11"
+  "scipy>=1.11",
+  "pandas>=2.0"
 ]
 
 [tool.poetry]
@@ -39,6 +40,7 @@ jax_dataclasses = ">=1.6.1"
 optimistix = ">=0.0.7"
 numpy = ">=1.26"
 scipy = ">=1.11"
+pandas = ">=2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"
