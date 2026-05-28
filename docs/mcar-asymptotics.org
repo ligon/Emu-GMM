@@ -1,0 +1,192 @@
+#+TITLE: Asymptotic Theory for emu-gmm Under MCAR Missingness
+#+SUBTITLE: A companion theoretical note to docs/design.org
+#+AUTHOR: Ethan Ligon
+#+OPTIONS: toc:nil num:t todo:nil |:t minlevel:1
+
+* Section 1: Scope and Setting
+
+This note establishes the asymptotic theory for the =emu-gmm= framework's pairwise-overlap moment estimator under the Missing Completely At Random (MCAR) assumption. It is a companion to =docs/design.org=, which describes the architecture without proving consistency or asymptotic normality of the resulting estimator. The /Open Theoretical Questions/ subsection of =design.org= Section 5 lists three loose ends; this note closes the first three under MCAR.
+
+The scope is deliberately narrow:
+
+- *In scope*: consistency of $\bar m_X(\theta)$ and $V_X(\theta)$; the asymptotic distribution of $\sqrt{N}\,\bar m_X(\theta_0)$; consistency and asymptotic normality of $\hat\theta_N$; the limit law of the J-statistic; positive-definiteness of the asymptotic variance.
+- *Sketched*: extensions to MAR via inverse-probability weighting, and to bounded sampling weights.
+- *Out of scope*: MNAR; joint cluster-and-missingness asymptotics; the design-doc convention question of /pweight/ vs normalised survey weight (orthogonal to the missingness theory).
+
+Throughout, the structural residual function $\psi: \mathcal{X} \times \Theta \to \mathbb{R}^M$ and parameter space $\Theta \subset \mathbb{R}^K$ are inherited from =design.org=. The analytical and synthetic estimators are not subject to the missingness issues treated here.
+
+---
+
+* Section 2: Setup and the MCAR Assumption
+
+Let $\{(X_i, D_i)\}_{i=1}^N$ be iid copies of $(X, D)$, where $X \in \mathcal{X}$ is the complete observation vector and $D = (D_1, \dots, D_M) \in \{0,1\}^M$ is the per-coordinate observability indicator: $D_j = 1$ if moment $j$ is observable for this unit, $0$ otherwise. Let $\psi: \mathcal{X} \times \Theta \to \mathbb{R}^M$ be the structural residual function. The moment estimator is the per-coordinate average over observed units:
+\[ \bar m_X(\theta)_j = \frac{1}{N_j} \sum_{i=1}^N D_{ij}\, \psi_j(X_i, \theta), \qquad N_j = \sum_{i=1}^N D_{ij} \]
+
+** Assumption MCAR (Missing Completely At Random)
+$D$ is independent of $X$. Define $p_j = E[D_j]$ and $p_{jk} = E[D_j D_k]$; assume $p_j > 0$ and $p_{jk} > 0$ for all $j, k$.
+
+The strict positivity of $p_{jk}$ rules out pairs of coordinates that are never observed together --- a degeneracy that would leave the cross-moment $V_{jk}$ unidentified.
+
+** Assumption REG (Regularity)
+There exist a neighbourhood $\mathcal{N} \subseteq \Theta$ of $\theta_0$ and an integrable function $\bar\psi: \mathcal{X} \to \mathbb{R}_+$ such that:
+
+1. $\psi(\cdot, \theta)$ is measurable and continuous in $\theta$ on $\Theta$ for each $X$;
+2. $|\psi_j(X, \theta)|^2 \leq \bar\psi(X)$ for all $\theta \in \mathcal{N}$ and all $j$, with $E[\bar\psi(X)] < \infty$;
+3. $\psi$ is continuously differentiable in $\theta$ on the interior of $\Theta$, with $\|\nabla_\theta \psi_j(X,\theta)\|^2 \leq \bar\psi(X)$ on $\mathcal{N}$.
+
+These are standard conditions for the uniform LLN and CLT to apply to functions of the iid sequence $\{(X_i, D_i)\}$.
+
+** Assumption ID (Identification)
+$\Theta$ is compact, $\theta_0 \in \mathrm{int}(\Theta)$, and $E[\psi(X, \theta)] = 0$ if and only if $\theta = \theta_0$.
+
+---
+
+* Section 3: Consistency of the Moment Estimator
+
+** Lemma 1 (Per-coordinate LLN)
+Under MCAR and REG, for each $\theta \in \mathcal{N}$ and each $j$,
+\[ \bar m_X(\theta)_j \xrightarrow{p} m_j(\theta) = E[\psi_j(X, \theta)]. \]
+
+/Proof sketch./ Write $\bar m_X(\theta)_j = S_j(\theta)/N_j$ with $S_j(\theta) = \sum_i D_{ij} \psi_j(X_i, \theta)$. The strong law of large numbers gives $N_j/N \to p_j$ a.s. and, by MCAR independence of $D_{ij}$ from $X_i$,
+\[ S_j(\theta)/N \xrightarrow{p} E[D_{ij}\, \psi_j(X_i, \theta)] = E[D_{ij}]\,E[\psi_j(X_i, \theta)] = p_j\, m_j(\theta). \]
+The continuous-mapping theorem applied to the ratio yields the result. $\square$
+
+** Theorem 1 (Uniform Consistency)
+Under MCAR and REG,
+\[ \sup_{\theta \in \mathcal{N}} \|\bar m_X(\theta) - m(\theta)\| \xrightarrow{p} 0. \]
+
+/Proof sketch./ The pointwise convergence in Lemma 1 extends to uniform convergence by the standard Glivenko-Cantelli argument applied to the iid sequence $\{(D_i, X_i)\}$, using the integrable envelope $\bar\psi$ and continuity of $\psi$ in $\theta$. See Newey & McFadden (1994, Lemma 2.4). $\square$
+
+---
+
+* Section 4: Asymptotic Distribution and the Limit Variance
+
+** Theorem 2 (CLT for the Moment Estimator)
+Under MCAR and REG,
+\[ \sqrt{N}\,\bar m_X(\theta_0) \xrightarrow{d} \mathcal{N}\!\bigl(0,\ V^\text{lim}(\theta_0)\bigr) \]
+where the limit covariance has $(j, k)$-th entry
+\[ V^\text{lim}_{jk}(\theta_0) = \frac{p_{jk}}{p_j p_k}\, V_{jk}(\theta_0), \qquad V_{jk}(\theta_0) = E\!\bigl[\psi_j(X, \theta_0)\, \psi_k(X, \theta_0)\bigr]. \]
+
+/Proof sketch./ Under MCAR, with $m(\theta_0) = 0$,
+\[ \operatorname{Cov}\!\bigl(D_{ij}\psi_j(X_i,\theta_0),\, D_{ik}\psi_k(X_i,\theta_0)\bigr) = E[D_{ij}D_{ik}\psi_j\psi_k] = p_{jk}\, V_{jk}(\theta_0). \]
+Combining with $N_j/N \to p_j$ and $N_k/N \to p_k$:
+\[ N\,\operatorname{Cov}\!\bigl(\bar m_j, \bar m_k\bigr) = \frac{N^2}{N_j N_k}\cdot \frac{1}{N}\sum_i \operatorname{Cov}\!\bigl(D_{ij}\psi_j, D_{ik}\psi_k\bigr) \xrightarrow{p} \frac{p_{jk}}{p_j p_k}\, V_{jk}(\theta_0). \]
+The joint Lindeberg-Lévy CLT applied to the $M$-vector $D_i \odot \psi(X_i, \theta_0)$ supplies asymptotic normality with this limit. $\square$
+
+** Remark (Hadamard Factorisation)
+The limit variance factorises as a Hadamard product:
+\[ V^\text{lim}(\theta_0) = R \circ V(\theta_0), \qquad R_{jk} = \frac{p_{jk}}{p_j p_k} \]
+where $\circ$ is the elementwise product. The matrix $R$ has the natural representation $R = E[\tilde D\, \tilde D']$ with $\tilde D_j = D_j / p_j$ (the inverse-probability-normalised indicator), so $R$ is positive semidefinite by construction.
+
+** Proposition 1 (PD of the Limit Variance)
+Suppose MCAR holds, $V(\theta_0)$ is positive definite, and $R = E[\tilde D\, \tilde D']$ is positive definite. Then $V^\text{lim}(\theta_0)$ is positive definite.
+
+/Proof./ By the Schur product theorem, the Hadamard product of two positive-definite matrices is positive definite. $\square$
+
+Positive-definiteness of $R$ excludes degenerate missingness patterns (e.g., linear dependencies among the normalised indicators $\tilde D_j$). In practice the relevant condition is that no nontrivial linear combination of $\tilde D_j$ is degenerate, which holds whenever the observability pattern is not pathologically structured.
+
+---
+
+* Section 5: The Pairwise-Overlap Variance Estimator
+
+The =emu-gmm= design defines, for each $(j, k)$,
+\[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_{i=1}^N D_{ij} D_{ik}\, \psi_j(X_i, \theta)\, \psi_k(X_i, \theta). \]
+
+** Theorem 3 (Consistency of $V_X$ for $V^\text{lim}/N$)
+Under MCAR and REG,
+\[ N\, V_X(\theta_0) \xrightarrow{p} V^\text{lim}(\theta_0). \]
+
+/Proof sketch./ Write
+\[ N\,[V_X(\theta_0)]_{jk} = \frac{N^2}{N_j N_k}\cdot \frac{1}{N}\sum_i D_{ij} D_{ik}\, \psi_j(X_i, \theta_0)\, \psi_k(X_i, \theta_0). \]
+By the LLN and MCAR,
+\[ \frac{1}{N}\sum_i D_{ij} D_{ik}\,\psi_j\psi_k \xrightarrow{p} E[D_{ij} D_{ik}\,\psi_j\psi_k] = p_{jk}\, V_{jk}(\theta_0). \]
+Combined with $N_j/N \to p_j$ and $N_k/N \to p_k$,
+\[ N\,[V_X(\theta_0)]_{jk} \xrightarrow{p} \frac{p_{jk}}{p_j p_k}\, V_{jk}(\theta_0) = V^\text{lim}_{jk}(\theta_0). \quad \square \]
+
+** Interpretation
+The =emu-gmm= convention --- $V_X(\theta) \approx \operatorname{Var}[\bar m_X(\theta)]$ at $\theta$ near $\theta_0$ --- is verified asymptotically by Theorem 3. The factor of $N$ on both sides reconciles the per-sample scaling of $V_X$ (which shrinks as $1/N$) with the fixed limit $V^\text{lim}$ (the asymptotic variance of $\sqrt{N}\,\bar m_X$).
+
+** Finite-Sample PD Failure and Regularisation
+Theorem 3 establishes /asymptotic/ positive-definiteness of $V_X$ via Proposition 1 but does not establish finite-sample positive-definiteness. The pairwise-overlap construction can produce a non-PD $V_X$ in finite samples, particularly when overlap counts $\sum_i D_{ij} D_{ik}$ are small relative to $M$. The design doc's diagonal-Tikhonov regularisation
+\[ V_X^\star(\theta) = V_X(\theta) + \tau\,\operatorname{diag}\!\bigl(V_X(\theta)\bigr) \]
+restores PD at the cost of a finite bias. As $\tau \to 0$ along the sample path, $N\, V_X^\star \to V^\text{lim}$; under the anchor-once-then-freeze policy described in =design.org=, $\tau$ depends on the sample but its rate of decay to zero is governed by the asymptotic conditioning of $V^\text{lim}$, which is bounded away from zero by Proposition 1. Convergence of $V_X^\star$ to $V_X$ in probability therefore follows under standard regularity.
+
+A precise rate for the finite-sample-PD failure probability as a function of $(N, M, \{p_{jk}\})$ remains an open quantitative question.
+
+---
+
+* Section 6: GMM Consistency, Asymptotic Normality, and the J-Statistic
+
+Define
+\[ Q_X(\theta) = \bar m_X(\theta)'\, V_X(\theta)^{-1}\, \bar m_X(\theta), \qquad \hat\theta_N = \arg\min_{\theta \in \Theta} Q_X(\theta). \]
+
+** Theorem 4 (Consistency of $\hat\theta_N$)
+Under MCAR, REG, and ID, with the conditions of Proposition 1 holding at $\theta_0$, $\hat\theta_N \xrightarrow{p} \theta_0$.
+
+/Proof sketch./ Standard extremum-estimator argument (Newey & McFadden 1994, Theorem 2.6). Uniform convergence of $\bar m_X(\theta)$ to $m(\theta)$ on $\Theta$ is supplied by Theorem 1; convergence of $V_X(\theta)^{-1}$ to a positive-definite limit at $\theta_0$ is supplied by Theorem 3 and Proposition 1; identification (Assumption ID) supplies the unique-minimum condition for the population criterion. $\square$
+
+** Theorem 5 (Asymptotic Normality)
+Suppose, in addition to the conditions of Theorem 4, that $G(\theta_0) = E[\nabla_\theta \psi(X, \theta_0)]$ has full column rank $K$. Then
+\[ \sqrt{N}\,\bigl(\hat\theta_N - \theta_0\bigr) \xrightarrow{d} \mathcal{N}\!\Bigl(0,\ \bigl(G(\theta_0)'\, V^\text{lim}(\theta_0)^{-1}\, G(\theta_0)\bigr)^{-1}\Bigr). \]
+
+/Proof sketch./ Standard delta-method argument from the first-order condition (Newey & McFadden 1994, Theorem 3.4). The uniformly convergent gradient is supplied by REG part 3. $\square$
+
+** Corollary (Information Matrix Identity)
+At the optimum, the asymptotic precision $\mathcal{I}(\theta_0) = G(\theta_0)'\, \Lambda^\text{lim}(\theta_0)\, G(\theta_0)$ with $\Lambda^\text{lim} = (V^\text{lim})^{-1}$ coincides with one-half of the population Hessian of $Q$ at $\theta_0$, as derived in =design.org= Section 1. The framework's inference engine computes $\hat G' \hat\Lambda \hat G$ directly rather than via a numerical Hessian of $Q_X$; the two are equivalent asymptotically but the direct form is cheaper and more numerically stable in finite samples.
+
+** Theorem 6 (J-Statistic Under MCAR)
+Under the conditions of Theorem 5, with $V_X$ used unregularised:
+\[ Q_X(\hat\theta_N) \xrightarrow{d} \chi^2_{M-K}. \]
+When $V_X$ is replaced by $V_X^\star = V_X + \tau\,\operatorname{diag}(V_X)$ with $\tau$ held fixed across the sample path, the limit becomes a generalised chi-squared --- a weighted sum of $M - K$ independent $\chi^2_1$ variates whose weights are the eigenvalues of $(V^{\star,\text{lim}})^{-1}\, V^\text{lim}$ projected onto the orthogonal complement of the column space of $G(\theta_0)$. The weights coincide at 1 when $\tau = 0$, recovering $\chi^2_{M-K}$.
+
+/Proof sketch./ For the unregularised case, the standard argument (Hansen 1982) gives $\sqrt{N}\,\bar m_X(\hat\theta_N) \to_d \mathcal{N}(0, V^\text{lim} - G(G'\Lambda^\text{lim}G)^{-1}G')$ when $V_X$ is consistent for $V^\text{lim}/N$ and $\Lambda^\text{lim}$ is the matching precision; the quadratic form then has $\chi^2_{M-K}$ limit. For the regularised case, replace $\Lambda^\text{lim}$ by $\Lambda^{\star,\text{lim}}$ in the projection and apply the standard quadratic-form-in-normal-variables result. $\square$
+
+---
+
+* Section 7: Extensions
+
+** Sampling Weights
+The unweighted iid sampling above extends to bounded weights $w_i$ provided the moment estimator is consistent for the targeted population expectation. The asymptotic theory carries through if $w_i$ is independent of $D_i$ and $X_i$ and has $E[w^2] < \infty$: $V^\text{lim}$ acquires a factor of $E[w^2]/E[w]^2$ in each entry, and the eigenstructure of the Hadamard factorisation is unchanged. The convention question of whether $w_i$ should be interpreted as the raw $1/\pi_i$ or as a survey weight normalised so that $E[w] = 1$ is orthogonal to the missingness asymptotics and resolved at the design level.
+
+** MAR (Missing At Random)
+Under MAR --- $D$ independent of $\psi$ given some observable covariate $Z$ --- the unweighted pairwise-overlap estimator is biased. Consistency is restored by inverse-probability weighting (Robins-Rotnitzky-Zhao 1994): replace $D_{ij}$ in $\bar m$ with $D_{ij} / \hat p_j(Z_i)$, where $\hat p_j(Z_i)$ is a consistent estimator of $P(D_j = 1 \mid Z = Z_i)$. The resulting estimator is asymptotically normal under standard regularity conditions on the propensity-score model and is doubly robust in the usual sense. Architecturally, this is a new =CovarianceStrategy= holding the propensity-score model as state; no change to =Measure= or =StructuralModel= is required.
+
+** MNAR (Missing Not At Random)
+Under MNAR, no nonparametric consistency obtains without additional structure (a parametric model for the missingness mechanism, an exclusion restriction, or external validation data). Joint modelling of the missingness process and the structural moments is required. The =emu-gmm= framework as currently designed does not accommodate this without architectural extension.
+
+** Cluster-Missingness Interactions
+The =ClusteredCovariance= strategy handles within-cluster correlation in $\psi$ but assumes MCAR-style missingness independent across units. If $D$ is correlated within clusters --- e.g., a non-response that propagates within households --- the cluster-totals variance form remains consistent under MCAR-within-cluster, but the per-coordinate effective sample sizes $N_j$ need a cluster-level reinterpretation. A precise statement is deferred to the v2 design ladder.
+
+---
+
+* Section 8: Map Back to design.org
+
+The following claims in =design.org= are established here under MCAR:
+
+| =design.org= claim                                                          | Result               |
+|-----------------------------------------------------------------------------+----------------------|
+| /Pairwise-overlap is the price paid for avoiding listwise deletion/         | Theorem 3 + Prop. 1  |
+| /$V_X(\theta)$ estimates $\operatorname{Var}[\bar m_X(\theta)]$/            | Theorem 3            |
+| /$Q_X(\hat\theta) \to \chi^2_{M-K}$ unregularised/                          | Theorem 6            |
+| /Regularised J-statistic has a weighted-$\chi^2$ limit/                     | Theorem 6 (second)   |
+| /Asymptotic PD of $V_X(\theta_0)$ under standard conditions/                | Proposition 1        |
+| /No claim about consistency outside MCAR/                                   | Confirmed; Sec. 7    |
+| /$\mathcal{I} = G' \Lambda G$ computed directly, not via Hessian/           | Corollary to Thm. 5  |
+
+The following remain open:
+
+- Quantitative rates for finite-sample-PD failure of $V_X$ as a function of $(N, M, \{p_{jk}\})$.
+- Convergence behaviour of $V_X^\star$ to $V_X$ under data-dependent $\tau$, when the anchor-once-then-freeze policy is violated.
+- Cluster-MCAR joint asymptotics with non-trivial within-cluster correlation in both $\psi$ and $D$.
+- Synthetic-empirical SMM combination under MCAR on the empirical side: a separate companion result.
+
+These are deferred to a later revision.
+
+---
+
+* References
+
+- Hansen, L. P. (1982). Large sample properties of generalized method of moments estimators. /Econometrica/, 50(4), 1029-1054.
+- Newey, W. K., & McFadden, D. (1994). Large sample estimation and hypothesis testing. In /Handbook of Econometrics/, vol. 4, ch. 36, 2111-2245.
+- Robins, J. M., Rotnitzky, A., & Zhao, L. P. (1994). Estimation of regression coefficients when some regressors are not always observed. /Journal of the American Statistical Association/, 89(427), 846-866.
+- Wooldridge, J. M. (2010). /Econometric Analysis of Cross Section and Panel Data/, 2nd ed., chs. 14, 18, 19. MIT Press.

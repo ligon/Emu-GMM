@@ -329,7 +329,7 @@ The pairwise-overlap covariance machinery introduced in Section 2 sidesteps list
 
 3. *Finite-sample versus asymptotic positive-definiteness.* The diagonal-Tikhonov regularisation handles finite-sample PD failure but distorts the J-statistic's limit law. The asymptotic PD of $V_X(\theta_0)$ under standard conditions (MCAR, bounded weights, finite fourth moments) is straightforward; the rate at which finite-sample PD becomes reliable in practice is not characterised here.
 
-These items are deferred to a companion theoretical note. The implementation paths described in this document are unchanged by their resolution --- the items affect what we /claim/ the estimator is doing, not what the code does.
+Items (1) and (2) under MCAR --- plus the J-statistic limit and asymptotic positive-definiteness of $V^\text{lim}$ --- are established in the companion note =docs/mcar-asymptotics.org=. The remaining quantitative and MAR/MNAR pieces are deferred to later revisions of that note. The implementation paths described in this document are unchanged by any of this: the open items affect what we /claim/ the estimator is doing, not what the code does.
 
 ---
 
