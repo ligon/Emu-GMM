@@ -1,0 +1,339 @@
+#+TITLE: emu-gmm v1 Implementation Plan
+#+SUBTITLE: Phased task list for building =src/emu_gmm/= against the API sketch
+#+AUTHOR: Ethan Ligon
+#+OPTIONS: toc:nil num:t todo:t
+#+TODO: TODO(t) DOING(g) BLOCKED(b) | DONE(d) DROPPED(x)
+
+* Section 1: Scope and Sequencing
+
+This plan operationalises =docs/api-sketch.org= as a sequence of phases. The order is:
+
+1. /Foundations/ --- internal plumbing nothing else can be written without.
+2. /Synthetic path/ --- the v1 demo target; first thing that runs end-to-end.
+3. /Inner pipeline/ --- weighting, regularisation, Cholesky.
+4. /Optimiser/ --- optimistix adapter.
+5. /Entry point/ --- =estimate()= ties it together; first acceptance test fires.
+6. /Analytical path/ --- closed-form identification round-trip; second acceptance test.
+7. /Empirical path/ --- ready for real data; unit-tested against synthetic inputs only.
+8. /Polish/ --- public API re-exports, README, pre-commit.
+
+Each phase has dependencies, tasks, and an acceptance criterion. The first end-to-end run is at the end of Phase 5 (synthetic Euler estimation). Real-data acceptance is deferred to whenever data arrives.
+
+Effort estimates are rough: /S/ ≈ 1-2 hours, /M/ ≈ half-day, /L/ ≈ full day. They are calibrated against /Sue + Claude working together/ pair-of-hours, not solo developer time.
+
+---
+
+* Section 2: Pre-Implementation Decisions
+
+A small number of choices need to land before code is written.
+
+** TODO Decide Haliax surface depth in v1                                  :S:
+=docs/api-sketch.org= Section 6 question 1.
+
+Options:
+- (a) Wrap plain arrays into =NamedArrays= internally; present plain arrays on the user-facing boundary.
+- (b) Accept either at the boundary; normalise internally.
+- (c) Require Haliax everywhere.
+
+Current lean (in the API sketch): (a). Confirming this affects every file's type signatures and the test patterns. Decide and write the choice into =CLAUDE.md=.
+
+** TODO Reconcile bibfile gap items                                        :S:
+The bibfile agent's gap list (Hansen-Heaton-Yaron 1996; Cameron-Miller 2015 or Wooldridge 2003; Wolter 2007; Nocedal-Wright 2006; Hayashi 2000; Horn-Johnson; Haliax software cite) needs a pass. Some likely live in =~/bibtex/main.bib= already. A second short agent pass can resolve these.
+
+Not blocking implementation; the docs cite the entries either way. Done before any next manuscript-direction work.
+
+---
+
+* Section 3: Phase 1 --- Foundations
+
+/Dependencies: none./
+/Acceptance: every module below has a passing pytest suite./
+
+** TODO src/emu_gmm/_internal/params.py                                    :M:
+Parameter dataclass ↔ flat JAX array conversion.
+
+- =flatten_params(params)=: returns =(flat_array, treedef)= via =jax.tree_util.tree_flatten=.
+- =unflatten_params(flat_array, treedef)=: inverse.
+- Validation: leaves must be 0-d JAX-friendly (scalar floats); raise =ValueError= with a clear message if not.
+- Optional: =param_names(params)= → list of field names in canonical order, for diagnostics.
+
+/Tests:/ round-trip on =EulerParams(beta=0.95, gamma=2.0)=; failure path with a non-scalar leaf; field-order preservation.
+
+** TODO src/emu_gmm/_internal/axes.py                                      :S:
+Canonical Haliax =Axis= definitions.
+
+- Module-level =Params=, =ParamsDual=, =Moments=, =MomentsDual=, =Obs= as factory functions that take size and return an =ha.Axis=. (Cannot be module-level constants because size depends on the user's problem.)
+- Helper =dual(axis)= → matching =*Dual= axis with the same size.
+
+/Tests:/ factory returns axes with the expected names and sizes; =dual()= round-trip.
+
+** TODO src/emu_gmm/_internal/cholesky.py                                  :M:
+Cholesky factor + forward/back substitution wrappers.
+
+- =cholesky(V) -> L=: thin wrapper around =jax.scipy.linalg.cholesky(V, lower=True)= with explicit error on non-PD.
+- =forward_solve(L, b) -> y=: solves =L y = b=.
+- =back_solve(L, b) -> x=: solves =L' x = b=.
+- =whiten(V, m) -> y=: chained convenience for $y = L^{-1} m$.
+
+/Tests:/ correctness against =scipy.linalg.solve_triangular= on a 5x5 PD matrix; verify =whiten= is the gradient of $\tfrac{1}{2}\|y\|^2$ w.r.t. $m$ equals $\Lambda m$.
+
+** TODO src/emu_gmm/types.py                                               :M:
+Protocols, type aliases, result/diagnostics dataclasses.
+
+- =StructuralModel= type alias = =Callable[[Array, ParamsLike], Float[Array, "M"]]=.
+- =ParamsLike= = TypeVar bound to a =@jdc.pytree_dataclass=.
+- =Measure(Protocol)= with =expectation=, =jacobian= methods.
+- =CovarianceStrategy(Protocol)= with =covariance= method.
+- =WeightingStrategy(Protocol)= with =whitening_residual= method.
+- =RegularizationStrategy(Protocol)= with =apply= method.
+- =Optimizer(Protocol)= callable signature.
+- =OptimizerInfo= dataclass: steps, status, backend-specific fields.
+- =Diagnostics= dataclass: tau_realised, kappa_V, binding_ridge, cholesky_pivot_min, final_objective, final_gradient_norm, optimizer_info.
+- =EstimationResult= dataclass: theta_hat, Sigma_theta, V_X, J_stat, J_dof, J_pvalue, converged, iterations, theta_init, measure, covariance, weighting, regularization, diagnostics.
+
+/Tests:/ protocols are runtime-checkable via =isinstance= when annotated with =@runtime_checkable=; dataclasses round-trip through =jax.tree_util.tree_flatten=.
+
+---
+
+* Section 4: Phase 2 --- Synthetic Path
+
+/Dependencies: Phase 1./
+/Acceptance: =SyntheticMeasure= and =SyntheticCovariance= each have unit tests that pass; expectation values match an independently-computed reference on a known DGP./
+
+** TODO src/emu_gmm/measures/synthetic.py                                  :M:
+=SyntheticMeasure= dataclass.
+
+- Fields: =key= (=jax.Array=), =n_sim= (static int), =sampler= (Callable).
+- =expectation(psi, theta)=: =vmap= =psi= over the =sampler= output, mean over =n_sim=.
+- =jacobian(psi, theta)=: =jacfwd= of =expectation= w.r.t. =theta=, treating =theta= as a flat array via the =params.py= machinery.
+- Sampler with degenerate $\theta$-dependence (returns same output regardless of $\theta$) must work: AD through the sampler returns zero, gradient flows entirely through $\psi$.
+
+/Tests:/ Constant DGP with known $\mathbb{E}[\psi]$; verify =expectation= matches to within Monte Carlo error on $n_{sim} = 10^5$. Sampler returning constants gives zero Jacobian for the sampler-path contribution.
+
+** TODO src/emu_gmm/covariance/synthetic.py                                :S:
+=SyntheticCovariance= Monte Carlo variance.
+
+- =covariance(psi, theta, measure)=: =vmap= =psi= over =measure= draws, centre, outer product, divide by =n_sim^2= (variance of the moment estimator).
+
+/Tests:/ Verify $\operatorname{Var}_{\mathrm{sim}}$ matches the analytical second moment on a Gaussian draw to within Monte Carlo error.
+
+---
+
+* Section 5: Phase 3 --- Inner Pipeline
+
+/Dependencies: Phase 1./
+/Acceptance: each strategy independently testable; composition (=residual_fn = weighting o regularization o measure o covariance=) tested in Phase 5./
+
+** TODO src/emu_gmm/weighting.py                                           :M:
+Three weighting strategies.
+
+- =Identity= --- whitening returns $m$ unchanged (equivalent to $L = I$).
+- =Fixed(V0)= --- pre-cholesky $V_0$ at construction; reuse $L_0$ on every call.
+- =ContinuouslyUpdated()= --- recompute Cholesky of $V(\theta)$ at each call; JAX AD traces through.
+
+The =Fixed= constructor takes a $V_0$ array and stores its Cholesky factor, not the original $V$.
+
+/Tests:/ For a known $V$, =Identity= passes through; =Fixed(V)= whitens to identity-covariance on a simulated normal sample; =ContinuouslyUpdated()= passes a smoke test that AD through =whitening_residual= produces non-zero gradients w.r.t. =theta=.
+
+** TODO src/emu_gmm/regularization.py                                      :S:
+=DiagonalTikhonov= regulariser.
+
+- =apply(V, anchor=None)=: if =anchor= provided, compute $\tau$ at the anchor's $V$; otherwise compute $\tau$ at the current $V$. Return =(V_star, tau, kappa)=.
+- $\tau$ computed via condition-number bisection (target $\kappa \leq 10^6$ by default).
+- A static =tau_threshold= field controls when =binding_ridge= flag fires.
+
+/Tests:/ On a $V$ with $\kappa = 10^8$, output has $\kappa \leq \kappa_{\mathrm{target}}$; $\tau$ scale-equivariant under per-moment rescaling; binding flag fires correctly.
+
+---
+
+* Section 6: Phase 4 --- Optimiser
+
+/Dependencies: Phase 1./
+/Acceptance: =optimistix_lm()= solves a known NLLS problem to machine precision; =scipy_lm()= solves the same problem to a looser tolerance./
+
+** TODO src/emu_gmm/optimizer.py                                           :M:
+=Optimizer= protocol + factories.
+
+- =optimistix_lm(rtol=1e-8, atol=1e-8, max_steps=200)= → Optimizer callable. Wraps =optimistix.LevenbergMarquardt= and =optimistix.least_squares=.
+- =scipy_lm(**kw)= → Optimizer callable. Wraps =scipy.optimize.least_squares(method='lm')=. Performs =jax.numpy= ↔ =numpy= conversion at the boundary.
+- Both return =(theta_opt, OptimizerInfo)=.
+
+/Tests:/ Both optimisers converge on Rosenbrock-as-NLLS (=residual_fn(x) = [10*(x[1] - x[0]**2), 1 - x[0]]=) from a far-from-optimum start.
+
+---
+
+* Section 7: Phase 5 --- Entry Point + First End-to-End
+
+/Dependencies: Phases 1, 2, 3, 4./
+/Acceptance: The Euler example in =docs/api-sketch.org= Section 5 runs end-to-end and converges./
+
+** TODO src/emu_gmm/diagnostics.py                                         :S:
+=Diagnostics= constructor helpers and logging hooks.
+
+- =collect_diagnostics(state)=: builds a =Diagnostics= from intermediate state computed during =estimate=.
+- A simple =log_to_stdout()= hook that prints regularisation $\tau$, condition number, and per-step objective.
+
+/Tests:/ =Diagnostics= is a valid PyTree; =collect_diagnostics= populates all fields without =NaN=.
+
+** TODO src/emu_gmm/estimator.py                                           :L:
+The =estimate()= entry point.
+
+- Flatten =theta_init= to a flat JAX array via =_internal/params=.
+- Build a closure =residual_fn(theta_flat)= that:
+  1. Unflattens =theta_flat= back to the user's params dataclass.
+  2. Calls =measure.expectation(model, theta)= → $m$.
+  3. Calls =covariance.covariance(model, theta, measure)= → $V$.
+  4. Calls =regularization.apply(V)= → $V^\star$ (anchor-once-then-freeze policy).
+  5. Calls =weighting.whitening_residual(m, V_star, theta)= → $y$.
+  6. Returns $y$ as the NLLS residual.
+- Hand =residual_fn= and =theta_init_flat= to =optimizer=.
+- At =theta_hat_flat=:
+  - Unflatten to the user's dataclass.
+  - Compute =G = measure.jacobian(model, theta_hat)= via AD.
+  - Compute =Sigma_theta = inv(G' V^{-1} G)= via Cholesky.
+  - Compute =J_stat = ||y_hat||^2=; =J_dof = M - K=; =J_pvalue= via =scipy.stats.chi2.sf=.
+  - Collect diagnostics; build =EstimationResult=.
+
+The anchor-once-then-freeze policy is implemented by computing $\tau$ at $\theta_{\mathrm{init}}$ and treating it as a non-traced static, so the regularised $V^\star$ at later $\theta$ uses the same $\tau$.
+
+/Acceptance test:/ The Euler example in =docs/api-sketch.org= Section 5 runs and converges to a point on the one-dimensional identified locus. =Diagnostics= report sensible values.
+
+---
+
+* Section 8: Phase 6 --- Analytical Path
+
+/Dependencies: Phase 5./
+/Acceptance: The analytical round-trip variant in =docs/api-sketch.org= Section 5 runs end-to-end and recovers $\theta_0$ to within floating-point tolerance./
+
+** TODO src/emu_gmm/measures/analytical.py                                 :S:
+=AnalyticalMeasure= dataclass.
+
+- Fields: =expectation_fn=, optional =jacobian_fn=.
+- =expectation(psi, theta)=: calls =expectation_fn(model, theta)=.
+- =jacobian(psi, theta)=: if =jacobian_fn= supplied, calls it; otherwise =jacfwd= of =expectation_fn=.
+
+/Tests:/ Lognormal-MGF expectation matches Monte Carlo on $n_{sim} \geq 10^5$.
+
+** TODO src/emu_gmm/covariance/analytical.py                               :S:
+=AnalyticalCovariance= dataclass.
+
+- Field: =covariance_fn=.
+- =covariance(psi, theta, measure)=: calls =covariance_fn(model, theta)=.
+
+/Tests:/ Match against a known $V(\theta)$ formula.
+
+** TODO Acceptance: analytical round-trip Euler example                    :S:
+The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
+
+---
+
+* Section 9: Phase 7 --- Empirical Path (Ready for Real Data)
+
+/Dependencies: Phase 5./
+/Acceptance: Unit tests against synthetic data fed via =EmpiricalMeasure= pass; no real-data acceptance test (waiting for data)./
+
+** TODO src/emu_gmm/measures/empirical.py                                  :M:
+=EmpiricalMeasure= dataclass.
+
+- Fields: =x= (=(N, D)= array), =mask= (=(N, M)= 0/1), =weights= (=(N,)=).
+- =expectation(psi, theta)=: =vmap= =psi= across =N=, apply =mask= and =weights=, normalise by per-coordinate $N_j = \sum_i d_{ij} w_i$.
+- =jacobian(psi, theta)=: same shape, but using =jacfwd= of =psi=.
+
+/Tests:/ Coordinate-wise mean on uniform data matches simple =np.mean=; missingness handled correctly per coordinate; weights of all-ones equivalent to unweighted.
+
+** TODO src/emu_gmm/covariance/iid.py                                      :M:
+=IIDCovariance= pairwise-overlap form.
+
+- =covariance(psi, theta, measure)=: =einsum= over the pairwise-overlap mask × $\psi_j \psi_k$ × $w_i^2$.
+
+/Tests:/ Special case with full mask and uniform weights matches =numpy.cov= on the $\psi$ matrix; pairwise-overlap test with a strict-subset missingness pattern matches the analytic formula on a 3x3 toy.
+
+** TODO src/emu_gmm/covariance/clustered.py                                :M:
+=ClusteredCovariance= cluster-totals form.
+
+- Resolve Section 6 question 2 (cluster ID representation) first: pad cluster IDs to a static maximum and use =jax.ops.segment_sum=.
+- Fields: =cluster_ids=, =n_clusters= (static).
+- =covariance(psi, theta, measure)=: segment_sum within cluster, outer product, sum over clusters, divide by $N_j N_k$.
+
+/Tests:/ With each cluster of size 1, reduces to =IIDCovariance=; on a toy two-cluster example, matches the analytic cluster-robust formula.
+
+** TODO Synthetic acceptance test through EmpiricalMeasure                 :S:
+Pre-generate synthetic Euler data from the same DGP as the Phase 5 demo. Feed it through =EmpiricalMeasure= + =IIDCovariance=. Verify the estimate is close to the synthetic-context result (modulo CRN vs frozen-sample noise).
+
+---
+
+* Section 10: Phase 8 --- Polish
+
+/Dependencies: Phases 5, 6, 7./
+/Acceptance: =pip install -e .= works; a fresh user can run the Euler demo from the README./
+
+** TODO src/emu_gmm/__init__.py public re-exports                          :S:
+Re-export user-facing names: =estimate=, =StructuralModel=, =SyntheticMeasure=, =AnalyticalMeasure=, =EmpiricalMeasure=, =SyntheticCovariance=, =IIDCovariance=, =ClusteredCovariance=, =AnalyticalCovariance=, =Identity=, =Fixed=, =ContinuouslyUpdated=, =DiagonalTikhonov=, =optimistix_lm=, =scipy_lm=, =EstimationResult=, =Diagnostics=.
+
+** TODO README.org quickstart                                              :S:
+Replace the placeholder layout with a working quickstart that mirrors the Phase 5 acceptance test (synthetic Euler demo, 30 lines or so).
+
+** TODO Pre-commit + CI                                                    :S:
+- =pre-commit install= once locally and document in README.
+- Decide whether to add a =.github/workflows/= CI config. ManifoldGMM has none; defer unless the user wants it.
+
+---
+
+* Section 11: Cross-Cutting Concerns
+
+These don't belong to a single phase; flagging them so they don't fall through the cracks.
+
+** TODO Test infrastructure                                                :S:
+- =tests/conftest.py= with a deterministic =jax.random.PRNGKey= fixture.
+- A small set of shared synthetic-DGP fixtures (lognormal consumption, simple linear regression for cross-checking).
+- =@pytest.mark.slow= for tests over $n_{sim} > 10^4$ or otherwise expensive.
+
+** TODO Numerical tolerance conventions                                    :S:
+Document in =CLAUDE.md=: which tests check exact equality, which use =jnp.allclose(rtol=1e-5, atol=1e-7)=, which use Monte Carlo tolerance with explicit seed. Inconsistent tolerance is a common source of flaky tests.
+
+** TODO Type-checking discipline                                           :S:
+Decide once whether =mypy= runs against =src= and =tests= or only =src=. ManifoldGMM does both; we should too. Add =# type: ignore= comments only with a stated reason.
+
+** TODO Examples directory                                                 :S:
+=examples/= directory with at least the Euler example as a runnable =.py= file (not just a docstring), tangled from =docs/api-sketch.org= if we want literate workflow. Defer until end of v1.
+
+---
+
+* Section 12: Phase Dependencies Summary
+
+#+BEGIN_SRC text
+Phase 0 (decisions)
+  |
+  v
+Phase 1 (foundations: params, axes, cholesky, types)
+  |
+  +----> Phase 2 (synthetic measure + covariance)
+  +----> Phase 3 (weighting + regularization)
+  +----> Phase 4 (optimizer)
+              |
+              v
+        Phase 5 (estimator + diagnostics + FIRST ACCEPTANCE)
+              |
+              +----> Phase 6 (analytical + SECOND ACCEPTANCE)
+              +----> Phase 7 (empirical + UNIT TESTS)
+                            |
+                            v
+                      Phase 8 (polish)
+#+END_SRC
+
+Phase 1 is the only true bottleneck. Phases 2/3/4 can be parallelised by separate agents working in worktrees; they integrate at Phase 5.
+
+---
+
+* Section 13: Out of Scope for This Plan
+
+Things the API sketch flags but this plan does not schedule:
+
+- /v2 SMM matching/ --- combined empirical + synthetic moment vectors, $(1+1/S)$ inflation, gradient threading through both contexts.
+- /v2 design-aware variance/ --- stratified, replicate-weight (BRR, jackknife, bootstrap), finite-population corrections.
+- /v2 regularisation/ --- eigenvalue-floor, Higham nearest-PSD.
+- /v2 diagnostics taxonomy/ --- the structured identification-failure reports per =design.org= Section 5.4.
+- /v2 quadrature/ --- Gauss-Hermite / Gauss-Legendre engines for =AnalyticalMeasure=.
+- /v2 named-tensor surface/ --- Haliax NamedArrays at the user-facing boundary.
+
+These return to the table after v1 ships and a few real estimations have surfaced what actually needs to come next.
