@@ -7,21 +7,21 @@
 
 The framework is named for the operator at its centre: =emu= reads as $\mathbb{E}_\mu$, the expectation under a measure $\mu$. The architectural conceit is that this one operator, applied uniformly to empirical, analytical, and synthetic measures, unifies sample estimation, identification analysis, and simulation-based inference inside a single computational interface.
 
-This document outlines the foundational architecture. The framework establishes an algebraic symmetry between population identification and sample estimation by embedding both data realizations and the underlying sampling design into the primitives of the =Measure= layer.
+This document outlines the foundational architecture. The framework establishes an algebraic symmetry between population identification and sample estimation by embedding both data realizations and the underlying sampling design into the primitives of the =Measure= and =CovarianceStrategy= layers.
 
 ** Population Primitives
-Let $\Theta$ denote the compact parameter space. We define the model structure via the following foundational mappings:
+Let $\Theta \subset \mathbb{R}^K$ denote a compact parameter space. We define the model structure via the following foundational mappings:
 
 - *Parameter Vector*: $\theta \in \Theta$, where $\theta_0$ represents the unique true parameter vector.
-- *Population Moment Function*: $m(\theta)$, an $M \times 1$ deterministic mapping representing the structural equations of the economic model. The fundamental identification restriction satisfies:
+- *Population Moment Function*: $m: \Theta \to \mathbb{R}^M$, an $M \times 1$ deterministic mapping representing the structural equations of the economic model. The fundamental identification restriction satisfies:
   \[ m(\theta_0) = 0 \]
-  Sections 2-4 generalise this to $m(\theta) \equiv \mathbb{E}_{\mu_\text{pop}}[\psi(\cdot,\theta)]$ under the (unobserved) population measure $\mu_\text{pop}$, and replace $\mu_\text{pop}$ with whatever measure the user supplies.
-- *Variance-Covariance Mapping*: $V(\theta) = E[m(\theta)m(\theta)']$, representing the population variance-covariance matrix of the underlying stochastic moments evaluated at $\theta$.
+  Sections 2-5 generalise this to $m(\theta) \equiv \mathbb{E}_{\mu_\text{pop}}[\psi(\cdot,\theta)]$ under the (unobserved) population measure $\mu_\text{pop}$, and replace $\mu_\text{pop}$ with whatever measure the user supplies.
+- *Variance-Covariance Mapping*: $V(\theta) = E[m(\theta)m(\theta)']$, the $M \times M$ positive-definite covariance matrix of the underlying stochastic moments evaluated at $\theta$.
 - *Optimal Weighting Matrix*: $\Lambda(\theta) = V^{-1}(\theta)$, providing the metric for the parameter space.
 - *Population Jacobian Matrix*: $G(\theta)$, the $M \times K$ matrix of first derivatives:
   \[ G(\theta) = \frac{\partial m(\theta)}{\partial \theta'} \]
 
-** The Theoretical Objective Function and Local Geometry
+** Local Geometry and Information Bounds
 The population criterion function $Q(\theta)$ is defined as the quadratic form:
 \[ Q(\theta) = m(\theta)' \Lambda(\theta) m(\theta) \]
 
@@ -37,39 +37,56 @@ This is the efficient-GMM analogue of the Cramér-Rao bound; it coincides with t
 
 ---
 
-* Section 2: Measure-Theoretic Abstraction and Model Decoupling
+* Section 2: Mathematical Interfaces and Operational Decoupling
 
-To achieve complete modularity, the architecture decouples the structural economic relationships from the underlying data-generating mechanics. The estimation framework is refactored from a data-dependent optimization problem into a measure-theoretic integration pipeline.
+The architecture separates the model into orthogonal interfaces so that integration, variance construction, and structural specification can be substituted independently:
 
-The system partitions cleanly into two distinct primitives: a /Structural Model/ representing the economic theory, and an abstract /Measure/ acting as an integration operator. Section 1's identification condition $m(\theta_0) = 0$ becomes $\mathbb{E}_{\mu_\text{pop}}[\psi(\cdot,\theta_0)] = 0$ in the new language; the rest of this section describes the operator algebra that makes this generalisation actionable.
+- =StructuralModel= --- the economic primitives (residuals and their gradients at a single observation).
+- =Measure= --- an integration operator $\mu$ over $(\mathcal{X}, \mathcal{F})$ exposing $\mathbb{E}_\mu[\,\cdot\,]$.
+- =CovarianceStrategy= --- a constructor that maps pointwise $\psi$ values to the $M \times M$ matrix $V_\mu(\theta)$.
+- =Context= --- a convenience bundler that ships a (measure, strategy) pair appropriate to a given modality.
 
-** The Model Primitive: StructuralModel
+=CovarianceStrategy= is parallel to (not nested under) =Measure= at the type level. Estimation is invoked as $\text{Estimator}(\text{model},\, \text{measure},\, \text{strategy},\, \text{weighting})$ rather than $\text{Estimator}(\text{model},\, \text{context})$; the =Context= type exists purely as sugar. This matters because the choice of variance construction is orthogonal to the choice of integration: a single =EmpiricalMeasure= can be paired with iid, cluster-robust, or replicate-weight variance strategies without changing the measure object, and the v1/v2 design-awareness ladder lives entirely on the strategy side.
+
+** Primitives
+
+*** The Model Primitive: StructuralModel
 The =StructuralModel= abstraction encapsulates only the elementary, observation-level structural equations. It possesses no awareness of sample scale, sampling weights, missingness patterns, or the empirical design layout.
 
-- *Elementary Function*: $\psi(x, \theta)$, an $M \times 1$ vector mapping an arbitrary observation vector $x$ and parameter vector $\theta$ to structural residuals or errors (e.g., the raw Euler equation residual for an individual household).
-- *Elementary Gradient*: $\nabla_\theta \psi(x, \theta) = \frac{\partial \psi(x, \theta)}{\partial \theta'}$, an $M \times K$ Jacobian matrix of the structural equations evaluated at a single point.
+- *Elementary Function*: $\psi(x, \theta)$, an $M \times 1$ vector mapping an observation $x \in \mathcal{X} \subseteq \mathbb{R}^D$ and parameter vector $\theta \in \Theta$ to structural residuals (e.g., the raw Euler equation residual for an individual household).
+- *Elementary Gradient*: $\nabla_\theta \psi(x, \theta) = \frac{\partial \psi(x, \theta)}{\partial \theta'}$, an $M \times K$ matrix of structural derivatives evaluated at a single point.
 
-** The Operator Primitive: The Measure Interface
-The =Measure= interface ($\mu$) abstracts the integration environment. The mathematical core of the estimator interacts exclusively with $\mu$, agnostic to whether the measure is composed of real-world survey responses, analytical density functions, or synthetic simulations.
-
-A valid =Measure= implementation must expose three foundational operations when evaluated against a given =StructuralModel= at parameter vector $\theta$:
+*** The Integration Primitive: Measure
+The =Measure= interface ($\mu$) acts strictly as a functional integration operator over a measurable space $(\mathcal{X}, \mathcal{F})$. It is agnostic to whether $\mu$ is composed of real-world survey responses, analytical density functions, or synthetic simulations, and exposes exactly two operations when evaluated against a =StructuralModel= at parameter vector $\theta$:
 
 1. *Expectation Mapping*:
-   \[ \mathbb{E}_\mu[\psi] = \int \psi(x, \theta) \, d\mu(x) \]
-2. *Jacobian Mapping*:
-   \[ \mathbb{E}_\mu[\nabla_\theta \psi] = \int \nabla_\theta \psi(x, \theta) \, d\mu(x) \]
-3. *Variance Mapping*: $\operatorname{Var}_\mu(\psi(\cdot, \theta))$, which characterizes the internal variance-covariance geometry of the underlying structural errors before integration:
-   \[ \operatorname{Var}_\mu(\psi(\cdot, \theta)) = \mathbb{E}_\mu\left[\psi(\cdot, \theta)\psi(\cdot, \theta)'\right] - \mathbb{E}_\mu[\psi(\cdot, \theta)]\mathbb{E}_\mu[\psi(\cdot, \theta)]' \]
+   \[ \mathbb{E}_\mu[\psi] = \int_\mathcal{X} \psi(x, \theta) \, d\mu(x) \]
+2. *Jacobian Integration*:
+   \[ \mathbb{E}_\mu[\nabla_\theta \psi] = \int_\mathcal{X} \nabla_\theta \psi(x, \theta) \, d\mu(x) \]
 
-** Polymorphic Implementations of d\mu
-By implementing the measure as a polymorphic interface, the framework permits seamless switching between different analytical modalities without altering a single line of code in the structural model or the optimization loop.
+Variance construction is /not/ a responsibility of the =Measure= --- it lives in =CovarianceStrategy=.
 
-*** EmpiricalMeasure (The Design-Aware Data Object)
-This implementation maps to the physical dataset and its associated sampling design. Strictly speaking, $\mu_X$ is not a single scalar measure but an $M$-tuple of coordinate-specific measures $\{\mu_X^{(j)}\}_{j=1}^M$ sharing a common support; the matrix-valued shorthand below packages this $M$-tuple into a single expression.
+*** The Variance Primitive: CovarianceStrategy
+The =CovarianceStrategy= interface ($\Sigma$) is responsible for constructing the $M \times M$ covariance matrix $V_\mu(\theta)$ of the sample moment vector. It consumes pointwise $\psi(x_i, \theta)$ evaluations (for empirical and synthetic measures) or analytic integrands (for analytical measures), and produces $V_\mu(\theta)$.
+
+Separating variance construction from integration isolates procedural and design concerns --- clustering, stratification, replicate weighting, missingness handling, regularisation --- entirely outside the core =Measure= definition. The same =EmpiricalMeasure= can be combined with multiple strategies; the strategy doesn't change what $\mathbb{E}_\mu[\psi]$ is, only what $V_\mu(\theta)$ is.
+
+*** The Context Bundle
+For a given modality (Empirical / Analytical / Synthetic), the natural pairing of a =Measure= with a default =CovarianceStrategy= is exposed as a =Context= type. A =Context= holds:
+- the measure $\mu$;
+- a default covariance strategy $\Sigma_\mu$;
+- any modality-specific metadata (cluster IDs, replicate weights, frozen simulation draws, quadrature grids) consumed by the strategy.
+
+The estimation API accepts either an unbundled =(measure, strategy)= pair or a =Context=. =Context= is sugar, not a third primitive --- everything it does is delegation to its components.
+
+** Polymorphic Implementations
+
+*** EmpiricalMeasure
+This implementation maps to a physical dataset. Strictly speaking, $\mu_X$ is not a single scalar measure but an $M$-tuple of coordinate-specific measures $\{\mu_X^{(j)}\}_{j=1}^M$ sharing a common support; the matrix-valued shorthand below packages this $M$-tuple into a single expression.
 
 The measure is represented as a discrete, empirical mass:
 \[ d\mu_X = \mathbf{N}_X \sum_{i \in X} D_i w_i \delta_{x_i} \]
-where $\delta_{x_i}$ is a Dirac delta at observation $x_i$; $w_i = 1/\pi_i$ is the probability weight (inverse inclusion probability --- /pweight/ semantics, not aweight or fweight); and $D_i = \operatorname{diag}(d_i)$ is an $M \times M$ coordinate-masking matrix tracking missingness per moment coordinate.
+where $\delta_{x_i}$ is a Dirac delta at observation $x_i$; $w_i = 1/\pi_i$ is the probability weight (inverse inclusion probability --- /pweight/ semantics, not aweight or fweight); and $D_i = \operatorname{diag}(d_i)$ is an $M \times M$ coordinate-masking matrix tracking missingness per moment coordinate ($d_{ij} = 1$ if moment $j$ is observable for unit $i$, $0$ otherwise).
 
 The dimension-specific scales are managed by the $M \times M$ diagonal matrix $\mathbf{N}_X$:
 \[ \mathbf{N}_X = \operatorname{diag}\left( \frac{1}{N_1}, \frac{1}{N_2}, \dots, \frac{1}{N_M} \right) \quad \text{where} \quad N_j = \sum_{i \in X} d_{ij} \]
@@ -78,48 +95,114 @@ Reading coordinate-wise:
 \[ \mathbb{E}_{\mu_X}[\psi]_j = \frac{1}{N_j} \sum_{i \in X} d_{ij} w_i\, \psi_j(x_i, \theta) \]
 --- each moment is integrated against its own coordinate-specific measure, with missing observations dropped per coordinate rather than per row.
 
-The cross-moment variance element $(j,k)$ uses the rows where both $\psi_j$ and $\psi_k$ are observed:
-\[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_{i \in X} d_{ij} d_{ik}\, w_i^2\, \psi_j(x_i, \theta)\, \psi_k(x_i, \theta) \]
+*** Empirical Covariance Strategies
+The design-awareness ladder lives here. The =EmpiricalMeasure= can be paired with any of the following:
 
-This /pairwise-overlap/ (a.k.a. /available-pairs/) estimator is the price the framework pays for avoiding listwise deletion: each $[V_X]_{jk}$ uses every row that supports its pair, not just rows complete on every moment. The cost is that $V_X$ is not guaranteed positive definite in finite samples --- see Section 4 for the regularisation policy and its implications for the J-statistic.
+- =IIDCovariance=: pweighted iid form with pairwise-overlap missingness handling. The element $(j,k)$ uses the rows where both $\psi_j$ and $\psi_k$ are observed:
+  \[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_{i \in X} d_{ij} d_{ik}\, w_i^2\, \psi_j(x_i, \theta)\, \psi_k(x_i, \theta) \]
+  Single-stage SRS with optional pweights; the common case.
 
-With clustering at a primary sampling unit (PSU) level --- clusters indexed by $c$ --- the variance is constructed from cluster totals before the outer product:
-\[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_c \Big(\sum_{i \in c} d_{ij} w_i\, \psi_j(x_i, \theta)\Big) \Big(\sum_{i \in c} d_{ik} w_i\, \psi_k(x_i, \theta)\Big) \]
-preserving within-cluster correlation while remaining design-robust. The iid form above is the special case where each cluster is a single observation.
+- =ClusteredCovariance(cluster_ids)=: cluster totals before outer product. With clusters indexed by $c$:
+  \[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_c \Big(\sum_{i \in c} d_{ij} w_i\, \psi_j(x_i, \theta)\Big) \Big(\sum_{i \in c} d_{ik} w_i\, \psi_k(x_i, \theta)\Big) \]
+  Required when within-cluster correlation matters (households within villages, students within schools). The =IIDCovariance= form is the special case where each cluster is a single observation.
 
-The =EmpiricalMeasure= commits to an explicit design-awareness ladder:
+- /v2 planned/: =StratifiedCovariance= (stratification with multiple PSUs per stratum); =ReplicateWeightCovariance= (BRR, jackknife, bootstrap variants for federal-survey datasets that distribute design information as replicate weight columns).
 
-- /v1/ (in scope): pweighted SRS; single-stage clustering via the cluster-totals form above; pairwise-overlap missingness handling.
-- /v2/ (planned): stratification with multiple PSUs per stratum; replicate-weight variance (BRR, jackknife, bootstrap) for federal-survey datasets that distribute design information as replicate weight columns.
-- Out of scope: single-PSU strata collapse rules; finite-population corrections; calibration / raking weights whose values depend on the realised sample.
+- /Out of scope/: single-PSU strata collapse rules; finite-population corrections; calibration / raking weights whose values depend on the realised sample.
 
-A structural property worth highlighting: $\mathbb{E}_{\mu_X}[\psi]$ is design-invariant across all rungs of this ladder. Only $V_X(\theta)$ changes. The residual path through the estimator therefore needs no design-specific code; specialisation lives entirely inside the variance constructor of =EmpiricalMeasure=.
+Both =IIDCovariance= and =ClusteredCovariance= use /pairwise overlap/ (a.k.a. /available-pairs/) to avoid listwise deletion: each $[V_X]_{jk}$ uses every row that supports its pair, not just rows complete on every moment. The cost is that $V_X$ is not guaranteed positive definite in finite samples --- see the regularisation policy in Section 5.
 
-*** AnalyticalMeasure (The Population Truth Environment)
-The =AnalyticalMeasure= contains no empirical data matrix. It represents the true continuous or discrete population distribution governed by the economic environment (e.g., joint log-normal income and preference shocks).
-- *Integration Mode*: Evaluates integrals via numerical quadrature (e.g., Gauss-Hermite or Gauss-Legendre grids) or exact closed-form analytical solutions.
-- *Internal Variance*: Directly computes the true population variance matrix $V(\theta)$.
+*** EmpiricalContext
+Bundles an =EmpiricalMeasure= with a default =CovarianceStrategy= (=ClusteredCovariance= when cluster IDs are present in the metadata, =IIDCovariance= otherwise) plus the dataset itself.
 
-*** SyntheticMeasure (The Generative Data-Generating Process)
-The =SyntheticMeasure= represents a stochastic parametric simulator whose law depends on $\theta$. Three design choices keep it well-behaved:
+A structural property worth highlighting: $\mathbb{E}_{\mu_X}[\psi]$ is design-invariant across every covariance strategy on the ladder. Only $V_X(\theta)$ changes. The residual path through the estimator therefore needs no design-specific code; specialisation lives entirely inside =CovarianceStrategy=.
+
+*** AnalyticalMeasure
+Contains no empirical data matrix. Represents the true continuous or discrete population distribution governed by the economic environment (e.g., joint log-normal income and preference shocks). Integration is performed via numerical quadrature (Gauss-Hermite, Gauss-Legendre) or exact closed-form solutions where available.
+
+*** AnalyticalCovariance
+Computes $V(\theta)$ directly from the population density $f$:
+\[ V(\theta) = \int_\mathcal{X} \psi(x, \theta)\psi(x, \theta)'\, f(x) \, dx - \mathbb{E}_\mu[\psi]\, \mathbb{E}_\mu[\psi]' \]
+typically via the same quadrature grid used by the measure.
+
+*** AnalyticalContext
+Bundles the =AnalyticalMeasure= and =AnalyticalCovariance= for an exhaustive specification of the true data-generating process. This pairing is the workhorse of the identification-verification diagnostic discussed in Section 5: round-tripping a =StructuralModel= through it at known $\theta_0$ must return $Q(\theta_0) = 0$ exactly.
+
+*** SyntheticMeasure
+A stochastic parametric simulator whose law depends on $\theta$. Three design choices keep it well-behaved:
 
 1. *Common Random Numbers (CRN)*: the measure holds a frozen batch of $N_{sim}$ latent draws $\{z_s\}$ (a fixed =PRNGKey= in JAX) and recomputes observations $x_s(\theta) = f(z_s; \theta)$ from the /same/ $z_s$ at each $\theta$. This converts a stochastic objective into a deterministic surface in $\theta$, restoring the smoothness gradient-based optimisers require. Fresh draws at every evaluation produce $\theta$-varying Monte Carlo noise that defeats both quasi-Newton and trust-region methods.
 2. *Reparameterisation for derivatives*: when $f(z; \theta)$ is smooth in $\theta$ and $z$ comes from a $\theta$-free base distribution, the Leibniz exchange holds inside the simulator:
    \[ \nabla_\theta \mathbb{E}_z[\psi(f(z;\theta), \theta)] = \mathbb{E}_z[\nabla_\theta \psi(f(z;\theta), \theta)] \]
    and JAX propagates the gradient end-to-end. For distributions that cannot be reparameterised (discrete latents, $\theta$-dependent support), the framework supports score-function (REINFORCE) gradients as an opt-in fallback, with the variance caveats that implies.
-3. *Simulation inflation*: SMM asymptotic variance carries the $(1 + 1/S)$ factor where $S = N_{sim}/N$. The =SyntheticMeasure= folds this into its variance computation automatically; $N_{sim}$ must be set explicitly, otherwise the inference engine refuses to report standard errors.
+3. *Simulation cardinality*: $N_{sim}$ is exposed as part of the =SyntheticMeasure='s state; the inference engine consumes it (alongside the empirical $N$) to assemble the canonical $(1 + 1/S)$ SMM inflation factor where $S = N_{sim}/N$.
 
-Paired with an =EmpiricalMeasure= via a combined moment vector, this yields a SMM estimator (McFadden 1989, Pakes-Pollard 1989) that is differentiable, JIT-compilable, and design-aware on the empirical side.
+*** SyntheticCovariance
+The variance of the simulated moment estimator $\bar m_{sim}(\theta) = \mathbb{E}_{\mu_\text{sim}(\theta)}[\psi]$, scaled consistently with the empirical-side convention (variance of the moment estimator, not of an individual draw). For iid simulation draws:
+\[ V_\text{sim}(\theta) = \frac{1}{N_{sim}}\Big( \mathbb{E}_z[\psi\, \psi'] - \mathbb{E}_z[\psi]\, \mathbb{E}_z[\psi]' \Big) \]
+When combined additively with $V_X$ in a matching SMM estimator, the result yields the standard $(1+1/S)$ inflation factor mechanically, without a separate correction.
+
+*** SyntheticContext
+Bundles =SyntheticMeasure= and =SyntheticCovariance= with the frozen $z_s$ batch and any auxiliary metadata (e.g., the choice of reparameterisation function). When combined with an =EmpiricalContext= in a matching estimator, this yields a Simulated Method of Moments estimator (McFadden 1989, Pakes-Pollard 1989) that is differentiable, JIT-compilable, and design-aware on the empirical side.
 
 ** Architectural Utility of Data-Free Measures
 Decoupling the measure from physical data files introduces major diagnostic and theoretical capabilities at the design level:
 
-1. *Deterministic Identification Verifications*: A =StructuralModel= can be integrated over an =AnalyticalMeasure= parameterized at a known true value $\theta_0$. Because the analytical moment condition satisfies $\int \psi(x, \theta_0) \, d\mu_{analytical} = 0$ exactly, passing this pair to the numerical optimizer must return $\theta_0$ with zero objective loss. Any failure to locate $\theta_0$ isolates a global identification failure or an ill-behaved objective surface, completely independent of sample noise.
-2. *Ex-Ante Efficiency Mapping*: Evaluating the system curvature using an =AnalyticalMeasure= yields the true population information matrix $\mathcal{I}(\theta_0) = G(\theta_0)' \Lambda(\theta_0) G(\theta_0)$. This enables the programmatic evaluation of alternative moment configurations ($\psi$) to maximize the information envelope before field data is ever introduced.
+1. *Deterministic Identification Verifications*: A =StructuralModel= can be integrated over an =AnalyticalContext= parameterised at a known true value $\theta_0$. Because the analytical moment condition satisfies $\int \psi(x, \theta_0) \, d\mu_\text{analytical} = 0$ exactly, passing this pair to the numerical optimizer must return $\theta_0$ with zero objective loss. Any failure to locate $\theta_0$ isolates a global identification failure or an ill-behaved objective surface, completely independent of sample noise --- see the diagnostics taxonomy in Section 5.
+2. *Ex-Ante Efficiency Mapping*: Evaluating the system curvature using an =AnalyticalContext= yields the true population information matrix $\mathcal{I}(\theta_0) = G(\theta_0)' \Lambda(\theta_0) G(\theta_0)$. This enables the programmatic evaluation of alternative moment configurations ($\psi$) to maximise the information envelope before field data is ever introduced.
 
 ---
 
-* Section 3: Differentiation Architecture and Gradient Propagation
+* Section 3: Worked Example --- Consumption Euler Equation
+
+To demonstrate the abstraction concretely, consider a standard consumption Euler equation under power utility. The model parameters are $\theta = (\beta, \gamma) \in \Theta \subset \mathbb{R}^2$ where $\beta$ is the discount factor and $\gamma$ is the coefficient of relative risk aversion. The observation vector is $x_t = (c_t, c_{t+1}, r_{t+1}) \in \mathbb{R}^3$: current consumption, realised next-period consumption, and the realised asset return.
+
+** The StructuralModel
+The elementary Euler-equation residual is:
+\[ \psi(x_t, \theta) = \beta \left( \frac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{t+1}) - 1 \]
+
+With $M = 1$ and $K = 2$, the analytical $M \times K$ Jacobian is the $1 \times 2$ row:
+\[ \nabla_\theta \psi(x_t, \theta) = \begin{bmatrix} \left( \tfrac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{t+1}) & -\beta \left( \tfrac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{t+1}) \ln\!\left( \tfrac{c_{t+1}}{c_t} \right) \end{bmatrix} \]
+
+The =StructuralModel= holds these two functions and nothing else --- no data, no quadrature grids, no simulation seeds.
+
+** Three Contexts, One Model
+The same =StructuralModel= instance is evaluated across three orthogonal contexts without altering its code path:
+
+#+BEGIN_SRC text
+                            +------------------------------+
+                            |   StructuralModel (Euler)    |
+                            |   defines psi(x, theta)      |
+                            +--------------+---------------+
+                                           |
+             +-----------------------------+-----------------------------+
+             v                             v                             v
+ +-----------------------+     +-----------------------+     +-----------------------+
+ |   EmpiricalContext    |     |   AnalyticalContext   |     |   SyntheticContext    |
+ +-----------------------+     +-----------------------+     +-----------------------+
+ | CEX panel:            |     | Joint log-normal      |     | Log-normal preference |
+ | (c_t, c_{t+1}, r_{t+1})|    | consumption /return   |     | shock simulator;      |
+ | weights, cluster IDs. |     | population density.   |     | frozen z_s batch.     |
+ +-----------------------+     +-----------------------+     +-----------------------+
+ | ClusteredCovariance:  |     | AnalyticalCovariance: |     | SyntheticCovariance:  |
+ | design-robust V_X     |     | Gauss-Legendre        |     | iid variance over     |
+ | from cluster totals.  |     | quadrature on exact   |     | simulation draws,     |
+ |                       |     | population means.     |     | combined w/ V_X for   |
+ |                       |     |                       |     | (1+1/S) SMM inflation.|
+ +-----------------------+     +-----------------------+     +-----------------------+
+#+END_SRC
+
+Three estimation paths, one =StructuralModel=:
+
+- /Empirical/: $\hat\theta = \arg\min_\theta Q_X(\theta)$ on CEX household data with cluster-robust variance.
+- /Analytical/: $\arg\min_\theta Q_\text{analytical}(\theta)$ at the chosen $\theta_0$ must return $\theta_0$ exactly with $Q = 0$. Deviations diagnose identification or numerical conditioning, not sample noise.
+- /Synthetic/: simulate $\{(c_t, c_{t+1}, r_{t+1})\}_{t=1}^{N_\text{sim}}$ from a generative model parameterised at $\theta$, hand to the same estimator paired with the empirical context. SMM falls out.
+
+The same =psi=, the same gradient, the same objective: only the =Context= changes.
+
+---
+
+* Section 4: Differentiation Architecture and Gradient Propagation
 
 A critical practical challenge in executing structural estimation is the efficient and accurate propagation of derivatives through the model components. Because the objective function is minimized using gradient-based numerical optimization, and because the computation of the sample information matrix requires the evaluation of the population Jacobian, differentiation must be seamlessly wired across the code blocks.
 
@@ -134,7 +217,7 @@ To circumvent this, the AD graph is strictly isolated at the element-wise bounda
 2. *Vectorized Batches (Vmap)*: For efficient hardware execution (e.g., SIMD lanes or GPU execution), the observation-level execution graph is batched across points using single-instruction, multiple-data vectorization primitives.
 3. *Graph Detachment*: The tracking graph for automatic differentiation terminates immediately after delivering the pointwise matrices. The subsequent linear operations --- applying masking indicators ($D_i$) and structural weights ($w_i$) --- are executed via standard native tensor math, bypassing the AD overhead entirely.
 
-This isolation strategy presumes the measure $\mu$ itself does not depend on $\theta$. For =EmpiricalMeasure= and =AnalyticalMeasure= with fixed quadrature grids this holds exactly. For =SyntheticMeasure=, where the law of the draws depends on $\theta$, the isolation is maintained at the level of the latent variates: the frozen $z_s$ batch (Section 2.3) carries no AD graph, while $f(z_s; \theta)$ and $\psi(f(z_s;\theta), \theta)$ are traced as usual.
+This isolation strategy presumes the measure $\mu$ itself does not depend on $\theta$. For =EmpiricalMeasure= and =AnalyticalMeasure= with fixed quadrature grids this holds exactly. For =SyntheticMeasure=, where the law of the draws depends on $\theta$, the isolation is maintained at the level of the latent variates: the frozen $z_s$ batch carries no AD graph, while $f(z_s; \theta)$ and $\psi(f(z_s;\theta), \theta)$ are traced as usual.
 
 ** The Linearity of Gradient Integration
 By the Leibniz Integral Rule, under standard regularity conditions allowing the exchange of differentiation and integration, the Jacobian mapping of the measure is equivalent to the integrated expectation of the local gradients.
@@ -165,13 +248,13 @@ At the true parameter values ($\theta_0$ in the population, or asymptotically at
 
 This is the theoretical justification for why the /Iterated/ weighting strategy (which fixes $V$ during each inner solve and refreshes it between iterations, so its inner gradient never sees $\nabla_\theta V$) converges to the same fixed point as the /Continuously Updated/ strategy (which sees $\nabla_\theta V$ at every evaluation). It is *not* a license to drop $\nabla_\theta V$ from the CU gradient implementation: away from the optimum the dropped term is $O_p(1)$, and silently omitting it produces an estimator that is neither CU nor Iterated.
 
-The clean architectural resolution --- see Section 4 --- is to make weighting an explicit strategy choice and to write the residual function so that JAX's AD picks up exactly the right gradient for each strategy.
+The clean architectural resolution --- see Section 5 --- is to make weighting an explicit strategy choice and to write the residual function so that JAX's AD picks up exactly the right gradient for each strategy.
 
 For the information matrix used by the inference engine, $\mathcal{I}_\mu(\hat\theta) = G_\mu(\hat\theta)' \Lambda_\mu(\hat\theta) G_\mu(\hat\theta)$ --- computed directly from $G$ and $\Lambda$, not from a numerical Hessian of $Q$. The asymptotic argument above implies the two coincide at $\hat\theta$; in finite samples they need not, and the direct $G'\Lambda G$ form is both cheaper and more stable.
 
 ---
 
-* Section 4: Estimation, Decomposition, and Specification Testing
+* Section 5: Estimation, Decomposition, and Specification Testing
 
 ** The Decomposition-Driven Criterion, Q_\mu(\theta)
 To ensure numerical stability and prevent precision loss from explicit matrix inversion, =emu-gmm= avoids calculating $V_\mu^{-1}(\theta)$ directly. Instead, it operates on the lower-triangular Cholesky factorization of the design-aware covariance matrix:
@@ -194,12 +277,12 @@ The choice of weighting policy is encoded as an explicit object that the optimis
 - =Identity=: $\Lambda_\mu(\theta) \equiv I_M$. Useful as a first stage when no preliminary $V$ is available, or for diagnostic runs.
 - =Fixed(V0)=: two-step GMM. The user supplies a precomputed $V_0$ (typically from a first-stage =Identity= run); $\Lambda$ is held fixed throughout the second-stage optimisation.
 - =Iterated(k_max, tol)=: iterated GMM. Alternates between solving $\hat\theta_k = \arg\min_\theta\, \mathbb{E}_\mu[\psi]'\, V_\mu(\hat\theta_{k-1})^{-1}\, \mathbb{E}_\mu[\psi]$ and refreshing $V$ at the new $\hat\theta_k$, up to convergence or $k_{\max}$ rounds. Each inner solve is a =Fixed= problem; gradients within an iteration are exact.
-- =ContinuouslyUpdated= (default): $\Lambda_\mu(\theta)$ is recomputed at every $\theta$ evaluation. The residual $y_\mu(\theta) = L_\mu(\theta)^{-1} \mathbb{E}_\mu[\psi(\cdot,\theta)]$ depends on $\theta$ through both factors; the NLLS Jacobian computed by JAX captures this dependence exactly, without manual derivation of the $\nabla_\theta V$ term from Section 3.
+- =ContinuouslyUpdated= (default): $\Lambda_\mu(\theta)$ is recomputed at every $\theta$ evaluation. The residual $y_\mu(\theta) = L_\mu(\theta)^{-1} \mathbb{E}_\mu[\psi(\cdot,\theta)]$ depends on $\theta$ through both factors; the NLLS Jacobian computed by JAX captures this dependence exactly, without manual derivation of the $\nabla_\theta V$ term from Section 4.
 
-A strategy is a JAX pytree carrying its state (precomputed $V_0$, iteration counter, etc.) so it composes cleanly with =jit= and =vmap=. Section 3.3's asymptotic-equivalence result guarantees =Iterated= and =ContinuouslyUpdated= share the same limit; the choice between them is a matter of finite-sample behaviour and computational cost rather than identification.
+A strategy is a JAX pytree carrying its state (precomputed $V_0$, iteration counter, etc.) so it composes cleanly with =jit= and =vmap=. Section 4's asymptotic-equivalence result guarantees =Iterated= and =ContinuouslyUpdated= share the same limit; the choice between them is a matter of finite-sample behaviour and computational cost rather than identification.
 
 ** Regularisation of V_\mu(\theta)
-When =EmpiricalMeasure= constructs $V_X(\theta)$ via the pairwise-overlap rule, the result is not guaranteed positive definite in finite samples (Section 2.3). The Cholesky pipeline requires $V_\mu \succ 0$, so the framework applies adaptive regularisation:
+When an =EmpiricalCovarianceStrategy= constructs $V_X(\theta)$ via the pairwise-overlap rule, the result is not guaranteed positive definite in finite samples. The Cholesky pipeline requires $V_\mu \succ 0$, so the framework applies adaptive regularisation:
 \[ V_\mu^\star(\theta) = V_\mu(\theta) + \tau\, \operatorname{diag}(V_\mu(\theta)) \]
 
 with $\tau$ chosen to enforce a target condition number ceiling (default $\kappa_\text{target} = 10^6$). The diagonal-Tikhonov form is scale-equivariant under per-moment rescaling, which matters because moment functions are routinely on heterogeneous scales (a residual in dollars and a residual in shares should not see the same absolute ridge).
@@ -212,11 +295,20 @@ To avoid introducing non-smoothness into the objective surface, $\tau$ is select
 
 Regularisation alters the limit law of $Q_\mu(\hat\theta)$: the $\chi^2_{M-K}$ distribution becomes a weighted-$\chi^2$ whose weights depend on $\tau$. For non-binding $\tau$ the deviation is negligible; the inference engine reports both the nominal $\chi^2$ critical value and a regularisation-adjusted critical value when $\tau$ exceeds a configurable threshold (default $\tau > 0.01$).
 
+** Identification Diagnostics
+When a =StructuralModel= is integrated against an =AnalyticalContext= parameterised at a known true value $\theta_0$, the population moment condition $\mathbb{E}_{\mu_\text{analytical}}[\psi(\cdot,\theta_0)] = 0$ holds exactly. The framework leverages this to provide a deterministic diagnostic tree when an optimiser fails to land at $\theta_0$:
+
+1. *Local boundary pathology* --- gradient zero, objective positive. $\nabla_\theta Q(\theta^\star) = 0$ but $Q(\theta^\star) > 0$ at the reported solution $\theta^\star \neq \theta_0$. Interpretation: local identification failure or multi-modal global non-identification; the moment system has a stationary point that is not the truth.
+2. *Conditioning pathology* --- Cholesky pivot failure. The factorisation $V_\mu(\theta) = L_\mu(\theta) L_\mu(\theta)'$ encounters a zero or sub-tolerance pivot. Interpretation: moment redundancy or collinearity; the framework reports the column index at which the pivot failed, mapping it back to the offending moment in the =StructuralModel=. Distinct from the pairwise-overlap regularisation case above: a pivot failure on an =AnalyticalContext= is a structural identification problem, not a sampling artifact.
+3. *Numerical instability* --- gradient nonzero at the known root. $\nabla_\theta Q(\theta_0) \neq 0$ when evaluated at the supplied truth. Interpretation: quadrature insufficiency, severe parameter scale disparities, or floating-point underflow --- solver mechanics rather than theory.
+
+Each diagnostic surfaces a structured report (failure category, offending dimension index, residual magnitude) rather than a generic optimisation failure. Combined with the analytical-context round-trip, this transforms identification analysis from an a-priori derivation into an a-posteriori test that runs against the actual implementation.
+
 ** The Overidentification Statistic
 Under the null hypothesis that the parametric model is correctly specified, and with $V_\mu(\theta)$ used unregularised, the minimized sample criterion function converges cleanly to a chi-squared distribution:
 \[ Q_X(\hat{\theta}) \xrightarrow{d} \chi^2_{M - K} \]
 
-When the variance has been regularised (Section 4.3), the limit is a weighted sum of chi-squared variates; the inference engine reports both the nominal and regularisation-adjusted critical values as described above.
+When the variance has been regularised, the limit is a weighted sum of chi-squared variates; the inference engine reports both the nominal and regularisation-adjusted critical values as described in the regularisation section above.
 
 ** Architectural Core Highlights
 1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the Hansen 1982 / Hayashi textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
@@ -224,7 +316,7 @@ When the variance has been regularised (Section 4.3), the limit is a weighted su
 
 ---
 
-* Section 5: Boundary Interfaces, Named Tensors, and PyTree Topology
+* Section 6: Boundary Interfaces, Named Tensors, and PyTree Topology
 
 To maintain mathematical legibility without introducing non-compilable runtime bottlenecks, =emu-gmm= eschews traditional dataframe paradigms (like =pandas=) inside the computation zone. Instead, the framework utilizes JAX-native named tensor architectures (=haliax=) and type-level axis verification (=jaxtyping=).
 
@@ -263,7 +355,7 @@ Rather than relying on floating-point =NaN= sentinels that contaminate the autom
 
 \[ \text{mask} \in \text{ha.NamedArray}[\text{Obs}, \text{Moments}, \text{bool}] \]
 
-The =EmpiricalMeasure= leverages this mask to execute coordinate-wise element selection entirely within compiled tensor primitives, enabling JAX to perform highly parallelized data filtering across SIMD lanes or hardware accelerators without dropping out of the execution graph.
+The =EmpiricalCovarianceStrategy= leverages this mask to execute coordinate-wise element selection entirely within compiled tensor primitives, enabling JAX to perform highly parallelized data filtering across SIMD lanes or hardware accelerators without dropping out of the execution graph.
 
 ** Structured Egress and Metadata Binding
 Because =haliax.NamedArray= instances and custom dataclasses decorated with =@jdc.pytree_dataclass= are fully compliant JAX PyTrees, the final outputs of the estimation loop require zero reconstruction or mapping steps. The =InferenceEngine= returns parameter arrays, covariance matrices, and overidentification statistics that inherently carry their coordinate strings, producing self-documenting diagnostic footprints.
