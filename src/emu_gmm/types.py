@@ -104,11 +104,15 @@ class RegularizationStrategy(Protocol):
     """Adaptive PD-restoration on V.
 
     Returns ``(V_star, tau)``: the regularised matrix and the realised
-    ridge magnitude (for diagnostics). Implementations live in
+    ridge magnitude (for diagnostics). ``tau`` may be a Python float or
+    a JAX scalar; the inference engine converts to a Python float when
+    building the :class:`Diagnostics` record. Implementations live in
     :mod:`emu_gmm.regularization`.
     """
 
-    def apply(self, V: Float[Array, "M M"]) -> tuple[Float[Array, "M M"], float]: ...
+    def apply(
+        self, V: Float[Array, "M M"]
+    ) -> tuple[Float[Array, "M M"], Float[Array, ""]]: ...
 
 
 @runtime_checkable
