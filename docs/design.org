@@ -112,9 +112,9 @@ The design-awareness ladder lives here. The =EmpiricalMeasure= can be paired wit
 
 - =ClusteredCovariance(cluster_ids)=: cluster totals before outer product. With clusters indexed by $c$:
   \[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_c \Big(\sum_{i \in c} d_{ij} w_i\, \psi_j(x_i, \theta)\Big) \Big(\sum_{i \in c} d_{ik} w_i\, \psi_k(x_i, \theta)\Big) \]
-  Required when within-cluster correlation matters (households within villages, students within schools). The =IIDCovariance= form is the special case where each cluster is a single observation.
+  Required when within-cluster correlation matters (households within villages, students within schools) [cite:@cameron-miller15]. The =IIDCovariance= form is the special case where each cluster is a single observation.
 
-- /v2 planned/: =StratifiedCovariance= (stratification with multiple PSUs per stratum); =ReplicateWeightCovariance= (BRR, jackknife, bootstrap variants for federal-survey datasets that distribute design information as replicate weight columns).
+- /v2 planned/: =StratifiedCovariance= (stratification with multiple PSUs per stratum); =ReplicateWeightCovariance= (BRR, jackknife, bootstrap variants for federal-survey datasets that distribute design information as replicate weight columns) [cite:@wolter07].
 
 - /Out of scope/: single-PSU strata collapse rules; finite-population corrections; calibration / raking weights whose values depend on the realised sample.
 
@@ -254,7 +254,7 @@ Substituting yields the complete gradient vector:
 At the true parameter values ($\theta_0$ in the population, or asymptotically at $\hat{\theta}$), $\mathbb{E}_\mu[\psi(\cdot, \theta_0)] \xrightarrow{p} 0$. The second term in the gradient is a quadratic form in the moment vector and vanishes at rate $O_p(N^{-1})$, while the primary term vanishes at $O_p(N^{-1/2})$:
 \[ \mathbb{E}_\mu[\psi]' V_\mu^{-1}(\theta) \left[ \nabla_\theta V_\mu(\theta) \right] V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi] \xrightarrow{p} 0 \]
 
-This is the theoretical justification for why the /Iterated/ weighting strategy (which fixes $V$ during each inner solve and refreshes it between iterations, so its inner gradient never sees $\nabla_\theta V$) converges to the same fixed point as the /Continuously Updated/ strategy (which sees $\nabla_\theta V$ at every evaluation). It is *not* a license to drop $\nabla_\theta V$ from the CU gradient implementation: away from the optimum the dropped term is $O_p(1)$, and silently omitting it produces an estimator that is neither CU nor Iterated.
+This is the theoretical justification for why the /Iterated/ weighting strategy (which fixes $V$ during each inner solve and refreshes it between iterations, so its inner gradient never sees $\nabla_\theta V$) converges to the same fixed point as the /Continuously Updated/ strategy (which sees $\nabla_\theta V$ at every evaluation) [cite:@hansen-etal96]. It is *not* a license to drop $\nabla_\theta V$ from the CU gradient implementation: away from the optimum the dropped term is $O_p(1)$, and silently omitting it produces an estimator that is neither CU nor Iterated.
 
 The clean architectural resolution --- see Section 5 --- is to make weighting an explicit strategy choice and to write the residual function so that JAX's AD picks up exactly the right gradient for each strategy.
 
@@ -277,7 +277,7 @@ The objective function is then evaluated strictly as the squared Euclidean $L_2$
 The GMM estimator is defined as:
 \[ \hat{\theta} = \arg\min_{\theta \in \Theta} Q_\mu(\theta) \]
 
-Framing the objective as a pure sum-of-squares allows the system to bypass general-purpose quasi-Newton optimizers and interface directly with high-performance non-linear least-squares solvers (Levenberg-Marquardt, trust-region reflective). These solvers exploit the structure to approximate local updates efficiently using only first derivatives --- derivatives that JAX provides exactly through the residual function $y_\mu(\theta)$, including the dependence of $L_\mu$ on $\theta$ when the weighting strategy calls for it (see below).
+Framing the objective as a pure sum-of-squares allows the system to bypass general-purpose quasi-Newton optimizers and interface directly with high-performance non-linear least-squares solvers (Levenberg-Marquardt, trust-region reflective) [cite:@nocedal-wright06]. These solvers exploit the structure to approximate local updates efficiently using only first derivatives --- derivatives that JAX provides exactly through the residual function $y_\mu(\theta)$, including the dependence of $L_\mu$ on $\theta$ when the weighting strategy calls for it (see below).
 
 ** The Weighting Strategy Interface
 The choice of weighting policy is encoded as an explicit object that the optimisation loop consults at every evaluation. Four strategies cover the standard cases:
@@ -319,7 +319,7 @@ Under the null hypothesis that the parametric model is correctly specified, and 
 When the variance has been regularised, the limit is a weighted sum of chi-squared variates; the inference engine reports both the nominal and regularisation-adjusted critical values as described in the regularisation section above.
 
 ** Architectural Core Highlights
-1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the [cite/t:@hansen82] / Hayashi textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
+1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the [cite/t:@hansen82] / [cite/t:@hayashi00] textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
 2. *Asymmetric Scale Resolution*: The interaction of the coordinate scaling inside $G_\mu(\theta)$ and the scaling inside $V_\mu(\theta)$ ensures that the sample information matrix properly weighs the relative data density across different variables without requiring listwise deletion.
 
 ** Open Theoretical Questions
@@ -337,7 +337,7 @@ Items (1) and (2) under MCAR --- plus the J-statistic limit and asymptotic posit
 
 * Section 6: Boundary Interfaces, Named Tensors, and PyTree Topology
 
-To maintain mathematical legibility without introducing non-compilable runtime bottlenecks, =emu-gmm= eschews traditional dataframe paradigms (like =pandas=) inside the computation zone. Instead, the framework utilizes JAX-native named tensor architectures (=haliax=) and type-level axis verification (=jaxtyping=).
+To maintain mathematical legibility without introducing non-compilable runtime bottlenecks, =emu-gmm= eschews traditional dataframe paradigms (like =pandas=) inside the computation zone. Instead, the framework utilizes JAX-native named tensor architectures (=haliax= [cite:@hall23]) and type-level axis verification (=jaxtyping= [cite:@kidger22]).
 
 This ensures that labels, dimension names, and missingness masks are fully integrated into JAX's PyTree layout, allowing structured datasets to pass seamlessly through =jit=, =vmap=, and automatic differentiation boundaries. Pandas-labelled tensors remain available at the I/O boundary (load, save, summarise) via the workspace's =jax-pandas-bridge= utilities; they do not enter the hot path.
 

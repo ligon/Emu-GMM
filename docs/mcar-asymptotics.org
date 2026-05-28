@@ -83,7 +83,7 @@ where $\circ$ is the elementwise product. The matrix $R$ has the natural represe
 ** Proposition 1 (PD of the Limit Variance)
 Suppose MCAR holds, $V(\theta_0)$ is positive definite, and $R = E[\tilde D\, \tilde D']$ is positive definite. Then $V^\text{lim}(\theta_0)$ is positive definite.
 
-/Proof./ By the Schur product theorem, the Hadamard product of two positive-definite matrices is positive definite. $\square$
+/Proof./ By the Schur product theorem [cite:@horn-johnson13 Theorem 7.5.3], the Hadamard product of two positive-definite matrices is positive definite. $\square$
 
 Positive-definiteness of $R$ excludes degenerate missingness patterns (e.g., linear dependencies among the normalised indicators $\tilde D_j$). In practice the relevant condition is that no nontrivial linear combination of $\tilde D_j$ is degenerate, which holds whenever the observability pattern is not pathologically structured.
 
@@ -141,7 +141,7 @@ Under the conditions of Theorem 5, with $V_X$ used unregularised:
 \[ Q_X(\hat\theta_N) \xrightarrow{d} \chi^2_{M-K}. \]
 When $V_X$ is replaced by $V_X^\star = V_X + \tau\,\operatorname{diag}(V_X)$ with $\tau$ held fixed across the sample path, the limit becomes a generalised chi-squared --- a weighted sum of $M - K$ independent $\chi^2_1$ variates whose weights are the eigenvalues of $(V^{\star,\text{lim}})^{-1}\, V^\text{lim}$ projected onto the orthogonal complement of the column space of $G(\theta_0)$. The weights coincide at 1 when $\tau = 0$, recovering $\chi^2_{M-K}$.
 
-/Proof sketch./ For the unregularised case, the standard argument [cite:@hansen82] gives $\sqrt{N}\,\bar m_X(\hat\theta_N) \to_d \mathcal{N}(0, V^\text{lim} - G(G'\Lambda^\text{lim}G)^{-1}G')$ when $V_X$ is consistent for $V^\text{lim}/N$ and $\Lambda^\text{lim}$ is the matching precision; the quadratic form then has $\chi^2_{M-K}$ limit. For the regularised case, replace $\Lambda^\text{lim}$ by $\Lambda^{\star,\text{lim}}$ in the projection and apply the standard quadratic-form-in-normal-variables result. $\square$
+/Proof sketch./ For the unregularised case, the standard argument [cite:@hansen82] gives $\sqrt{N}\,\bar m_X(\hat\theta_N) \to_d \mathcal{N}(0, V^\text{lim} - G(G'\Lambda^\text{lim}G)^{-1}G')$ when $V_X$ is consistent for $V^\text{lim}/N$ and $\Lambda^\text{lim}$ is the matching precision; the quadratic form then has $\chi^2_{M-K}$ limit. For the regularised case, replace $\Lambda^\text{lim}$ by $\Lambda^{\star,\text{lim}}$ in the projection and apply the standard quadratic-form-in-normal-variables result [cite:@horn-johnson13 Section 7.6]. $\square$
 
 ---
 
