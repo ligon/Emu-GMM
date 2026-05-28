@@ -1,0 +1,472 @@
+#+TITLE: emu-gmm v1 API Sketch
+#+SUBTITLE: Module layout, types, and a worked example
+#+AUTHOR: Ethan Ligon
+#+OPTIONS: toc:nil num:t todo:nil |:t minlevel:1
+
+* Section 1: Scope and Conventions
+
+This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run an empirical structural-GMM estimation end-to-end and to round-trip a known-truth identification check against an analytical context.
+
+** In Scope (v1)
+- =StructuralModel= as a callable; user-supplied plain function or =@jdc.pytree_dataclass=.
+- =EmpiricalMeasure= over a sample with per-coordinate missingness mask and pweighted observations.
+- =AnalyticalMeasure= for closed-form populations (no quadrature library yet --- closed-form integrators only).
+- =CovarianceStrategy= implementations: =IIDCovariance=, =ClusteredCovariance=, =AnalyticalCovariance=.
+- =WeightingStrategy=: =Identity=, =Fixed=, =ContinuouslyUpdated= (default). =Iterated= deferred --- CU subsumes it.
+- =RegularizationStrategy=: =DiagonalTikhonov= only.
+- =Optimizer= protocol with =optimistix_lm()= default; =scipy_lm()= adapter for the non-JIT-pure fallback.
+- Stateless =estimate(...)= entry point.
+- =EstimationResult= with provenance and a v1 =Diagnostics= dataclass.
+
+** Deferred to v2+
+- =SyntheticMeasure= / =SyntheticCovariance= (CRN, reparameterisation, $(1+1/S)$).
+- =StratifiedCovariance=, =ReplicateWeightCovariance=.
+- =Iterated= weighting (subsumed by CU for v1 purposes).
+- =EigenvalueFloor= and =NearestPSD= regularisers.
+- The full identification-diagnostics taxonomy (=design.org= Section 5.4) as machine-readable structured reports.
+- Quadrature-based analytical measures.
+- Replicate-weight statistics (BRR, jackknife, bootstrap).
+
+** Dependencies
+- =jax= (>= 0.4.something current)
+- =haliax= (named axes / PyTree-friendly tensors)
+- =jaxtyping= (compile-time shape annotations)
+- =jax_dataclasses= (pytree-dataclass decorator, exposed as =jdc=)
+- =optimistix= (NLLS solver; LM and trust-region)
+- =numpy=, =scipy= (numpy for the scipy fallback, scipy.stats for J-test p-values)
+
+No =pandas= in the hot path. Pandas-labelled tensors are valid at the I/O boundary via the workspace's =jax-pandas-bridge=; the framework's =estimate(...)= consumes JAX arrays (and Haliax NamedArrays as a future enhancement).
+
+---
+
+* Section 2: Module Layout
+
+#+BEGIN_SRC text
+emu_gmm/
+    __init__.py            # public API: estimate, types
+    types.py               # protocols, type aliases, result/diagnostics types
+    measures/
+        __init__.py
+        empirical.py       # EmpiricalMeasure
+        analytical.py      # AnalyticalMeasure
+    covariance/
+        __init__.py
+        iid.py             # IIDCovariance (empirical, pairwise-overlap)
+        clustered.py       # ClusteredCovariance (empirical, cluster totals)
+        analytical.py      # AnalyticalCovariance (closed-form V)
+    weighting.py           # Identity, Fixed, ContinuouslyUpdated
+    regularization.py      # DiagonalTikhonov
+    optimizer.py           # Optimizer protocol, optimistix_lm, scipy_lm
+    estimator.py           # estimate() entry point + Cholesky pipeline
+    diagnostics.py         # Diagnostics dataclass; logging hooks
+    _internal/
+        axes.py            # canonical Haliax Axis definitions
+        params.py          # dataclass <-> flat JAX array conversion
+        cholesky.py        # Cholesky factor, forward/back substitution
+#+END_SRC
+
+The =_internal/= subpackage is private; users should not import from it.
+
+---
+
+* Section 3: Core Types
+
+** StructuralModel
+A =StructuralModel= is anything callable matching the signature
+\[ \texttt{psi}: (x, \theta) \to \mathbb{R}^M \]
+where $x$ is a single observation (1-D array of length $D$) and $\theta$ is the parameter vector.
+
+The framework supports two authoring styles:
+
+*** Plain function (default)
+#+BEGIN_SRC python
+def euler_residual(x, theta):
+    c, c_next, r = x
+    beta, gamma = theta.beta, theta.gamma
+    return jnp.array([beta * (c_next / c) ** (-gamma) * (1 + r) - 1.0])
+#+END_SRC
+
+*** Dataclass with hyperparameters (opt-in)
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class EulerModel:
+    risk_free_rate: float = jdc.static_field(default=0.02)
+
+    def __call__(self, x, theta):
+        c, c_next, r = x
+        adj_r = r + self.risk_free_rate
+        return jnp.array([theta.beta * (c_next / c) ** (-theta.gamma) * (1 + adj_r) - 1.0])
+#+END_SRC
+
+The framework duck-types: both forms work. Dataclass authoring is the right tool when the model has calibration constants or auxiliary objects that need to ride through =jit=/=vmap=.
+
+Optionally, the user can provide an analytical gradient via a paired callable (e.g., =psi_grad(x, theta)= returning the $M \times K$ Jacobian); the framework falls through to =jax.jacfwd= when not supplied.
+
+** Parameters
+Parameters are a user-defined =@jdc.pytree_dataclass=:
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class EulerParams:
+    beta: float
+    gamma: float
+#+END_SRC
+
+The framework converts this to a flat JAX array internally (via =jax.tree_util=) for AD operations, and reconstructs the same dataclass on output. Field order is preserved as the canonical parameter order.
+
+** Measure (Protocol)
+#+BEGIN_SRC python
+class Measure(Protocol):
+    def expectation(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "M"]:
+        """E_mu[psi(., theta)]"""
+
+    def jacobian(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "M K"]:
+        """E_mu[grad_theta psi(., theta)]"""
+#+END_SRC
+
+Concrete implementations:
+
+*** EmpiricalMeasure
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class EmpiricalMeasure:
+    x: Float[Array, "N D"]              # observations
+    mask: Float[Array, "N M"]           # per-coordinate observability (0/1)
+    weights: Float[Array, "N"]          # normalised survey weights
+                                        # (defaults to ones if not provided)
+
+    # expectation / jacobian: vmap psi across N, mask, weight, normalise
+    # by N_j = sum_i d_ij w_i per coordinate.
+#+END_SRC
+
+*** AnalyticalMeasure
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class AnalyticalMeasure:
+    expectation_fn: Callable[[StructuralModel, ParamsLike], Float[Array, "M"]]
+    jacobian_fn: Optional[Callable[[StructuralModel, ParamsLike], Float[Array, "M K"]]] = None
+
+    # User provides a closed-form expression for E[psi] under the true population
+    # distribution. If jacobian_fn is None, AD differentiates expectation_fn through.
+#+END_SRC
+
+The user is responsible for the analytical expression; v1 does not include a quadrature engine.
+
+** CovarianceStrategy (Protocol)
+#+BEGIN_SRC python
+class CovarianceStrategy(Protocol):
+    def covariance(
+        self, psi: StructuralModel, theta: ParamsLike, measure: Measure
+    ) -> Float[Array, "M M"]:
+        """Construct V_mu(theta) for the given (model, measure)."""
+#+END_SRC
+
+Concrete implementations:
+
+*** IIDCovariance (empirical, pairwise overlap)
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class IIDCovariance:
+    """Pairwise-overlap iid variance.
+
+    [V_X(theta)]_{jk} = (1 / N_j N_k) sum_i d_ij d_ik w_i^2 psi_j psi_k
+    """
+    # No state; the variance is computed from the measure at evaluation time.
+#+END_SRC
+
+*** ClusteredCovariance (empirical, cluster totals)
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class ClusteredCovariance:
+    """Cluster-totals form.
+
+    [V_X(theta)]_{jk} = (1 / N_j N_k) sum_c (sum_{i in c} d_ij w_i psi_j) x (...)
+    """
+    cluster_ids: Float[Array, "N"]
+    n_clusters: int = jdc.static_field()
+#+END_SRC
+
+*** AnalyticalCovariance (closed-form)
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class AnalyticalCovariance:
+    """User-supplied closed-form V(theta) under the population."""
+    covariance_fn: Callable[[StructuralModel, ParamsLike], Float[Array, "M M"]]
+#+END_SRC
+
+** WeightingStrategy
+#+BEGIN_SRC python
+class WeightingStrategy(Protocol):
+    def whitening_residual(
+        self, m: Float[Array, "M"], V: Float[Array, "M M"], theta: ParamsLike
+    ) -> Float[Array, "M"]:
+        """Return y = L^-1 m where V = L L'. For Fixed/Identity strategies V
+        is held constant; for CU the residual carries dependence on theta
+        through L for JAX AD to pick up."""
+#+END_SRC
+
+Implementations:
+- =Identity= --- $\Lambda \equiv I_M$.
+- =Fixed(V0)= --- $L$ from a precomputed $V_0$, frozen.
+- =ContinuouslyUpdated()= (default) --- $L(\theta)$ recomputed each call; JAX traces through.
+
+** RegularizationStrategy
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class DiagonalTikhonov:
+    """V_reg = V + tau * diag(V); tau chosen to enforce kappa_target."""
+    kappa_target: float = jdc.static_field(default=1e6)
+    tau_threshold: float = jdc.static_field(default=0.01)
+    # The realised tau is computed at the anchor point and stored in Diagnostics.
+#+END_SRC
+
+** Optimizer
+#+BEGIN_SRC python
+class Optimizer(Protocol):
+    def __call__(
+        self,
+        residual_fn: Callable[[Float[Array, "K"]], Float[Array, "M"]],
+        theta_init: Float[Array, "K"],
+    ) -> tuple[Float[Array, "K"], OptimizerInfo]:
+        """Solve min_theta || residual_fn(theta) ||^2."""
+
+def optimistix_lm(rtol: float = 1e-8, atol: float = 1e-8, **kw) -> Optimizer:
+    """Default LM optimiser wrapping optimistix."""
+    ...
+
+def scipy_lm(**kw) -> Optimizer:
+    """scipy.optimize.least_squares LM adapter; non-JIT-pure fallback."""
+    ...
+#+END_SRC
+
+** EstimationResult
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class EstimationResult:
+    # Estimate
+    theta_hat: UserParamsType                     # back in user's dataclass type
+    Sigma_theta: Float[Array, "K K"]              # asymptotic covariance
+    V_X: Float[Array, "M M"]                      # variance at theta_hat
+
+    # J-test
+    J_stat: float
+    J_dof: int
+    J_pvalue: float
+
+    # Status
+    converged: bool
+    iterations: int
+
+    # Provenance (echoed from the call site)
+    theta_init: UserParamsType
+    measure: Measure
+    covariance: CovarianceStrategy
+    weighting: WeightingStrategy
+    regularization: Optional[RegularizationStrategy]
+
+    # Diagnostics
+    diagnostics: Diagnostics
+#+END_SRC
+
+** Diagnostics (v1)
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class Diagnostics:
+    # Regularisation
+    tau_realised: float                # chosen at anchor point
+    kappa_V: float                     # condition number of V_X^* at convergence
+    binding_ridge: bool                # tau exceeded tau_threshold
+
+    # Cholesky
+    cholesky_pivot_min: float          # smallest pivot at convergence
+
+    # Optimisation
+    final_objective: float             # ||y||^2 at convergence
+    final_gradient_norm: float         # ||grad Q|| at convergence
+
+    # Provenance
+    optimizer_info: OptimizerInfo      # backend-specific
+#+END_SRC
+
+The structured identification-failure taxonomy (=design.org= Section 5.4) is deferred to v2; v1 surfaces the same information through =diagnostics= but does not classify failures.
+
+---
+
+* Section 4: The =estimate()= Entry Point
+
+#+BEGIN_SRC python
+def estimate(
+    model: StructuralModel,
+    measure: Measure,
+    *,
+    covariance: CovarianceStrategy,
+    weighting: WeightingStrategy = ContinuouslyUpdated(),
+    regularization: Optional[RegularizationStrategy] = DiagonalTikhonov(),
+    optimizer: Optimizer = optimistix_lm(),
+    theta_init: ParamsLike,
+) -> EstimationResult:
+    """
+    Estimate theta by minimising Q_mu(theta) = ||L_mu(theta)^-1 m_mu(theta)||^2.
+
+    Steps:
+      1. Flatten theta_init to a JAX array (preserving the user's dataclass type).
+      2. Build residual_fn(theta_flat) that computes:
+           m       = measure.expectation(model, theta)
+           V       = covariance.covariance(model, theta, measure)
+           V_star  = regularization.apply(V) at anchor (frozen for the run)
+           L       = cholesky(V_star)
+           y       = forward_solve(L, m)
+         The whitening strategy controls whether L depends on theta_flat (CU)
+         or is precomputed and frozen (Fixed/Identity).
+      3. Hand residual_fn to optimizer; collect (theta_hat_flat, info).
+      4. At theta_hat_flat:
+           - reconstruct user dataclass type
+           - compute G = measure.jacobian(model, theta_hat) (via AD or user-supplied)
+           - compute Sigma_theta = (G' V^-1 G)^-1
+           - compute J statistic, J_dof, J_pvalue via scipy.stats.chi2
+           - collect diagnostics
+      5. Return EstimationResult.
+    """
+#+END_SRC
+
+** Behavioural notes
+- All keyword-only after =measure=, to make the call site self-documenting.
+- The =CovarianceStrategy= is required; there is no implicit default. The user must opt into a specific design.
+- =regularization= can be =None= to disable; the framework will let the Cholesky raise if $V$ is non-PD.
+- =theta_init= is the user's parameter dataclass; the framework normalises internally.
+
+---
+
+* Section 5: Worked Example --- Consumption Euler Equation
+
+End-to-end code that compiles against the v1 API:
+
+#+BEGIN_SRC python
+import jax.numpy as jnp
+import jax_dataclasses as jdc
+from emu_gmm import (
+    estimate, EmpiricalMeasure, ClusteredCovariance, ContinuouslyUpdated,
+    DiagonalTikhonov, optimistix_lm,
+)
+
+# 1. Define parameters.
+@jdc.pytree_dataclass
+class EulerParams:
+    beta: float
+    gamma: float
+
+# 2. Define the structural model.
+def euler_residual(x, theta):
+    c, c_next, r = x
+    return jnp.array([
+        theta.beta * (c_next / c) ** (-theta.gamma) * (1 + r) - 1.0
+    ])
+
+# 3. Construct the empirical context.
+measure = EmpiricalMeasure(
+    x=cex_data,                          # shape (N, 3)
+    mask=cex_mask,                       # shape (N, 1); all 1s if complete
+    weights=cex_pweights,                # shape (N,)
+)
+
+covariance = ClusteredCovariance(
+    cluster_ids=cex_psu_ids,             # shape (N,)
+    n_clusters=int(cex_psu_ids.max() + 1),
+)
+
+# 4. Estimate.
+result = estimate(
+    model=euler_residual,
+    measure=measure,
+    covariance=covariance,
+    weighting=ContinuouslyUpdated(),
+    regularization=DiagonalTikhonov(kappa_target=1e6),
+    optimizer=optimistix_lm(rtol=1e-8),
+    theta_init=EulerParams(beta=0.95, gamma=2.0),
+)
+
+# 5. Inspect.
+print(f"beta = {result.theta_hat.beta:.4f}")
+print(f"gamma = {result.theta_hat.gamma:.4f}")
+print(f"J-stat = {result.J_stat:.3f}  (dof={result.J_dof}, p={result.J_pvalue:.3f})")
+print(f"Converged: {result.converged} in {result.iterations} iterations")
+if result.diagnostics.binding_ridge:
+    print(f"WARNING: regularization tau={result.diagnostics.tau_realised:.4f} was binding")
+#+END_SRC
+
+** Identification round-trip variant
+#+BEGIN_SRC python
+from emu_gmm import AnalyticalMeasure, AnalyticalCovariance
+
+# Same model and EulerParams as above.
+
+# Suppose c_{t+1}/c_t is lognormal(mu, sigma^2) and r is constant.
+# The analytical moment condition is then computable in closed form:
+def analytical_expectation(model, theta):
+    # E[(c_t+1/c_t)^-gamma] = exp(-gamma*mu + 0.5*gamma^2 sigma^2) by lognormal MGF
+    log_growth_mgf = jnp.exp(-theta.gamma * MU + 0.5 * theta.gamma**2 * SIGMA**2)
+    return jnp.array([theta.beta * log_growth_mgf * (1 + R) - 1.0])
+
+# At the true theta_0 = (beta_0, gamma_0) chosen so the moment vanishes,
+# estimate() should return theta_0 (up to floating-point tolerance).
+analytic_measure = AnalyticalMeasure(expectation_fn=analytical_expectation)
+analytic_cov = AnalyticalCovariance(
+    covariance_fn=lambda model, theta: closed_form_V(theta),  # user-supplied
+)
+
+round_trip = estimate(
+    model=euler_residual,
+    measure=analytic_measure,
+    covariance=analytic_cov,
+    weighting=ContinuouslyUpdated(),
+    theta_init=EulerParams(beta=0.90, gamma=1.5),  # arbitrary start
+)
+
+# round_trip.theta_hat should equal theta_0 to within quadrature/FP tolerance.
+# round_trip.diagnostics.final_objective should be ~ 0.
+# Non-zero indicates identification or numerical-conditioning trouble,
+# per the diagnostics taxonomy in design.org Section 5.4.
+#+END_SRC
+
+---
+
+* Section 6: Open Implementation Questions
+
+These are real questions that need answers before code can be written, not architectural redesigns.
+
+1. *Haliax surface in v1.* The design doc commits to Haliax NamedArrays. This sketch shows plain JAX arrays at the user-facing boundary for simplicity. Should v1:
+   - (a) wrap plain arrays into NamedArrays internally, present plain on the boundary; or
+   - (b) accept either at the boundary, normalise internally; or
+   - (c) require Haliax everywhere?
+   My lean: (a) for v1. The named-axis story is a documentation and self-description benefit that doesn't need to leak to first-time users.
+
+2. *Cluster ID representation.* JAX prefers floats. Integer-typed cluster IDs work in =jax.ops.segment_sum= but the static =n_clusters= argument forces recompilation on cardinality changes. Plan: pad cluster IDs to a fixed maximum at construction time and use =n_clusters= as a static upper bound.
+
+3. *Anchor point for $\tau$.* The design says "first-stage $\hat\theta_1$ for Fixed/Iterated; pilot evaluation for CU." For v1 with only Identity/Fixed/CU strategies, the policy reduces to: $\tau$ is selected once at the start of optimisation (using either $\theta_{init}$ for CU, or the Fixed strategy's anchor $V_0$ for Fixed). Hold fixed thereafter. Document explicitly.
+
+4. *J-test under regularisation.* The weighted-$\chi^2$ characterisation in =design.org= Section 5 / =mcar-asymptotics.org= Theorem 6 is exact in the limit but computationally heavy. v1 reports the nominal $\chi^2_{M-K}$ p-value and flags =binding_ridge= when $\tau > \tau_{threshold}$; computing the adjusted p-value is deferred unless the binding flag fires.
+
+5. *Static vs traced fields on dataclasses.* The patterns above use =jdc.static_field()= for hyperparameters (e.g., =n_clusters=, =kappa_target=). Confirm these are appropriately static --- recompilation when they change is intended.
+
+6. *Output dataclass reconstruction.* The framework needs to round-trip the user's parameter dataclass through a flat JAX array. The implementation uses =jax.tree_util.tree_flatten= / =tree_unflatten=, which assumes the dataclass leaves are scalar-like JAX arrays. Document the restriction; provide a clear error message if violated.
+
+7. *Optimistix interaction with `vmap`.* If a user wants to =vmap= a sweep over hyperparameter grids (e.g., fitting the same model to many cuts of the data), the optimiser must be vmappable. =optimistix= supports this. =scipy_lm= does not. Document the constraint when the scipy adapter is used.
+
+---
+
+* Section 7: Next Steps
+
+1. Confirm the v1 surface here matches expectations; iterate if not.
+2. Bibfile (=docs/refs.bib=) inspection and convention reconciliation.
+3. Implementation: =emu_gmm/= package per the layout in Section 2. Order:
+   1. =_internal/params.py= + =_internal/axes.py= --- parameter conversion and axis taxonomy.
+   2. =measures/empirical.py= + =covariance/iid.py= --- minimum viable estimation.
+   3. =weighting.py= + =regularization.py= + =_internal/cholesky.py= --- the inner pipeline.
+   4. =optimizer.py= --- optimistix adapter.
+   5. =estimator.py= + =diagnostics.py= --- the entry point.
+   6. =covariance/clustered.py= --- cluster-robust path.
+   7. =measures/analytical.py= + =covariance/analytical.py= --- identification round-trip.
+4. Tests: the Euler example above should be a runnable acceptance test in two modes (empirical with synthetic data; analytical round-trip).
