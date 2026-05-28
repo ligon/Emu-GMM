@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
 import pytest
-
 from emu_gmm import types as t
 from emu_gmm._internal.cholesky import cholesky
 from emu_gmm.weighting import ContinuouslyUpdated, Fixed, Identity

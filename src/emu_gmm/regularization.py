@@ -65,8 +65,8 @@ class DiagonalTikhonov:
         downstream consumers.
     """
 
-    kappa_target: float = jdc.static_field(default=1.0e6)
-    tau_threshold: float = jdc.static_field(default=1.0e-2)
+    kappa_target: float = jdc.static_field(default=1.0e6)  # type: ignore[attr-defined]
+    tau_threshold: float = jdc.static_field(default=1.0e-2)  # type: ignore[attr-defined]
 
     def apply(
         self,

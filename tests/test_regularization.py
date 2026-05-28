@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from emu_gmm import types as t
 from emu_gmm.regularization import DiagonalTikhonov
 
