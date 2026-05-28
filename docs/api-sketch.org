@@ -68,8 +68,6 @@ emu_gmm/
 
 The =_internal/= subpackage is private; users should not import from it.
 
----
-
 * Section 3: Core Types
 
 ** StructuralModel
@@ -247,9 +245,9 @@ class WeightingStrategy(Protocol):
 #+END_SRC
 
 Implementations:
-- =Identity= --- $\Lambda \equiv I_M$.
-- =Fixed(V0)= --- $L$ from a precomputed $V_0$, frozen.
-- =ContinuouslyUpdated()= (default) --- $L(\theta)$ recomputed each call; JAX traces through.
+- =Identity= --- \(\Lambda \equiv I_M\).
+- =Fixed(V0)= --- \(L\) from a precomputed \(V_0\), frozen.
+- =ContinuouslyUpdated()= (default) --- \(L(\theta)\) recomputed each call; JAX traces through.
 
 ** RegularizationStrategy
 #+BEGIN_SRC python
@@ -331,8 +329,6 @@ class Diagnostics:
 
 The structured identification-failure taxonomy (=design.org= Section 5.4) is deferred to v2; v1 surfaces the same information through =diagnostics= but does not classify failures.
 
----
-
 * Section 4: The =estimate()= Entry Point
 
 #+BEGIN_SRC python
@@ -370,19 +366,18 @@ def estimate(
     """
 #+END_SRC
 
-** Behavioural notes
+** Behavioral notes
 - All keyword-only after =measure=, to make the call site self-documenting.
 - The =CovarianceStrategy= is required; there is no implicit default. The user must opt into a specific design.
-- =regularization= can be =None= to disable; the framework will let the Cholesky raise if $V$ is non-PD.
+- =regularization= can be =None= to disable; the framework will let the Cholesky raise if \(V\) is non-PD.
 - =theta_init= is the user's parameter dataclass; the framework normalises internally.
 
----
 
 * Section 5: Worked Example --- Consumption Euler Equation
 
-The v1 demo uses =SyntheticMeasure=: a generator simulates $(c_t, c_{t+1}, r)$ tuples on demand, and the framework estimates $(\beta, \gamma)$ from the moment condition. This is the architecturally clean way to exercise the pipeline end-to-end without external data, and it commits the framework to the same operator interface ($\mathbb{E}_\mu[\,\cdot\,]$) it will use against real surveys later.
+The v1 demo uses =SyntheticMeasure=: a generator simulates \((c_t, c_{t+1}, r)\) tuples on demand, and the framework estimates \((\beta, \gamma)\) from the moment condition. This is the architecturally clean way to exercise the pipeline end-to-end without external data, and it commits the framework to the same operator interface (\(\mathbb{E}_\mu[\,\cdot\,]\)) it will use against real surveys later.
 
-For the Euler equation the sampler doesn't /need/ to depend on $\theta$: the consumption-and-return process is exogenous to preferences, so $f(z; \theta) = f(z)$. The =SyntheticMeasure= interface accepts this degenerate case; AD through the sampler returns zero and the residual gradient flows entirely through $\psi$. Genuine $\theta$-dependent samplers (SMM matching, indirect inference, where the structural parameters enter the simulator) work the same way and are useful when there's an =EmpiricalMeasure= on the other side --- that combination is v2.
+For the Euler equation the sampler doesn't /need/ to depend on \(\theta\): the consumption-and-return process is exogenous to preferences, so \(f(z; \theta) = f(z)\). The =SyntheticMeasure= interface accepts this degenerate case; AD through the sampler returns zero and the residual gradient flows entirely through \(\psi\). Genuine \(\theta\)-dependent samplers (SMM matching, indirect inference, where the structural parameters enter the simulator) work the same way and are useful when there's an =EmpiricalMeasure= on the other side --- that combination is v2.
 
 ** v1 Demo: SyntheticMeasure with Pure Simulator
 End-to-end code that compiles against the v1 API:
@@ -457,7 +452,7 @@ if result.diagnostics.binding_ridge:
     print(f"WARNING: regularization tau={result.diagnostics.tau_realised:.4f} was binding")
 #+END_SRC
 
-To get a properly identified system, add a second moment --- for instance a return-on-equity Euler condition with an excess-return instrument --- so $M > K$. The demo is structured to demonstrate the pipeline rather than recover textbook parameter values; the identification failure surfaced by the diagnostics is itself useful information.
+To get a properly identified system, add a second moment --- for instance a return-on-equity Euler condition with an excess-return instrument --- so \(M > K\). The demo is structured to demonstrate the pipeline rather than recover textbook parameter values; the identification failure surfaced by the diagnostics is itself useful information.
 
 ** Variant: Analytical Round-Trip
 The same model can be paired with an =AnalyticalMeasure= for a closed-form identification check that avoids Monte Carlo noise entirely:
@@ -494,8 +489,6 @@ round_trip = estimate(
 ** Variant: EmpiricalMeasure (ready for real data)
 =EmpiricalMeasure= remains in v1 for when real survey data is in hand. The signature is identical to what the v1 demo uses for =SyntheticMeasure=, with =x=, =mask=, and =weights= replacing the =sampler= callable. Cluster-robust standard errors via =ClusteredCovariance= require an additional =cluster_ids= array. This variant isn't exercised in the bundled tests --- those rely on synthetic data via =SyntheticMeasure= --- but the path is available and will be the production target once data arrives.
 
----
-
 * Section 6: Open Implementation Questions
 
 These are real questions that need answers before code can be written, not architectural redesigns.
@@ -508,9 +501,9 @@ These are real questions that need answers before code can be written, not archi
 
 2. *Cluster ID representation.* JAX prefers floats. Integer-typed cluster IDs work in =jax.ops.segment_sum= but the static =n_clusters= argument forces recompilation on cardinality changes. Plan: pad cluster IDs to a fixed maximum at construction time and use =n_clusters= as a static upper bound.
 
-3. *Anchor point for $\tau$.* The design says "first-stage $\hat\theta_1$ for Fixed/Iterated; pilot evaluation for CU." For v1 with only Identity/Fixed/CU strategies, the policy reduces to: $\tau$ is selected once at the start of optimisation (using either $\theta_{init}$ for CU, or the Fixed strategy's anchor $V_0$ for Fixed). Hold fixed thereafter. Document explicitly.
+3. *Anchor point for \(\tau\).* The design says "first-stage \(\hat\theta_1\) for Fixed/Iterated; pilot evaluation for CU." For v1 with only Identity/Fixed/CU strategies, the policy reduces to: \(\tau\) is selected once at the start of optimization (using either \(\theta_{init}\) for CU, or the Fixed strategy's anchor \(V_0\) for Fixed). Hold fixed thereafter. Document explicitly.
 
-4. *J-test under regularisation.* The weighted-$\chi^2$ characterisation in =design.org= Section 5 / =mcar-asymptotics.org= Theorem 6 is exact in the limit but computationally heavy. v1 reports the nominal $\chi^2_{M-K}$ p-value and flags =binding_ridge= when $\tau > \tau_{threshold}$; computing the adjusted p-value is deferred unless the binding flag fires.
+4. *J-test under regularization.* The weighted-\(\chi^2\) characterisation in =design.org= Section 5 / =mcar-asymptotics.org= Theorem 6 is exact in the limit but computationally heavy. v1 reports the nominal \(\chi^2_{M-K}\) p-value and flags =binding_ridge= when \(\tau > \tau_{threshold}\); computing the adjusted p-value is deferred unless the binding flag fires.
 
 5. *Static vs traced fields on dataclasses.* The patterns above use =jdc.static_field()= for hyperparameters (e.g., =n_clusters=, =kappa_target=). Confirm these are appropriately static --- recompilation when they change is intended.
 
@@ -518,9 +511,7 @@ These are real questions that need answers before code can be written, not archi
 
 7. *Optimistix interaction with `vmap`.* If a user wants to =vmap= a sweep over hyperparameter grids (e.g., fitting the same model to many cuts of the data), the optimiser must be vmappable. =optimistix= supports this. =scipy_lm= does not. Document the constraint when the scipy adapter is used.
 
-8. *Sampler signature for =SyntheticMeasure=.* The signature is =sampler(key, theta) -> (n_sim, D)=, but for $\theta$-independent samplers (the Euler demo case) the user is forced to accept and ignore =theta=. Acceptable boilerplate for v1; revisit if the pattern proves annoying in practice. A polymorphic overload accepting =sampler(key)= would require runtime introspection of the user's callable.
-
----
+8. *Sampler signature for =SyntheticMeasure=.* The signature is =sampler(key, theta) -> (n_sim, D)=, but for \(\theta\)-independent samplers (the Euler demo case) the user is forced to accept and ignore =theta=. Acceptable boilerplate for v1; revisit if the pattern proves annoying in practice. A polymorphic overload accepting =sampler(key)= would require runtime introspection of the user's callable.
 
 * Section 7: Next Steps
 
