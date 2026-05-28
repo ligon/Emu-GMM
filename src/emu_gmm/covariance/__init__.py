@@ -1,5 +1,13 @@
 """Covariance strategies: constructors for V_mu(theta), the variance of the moment estimator."""
 
+from emu_gmm.covariance.analytical import AnalyticalCovariance
+from emu_gmm.covariance.clustered import ClusteredCovariance
+from emu_gmm.covariance.iid import IIDCovariance
 from emu_gmm.covariance.synthetic import SyntheticCovariance
 
-__all__ = ["SyntheticCovariance"]
+__all__ = [
+    "AnalyticalCovariance",
+    "ClusteredCovariance",
+    "IIDCovariance",
+    "SyntheticCovariance",
+]
