@@ -1,11 +1,13 @@
-#+TITLE: Structural Estimation Architecture: The emu-gmm Framework
-#+SUBTITLE: Emu Measure Utility for the Generalized Method of Moments
+#+TITLE: emu-gmm: Measure-Theoretic GMM
+#+SUBTITLE: Estimation via $\mathbb{E}_\mu$
 #+AUTHOR: Ethan Ligon
 #+OPTIONS: toc:nil num:t todo:nil |:t minlevel:1
 
 * Section 1: Introduction and Population Primitives
 
-This document outlines the foundational architecture for the =emu-gmm= framework mapped over a generalized parameter space. The framework establishes an exact algebraic symmetry between population identification and sample estimation by embedding both data realizations and the underlying sampling design directly into the primitives.
+The framework is named for the operator at its centre: =emu= reads as $\mathbb{E}_\mu$, the expectation under a measure $\mu$. The architectural conceit is that this one operator, applied uniformly to empirical, analytical, and synthetic measures, unifies sample estimation, identification analysis, and simulation-based inference inside a single computational interface.
+
+This document outlines the foundational architecture. The framework establishes an algebraic symmetry between population identification and sample estimation by embedding both data realizations and the underlying sampling design into the primitives of the =Measure= layer.
 
 ** Population Primitives
 Let $\Theta$ denote the compact parameter space. We define the model structure via the following foundational mappings:
@@ -13,6 +15,7 @@ Let $\Theta$ denote the compact parameter space. We define the model structure v
 - *Parameter Vector*: $\theta \in \Theta$, where $\theta_0$ represents the unique true parameter vector.
 - *Population Moment Function*: $m(\theta)$, an $M \times 1$ deterministic mapping representing the structural equations of the economic model. The fundamental identification restriction satisfies:
   \[ m(\theta_0) = 0 \]
+  Sections 2-4 generalise this to $m(\theta) \equiv \mathbb{E}_{\mu_\text{pop}}[\psi(\cdot,\theta)]$ under the (unobserved) population measure $\mu_\text{pop}$, and replace $\mu_\text{pop}$ with whatever measure the user supplies.
 - *Variance-Covariance Mapping*: $V(\theta) = E[m(\theta)m(\theta)']$, representing the population variance-covariance matrix of the underlying stochastic moments evaluated at $\theta$.
 - *Optimal Weighting Matrix*: $\Lambda(\theta) = V^{-1}(\theta)$, providing the metric for the parameter space.
 - *Population Jacobian Matrix*: $G(\theta)$, the $M \times K$ matrix of first derivatives:
@@ -24,19 +27,21 @@ The population criterion function $Q(\theta)$ is defined as the quadratic form:
 
 By construction, $Q(\theta) \geq 0$ for all $\theta \in \Theta$, achieving its global minimum at $Q(\theta_0) = 0$.
 
-Taking the second derivative of $Q(\theta)$ and evaluating it at the truth $\theta_0$, the terms containing the first and second derivatives of $\Lambda(\theta)$ as well as the second derivatives of $m(\theta)$ vanish because $m(\theta_0) = 0$. The population Hessian collapses precisely to the population information metric:
+Taking the second derivative of $Q(\theta)$ and evaluating it at the truth $\theta_0$, the terms containing the first and second derivatives of $\Lambda(\theta)$ as well as the second derivatives of $m(\theta)$ vanish because $m(\theta_0) = 0$. The population Hessian collapses precisely to:
 \[ \nabla^2 Q(\theta_0) = 2 G(\theta_0)' \Lambda(\theta_0) G(\theta_0) = 2 \mathcal{I}(\theta_0) \]
 
-where $\mathcal{I}(\theta_0)$ represents the theoretical generalized Cramér-Rao efficiency bound for this system of moments:
+where $\mathcal{I}(\theta_0)$ is the asymptotic precision of efficient GMM for this moment system --- loosely, the GMM information matrix:
 \[ \mathcal{I}(\theta_0) = G(\theta_0)' \Lambda(\theta_0) G(\theta_0) \]
+
+This is the efficient-GMM analogue of the Cramér-Rao bound; it coincides with the latter only when the moments span the score and the data-generating process is correctly specified.
 
 ---
 
 * Section 2: Measure-Theoretic Abstraction and Model Decoupling
 
-To achieve complete modularity, the architecture completely decouples the structural economic relationships from the underlying data-generating mechanics. The estimation framework is refactored from a data-dependent optimization problem into a pure measure-theoretic integration pipeline. 
+To achieve complete modularity, the architecture decouples the structural economic relationships from the underlying data-generating mechanics. The estimation framework is refactored from a data-dependent optimization problem into a measure-theoretic integration pipeline.
 
-The system partitions cleanly into two distinct primitives: a /Structural Model/ representing the economic theory, and an abstract /Measure/ acting as an integration operator.
+The system partitions cleanly into two distinct primitives: a /Structural Model/ representing the economic theory, and an abstract /Measure/ acting as an integration operator. Section 1's identification condition $m(\theta_0) = 0$ becomes $\mathbb{E}_{\mu_\text{pop}}[\psi(\cdot,\theta_0)] = 0$ in the new language; the rest of this section describes the operator algebra that makes this generalisation actionable.
 
 ** The Model Primitive: StructuralModel
 The =StructuralModel= abstraction encapsulates only the elementary, observation-level structural equations. It possesses no awareness of sample scale, sampling weights, missingness patterns, or the empirical design layout.
@@ -49,9 +54,9 @@ The =Measure= interface ($\mu$) abstracts the integration environment. The mathe
 
 A valid =Measure= implementation must expose three foundational operations when evaluated against a given =StructuralModel= at parameter vector $\theta$:
 
-1. *Expectation Mapping*: 
+1. *Expectation Mapping*:
    \[ \mathbb{E}_\mu[\psi] = \int \psi(x, \theta) \, d\mu(x) \]
-2. *Jacobian Mapping*: 
+2. *Jacobian Mapping*:
    \[ \mathbb{E}_\mu[\nabla_\theta \psi] = \int \nabla_\theta \psi(x, \theta) \, d\mu(x) \]
 3. *Variance Mapping*: $\operatorname{Var}_\mu(\psi(\cdot, \theta))$, which characterizes the internal variance-covariance geometry of the underlying structural errors before integration:
    \[ \operatorname{Var}_\mu(\psi(\cdot, \theta)) = \mathbb{E}_\mu\left[\psi(\cdot, \theta)\psi(\cdot, \theta)'\right] - \mathbb{E}_\mu[\psi(\cdot, \theta)]\mathbb{E}_\mu[\psi(\cdot, \theta)]' \]
@@ -60,17 +65,35 @@ A valid =Measure= implementation must expose three foundational operations when 
 By implementing the measure as a polymorphic interface, the framework permits seamless switching between different analytical modalities without altering a single line of code in the structural model or the optimization loop.
 
 *** EmpiricalMeasure (The Design-Aware Data Object)
-This implementation maps to the physical dataset and design metadata (e.g., clustering, stratification, or complex survey rules). The measure is represented as a discrete, empirical probability mass function:
-\[ d\mu_X = \mathbf{N}_X \sum_{i \in X} D_i w_i \delta_{x_i} \]
-where $\delta_{x_i} $ represents a Dirac delta mass centered at observation $x_i$, $w_i$ denotes the design-determined sampling weight, and $D_i = \operatorname{diag}(d_i)$ is an $M \times M$ coordinate-masking matrix tracking missing data patterns for individual variables. 
+This implementation maps to the physical dataset and its associated sampling design. Strictly speaking, $\mu_X$ is not a single scalar measure but an $M$-tuple of coordinate-specific measures $\{\mu_X^{(j)}\}_{j=1}^M$ sharing a common support; the matrix-valued shorthand below packages this $M$-tuple into a single expression.
 
-The dimension-specific scales are managed by the $M \times M$ diagonal scaling matrix $\mathbf{N}_X$:
+The measure is represented as a discrete, empirical mass:
+\[ d\mu_X = \mathbf{N}_X \sum_{i \in X} D_i w_i \delta_{x_i} \]
+where $\delta_{x_i}$ is a Dirac delta at observation $x_i$; $w_i = 1/\pi_i$ is the probability weight (inverse inclusion probability --- /pweight/ semantics, not aweight or fweight); and $D_i = \operatorname{diag}(d_i)$ is an $M \times M$ coordinate-masking matrix tracking missingness per moment coordinate.
+
+The dimension-specific scales are managed by the $M \times M$ diagonal matrix $\mathbf{N}_X$:
 \[ \mathbf{N}_X = \operatorname{diag}\left( \frac{1}{N_1}, \frac{1}{N_2}, \dots, \frac{1}{N_M} \right) \quad \text{where} \quad N_j = \sum_{i \in X} d_{ij} \]
 
-When evaluating the cross-moment variance matrix $V_X(\theta) = \operatorname{Var}_X(m_X(\theta))$, the element $(j,k)$ is constructed using a logical ~AND~ overlap filter:
-\[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_{i \in X} (d_{ij} d_{ik}) w_i^2 \psi_j(x_i, \theta) \psi_k(x_i, \theta) \]
+Reading coordinate-wise:
+\[ \mathbb{E}_{\mu_X}[\psi]_j = \frac{1}{N_j} \sum_{i \in X} d_{ij} w_i\, \psi_j(x_i, \theta) \]
+--- each moment is integrated against its own coordinate-specific measure, with missing observations dropped per coordinate rather than per row.
 
-If $X$ specifies clustering at a primary sampling unit (PSU) level, the summation natively aggregates to cluster totals before taking the outer product, preserving design robustness.
+The cross-moment variance element $(j,k)$ uses the rows where both $\psi_j$ and $\psi_k$ are observed:
+\[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_{i \in X} d_{ij} d_{ik}\, w_i^2\, \psi_j(x_i, \theta)\, \psi_k(x_i, \theta) \]
+
+This /pairwise-overlap/ (a.k.a. /available-pairs/) estimator is the price the framework pays for avoiding listwise deletion: each $[V_X]_{jk}$ uses every row that supports its pair, not just rows complete on every moment. The cost is that $V_X$ is not guaranteed positive definite in finite samples --- see Section 4 for the regularisation policy and its implications for the J-statistic.
+
+With clustering at a primary sampling unit (PSU) level --- clusters indexed by $c$ --- the variance is constructed from cluster totals before the outer product:
+\[ [V_X(\theta)]_{jk} = \frac{1}{N_j N_k} \sum_c \Big(\sum_{i \in c} d_{ij} w_i\, \psi_j(x_i, \theta)\Big) \Big(\sum_{i \in c} d_{ik} w_i\, \psi_k(x_i, \theta)\Big) \]
+preserving within-cluster correlation while remaining design-robust. The iid form above is the special case where each cluster is a single observation.
+
+The =EmpiricalMeasure= commits to an explicit design-awareness ladder:
+
+- /v1/ (in scope): pweighted SRS; single-stage clustering via the cluster-totals form above; pairwise-overlap missingness handling.
+- /v2/ (planned): stratification with multiple PSUs per stratum; replicate-weight variance (BRR, jackknife, bootstrap) for federal-survey datasets that distribute design information as replicate weight columns.
+- Out of scope: single-PSU strata collapse rules; finite-population corrections; calibration / raking weights whose values depend on the realised sample.
+
+A structural property worth highlighting: $\mathbb{E}_{\mu_X}[\psi]$ is design-invariant across all rungs of this ladder. Only $V_X(\theta)$ changes. The residual path through the estimator therefore needs no design-specific code; specialisation lives entirely inside the variance constructor of =EmpiricalMeasure=.
 
 *** AnalyticalMeasure (The Population Truth Environment)
 The =AnalyticalMeasure= contains no empirical data matrix. It represents the true continuous or discrete population distribution governed by the economic environment (e.g., joint log-normal income and preference shocks).
@@ -78,9 +101,15 @@ The =AnalyticalMeasure= contains no empirical data matrix. It represents the tru
 - *Internal Variance*: Directly computes the true population variance matrix $V(\theta)$.
 
 *** SyntheticMeasure (The Generative Data-Generating Process)
-The =SyntheticMeasure= represents a stochastic parametric simulation environment. 
-- *Integration Mode*: When evaluated, it draws pseudo-random synthetic samples of size $N_{sim}$ from a specified parametric distribution to approximate the integrals via Monte Carlo simulation.
-- *SMM Convergence*: This abstraction naturally transforms the standard GMM pipeline into a Simulated Method of Moments (SMM) estimator when paired with an empirical objective.
+The =SyntheticMeasure= represents a stochastic parametric simulator whose law depends on $\theta$. Three design choices keep it well-behaved:
+
+1. *Common Random Numbers (CRN)*: the measure holds a frozen batch of $N_{sim}$ latent draws $\{z_s\}$ (a fixed =PRNGKey= in JAX) and recomputes observations $x_s(\theta) = f(z_s; \theta)$ from the /same/ $z_s$ at each $\theta$. This converts a stochastic objective into a deterministic surface in $\theta$, restoring the smoothness gradient-based optimisers require. Fresh draws at every evaluation produce $\theta$-varying Monte Carlo noise that defeats both quasi-Newton and trust-region methods.
+2. *Reparameterisation for derivatives*: when $f(z; \theta)$ is smooth in $\theta$ and $z$ comes from a $\theta$-free base distribution, the Leibniz exchange holds inside the simulator:
+   \[ \nabla_\theta \mathbb{E}_z[\psi(f(z;\theta), \theta)] = \mathbb{E}_z[\nabla_\theta \psi(f(z;\theta), \theta)] \]
+   and JAX propagates the gradient end-to-end. For distributions that cannot be reparameterised (discrete latents, $\theta$-dependent support), the framework supports score-function (REINFORCE) gradients as an opt-in fallback, with the variance caveats that implies.
+3. *Simulation inflation*: SMM asymptotic variance carries the $(1 + 1/S)$ factor where $S = N_{sim}/N$. The =SyntheticMeasure= folds this into its variance computation automatically; $N_{sim}$ must be set explicitly, otherwise the inference engine refuses to report standard errors.
+
+Paired with an =EmpiricalMeasure= via a combined moment vector, this yields a SMM estimator (McFadden 1989, Pakes-Pollard 1989) that is differentiable, JIT-compilable, and design-aware on the empirical side.
 
 ** Architectural Utility of Data-Free Measures
 Decoupling the measure from physical data files introduces major diagnostic and theoretical capabilities at the design level:
@@ -97,49 +126,55 @@ A critical practical challenge in executing structural estimation is the efficie
 Rather than treating differentiation as a global monolithic process, this architecture isolates automatic differentiation (AD) at the individual observation level while leveraging the linearity of the =Measure= abstraction to handle aggregation.
 
 ** The Computational Boundary for Automatic Differentiation
-Running reverse-mode or forward-mode automatic differentiation over a massive empirical dataset can lead to catastrophic memory explosion (graph bloat) if the tracking engine logs every individual observation loop, sampling weight multiplication, and cluster-level accumulation. 
+Running reverse-mode or forward-mode automatic differentiation over a massive empirical dataset can lead to catastrophic memory explosion (graph bloat) if the tracking engine logs every individual observation loop, sampling weight multiplication, and cluster-level accumulation.
 
 To circumvent this, the AD graph is strictly isolated at the element-wise boundary:
 
 1. *Observation-Level Graphing*: The system computes the structural error $\psi(x, \theta)$ and its local gradient $\nabla_\theta \psi(x, \theta)$ at a single point $x$.
 2. *Vectorized Batches (Vmap)*: For efficient hardware execution (e.g., SIMD lanes or GPU execution), the observation-level execution graph is batched across points using single-instruction, multiple-data vectorization primitives.
-3. *Graph Detachment*: The tracking graph for automatic differentiation terminates immediately after delivering the pointwise matrices. The subsequent linear operations—such as applying masking indicators ($D_i$) and structural weights ($w_i$)—are executed via standard native tensor math, bypassing the AD overhead entirely.
+3. *Graph Detachment*: The tracking graph for automatic differentiation terminates immediately after delivering the pointwise matrices. The subsequent linear operations --- applying masking indicators ($D_i$) and structural weights ($w_i$) --- are executed via standard native tensor math, bypassing the AD overhead entirely.
+
+This isolation strategy presumes the measure $\mu$ itself does not depend on $\theta$. For =EmpiricalMeasure= and =AnalyticalMeasure= with fixed quadrature grids this holds exactly. For =SyntheticMeasure=, where the law of the draws depends on $\theta$, the isolation is maintained at the level of the latent variates: the frozen $z_s$ batch (Section 2.3) carries no AD graph, while $f(z_s; \theta)$ and $\psi(f(z_s;\theta), \theta)$ are traced as usual.
 
 ** The Linearity of Gradient Integration
-By the Leibniz Integral Rule, under standard regularity conditions allowing the exchange of differentiation and integration, the Jacobian mapping of the measure is equivalent to the integrated expectation of the local gradients. 
+By the Leibniz Integral Rule, under standard regularity conditions allowing the exchange of differentiation and integration, the Jacobian mapping of the measure is equivalent to the integrated expectation of the local gradients.
 
-For any valid =Measure= $\mu$, the functional interface maps the derivative through the integration space linearly:
+For any valid =Measure= $\mu$ whose support does not depend on $\theta$, the functional interface maps the derivative through the integration space linearly:
 \[ G_\mu(\theta) = \frac{\partial}{\partial \theta'} \int \psi(x, \theta) \, d\mu(x) = \int \left[ \nabla_\theta \psi(x, \theta) \right] \, d\mu(x) \]
 
 - In an =AnalyticalMeasure=, this maps to the direct integration of the analytical derivative mapping over the continuous density.
 - In an =EmpiricalMeasure=, this maps to the coordinate-scaled matrix product:
   \[ G_X(\theta) = \mathbf{N}_X \sum_{i \in X} D_i w_i \left[ \nabla_\theta \psi(x_i, \theta) \right] \]
+- In a =SyntheticMeasure= with reparameterised draws, Leibniz applies in the latent space: $G_\mu(\theta) = \mathbb{E}_z[\nabla_\theta \psi(f(z;\theta), \theta)]$, including the contribution that flows through $f$.
 
 ** Differentiating through the Continuously Updating Weighting Matrix
-Because this system targets the optimal GMM framework where the weighting matrix is treated as a continuous function of the parameter vector itself, evaluating the full gradient of the criterion function requires differentiating through a matrix dependency.
+Because this system targets the optimal GMM framework where the weighting matrix can be treated as a continuous function of the parameter vector itself, evaluating the full gradient of the criterion function requires differentiating through a matrix dependency.
 
-Let $Q_\mu(\theta) = \mathbb{E}_\mu[\psi]' V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi]$. The exact analytical gradient of the objective function with respect to a scalar parameter $\theta_k$ is given by:
+Let $Q_\mu(\theta) = \mathbb{E}_\mu[\psi]' V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi]$. The exact analytical gradient with respect to a scalar parameter $\theta_k$ is:
 \[ \frac{\partial Q_\mu(\theta)}{\partial \theta_k} = 2 \left[ \frac{\partial \mathbb{E}_\mu[\psi]}{\partial \theta_k} \right]' V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi] + \mathbb{E}_\mu[\psi]' \left[ \frac{\partial V_\mu^{-1}(\theta)}{\partial \theta_k} \right] \mathbb{E}_\mu[\psi] \]
 
-Utilizing the matrix derivative identity for an inverted matrix, the derivative of the optimal weighting metric is mapped directly back to the derivative of the variance mapping:
+Using the matrix derivative identity for an inverted matrix, the derivative of the optimal weighting metric maps directly back to the derivative of the variance:
 \[ \frac{\partial V_\mu^{-1}(\theta)}{\partial \theta_k} = -V_\mu^{-1}(\theta) \left[ \frac{\partial V_\mu(\theta)}{\partial \theta_k} \right] V_\mu^{-1}(\theta) \]
 
-Substituting this back yields the complete gradient vector required by the numerical optimizer away from the true parameters:
+Substituting yields the complete gradient vector:
 \[ \nabla_\theta Q_\mu(\theta) = 2 G_\mu(\theta)' V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi] - \mathbb{E}_\mu[\psi]' V_\mu^{-1}(\theta) \left[ \nabla_\theta V_\mu(\theta) \right] V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi] \]
 
-*** Asymptotic Vanishing of the Weight Gradient
-An elegant consequence of the model decoupling occurs at the true parameter values ($\theta_0$ in the population, or asymptotically at $\hat{\theta}$). Because $\mathbb{E}_\mu[\psi(\cdot, \theta_0)] \xrightarrow{p} 0$, the second term on the right-hand side contains a quadratic form wrapped around the moment vector, causing it to vanish at a rate faster than the primary gradient term:
+*** Asymptotic Equivalence of CU and Iterated Weighting
+At the true parameter values ($\theta_0$ in the population, or asymptotically at $\hat{\theta}$), $\mathbb{E}_\mu[\psi(\cdot, \theta_0)] \xrightarrow{p} 0$. The second term in the gradient is a quadratic form in the moment vector and vanishes at rate $O_p(N^{-1})$, while the primary term vanishes at $O_p(N^{-1/2})$:
 \[ \mathbb{E}_\mu[\psi]' V_\mu^{-1}(\theta) \left[ \nabla_\theta V_\mu(\theta) \right] V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi] \xrightarrow{p} 0 \]
 
-Consequently, for local updates near the solution and for the final evaluation of the information matrix within the Inference Engine, the system can safely drop the computationally intensive tensor derivative $\nabla_\theta V_\mu(\theta)$, collapsing the local gradient routing down to:
-\[ \nabla_\theta Q_\mu(\theta) \approx 2 G_\mu(\theta)' V_\mu^{-1}(\theta) \mathbb{E}_\mu[\psi] \]
+This is the theoretical justification for why the /Iterated/ weighting strategy (which fixes $V$ during each inner solve and refreshes it between iterations, so its inner gradient never sees $\nabla_\theta V$) converges to the same fixed point as the /Continuously Updated/ strategy (which sees $\nabla_\theta V$ at every evaluation). It is *not* a license to drop $\nabla_\theta V$ from the CU gradient implementation: away from the optimum the dropped term is $O_p(1)$, and silently omitting it produces an estimator that is neither CU nor Iterated.
+
+The clean architectural resolution --- see Section 4 --- is to make weighting an explicit strategy choice and to write the residual function so that JAX's AD picks up exactly the right gradient for each strategy.
+
+For the information matrix used by the inference engine, $\mathcal{I}_\mu(\hat\theta) = G_\mu(\hat\theta)' \Lambda_\mu(\hat\theta) G_\mu(\hat\theta)$ --- computed directly from $G$ and $\Lambda$, not from a numerical Hessian of $Q$. The asymptotic argument above implies the two coincide at $\hat\theta$; in finite samples they need not, and the direct $G'\Lambda G$ form is both cheaper and more stable.
 
 ---
 
 * Section 4: Estimation, Decomposition, and Specification Testing
 
 ** The Decomposition-Driven Criterion, Q_\mu(\theta)
-To ensure absolute numerical stability and prevent precision loss from explicit matrix inversion, =emu-gmm= avoids calculating $V_\mu^{-1}(\theta)$ directly. Instead, it operates on the lower-triangular Cholesky factorization of the design-aware covariance matrix:
+To ensure numerical stability and prevent precision loss from explicit matrix inversion, =emu-gmm= avoids calculating $V_\mu^{-1}(\theta)$ directly. Instead, it operates on the lower-triangular Cholesky factorization of the design-aware covariance matrix:
 \[ V_\mu(\theta) = L_\mu(\theta) L_\mu(\theta)' \]
 
 The system computes a whitened moment vector $y_\mu(\theta)$ via forward substitution, avoiding the direct inversion of the system:
@@ -151,23 +186,49 @@ The objective function is then evaluated strictly as the squared Euclidean $L_2$
 The GMM estimator is defined as:
 \[ \hat{\theta} = \arg\min_{\theta \in \Theta} Q_\mu(\theta) \]
 
-Framing the objective as a pure sum-of-squares allows the system to bypass general-purpose quasi-Newton optimizers and interface directly with high-performance non-linear least-squares solvers (like Levenberg-Marquardt or trust-region reflective algorithms). These solvers exploit the structure to approximate local updates efficiently using only first derivatives.
+Framing the objective as a pure sum-of-squares allows the system to bypass general-purpose quasi-Newton optimizers and interface directly with high-performance non-linear least-squares solvers (Levenberg-Marquardt, trust-region reflective). These solvers exploit the structure to approximate local updates efficiently using only first derivatives --- derivatives that JAX provides exactly through the residual function $y_\mu(\theta)$, including the dependence of $L_\mu$ on $\theta$ when the weighting strategy calls for it (see below).
+
+** The Weighting Strategy Interface
+The choice of weighting policy is encoded as an explicit object that the optimisation loop consults at every evaluation. Four strategies cover the standard cases:
+
+- =Identity=: $\Lambda_\mu(\theta) \equiv I_M$. Useful as a first stage when no preliminary $V$ is available, or for diagnostic runs.
+- =Fixed(V0)=: two-step GMM. The user supplies a precomputed $V_0$ (typically from a first-stage =Identity= run); $\Lambda$ is held fixed throughout the second-stage optimisation.
+- =Iterated(k_max, tol)=: iterated GMM. Alternates between solving $\hat\theta_k = \arg\min_\theta\, \mathbb{E}_\mu[\psi]'\, V_\mu(\hat\theta_{k-1})^{-1}\, \mathbb{E}_\mu[\psi]$ and refreshing $V$ at the new $\hat\theta_k$, up to convergence or $k_{\max}$ rounds. Each inner solve is a =Fixed= problem; gradients within an iteration are exact.
+- =ContinuouslyUpdated= (default): $\Lambda_\mu(\theta)$ is recomputed at every $\theta$ evaluation. The residual $y_\mu(\theta) = L_\mu(\theta)^{-1} \mathbb{E}_\mu[\psi(\cdot,\theta)]$ depends on $\theta$ through both factors; the NLLS Jacobian computed by JAX captures this dependence exactly, without manual derivation of the $\nabla_\theta V$ term from Section 3.
+
+A strategy is a JAX pytree carrying its state (precomputed $V_0$, iteration counter, etc.) so it composes cleanly with =jit= and =vmap=. Section 3.3's asymptotic-equivalence result guarantees =Iterated= and =ContinuouslyUpdated= share the same limit; the choice between them is a matter of finite-sample behaviour and computational cost rather than identification.
+
+** Regularisation of V_\mu(\theta)
+When =EmpiricalMeasure= constructs $V_X(\theta)$ via the pairwise-overlap rule, the result is not guaranteed positive definite in finite samples (Section 2.3). The Cholesky pipeline requires $V_\mu \succ 0$, so the framework applies adaptive regularisation:
+\[ V_\mu^\star(\theta) = V_\mu(\theta) + \tau\, \operatorname{diag}(V_\mu(\theta)) \]
+
+with $\tau$ chosen to enforce a target condition number ceiling (default $\kappa_\text{target} = 10^6$). The diagonal-Tikhonov form is scale-equivariant under per-moment rescaling, which matters because moment functions are routinely on heterogeneous scales (a residual in dollars and a residual in shares should not see the same absolute ridge).
+
+Alternative regularisers are available as opt-in:
+- *Eigenvalue floor*: clip eigenvalues at $\epsilon\,\lambda_{\max}(V_\mu)$ via spectral decomposition. Transparent; $O(M^3)$.
+- *Higham nearest-PSD* (Higham 1988): project to the nearest positive semidefinite matrix in Frobenius norm. Most principled, slowest.
+
+To avoid introducing non-smoothness into the objective surface, $\tau$ is selected once at an anchor point (first-stage $\hat\theta_1$ for =Fixed= / =Iterated=; a pilot evaluation for =ContinuouslyUpdated=) and held fixed thereafter. The chosen $\tau$, the achieved $\kappa(V_\mu^\star)$, and $\lambda_{\min}(V_\mu)/\lambda_{\max}(V_\mu)$ are logged at every $V$ refresh; a binding ridge is surfaced as a diagnostic flag rather than silently absorbed.
+
+Regularisation alters the limit law of $Q_\mu(\hat\theta)$: the $\chi^2_{M-K}$ distribution becomes a weighted-$\chi^2$ whose weights depend on $\tau$. For non-binding $\tau$ the deviation is negligible; the inference engine reports both the nominal $\chi^2$ critical value and a regularisation-adjusted critical value when $\tau$ exceeds a configurable threshold (default $\tau > 0.01$).
 
 ** The Overidentification Statistic
-Under the null hypothesis that the parametric model is correctly specified, the minimized sample criterion function converges cleanly to a chi-squared distribution:
+Under the null hypothesis that the parametric model is correctly specified, and with $V_\mu(\theta)$ used unregularised, the minimized sample criterion function converges cleanly to a chi-squared distribution:
 \[ Q_X(\hat{\theta}) \xrightarrow{d} \chi^2_{M - K} \]
 
+When the variance has been regularised (Section 4.3), the limit is a weighted sum of chi-squared variates; the inference engine reports both the nominal and regularisation-adjusted critical values as described above.
+
 ** Architectural Core Highlights
-1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is completely redundant. $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively.
+1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the Hansen 1982 / Hayashi textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
 2. *Asymmetric Scale Resolution*: The interaction of the coordinate scaling inside $G_\mu(\theta)$ and the scaling inside $V_\mu(\theta)$ ensures that the sample information matrix properly weighs the relative data density across different variables without requiring listwise deletion.
 
 ---
 
 * Section 5: Boundary Interfaces, Named Tensors, and PyTree Topology
 
-To maintain mathematical legibility without introducing non-compilable runtime bottlenecks, =emu-gmm= completely eschews traditional dataframe paradigms (like =pandas=) inside the computation zone. Instead, the framework utilizes JAX-native named tensor architectures (=haliax=) and type-level axis verification (=jaxtyping=).
+To maintain mathematical legibility without introducing non-compilable runtime bottlenecks, =emu-gmm= eschews traditional dataframe paradigms (like =pandas=) inside the computation zone. Instead, the framework utilizes JAX-native named tensor architectures (=haliax=) and type-level axis verification (=jaxtyping=).
 
-This ensures that labels, dimension names, and missingness masks are fully integrated into JAX's PyTree layout, allowing structured datasets to pass seamlessly through =jit=, =vmap=, and automatic differentiation boundaries.
+This ensures that labels, dimension names, and missingness masks are fully integrated into JAX's PyTree layout, allowing structured datasets to pass seamlessly through =jit=, =vmap=, and automatic differentiation boundaries. Pandas-labelled tensors remain available at the I/O boundary (load, save, summarise) via the workspace's =jax-pandas-bridge= utilities; they do not enter the hot path.
 
 ** Axis Specifications and Haliax Integration
 Dimensions are promoted from implicit integer indices to first-class compile-time constants. We define the foundational axis taxonomy for any estimation instance:
@@ -175,16 +236,27 @@ Dimensions are promoted from implicit integer indices to first-class compile-tim
 #+BEGIN_SRC python
 import haliax as ha
 
-Params  = ha.Axis("parameters", size=K)
-Moments = ha.Axis("moments", size=M)
-Obs     = ha.Axis("observations", size=N)
+Params       = ha.Axis("parameters",      size=K)
+ParamsDual   = ha.Axis("parameters_dual", size=K)
+Moments      = ha.Axis("moments",         size=M)
+MomentsDual  = ha.Axis("moments_dual",    size=M)
+Obs          = ha.Axis("observations",    size=N)
 #+END_SRC
 
-The structural components yield outputs mapped across these formal dimensions. For example, the Sample Jacobian mapping $G_X(\theta)$ is typed natively as a two-dimensional named array:
-\[ G_X: \Theta \to \text{ha.NamedArray}[\text{Moments}, \text{Params}] \]
+The =Dual= axes carry the /same size/ as their primary counterparts and are used as the second index of symmetric matrices ($\Lambda$, $\mathcal{I}$, parameter covariances). Naming both indices of a symmetric matrix with the same string causes =ha.dot= to alias the contraction and silently produce wrong results --- the dual-name convention prevents that pitfall.
 
-When computing the sample information metric, manual axis tracking and matrix transpositions are completely eliminated. The framework contracts dimensions algorithmically by matching axis names:
-\[ \mathcal{I}_X(\hat{\theta}) = \text{ha.dot}(\text{Moments}, G_X, \text{ha.dot}(\text{Moments}, \Lambda_X, G_X)) \]
+The structural components yield outputs mapped across these formal dimensions. The Sample Jacobian is typed natively as a two-dimensional named array:
+\[ G_X : \Theta \to \text{ha.NamedArray}[\text{Moments}, \text{Params}] \]
+
+The weighting matrix is typed as:
+\[ \Lambda_X : \Theta \to \text{ha.NamedArray}[\text{Moments}, \text{MomentsDual}] \]
+
+Computing the sample information metric requires renaming the duplicated axes of $G$ before contraction:
+\[ \tilde G_X = G_X.\text{rename}(\{\text{Moments}: \text{MomentsDual},\; \text{Params}: \text{ParamsDual}\}) \]
+\[ \mathcal{I}_X(\hat\theta) = \text{ha.dot}(\text{Moments},\, G_X,\, \text{ha.dot}(\text{MomentsDual},\, \Lambda_X,\, \tilde G_X)) \]
+producing a =NamedArray[Params, ParamsDual]= naturally, without further renaming.
+
+Changing $K$, $M$, or $N$ between runs triggers JIT recompilation; JAX's shape-signature cache amortises the cost across repeated estimations at the same dimensions, so the recompile bites only at the start of a parameter / moment sweep.
 
 ** Labeled Missingness Masks as Tensor Fields
 Rather than relying on floating-point =NaN= sentinels that contaminate the automatic differentiation tape, the missingness layout is captured as a dedicated boolean structure mapped directly over the named axes:
