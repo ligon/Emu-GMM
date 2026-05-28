@@ -2,6 +2,8 @@
 #+SUBTITLE: A companion theoretical note to docs/design.org
 #+AUTHOR: Ethan Ligon
 #+OPTIONS: toc:nil num:t todo:nil |:t minlevel:1
+#+bibliography: ~/bibtex/main.bib
+#+bibliography: refs.bib
 
 * Section 1: Scope and Setting
 
@@ -55,7 +57,7 @@ The continuous-mapping theorem applied to the ratio yields the result. $\square$
 Under MCAR and REG,
 \[ \sup_{\theta \in \mathcal{N}} \|\bar m_X(\theta) - m(\theta)\| \xrightarrow{p} 0. \]
 
-/Proof sketch./ The pointwise convergence in Lemma 1 extends to uniform convergence by the standard Glivenko-Cantelli argument applied to the iid sequence $\{(D_i, X_i)\}$, using the integrable envelope $\bar\psi$ and continuity of $\psi$ in $\theta$. See Newey & McFadden (1994, Lemma 2.4). $\square$
+/Proof sketch./ The pointwise convergence in Lemma 1 extends to uniform convergence by the standard Glivenko-Cantelli argument applied to the iid sequence $\{(D_i, X_i)\}$, using the integrable envelope $\bar\psi$ and continuity of $\psi$ in $\theta$. See [cite/t:@newey-mcfadden94 Lemma 2.4]. $\square$
 
 ---
 
@@ -123,13 +125,13 @@ Define
 ** Theorem 4 (Consistency of $\hat\theta_N$)
 Under MCAR, REG, and ID, with the conditions of Proposition 1 holding at $\theta_0$, $\hat\theta_N \xrightarrow{p} \theta_0$.
 
-/Proof sketch./ Standard extremum-estimator argument (Newey & McFadden 1994, Theorem 2.6). Uniform convergence of $\bar m_X(\theta)$ to $m(\theta)$ on $\Theta$ is supplied by Theorem 1; convergence of $V_X(\theta)^{-1}$ to a positive-definite limit at $\theta_0$ is supplied by Theorem 3 and Proposition 1; identification (Assumption ID) supplies the unique-minimum condition for the population criterion. $\square$
+/Proof sketch./ Standard extremum-estimator argument [cite:@newey-mcfadden94 Theorem 2.6]. Uniform convergence of $\bar m_X(\theta)$ to $m(\theta)$ on $\Theta$ is supplied by Theorem 1; convergence of $V_X(\theta)^{-1}$ to a positive-definite limit at $\theta_0$ is supplied by Theorem 3 and Proposition 1; identification (Assumption ID) supplies the unique-minimum condition for the population criterion. $\square$
 
 ** Theorem 5 (Asymptotic Normality)
 Suppose, in addition to the conditions of Theorem 4, that $G(\theta_0) = E[\nabla_\theta \psi(X, \theta_0)]$ has full column rank $K$. Then
 \[ \sqrt{N}\,\bigl(\hat\theta_N - \theta_0\bigr) \xrightarrow{d} \mathcal{N}\!\Bigl(0,\ \bigl(G(\theta_0)'\, V^\text{lim}(\theta_0)^{-1}\, G(\theta_0)\bigr)^{-1}\Bigr). \]
 
-/Proof sketch./ Standard delta-method argument from the first-order condition (Newey & McFadden 1994, Theorem 3.4). The uniformly convergent gradient is supplied by REG part 3. $\square$
+/Proof sketch./ Standard delta-method argument from the first-order condition [cite:@newey-mcfadden94 Theorem 3.4]. The uniformly convergent gradient is supplied by REG part 3. $\square$
 
 ** Corollary (Information Matrix Identity)
 At the optimum, the asymptotic precision $\mathcal{I}(\theta_0) = G(\theta_0)'\, \Lambda^\text{lim}(\theta_0)\, G(\theta_0)$ with $\Lambda^\text{lim} = (V^\text{lim})^{-1}$ coincides with one-half of the population Hessian of $Q$ at $\theta_0$, as derived in =design.org= Section 1. The framework's inference engine computes $\hat G' \hat\Lambda \hat G$ directly rather than via a numerical Hessian of $Q_X$; the two are equivalent asymptotically but the direct form is cheaper and more numerically stable in finite samples.
@@ -139,7 +141,7 @@ Under the conditions of Theorem 5, with $V_X$ used unregularised:
 \[ Q_X(\hat\theta_N) \xrightarrow{d} \chi^2_{M-K}. \]
 When $V_X$ is replaced by $V_X^\star = V_X + \tau\,\operatorname{diag}(V_X)$ with $\tau$ held fixed across the sample path, the limit becomes a generalised chi-squared --- a weighted sum of $M - K$ independent $\chi^2_1$ variates whose weights are the eigenvalues of $(V^{\star,\text{lim}})^{-1}\, V^\text{lim}$ projected onto the orthogonal complement of the column space of $G(\theta_0)$. The weights coincide at 1 when $\tau = 0$, recovering $\chi^2_{M-K}$.
 
-/Proof sketch./ For the unregularised case, the standard argument (Hansen 1982) gives $\sqrt{N}\,\bar m_X(\hat\theta_N) \to_d \mathcal{N}(0, V^\text{lim} - G(G'\Lambda^\text{lim}G)^{-1}G')$ when $V_X$ is consistent for $V^\text{lim}/N$ and $\Lambda^\text{lim}$ is the matching precision; the quadratic form then has $\chi^2_{M-K}$ limit. For the regularised case, replace $\Lambda^\text{lim}$ by $\Lambda^{\star,\text{lim}}$ in the projection and apply the standard quadratic-form-in-normal-variables result. $\square$
+/Proof sketch./ For the unregularised case, the standard argument [cite:@hansen82] gives $\sqrt{N}\,\bar m_X(\hat\theta_N) \to_d \mathcal{N}(0, V^\text{lim} - G(G'\Lambda^\text{lim}G)^{-1}G')$ when $V_X$ is consistent for $V^\text{lim}/N$ and $\Lambda^\text{lim}$ is the matching precision; the quadratic form then has $\chi^2_{M-K}$ limit. For the regularised case, replace $\Lambda^\text{lim}$ by $\Lambda^{\star,\text{lim}}$ in the projection and apply the standard quadratic-form-in-normal-variables result. $\square$
 
 ---
 
@@ -149,7 +151,7 @@ When $V_X$ is replaced by $V_X^\star = V_X + \tau\,\operatorname{diag}(V_X)$ wit
 The unweighted iid sampling above extends to bounded weights $w_i$ provided the moment estimator is consistent for the targeted population expectation. The asymptotic theory carries through if $w_i$ is independent of $D_i$ and $X_i$ and has $E[w^2] < \infty$: $V^\text{lim}$ acquires a factor of $E[w^2]/E[w]^2$ in each entry, and the eigenstructure of the Hadamard factorisation is unchanged. The convention question of whether $w_i$ should be interpreted as the raw $1/\pi_i$ or as a survey weight normalised so that $E[w] = 1$ is orthogonal to the missingness asymptotics and resolved at the design level.
 
 ** MAR (Missing At Random)
-Under MAR --- $D$ independent of $\psi$ given some observable covariate $Z$ --- the unweighted pairwise-overlap estimator is biased. Consistency is restored by inverse-probability weighting (Robins-Rotnitzky-Zhao 1994): replace $D_{ij}$ in $\bar m$ with $D_{ij} / \hat p_j(Z_i)$, where $\hat p_j(Z_i)$ is a consistent estimator of $P(D_j = 1 \mid Z = Z_i)$. The resulting estimator is asymptotically normal under standard regularity conditions on the propensity-score model and is doubly robust in the usual sense. Architecturally, this is a new =CovarianceStrategy= holding the propensity-score model as state; no change to =Measure= or =StructuralModel= is required.
+Under MAR --- $D$ independent of $\psi$ given some observable covariate $Z$ --- the unweighted pairwise-overlap estimator is biased. Consistency is restored by inverse-probability weighting [cite:@robins-etal94]: replace $D_{ij}$ in $\bar m$ with $D_{ij} / \hat p_j(Z_i)$, where $\hat p_j(Z_i)$ is a consistent estimator of $P(D_j = 1 \mid Z = Z_i)$. The resulting estimator is asymptotically normal under standard regularity conditions on the propensity-score model and is doubly robust in the usual sense. Architecturally, this is a new =CovarianceStrategy= holding the propensity-score model as state; no change to =Measure= or =StructuralModel= is required.
 
 ** MNAR (Missing Not At Random)
 Under MNAR, no nonparametric consistency obtains without additional structure (a parametric model for the missingness mechanism, an exclusion restriction, or external validation data). Joint modelling of the missingness process and the structural moments is required. The =emu-gmm= framework as currently designed does not accommodate this without architectural extension.
@@ -186,7 +188,6 @@ These are deferred to a later revision.
 
 * References
 
-- Hansen, L. P. (1982). Large sample properties of generalized method of moments estimators. /Econometrica/, 50(4), 1029-1054.
-- Newey, W. K., & McFadden, D. (1994). Large sample estimation and hypothesis testing. In /Handbook of Econometrics/, vol. 4, ch. 36, 2111-2245.
-- Robins, J. M., Rotnitzky, A., & Zhao, L. P. (1994). Estimation of regression coefficients when some regressors are not always observed. /Journal of the American Statistical Association/, 89(427), 846-866.
-- Wooldridge, J. M. (2010). /Econometric Analysis of Cross Section and Panel Data/, 2nd ed., chs. 14, 18, 19. MIT Press.
+[cite/n:@wooldridge10]
+
+#+print_bibliography:

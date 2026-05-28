@@ -2,6 +2,8 @@
 #+SUBTITLE: Estimation via $\mathbb{E}_\mu$
 #+AUTHOR: Ethan Ligon
 #+OPTIONS: toc:nil num:t todo:nil |:t minlevel:1
+#+bibliography: ~/bibtex/main.bib
+#+bibliography: refs.bib
 
 * Section 1: Introduction and Population Primitives
 
@@ -149,7 +151,7 @@ The variance of the simulated moment estimator $\bar m_{sim}(\theta) = \mathbb{E
 When combined additively with $V_X$ in a matching SMM estimator, the result yields the standard $(1+1/S)$ inflation factor mechanically, without a separate correction.
 
 *** SyntheticContext
-Bundles =SyntheticMeasure= and =SyntheticCovariance= with the frozen $z_s$ batch and any auxiliary metadata (e.g., the choice of reparameterisation function). When combined with an =EmpiricalContext= in a matching estimator, this yields a Simulated Method of Moments estimator (McFadden 1989, Pakes-Pollard 1989) that is differentiable, JIT-compilable, and design-aware on the empirical side.
+Bundles =SyntheticMeasure= and =SyntheticCovariance= with the frozen $z_s$ batch and any auxiliary metadata (e.g., the choice of reparameterisation function). When combined with an =EmpiricalContext= in a matching estimator, this yields a Simulated Method of Moments estimator [cite:@mcfadden89;@pakes-pollard89] that is differentiable, JIT-compilable, and design-aware on the empirical side.
 
 ** Architectural Utility of Data-Free Measures
 Decoupling the measure from physical data files introduces major diagnostic and theoretical capabilities at the design level:
@@ -295,7 +297,7 @@ with $\tau$ chosen to enforce a target condition number ceiling (default $\kappa
 
 Alternative regularisers are available as opt-in:
 - *Eigenvalue floor*: clip eigenvalues at $\epsilon\,\lambda_{\max}(V_\mu)$ via spectral decomposition. Transparent; $O(M^3)$.
-- *Higham nearest-PSD* (Higham 1988): project to the nearest positive semidefinite matrix in Frobenius norm. Most principled, slowest.
+- *Higham nearest-PSD* [cite:@higham88]: project to the nearest positive semidefinite matrix in Frobenius norm. Most principled, slowest.
 
 To avoid introducing non-smoothness into the objective surface, $\tau$ is selected once at an anchor point (first-stage $\hat\theta_1$ for =Fixed= / =Iterated=; a pilot evaluation for =ContinuouslyUpdated=) and held fixed thereafter. The chosen $\tau$, the achieved $\kappa(V_\mu^\star)$, and $\lambda_{\min}(V_\mu)/\lambda_{\max}(V_\mu)$ are logged at every $V$ refresh; a binding ridge is surfaced as a diagnostic flag rather than silently absorbed.
 
@@ -317,7 +319,7 @@ Under the null hypothesis that the parametric model is correctly specified, and 
 When the variance has been regularised, the limit is a weighted sum of chi-squared variates; the inference engine reports both the nominal and regularisation-adjusted critical values as described in the regularisation section above.
 
 ** Architectural Core Highlights
-1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the Hansen 1982 / Hayashi textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
+1. *No External Scalar Multipliers*: Because $V_\mu(\theta)$ represents the variance of the sample moment vector itself (scaling at $O(1/N)$) rather than the variance of an individual observation, the standard textbook $N$ multiplier is absorbed into the variance definition; $Q_X(\hat{\theta})$ converges to a $\chi^2$ natively. This is a convention choice rather than a free lunch --- it differs from the [cite/t:@hansen82] / Hayashi textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
 2. *Asymmetric Scale Resolution*: The interaction of the coordinate scaling inside $G_\mu(\theta)$ and the scaling inside $V_\mu(\theta)$ ensures that the sample information matrix properly weighs the relative data density across different variables without requiring listwise deletion.
 
 ** Open Theoretical Questions
