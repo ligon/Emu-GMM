@@ -38,8 +38,6 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 
 No =pandas= in the hot path. Pandas-labelled tensors are valid at the I/O boundary via the workspace's =jax-pandas-bridge=; the framework's =estimate(...)= consumes JAX arrays (and Haliax NamedArrays as a future enhancement).
 
----
-
 * Section 2: Module Layout
 
 #+BEGIN_SRC text
