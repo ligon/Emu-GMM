@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+.env/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Tangled scripts (Org-babel generates these on demand)
+examples/*.py
+
+# Coder session scaffolding
+.coder-session/
+
+# OS metadata
+.DS_Store
+Thumbs.db

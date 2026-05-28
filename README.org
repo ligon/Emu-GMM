@@ -1,0 +1,52 @@
+#+TITLE: emu-gmm
+#+SUBTITLE: Measure-theoretic GMM; estimation via $\mathbb{E}_\mu$
+#+AUTHOR: Ethan Ligon
+#+OPTIONS: toc:nil num:nil
+
+=emu-gmm= is a JAX-native framework for Generalized Method of Moments estimation. The framework is named for the operator at its centre: =emu= reads as $\mathbb{E}_\mu$, the expectation under a measure $\mu$.  One operator interface --- implemented against empirical, analytical, or synthetic measures --- drives sample estimation, identification analysis, and simulation-based inference through a single computational pipeline.
+
+The most important architectural commitment is that variance construction is orthogonal to integration: $\mathbb{E}_\mu[\psi]$ is a property of the measure; $V_\mu(\theta)$ is a property of a separate =CovarianceStrategy= that can be swapped (iid vs cluster-robust vs replicate-weight) without changing what is being integrated.
+
+* Status
+
+Pre-alpha; v0.1.0a0.  The architecture is documented; implementation is just beginning.  See =docs/= for the design specification, the MCAR asymptotic theory, and the v1 API sketch.
+
+* Documents
+
+- =docs/design.org= --- architecture specification.
+- =docs/mcar-asymptotics.org= --- companion theoretical note; consistency, asymptotic normality, and PD properties of the pairwise-overlap estimator under MCAR.
+- =docs/api-sketch.org= --- v1 API surface; module layout, types, and a worked Euler-equation example.
+- =docs/refs.bib= --- project-local bibliography (entries not in =~/bibtex/main.bib=).
+
+* Setup
+
+Requires Python >= 3.11 and [[https://python-poetry.org/][Poetry]].
+
+#+begin_src shell
+make setup
+#+end_src
+
+This runs =poetry install= and creates =.venv/= in the project root.  Activate with =direnv allow= or =poetry shell=.
+
+* Development
+
+#+begin_src shell
+make check         # lint + black + mypy + tests
+make quick-check   # same but skips slow tests
+make test          # pytest only
+#+end_src
+
+* Layout
+
+#+begin_example
+docs/                 design and theoretical specifications
+src/emu_gmm/          implementation (in progress)
+tests/                test suite
+Makefile              build automation
+pyproject.toml        Poetry configuration
+poetry.lock           pinned dependencies (committed)
+#+end_example
+
+* License
+
+[[file:LICENSE.org][CC-BY-NC-SA-4.0]].
