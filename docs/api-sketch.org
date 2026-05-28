@@ -5,13 +5,14 @@
 
 * Section 1: Scope and Conventions
 
-This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run an empirical structural-GMM estimation end-to-end and to round-trip a known-truth identification check against an analytical context.
+This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run a structural-GMM estimation end-to-end --- against a synthetic generator, a closed-form analytical population, or real empirical data --- through a single operator interface.
 
 ** In Scope (v1)
 - =StructuralModel= as a callable; user-supplied plain function or =@jdc.pytree_dataclass=.
+- =SyntheticMeasure= over a frozen PRNG-key batch with a user-supplied sampler. Sampler may or may not depend on $\theta$.
 - =EmpiricalMeasure= over a sample with per-coordinate missingness mask and pweighted observations.
 - =AnalyticalMeasure= for closed-form populations (no quadrature library yet --- closed-form integrators only).
-- =CovarianceStrategy= implementations: =IIDCovariance=, =ClusteredCovariance=, =AnalyticalCovariance=.
+- =CovarianceStrategy= implementations: =SyntheticCovariance=, =IIDCovariance=, =ClusteredCovariance=, =AnalyticalCovariance=.
 - =WeightingStrategy=: =Identity=, =Fixed=, =ContinuouslyUpdated= (default). =Iterated= deferred --- CU subsumes it.
 - =RegularizationStrategy=: =DiagonalTikhonov= only.
 - =Optimizer= protocol with =optimistix_lm()= default; =scipy_lm()= adapter for the non-JIT-pure fallback.
@@ -19,7 +20,7 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 - =EstimationResult= with provenance and a v1 =Diagnostics= dataclass.
 
 ** Deferred to v2+
-- =SyntheticMeasure= / =SyntheticCovariance= (CRN, reparameterisation, $(1+1/S)$).
+- *SMM matching* --- combining =EmpiricalMeasure= and =SyntheticMeasure= in one moment vector, including the $(1+1/S)$ asymptotic-variance inflation. v1 supports each measure independently but does not combine them.
 - =StratifiedCovariance=, =ReplicateWeightCovariance=.
 - =Iterated= weighting (subsumed by CU for v1 purposes).
 - =EigenvalueFloor= and =NearestPSD= regularisers.
@@ -47,10 +48,12 @@ emu_gmm/
     types.py               # protocols, type aliases, result/diagnostics types
     measures/
         __init__.py
+        synthetic.py       # SyntheticMeasure
         empirical.py       # EmpiricalMeasure
         analytical.py      # AnalyticalMeasure
     covariance/
         __init__.py
+        synthetic.py       # SyntheticCovariance (Monte Carlo variance)
         iid.py             # IIDCovariance (empirical, pairwise-overlap)
         clustered.py       # ClusteredCovariance (empirical, cluster totals)
         analytical.py      # AnalyticalCovariance (closed-form V)
@@ -155,6 +158,26 @@ class AnalyticalMeasure:
 
 The user is responsible for the analytical expression; v1 does not include a quadrature engine.
 
+*** SyntheticMeasure
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class SyntheticMeasure:
+    """Generator-backed measure. The sampler produces n_sim observations
+    from a frozen PRNG key (Common Random Numbers). The sampler may
+    depend on theta (genuine SMM-style generator) or ignore it (the
+    Euler demo case where the data-generating process is exogenous);
+    the framework's AD treats both uniformly."""
+    key: jax.Array                                     # frozen PRNGKey
+    n_sim: int = jdc.static_field()
+    sampler: Callable[[jax.Array, ParamsLike], Float[Array, "n_sim D"]]
+
+    # expectation: vmap psi over the n_sim simulated draws and average.
+    # jacobian: jax.jacfwd of the expectation; AD threads through both
+    # the sampler (if it depends on theta) and psi.
+#+END_SRC
+
+In v1 the =SyntheticMeasure= is the natural self-contained demo path: no external data file is required, the moment estimator is deterministic in $\theta$ (CRN), and the same operator interface (=expectation=, =jacobian=) drives the estimator. Combining a =SyntheticMeasure= with an =EmpiricalMeasure= for SMM matching --- with the $(1+1/S)$ inflation factor in the inference engine --- is v2.
+
 ** CovarianceStrategy (Protocol)
 #+BEGIN_SRC python
 class CovarianceStrategy(Protocol):
@@ -196,6 +219,23 @@ class AnalyticalCovariance:
     """User-supplied closed-form V(theta) under the population."""
     covariance_fn: Callable[[StructuralModel, ParamsLike], Float[Array, "M M"]]
 #+END_SRC
+
+*** SyntheticCovariance (Monte Carlo)
+#+BEGIN_SRC python
+@jdc.pytree_dataclass
+class SyntheticCovariance:
+    """Monte Carlo variance of the simulated moment estimator.
+
+        V_sim(theta) = (1/n_sim) * (E_z[psi psi'] - E_z[psi] E_z[psi]')
+                       evaluated over the frozen draws.
+
+    Scales consistently with the other strategies as the variance of the
+    sample moment estimator (not the per-draw variance)."""
+    # No state; the variance is constructed from the measure's draws and
+    # the StructuralModel at evaluation time.
+#+END_SRC
+
+The $(1+1/S)$ inflation that distinguishes SMM from GMM appears only when a =SyntheticContext= is /combined/ with an =EmpiricalContext= in a matching estimator (v2). Pure-synthetic v1 estimation has no inflation factor.
 
 ** WeightingStrategy
 #+BEGIN_SRC python
@@ -342,13 +382,19 @@ def estimate(
 
 * Section 5: Worked Example --- Consumption Euler Equation
 
+The v1 demo uses =SyntheticMeasure=: a generator simulates $(c_t, c_{t+1}, r)$ tuples on demand, and the framework estimates $(\beta, \gamma)$ from the moment condition. This is the architecturally clean way to exercise the pipeline end-to-end without external data, and it commits the framework to the same operator interface ($\mathbb{E}_\mu[\,\cdot\,]$) it will use against real surveys later.
+
+For the Euler equation the sampler doesn't /need/ to depend on $\theta$: the consumption-and-return process is exogenous to preferences, so $f(z; \theta) = f(z)$. The =SyntheticMeasure= interface accepts this degenerate case; AD through the sampler returns zero and the residual gradient flows entirely through $\psi$. Genuine $\theta$-dependent samplers (SMM matching, indirect inference, where the structural parameters enter the simulator) work the same way and are useful when there's an =EmpiricalMeasure= on the other side --- that combination is v2.
+
+** v1 Demo: SyntheticMeasure with Pure Simulator
 End-to-end code that compiles against the v1 API:
 
 #+BEGIN_SRC python
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 from emu_gmm import (
-    estimate, EmpiricalMeasure, ClusteredCovariance, ContinuouslyUpdated,
+    estimate, SyntheticMeasure, SyntheticCovariance, ContinuouslyUpdated,
     DiagonalTikhonov, optimistix_lm,
 )
 
@@ -365,19 +411,31 @@ def euler_residual(x, theta):
         theta.beta * (c_next / c) ** (-theta.gamma) * (1 + r) - 1.0
     ])
 
-# 3. Construct the empirical context.
-measure = EmpiricalMeasure(
-    x=cex_data,                          # shape (N, 3)
-    mask=cex_mask,                       # shape (N, 1); all 1s if complete
-    weights=cex_pweights,                # shape (N,)
-)
+# 3. Define the data-generating process.
+#    Log consumption growth ~ N(MU, SIGMA**2); return rate constant at R.
+#    Sampler ignores theta in this Euler case (Mode C with degenerate
+#    theta-dependence). Same API surface as a genuinely theta-dependent
+#    simulator; AD through the sampler returns zero here.
+MU, SIGMA, R = 0.02, 0.10, 0.03
+N_SIM = 10_000
 
-covariance = ClusteredCovariance(
-    cluster_ids=cex_psu_ids,             # shape (N,)
-    n_clusters=int(cex_psu_ids.max() + 1),
-)
+def consumption_sampler(key, theta):
+    # Returns shape (N_SIM, 3): (c_t, c_{t+1}, r) for each draw.
+    growth = jnp.exp(MU + SIGMA * jax.random.normal(key, (N_SIM,)))
+    c_t = jnp.ones(N_SIM)                  # normalise c_t = 1; only c_{t+1}/c_t matters
+    c_next = growth
+    r = jnp.full(N_SIM, R)
+    return jnp.stack([c_t, c_next, r], axis=-1)
 
-# 4. Estimate.
+# 4. Construct the synthetic context.
+measure = SyntheticMeasure(
+    key=jax.random.PRNGKey(0),            # frozen for CRN
+    n_sim=N_SIM,
+    sampler=consumption_sampler,
+)
+covariance = SyntheticCovariance()
+
+# 5. Estimate.
 result = estimate(
     model=euler_residual,
     measure=measure,
@@ -385,10 +443,14 @@ result = estimate(
     weighting=ContinuouslyUpdated(),
     regularization=DiagonalTikhonov(kappa_target=1e6),
     optimizer=optimistix_lm(rtol=1e-8),
-    theta_init=EulerParams(beta=0.95, gamma=2.0),
+    theta_init=EulerParams(beta=0.90, gamma=1.5),
 )
 
-# 5. Inspect.
+# 6. Inspect. With MU=0.02, SIGMA=0.10, R=0.03 fixed, the moment condition
+#    beta * E[(c'/c)^{-gamma}] * (1+R) = 1 has a one-dimensional locus in
+#    (beta, gamma) -- the moment is just-identified, not point-identified.
+#    The diagnostics taxonomy in design.org Section 5.4 should flag this
+#    (gradient zero on a curve; identification failure, not numerical).
 print(f"beta = {result.theta_hat.beta:.4f}")
 print(f"gamma = {result.theta_hat.gamma:.4f}")
 print(f"J-stat = {result.J_stat:.3f}  (dof={result.J_dof}, p={result.J_pvalue:.3f})")
@@ -397,21 +459,20 @@ if result.diagnostics.binding_ridge:
     print(f"WARNING: regularization tau={result.diagnostics.tau_realised:.4f} was binding")
 #+END_SRC
 
-** Identification round-trip variant
+To get a properly identified system, add a second moment --- for instance a return-on-equity Euler condition with an excess-return instrument --- so $M > K$. The demo is structured to demonstrate the pipeline rather than recover textbook parameter values; the identification failure surfaced by the diagnostics is itself useful information.
+
+** Variant: Analytical Round-Trip
+The same model can be paired with an =AnalyticalMeasure= for a closed-form identification check that avoids Monte Carlo noise entirely:
+
 #+BEGIN_SRC python
 from emu_gmm import AnalyticalMeasure, AnalyticalCovariance
 
 # Same model and EulerParams as above.
-
-# Suppose c_{t+1}/c_t is lognormal(mu, sigma^2) and r is constant.
-# The analytical moment condition is then computable in closed form:
+# E[(c_{t+1}/c_t)^{-gamma}] = exp(-gamma*MU + 0.5*gamma**2 * SIGMA**2)
 def analytical_expectation(model, theta):
-    # E[(c_t+1/c_t)^-gamma] = exp(-gamma*mu + 0.5*gamma^2 sigma^2) by lognormal MGF
     log_growth_mgf = jnp.exp(-theta.gamma * MU + 0.5 * theta.gamma**2 * SIGMA**2)
     return jnp.array([theta.beta * log_growth_mgf * (1 + R) - 1.0])
 
-# At the true theta_0 = (beta_0, gamma_0) chosen so the moment vanishes,
-# estimate() should return theta_0 (up to floating-point tolerance).
 analytic_measure = AnalyticalMeasure(expectation_fn=analytical_expectation)
 analytic_cov = AnalyticalCovariance(
     covariance_fn=lambda model, theta: closed_form_V(theta),  # user-supplied
@@ -422,14 +483,18 @@ round_trip = estimate(
     measure=analytic_measure,
     covariance=analytic_cov,
     weighting=ContinuouslyUpdated(),
-    theta_init=EulerParams(beta=0.90, gamma=1.5),  # arbitrary start
+    theta_init=EulerParams(beta=0.90, gamma=1.5),
 )
 
-# round_trip.theta_hat should equal theta_0 to within quadrature/FP tolerance.
-# round_trip.diagnostics.final_objective should be ~ 0.
-# Non-zero indicates identification or numerical-conditioning trouble,
-# per the diagnostics taxonomy in design.org Section 5.4.
+# round_trip.diagnostics.final_objective should be ~ 0 at any point on
+# the just-identified locus. Non-zero indicates numerical-conditioning
+# trouble. The framework's diagnostics taxonomy (design.org Section 5.4)
+# distinguishes "gradient zero but Q > 0" (identification failure) from
+# "gradient nonzero at known root" (numerical instability).
 #+END_SRC
+
+** Variant: EmpiricalMeasure (ready for real data)
+=EmpiricalMeasure= remains in v1 for when real survey data is in hand. The signature is identical to what the v1 demo uses for =SyntheticMeasure=, with =x=, =mask=, and =weights= replacing the =sampler= callable. Cluster-robust standard errors via =ClusteredCovariance= require an additional =cluster_ids= array. This variant isn't exercised in the bundled tests --- those rely on synthetic data via =SyntheticMeasure= --- but the path is available and will be the production target once data arrives.
 
 ---
 
@@ -455,18 +520,20 @@ These are real questions that need answers before code can be written, not archi
 
 7. *Optimistix interaction with `vmap`.* If a user wants to =vmap= a sweep over hyperparameter grids (e.g., fitting the same model to many cuts of the data), the optimiser must be vmappable. =optimistix= supports this. =scipy_lm= does not. Document the constraint when the scipy adapter is used.
 
+8. *Sampler signature for =SyntheticMeasure=.* The signature is =sampler(key, theta) -> (n_sim, D)=, but for $\theta$-independent samplers (the Euler demo case) the user is forced to accept and ignore =theta=. Acceptable boilerplate for v1; revisit if the pattern proves annoying in practice. A polymorphic overload accepting =sampler(key)= would require runtime introspection of the user's callable.
+
 ---
 
 * Section 7: Next Steps
 
 1. Confirm the v1 surface here matches expectations; iterate if not.
-2. Bibfile (=docs/refs.bib=) inspection and convention reconciliation.
-3. Implementation: =emu_gmm/= package per the layout in Section 2. Order:
+2. Implementation: =emu_gmm/= package per the layout in Section 2. Order:
    1. =_internal/params.py= + =_internal/axes.py= --- parameter conversion and axis taxonomy.
-   2. =measures/empirical.py= + =covariance/iid.py= --- minimum viable estimation.
+   2. =measures/synthetic.py= + =covariance/synthetic.py= --- the v1 demo path; Monte Carlo expectation and variance.
    3. =weighting.py= + =regularization.py= + =_internal/cholesky.py= --- the inner pipeline.
-   4. =optimizer.py= --- optimistix adapter.
+   4. =optimizer.py= --- optimistix adapter (+ scipy fallback).
    5. =estimator.py= + =diagnostics.py= --- the entry point.
-   6. =covariance/clustered.py= --- cluster-robust path.
-   7. =measures/analytical.py= + =covariance/analytical.py= --- identification round-trip.
-4. Tests: the Euler example above should be a runnable acceptance test in two modes (empirical with synthetic data; analytical round-trip).
+   6. =measures/analytical.py= + =covariance/analytical.py= --- identification round-trip path.
+   7. =measures/empirical.py= + =covariance/iid.py= --- empirical estimation surface (ready for real data).
+   8. =covariance/clustered.py= --- cluster-robust empirical path.
+3. Tests: the Euler example above runs end-to-end as a synthetic-context acceptance test; the analytical round-trip is a second acceptance test. Empirical-side machinery has unit tests against synthetic data fed via =EmpiricalMeasure=, but no acceptance test until real data lands.
