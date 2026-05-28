@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pytest
-
 from emu_gmm._internal import params as params_mod
 
 

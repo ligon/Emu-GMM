@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import haliax as ha
 import pytest
-
 from emu_gmm._internal import axes
 
 

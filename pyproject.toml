@@ -63,10 +63,16 @@ line-length = 88
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+extend-exclude = [".claude", ".coder-session", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
-ignore = ["E501"]
+# E501 (line length): handled by black.
+# F722 (syntax error in forward annotation), F821 (undefined name in
+# forward annotation), UP037 (remove quotes from type annotation):
+# all false positives on jaxtyping shape strings like
+# Float[Array, "M K"]. Suppressed project-wide.
+ignore = ["E501", "F722", "F821", "UP037"]
 
 [tool.ruff.lint.isort]
 known-third-party = ["jax", "jaxtyping", "haliax", "jax_dataclasses", "optimistix", "numpy", "scipy"]

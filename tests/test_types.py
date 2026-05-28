@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pandas as pd
 import pytest
-
 from emu_gmm import types as t
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import labels as labels_mod
@@ -93,9 +92,7 @@ def _make_result() -> t.EstimationResult:
     sigma = labels_mod.label_matrix(
         jnp.array([[0.01, 0.001], [0.001, 0.02]]), Params, ParamsDual
     )
-    v_x = labels_mod.label_matrix(
-        jnp.eye(3) * 0.1, Moments, MomentsDual
-    )
+    v_x = labels_mod.label_matrix(jnp.eye(3) * 0.1, Moments, MomentsDual)
     n_j = labels_mod.label_vector(jnp.array([100.0, 100.0, 100.0]), Moments)
     m_res = labels_mod.label_vector(jnp.array([1e-4, -2e-4, 5e-5]), Moments)
 

@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.linalg
-
 from emu_gmm._internal import cholesky as cho
 
 

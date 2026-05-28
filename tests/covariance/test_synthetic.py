@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pytest
-
 from emu_gmm.covariance.synthetic import SyntheticCovariance
 from emu_gmm.measures.synthetic import SyntheticMeasure
 

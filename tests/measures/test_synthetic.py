@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pytest
-
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm.measures.synthetic import SyntheticMeasure
 

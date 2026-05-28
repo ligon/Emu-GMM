@@ -87,8 +87,7 @@ def unflatten_params(
     flat_arr = jnp.asarray(flat)
     if flat_arr.ndim != 1:
         raise ValueError(
-            f"unflatten_params: flat array must be 1-D, got shape "
-            f"{flat_arr.shape}"
+            f"unflatten_params: flat array must be 1-D, got shape " f"{flat_arr.shape}"
         )
     n = treedef.num_leaves
     if int(flat_arr.shape[0]) != n:
@@ -127,8 +126,7 @@ def param_names(params: Any) -> list[str]:
     """
     if not dataclasses.is_dataclass(params):
         raise TypeError(
-            f"param_names expects a dataclass instance, got "
-            f"{type(params).__name__}"
+            f"param_names expects a dataclass instance, got " f"{type(params).__name__}"
         )
     names: list[str] = []
     for field in dataclasses.fields(params):

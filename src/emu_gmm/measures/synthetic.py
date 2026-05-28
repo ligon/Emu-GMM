@@ -15,7 +15,8 @@ for the architectural context.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import haliax as ha
 import jax
@@ -55,9 +56,9 @@ class SyntheticMeasure:
     """
 
     key: jax.Array
-    n_sim: int = jdc.static_field()
+    n_sim: int = jdc.static_field()  # type: ignore[attr-defined]
     sampler: Callable[[jax.Array, ParamsLike], Float[Array, "n_sim D"]] = (
-        jdc.static_field()
+        jdc.static_field()  # type: ignore[attr-defined]
     )
 
     def _draws(self, theta: ParamsLike) -> Float[Array, "n_sim D"]:
@@ -83,9 +84,7 @@ class SyntheticMeasure:
         psi_batch = jax.vmap(psi_at)(x_batch)
         return jnp.mean(psi_batch, axis=0)
 
-    def jacobian(
-        self, psi: StructuralModel, theta: ParamsLike
-    ) -> Float[Array, "M K"]:
+    def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
         """Jacobian of ``expectation`` with respect to ``theta``.
 
         Computed by routing ``theta`` through ``flatten_params`` and

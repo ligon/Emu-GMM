@@ -37,7 +37,7 @@ try:
 
     _HAVE_PANDAS = True
 except ImportError:  # pragma: no cover
-    pd = None  # type: ignore[assignment]
+    pd = None
     _HAVE_PANDAS = False
 
 
@@ -112,7 +112,9 @@ def normalise_x(
                 f"{[a.name for a in x_in.axes]}"
             )
         # First axis presumed to be observations; second to be variables.
-        cols = (x_in.axes[1].name,) if False else tuple([x_in.axes[1].name])  # placeholder
+        cols = (
+            (x_in.axes[1].name,) if False else tuple([x_in.axes[1].name])
+        )  # placeholder
         # Actually a NamedArray's axes are AXIS-LEVEL names (one per dim),
         # not per-coordinate names. For per-coordinate names we'd need
         # a different mechanism. For v1, treat the axis name as the
@@ -203,9 +205,7 @@ def normalise_mask(
     else:
         arr = jnp.asarray(mask_in)
     if arr.shape != (n, m):
-        raise ValueError(
-            f"normalise_mask: expected shape ({n}, {m}), got {arr.shape}"
-        )
+        raise ValueError(f"normalise_mask: expected shape ({n}, {m}), got {arr.shape}")
     return arr.astype(jnp.float32)
 
 
@@ -244,7 +244,7 @@ def resolve_moment_names(
     ValueError
         If a supplied source has the wrong length.
     """
-    if _is_haliax_named(model_return):
+    if isinstance(model_return, ha.NamedArray):
         moments_axes = [a for a in model_return.axes if a.name == axes_mod.MOMENTS_NAME]
         if moments_axes:
             ax = moments_axes[0]
@@ -291,9 +291,7 @@ def label_matrix(
         If axis sizes don't match the array.
     """
     if arr.ndim != 2:
-        raise ValueError(
-            f"label_matrix: expected 2-D array, got shape {arr.shape}"
-        )
+        raise ValueError(f"label_matrix: expected 2-D array, got shape {arr.shape}")
     if arr.shape != (row_axis.size, col_axis.size):
         raise ValueError(
             f"label_matrix: array shape {arr.shape} does not match axes "
@@ -316,9 +314,7 @@ def label_vector(
         Haliax axis. Size must match ``arr.shape[0]``.
     """
     if arr.ndim != 1:
-        raise ValueError(
-            f"label_vector: expected 1-D array, got shape {arr.shape}"
-        )
+        raise ValueError(f"label_vector: expected 1-D array, got shape {arr.shape}")
     if int(arr.shape[0]) != axis.size:
         raise ValueError(
             f"label_vector: array length {int(arr.shape[0])} does not match "

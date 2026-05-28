@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import pytest
-
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import labels
 
@@ -36,9 +35,7 @@ class TestLabelContext:
 
 class TestNormaliseX:
     def test_pandas_dataframe(self):
-        df = pd.DataFrame(
-            {"c_t": [1.0, 1.1], "c_tp1": [1.05, 1.08], "r": [0.03, 0.04]}
-        )
+        df = pd.DataFrame({"c_t": [1.0, 1.1], "c_tp1": [1.05, 1.08], "r": [0.03, 0.04]})
         df.index.name = "hh_id"
         arr, cols, idx_name = labels.normalise_x(df)
         assert arr.shape == (2, 3)
@@ -71,9 +68,7 @@ class TestNormaliseX:
     def test_haliax_named(self):
         Obs = ha.Axis("obs", 3)
         Vars = ha.Axis("vars", 2)
-        named = ha.named(
-            jnp.arange(6).reshape(3, 2).astype(jnp.float32), (Obs, Vars)
-        )
+        named = ha.named(jnp.arange(6).reshape(3, 2).astype(jnp.float32), (Obs, Vars))
         arr, cols, idx_name = labels.normalise_x(named)
         assert arr.shape == (3, 2)
         assert idx_name == "obs"
@@ -123,9 +118,7 @@ class TestNormaliseMask:
 
 class TestResolveMomentNames:
     def test_positional_fallback(self):
-        names = labels.resolve_moment_names(
-            model_return=None, kwarg_names=None, m=3
-        )
+        names = labels.resolve_moment_names(model_return=None, kwarg_names=None, m=3)
         assert names == ("m_0", "m_1", "m_2")
 
     def test_kwarg_wins_over_positional(self):
@@ -136,9 +129,7 @@ class TestResolveMomentNames:
 
     def test_kwarg_wrong_length_raises(self):
         with pytest.raises(ValueError, match="length 1, expected 2"):
-            labels.resolve_moment_names(
-                model_return=None, kwarg_names=("euler",), m=2
-            )
+            labels.resolve_moment_names(model_return=None, kwarg_names=("euler",), m=2)
 
     def test_model_return_wins_over_kwarg(self):
         Moments = axes_mod.moments_axis(2)

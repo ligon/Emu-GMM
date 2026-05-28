@@ -25,7 +25,8 @@ constructed once at the end of an estimation and not threaded through
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 import haliax as ha
 import jax.numpy as jnp
@@ -107,9 +108,7 @@ class RegularizationStrategy(Protocol):
     :mod:`emu_gmm.regularization`.
     """
 
-    def apply(
-        self, V: Float[Array, "M M"]
-    ) -> tuple[Float[Array, "M M"], float]: ...
+    def apply(self, V: Float[Array, "M M"]) -> tuple[Float[Array, "M M"], float]: ...
 
 
 @runtime_checkable
@@ -201,7 +200,7 @@ class EstimationResult:
     measure: Measure
     covariance: CovarianceStrategy
     weighting: WeightingStrategy
-    regularization: Optional[RegularizationStrategy]
+    regularization: RegularizationStrategy | None
 
     # Diagnostics
     diagnostics: Diagnostics
