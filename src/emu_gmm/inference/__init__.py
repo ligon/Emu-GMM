@@ -3,7 +3,7 @@
 This subpackage hosts weak-identification-robust and specification
 diagnostics that operate on a hypothesised :math:`\\theta_0` plus the
 same ``(model, measure, covariance)`` triple used by
-:func:`emu_gmm.estimate`.
+:func:`emu_gmm.estimate`, plus resampling-based standard-error helpers.
 
 Currently exposed:
 
@@ -20,10 +20,17 @@ Currently exposed:
   models with NaN-masked moments and few clusters. See
   :mod:`emu_gmm.inference.wild_bootstrap` for the algorithm description
   and v1 scope.
+- :func:`cluster_bootstrap` and :class:`ClusterBootstrapResult` ---
+  refit-based cluster bootstrap helper for
+  :class:`~emu_gmm.covariance.clustered.ClusteredCovariance`.
 """
 
 from __future__ import annotations
 
+from emu_gmm.inference.cluster_bootstrap import (
+    ClusterBootstrapResult,
+    cluster_bootstrap,
+)
 from emu_gmm.inference.j_test import JTestResult, j_test
 from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
 from emu_gmm.inference.wild_bootstrap import (
@@ -32,9 +39,11 @@ from emu_gmm.inference.wild_bootstrap import (
 )
 
 __all__ = [
+    "ClusterBootstrapResult",
     "JTestResult",
     "KStatisticResult",
     "WildBootstrapResult",
+    "cluster_bootstrap",
     "j_test",
     "k_statistic",
     "moment_wild_bootstrap",

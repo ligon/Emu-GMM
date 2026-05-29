@@ -53,9 +53,11 @@ from emu_gmm.diagnostics import (
 )
 from emu_gmm.estimator import estimate
 from emu_gmm.inference import (
+    ClusterBootstrapResult,
     JTestResult,
     KStatisticResult,
     WildBootstrapResult,
+    cluster_bootstrap,
     j_test,
     k_statistic,
     moment_wild_bootstrap,
@@ -116,6 +118,8 @@ __all__ = [
     "optimistix_lm",
     "scipy_lm",
     # Inference helpers
+    "cluster_bootstrap",
+    "ClusterBootstrapResult",
     "j_test",
     "JTestResult",
     # Result / diagnostics types
