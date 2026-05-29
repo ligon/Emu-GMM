@@ -23,7 +23,8 @@ Section 7 for the architectural spec.
 
 from __future__ import annotations
 
-from typing import Any
+import inspect
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -242,11 +243,52 @@ def estimate(
             return regularization.apply_fixed_tau(V, tau_anchor)
         return V + tau_anchor * jnp.diag(jnp.diag(V))
 
+    # Detect whether the measure / covariance combination supports the
+    # shared ``expectation_and_contributions`` primitive. When the
+    # measure exposes ``moments_and_contributions``
+    # (:class:`~emu_gmm.measures.synthetic.SyntheticMeasure`) or
+    # ``expectation_and_contributions``
+    # (:class:`~emu_gmm.measures.empirical.EmpiricalMeasure`) AND the
+    # paired covariance strategy accepts ``cached_intermediates`` in
+    # its ``covariance`` signature, the residual closure runs
+    # ``vmap(psi)`` once and threads the cached payload into the
+    # covariance strategy --- halving the per-step ``vmap`` cost (see
+    # ``docs/reviews/v1x-performance-review.org`` findings #4 and #5).
+    # Third-party covariance strategies that do not advertise
+    # ``cached_intermediates`` are routed through the back-compat path
+    # that calls ``measure.expectation`` and ``covariance.covariance``
+    # separately, preserving the v1 contract.
+    try:
+        _cov_sig = inspect.signature(covariance.covariance)
+        _cov_accepts_cache = "cached_intermediates" in _cov_sig.parameters
+    except (TypeError, ValueError):  # builtins / C-extensions
+        _cov_accepts_cache = False
+    _emp_cache_method = getattr(measure, "expectation_and_contributions", None)
+    _syn_cache_method = getattr(measure, "moments_and_contributions", None)
+    if _cov_accepts_cache and _emp_cache_method is not None:
+        _cache_method = _emp_cache_method
+    elif _cov_accepts_cache and _syn_cache_method is not None:
+        _cache_method = _syn_cache_method
+    else:
+        _cache_method = None
+
     # Residual closure: produces the whitened moment vector y.
     def residual_fn(theta_flat: Float[Array, " K"]) -> Float[Array, " M"]:
         theta = params_mod.unflatten_params(theta_flat, treedef)
-        m = measure.expectation(model, theta)
-        V = covariance.covariance(model, theta, measure)
+        if _cache_method is not None:
+            cached = _cache_method(model, theta)
+            m = cached[0]
+            # The minimal :class:`CovarianceStrategy` protocol does not
+            # advertise ``cached_intermediates``; concrete IID / Clustered
+            # / Synthetic strategies extend the signature with the kwarg
+            # and the signature probe above gates this call. ``Any``
+            # cast bypasses mypy's protocol-narrow check.
+            V = cast(Any, covariance).covariance(
+                model, theta, measure, cached_intermediates=cached
+            )
+        else:
+            m = measure.expectation(model, theta)
+            V = covariance.covariance(model, theta, measure)
         V_star = _apply_anchored(V)
         y = weighting.whitening_residual(m, V_star, theta)
         return y
@@ -255,55 +297,157 @@ def estimate(
     theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)
     theta_hat = params_mod.unflatten_params(theta_hat_flat, treedef)
 
-    # Inference quantities at theta_hat. Use the *anchored* tau here too,
-    # so reported diagnostics are consistent with the surface the
-    # optimiser actually saw.
-    m_hat = jnp.asarray(measure.expectation(model, theta_hat))
-    V_hat = covariance.covariance(model, theta_hat, measure)
-    V_star_hat = _apply_anchored(V_hat)
-    tau_hat = tau_anchor
-
-    # G = E_mu[grad_theta psi] : (M, K).
-    G_hat = measure.jacobian(model, theta_hat)
-    if hasattr(G_hat, "array"):
-        G_hat = G_hat.array
-    G_hat = jnp.asarray(G_hat)
-
-    # Sigma_theta = (G' V^{-1} G)^{-1} via Cholesky of V_star_hat.
-    # Solve L Z = G for Z; then info_matrix = Z' Z.
-    L = cho.cholesky(V_star_hat)
-    Z = jax.scipy.linalg.solve_triangular(L, G_hat, lower=True)  # (M, K)
-    info_matrix = Z.T @ Z  # (K, K)
-    # Use jnp.linalg.inv for v1; under-identified problems will yield NaN.
-    Sigma_theta_arr = jnp.linalg.inv(info_matrix)
-
-    # J-stat. Keep as a 0-d JAX array so the result flows through
-    # ``jit`` / ``vmap``; users cast at the eager boundary (e.g. inside
-    # ``to_pandas``).
-    y_hat = weighting.whitening_residual(m_hat, V_star_hat, theta_hat)
-    J_stat = jnp.sum(y_hat * y_hat)
+    # ------------------------------------------------------------------
+    # Post-optimum inference. The previous structure walked the
+    # residual pipeline (expectation -> covariance -> regularisation ->
+    # Cholesky -> whitened residual) three times in eager mode at
+    # ``theta_hat`` --- once via ``measure.expectation`` +
+    # ``covariance.covariance``, once via ``weighting.whitening_residual``,
+    # and once more via ``jax.grad(half_obj)`` which re-traces
+    # ``residual_fn`` from scratch. At the typical v1 sizes this
+    # totalled ~0.4s of cumulative small-op dispatch on every call
+    # (see ``docs/reviews/v1x-performance-review.org`` finding #6).
+    #
+    # We hoist the entire raw inference pipeline into a single jit'd
+    # helper so XLA fuses the pipeline once. The estimate() entry point
+    # calls it exactly one time at the end. ``J_dof`` is a Python int
+    # (it's static, derived from the static ``M`` and ``K``) and the
+    # only-defined-when-overidentified branch for ``J_pvalue`` is
+    # resolved with a static guard outside the jit'd body --- ``J_dof``
+    # cannot be traced as a chi^2 dof argument anyway, and the
+    # weighted-chi^2 adjustment is only meaningful when overidentified.
+    half_M_minus_K_overidentified = (M - K) > 0
     J_dof = max(M - K, 0)
-    if J_dof > 0:
-        # ``jax.scipy.stats.chi2.sf`` is traceable; ``scipy.stats.chi2.sf``
-        # is not. The dof is a static Python int (it comes from M and K,
-        # which are static closure variables).
-        J_pvalue = jax.scipy.stats.chi2.sf(J_stat, J_dof)
-        # Regularisation-adjusted p-value: weighted-chi^2 limit per
-        # mcar-asymptotics.org Theorem 6. Computed unconditionally and
-        # surfaced as ``J_pvalue_adjusted`` so users can compare against
-        # the nominal value; we then pick between them based on whether
-        # the ridge is binding.
-        J_pvalue_adjusted_unbinding = J_pvalue  # tau ~= 0 case
-        J_pvalue_adjusted_binding = regularization_adjusted_pvalue(
-            J_stat, V_hat, V_star_hat, G_hat
+
+    def _compute_inference(
+        theta_flat: Float[Array, " K"],
+    ) -> tuple[
+        Float[Array, "K K"],  # Sigma_theta_arr
+        Float[Array, "M M"],  # V_star_hat (== V_X data)
+        Float[Array, ""],  # J_stat
+        Float[Array, ""],  # kappa_V
+        Float[Array, ""],  # tau_hat
+        Float[Array, "K K"],  # info_matrix (kept for diagnostics parity)
+        Float[Array, " M"],  # m_hat
+        Float[Array, "M M"],  # L_hat (Cholesky factor of V_star_hat)
+        Float[Array, " M"],  # y_hat
+        Float[Array, "M K"],  # G_hat
+        Float[Array, "M M"],  # V_hat (unregularised; needed for adjusted p)
+        Float[Array, ""],  # cholesky_pivot_min
+        Float[Array, ""],  # final_gradient_norm
+        Float[Array, ""],  # J_pvalue
+        Float[Array, ""],  # J_pvalue_adjusted
+    ]:
+        """One-shot raw inference pipeline at ``theta_flat``.
+
+        Folds the moment evaluation, covariance, anchored ridge,
+        Cholesky factorisation, whitened residual, Jacobian,
+        ``Sigma_theta = (G' V^{-1} G)^{-1}``, J-statistic, p-values,
+        and the half-objective gradient norm into one jit-compiled
+        block. All the loose pieces the surrounding code used to
+        materialise via separate eager calls are returned together so
+        the caller can wrap them in labelled outputs / diagnostics.
+        """
+        theta_local = params_mod.unflatten_params(theta_flat, treedef)
+        # Re-walk the cached residual path so the post-optimum pass
+        # benefits from the same fusion the optimiser saw.
+        if _cache_method is not None:
+            cached = _cache_method(model, theta_local)
+            m_local = cached[0]
+            V_local = cast(Any, covariance).covariance(
+                model, theta_local, measure, cached_intermediates=cached
+            )
+        else:
+            m_local = measure.expectation(model, theta_local)
+            V_local = covariance.covariance(model, theta_local, measure)
+        V_star_local = _apply_anchored(V_local)
+        # Cholesky of V_star (single factorisation reused below).
+        L_local = cho.cholesky(V_star_local)
+        # Whitened residual via the weighting policy (CU recomputes the
+        # Cholesky from V_star_local --- under jit XLA folds the
+        # duplicate Cholesky into the same kernel).
+        y_local = weighting.whitening_residual(m_local, V_star_local, theta_local)
+        J_local = jnp.sum(y_local * y_local)
+        # Jacobian.
+        G_local_raw = measure.jacobian(model, theta_local)
+        if hasattr(G_local_raw, "array"):
+            G_local_raw = G_local_raw.array
+        G_local = jnp.asarray(G_local_raw)
+        # Sigma_theta via the Cholesky factor of V_star_local.
+        Z_local = jax.scipy.linalg.solve_triangular(L_local, G_local, lower=True)
+        info_local = Z_local.T @ Z_local
+        Sigma_local = jnp.linalg.inv(info_local)
+        kappa_local = jnp.linalg.cond(V_star_local)
+        pivot_min_local = jnp.min(jnp.diag(L_local))
+
+        # Half-objective gradient at the optimum --- folds into the
+        # same fused kernel under jit, eliminating the standalone
+        # ``jax.grad(half_obj)`` retrace.
+        def _half(tf):
+            theta_inner = params_mod.unflatten_params(tf, treedef)
+            if _cache_method is not None:
+                inner_cached = _cache_method(model, theta_inner)
+                m_inner = inner_cached[0]
+                V_inner = cast(Any, covariance).covariance(
+                    model, theta_inner, measure, cached_intermediates=inner_cached
+                )
+            else:
+                m_inner = measure.expectation(model, theta_inner)
+                V_inner = covariance.covariance(model, theta_inner, measure)
+            V_star_inner = _apply_anchored(V_inner)
+            y_inner = weighting.whitening_residual(m_inner, V_star_inner, theta_inner)
+            return 0.5 * jnp.sum(y_inner * y_inner)
+
+        grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
+        # J-test p-values (both kept as traced 0-d arrays even in the
+        # under-/just-identified case so the return signature is
+        # invariant under jit).
+        if half_M_minus_K_overidentified:
+            J_pv = jax.scipy.stats.chi2.sf(J_local, J_dof)
+            J_pv_adj_binding = regularization_adjusted_pvalue(
+                J_local, V_local, V_star_local, G_local
+            )
+            binding_flag = jnp.asarray(_binding_ridge(regularization, tau_anchor))
+            J_pv_adj = jnp.where(binding_flag, J_pv_adj_binding, J_pv)
+        else:
+            J_pv = jnp.asarray(jnp.nan)
+            J_pv_adj = jnp.asarray(jnp.nan)
+        return (
+            Sigma_local,
+            V_star_local,
+            J_local,
+            kappa_local,
+            tau_anchor,
+            info_local,
+            jnp.asarray(m_local),
+            L_local,
+            y_local,
+            G_local,
+            V_local,
+            pivot_min_local,
+            grad_norm_local,
+            J_pv,
+            J_pv_adj,
         )
-        binding_flag = jnp.asarray(_binding_ridge(regularization, tau_hat))
-        J_pvalue_adjusted = jnp.where(
-            binding_flag, J_pvalue_adjusted_binding, J_pvalue_adjusted_unbinding
-        )
-    else:
-        J_pvalue = jnp.asarray(jnp.nan)  # under- or just-identified
-        J_pvalue_adjusted = jnp.asarray(jnp.nan)
+
+    _compute_inference_jit = jax.jit(_compute_inference)
+    (
+        Sigma_theta_arr,
+        V_star_hat,
+        J_stat,
+        kappa_V,
+        tau_hat,
+        info_matrix,
+        m_hat,
+        L,
+        y_hat,
+        G_hat,
+        V_hat,
+        cholesky_pivot_min,
+        final_gradient_norm,
+        J_pvalue,
+        J_pvalue_adjusted,
+    ) = _compute_inference_jit(theta_hat_flat)
 
     # Labelled outputs.
     Params = axes_mod.params_axis(K)
@@ -314,22 +458,10 @@ def estimate(
     Sigma_theta = labels_mod.label_matrix(Sigma_theta_arr, Params, ParamsDual)
     V_X = labels_mod.label_matrix(V_star_hat, Moments, MomentsDual)
 
-    # Diagnostics. All scalars are kept as 0-d JAX arrays so the
-    # ``estimate`` call traces cleanly under ``jit`` / ``vmap``. The
-    # eager-only ``to_pandas`` / ``__repr__`` boundary casts to Python
-    # floats; user code that does ``float(result.J_stat)`` continues to
-    # work because 0-d JAX arrays are float()-castable outside of trace.
-    kappa_V = jnp.linalg.cond(V_star_hat)
+    # Scalar diagnostics produced by the jit'd pipeline are kept as
+    # 0-d JAX arrays; the eager-only ``to_pandas`` / ``__repr__``
+    # boundary casts to Python floats.
     binding_ridge = _binding_ridge(regularization, tau_hat)
-    cholesky_pivot_min = jnp.min(jnp.diag(L))
-
-    # Gradient of (1/2)||y||^2 at the optimum.
-    def half_obj(tf: Float[Array, " K"]) -> Float[Array, ""]:
-        y = residual_fn(tf)
-        return 0.5 * jnp.sum(y * y)
-
-    final_grad = jax.grad(half_obj)(theta_hat_flat)
-    final_gradient_norm = jnp.linalg.norm(final_grad)
 
     N_j_arr = _effective_n_per_moment(measure, theta_hat, M)
 
@@ -338,7 +470,10 @@ def estimate(
     # (CLAUDE.md commitment 5); cond_info reports its condition number
     # along three views (raw / data_only / exclude_gauge). For v1
     # data_only and exclude_gauge alias to raw; #7 (penalty hook) and
-    # the v2 manifold epic will distinguish them.
+    # the v2 manifold epic will distinguish them. ``compute_cond_info``
+    # operates on the *already-computed* ``G_hat`` and ``V_star_hat``
+    # returned from the jit'd block, so the cost is a small extra
+    # Cholesky + matmul --- not a full residual pipeline retrace.
     cond_info = compute_cond_info(G_hat, V_star_hat)
 
     # Optimiser-health summary. step_norm / accepted_step_count are

@@ -149,6 +149,79 @@ class EmpiricalMeasure:
     mask: Float[Array, "N M"]
     weights: Float[Array, " N"]
 
+    def expectation_and_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> tuple[
+        Float[Array, " M"],
+        Float[Array, "N M"],
+        Float[Array, "N M"],
+        Float[Array, " M"],
+    ]:
+        """Shared primitive: expectation + intermediates in one vmap pass.
+
+        Returns the per-coordinate mean ``m`` together with the
+        ``(N, M)`` mask-safe residual matrix ``psi_safe``, the pairwise
+        weight mask ``weight_mask = mask * weights[:, None]``, and the
+        per-coordinate effective sample size ``N_j``. This is the
+        single source of truth for the empirical hot path: the
+        :class:`~emu_gmm.covariance.iid.IIDCovariance` and
+        :class:`~emu_gmm.covariance.clustered.ClusteredCovariance`
+        strategies accept these as ``cached_intermediates`` and skip
+        their own ``vmap(psi)`` pass, eliminating a ~72 MB transient
+        rebuild and a redundant doubled ``psi`` evaluation per
+        ``residual_fn`` call at typical empirical sizes
+        (``N=60k, M=50, float64``).
+
+        Parameters
+        ----------
+        psi : :data:`StructuralModel`
+            Per-observation residual function.
+        theta : :data:`ParamsLike`
+            User parameter dataclass.
+
+        Returns
+        -------
+        m : (M,) jax array
+            The per-coordinate mean
+            ``(1 / N_j) * sum_i d_ij * w_i * psi_j(x_i, theta)``.
+        psi_safe : (N, M) jax array
+            Per-observation residual matrix with masked-out cells
+            zeroed via :func:`jax.numpy.where`. NaN-safe under the
+            "double where" pattern documented on :meth:`expectation`.
+        weight_mask : (N, M) jax array
+            ``mask * weights[:, None]``, the pairwise per-coordinate
+            mass that combined with ``psi_safe`` reproduces both the
+            moment sum and any downstream second-moment construction.
+        N_j : (M,) jax array
+            Per-coordinate effective sample size ``sum_i d_ij * w_i``,
+            the same quantity used by both the numerator normalisation
+            and the diagnostics layer.
+        """
+        # Pre-sanitise the data array so that NaN cells (e.g., a
+        # non-holder's return) cannot enter the user's psi or its
+        # gradient. The "double where" pattern: evaluate psi on a
+        # NaN-free surrogate, then mask the result. Without this
+        # guard, reverse-mode AD would propagate the NaN through the
+        # untaken branch of any jnp.where on the output side
+        # (cotangent flow ignores branch selection).
+        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+
+        def psi_at(x):
+            return _to_plain(psi(x, theta))
+
+        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+        # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
+        # the weight multiplication. Without this guard, NaN at a
+        # masked-out cell would propagate (0 * NaN = NaN in JAX).
+        mask_bool = self.mask > 0.0  # (N, M)
+        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
+        # Pairwise per-coordinate mass: d_ij * w_i, broadcast across moments.
+        weight_mask = self.mask * self.weights[:, None]  # (N, M)
+        numer = jnp.sum(weight_mask * psi_safe, axis=0)  # (M,)
+        N_j = jnp.sum(weight_mask, axis=0)  # (M,)
+        m = _safe_divide(numer, N_j)
+        return m, psi_safe, weight_mask, N_j
+
     def expectation(
         self, psi: StructuralModel, theta: ParamsLike
     ) -> Float[Array, " M"]:
@@ -174,30 +247,10 @@ class EmpiricalMeasure:
             each coordinate ``j``; coordinates with ``N_j = 0`` map to
             zero rather than NaN.
         """
-
-        # Pre-sanitise the data array so that NaN cells (e.g., a
-        # non-holder's return) cannot enter the user's psi or its
-        # gradient. The "double where" pattern: evaluate psi on a
-        # NaN-free surrogate, then mask the result. Without this
-        # guard, reverse-mode AD would propagate the NaN through the
-        # untaken branch of any jnp.where on the output side
-        # (cotangent flow ignores branch selection).
-        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
-
-        def psi_at(x):
-            return _to_plain(psi(x, theta))
-
-        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
-        # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
-        # the weight multiplication. Without this guard, NaN at a
-        # masked-out cell would propagate (0 * NaN = NaN in JAX).
-        mask_bool = self.mask > 0.0  # (N, M)
-        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
-        # Pairwise per-coordinate mass: d_ij * w_i, broadcast across moments.
-        weight_mask = self.mask * self.weights[:, None]  # (N, M)
-        numer = jnp.sum(weight_mask * psi_safe, axis=0)  # (M,)
-        denom = jnp.sum(weight_mask, axis=0)  # (M,)
-        return _safe_divide(numer, denom)
+        m, _psi_safe, _weight_mask, _N_j = self.expectation_and_contributions(
+            psi, theta
+        )
+        return m
 
     def moment_contributions(
         self, psi: StructuralModel, theta: ParamsLike
