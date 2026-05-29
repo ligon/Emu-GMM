@@ -25,15 +25,19 @@ constructed once at the end of an estimation and not threaded through
 from __future__ import annotations
 
 import dataclasses
+import functools
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
 import haliax as ha
 import jax.numpy as jnp
 import pandas as pd
+import scipy.stats
 from jaxtyping import Array, Float
 
-from emu_gmm._internal.labels import LabelContext
+from emu_gmm._internal import axes as axes_mod
+from emu_gmm._internal.labels import LabelContext, label_vector
+from emu_gmm._internal.params import flatten_params
 
 # A user's parameter PyTree: typically a @jdc.pytree_dataclass. We use
 # Any in the protocol signatures because users define their own types;
@@ -249,11 +253,83 @@ class EstimationResult:
     # to_pandas() for DataFrame construction.
     labels: LabelContext
 
+    @functools.cached_property
+    def standard_errors(self) -> ha.NamedArray:
+        """Asymptotic standard errors of ``theta_hat``.
+
+        Computed as ``sqrt(diag(Sigma_theta))``, returned as a
+        :class:`haliax.NamedArray` on the ``parameters`` axis so
+        downstream code can index by parameter name. Cached on first
+        access.
+
+        Negative diagonal entries (which can arise in pathological
+        finite-sample regimes when ``info_matrix`` was numerically
+        non-PD) propagate as :data:`numpy.nan` rather than complex
+        values, matching the convention in :func:`numpy.sqrt` with
+        ``where=arr>=0``.
+        """
+        diag = jnp.diag(jnp.asarray(self.Sigma_theta.array))
+        # Guard against tiny negatives from finite-precision round-off:
+        # clip exactly to 0 before sqrt.
+        se = jnp.sqrt(jnp.where(diag >= 0.0, diag, jnp.nan))
+        Params = axes_mod.params_axis(int(se.shape[0]))
+        return label_vector(se, Params)
+
+    @functools.cached_property
+    def coef_table(self) -> pd.DataFrame:
+        """Coefficient table: estimate, std error, t-stat, p-value.
+
+        A :class:`pandas.DataFrame` indexed by parameter name with four
+        columns:
+
+        - ``estimate``: ``theta_hat`` (flattened in PyTree-traversal
+          order to align with ``Sigma_theta``'s ``parameters`` axis).
+        - ``std_error``: ``sqrt(diag(Sigma_theta))`` (see
+          :attr:`standard_errors`).
+        - ``t_stat``: ``estimate / std_error`` (NaN where std_error is
+          0 or NaN).
+        - ``p_value``: two-sided large-sample p-value under standard
+          normal reference (``2 * (1 - Phi(|t_stat|))``), matching the
+          asymptotic-normality of the GMM estimator.
+
+        Cached on first access. The flattening of ``theta_hat`` uses
+        :func:`emu_gmm._internal.params.flatten_params`, which requires
+        all parameter leaves to be 0-d scalars (the v1 contract).
+        """
+        import numpy as _np
+
+        param_names = list(self.labels.param_names)
+        estimate, _treedef = flatten_params(self.theta_hat)
+        estimate_arr = jnp.asarray(estimate)
+        se_arr = jnp.asarray(self.standard_errors.array)
+        # Where se_arr is non-positive or NaN, t_stat and p_value go
+        # to NaN rather than dividing by zero. ``jnp.where`` evaluates
+        # both branches under jit, so the divide itself is harmless;
+        # we just mask the result.
+        safe_se = jnp.where((se_arr > 0.0) & jnp.isfinite(se_arr), se_arr, jnp.nan)
+        t_stat = estimate_arr / safe_se
+        # Two-sided p-value under N(0,1). scipy is already a dep (see
+        # estimator.py); evaluate on the host side via numpy.
+        t_host = _np.asarray(t_stat)
+        p_value = 2.0 * scipy.stats.norm.sf(_np.abs(t_host))
+        return pd.DataFrame(
+            {
+                "estimate": _np.asarray(estimate_arr),
+                "std_error": _np.asarray(se_arr),
+                "t_stat": t_host,
+                "p_value": p_value,
+            },
+            index=param_names,
+        )
+
     def to_pandas(self) -> dict[str, pd.DataFrame | pd.Series]:
         """Materialise labelled fields as pandas objects.
 
         Returns a dict with keys:
 
+        - ``"coefficients"``: :class:`pandas.DataFrame` with columns
+          ``estimate, std_error, t_stat, p_value``, indexed by
+          parameter name. Same object as :attr:`coef_table`.
         - ``"Sigma_theta"``: :class:`pandas.DataFrame` indexed by
           parameter names on both axes.
         - ``"V_X"``: :class:`pandas.DataFrame` indexed by moment names
@@ -309,6 +385,7 @@ class EstimationResult:
         )
 
         return {
+            "coefficients": self.coef_table,
             "Sigma_theta": sigma_df,
             "V_X": v_df,
             "N_j": n_j,

@@ -66,7 +66,7 @@ from emu_gmm.types import (
     StructuralModel,
     WeightingStrategy,
 )
-from emu_gmm.weighting import ContinuouslyUpdated, Fixed, Identity
+from emu_gmm.weighting import CUE, ContinuouslyUpdated, Fixed, Identity
 
 try:
     __version__ = version("emu-gmm")
@@ -90,6 +90,7 @@ __all__ = [
     "Identity",
     "Fixed",
     "ContinuouslyUpdated",
+    "CUE",
     # Regularization
     "DiagonalTikhonov",
     # Optimisers
