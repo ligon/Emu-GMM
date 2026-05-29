@@ -213,7 +213,39 @@ class Diagnostics:
     # Cholesky
     cholesky_pivot_min: Float[Array, ""]
 
-    # Optimisation
+    # Optimisation.
+    #
+    # ``final_objective_data`` is the *data-only* criterion value
+    # :math:`Q_\\mu(\\hat\\theta) = \\|L^{-1}\\, m_\\mu(\\hat\\theta)\\|^2`
+    # at the optimum --- equivalently :math:`J_{\\mathrm{stat}}`. This is
+    # what the GMM literature and ``J_stat`` use. Reported regardless of
+    # whether a :class:`PenaltyStrategy` is supplied.
+    #
+    # ``final_objective_full`` is the *full* criterion the optimiser
+    # actually minimised, including any in-objective penalty contribution
+    # :math:`p(\\hat\\theta)` (issue #7 hook). With ``penalty=None`` it
+    # equals ``final_objective_data``; with a penalty supplied it is
+    # strictly :math:`\\geq` ``final_objective_data``.
+    #
+    # Note that :data:`OptimizerInfo.final_objective` reports the
+    # *half* norm :math:`\\tfrac{1}{2}\\|r\\|^2` (the standard NLLS
+    # convention for the LM-minimised value), so under a penalty
+    # ``optimizer_info.final_objective == 0.5 * final_objective_full``.
+    # ``final_objective_full`` is reported *unhalved* so it stays on
+    # the same scale as ``J_stat`` and ``final_objective_data``.
+    #
+    # ``final_objective`` is retained as an alias for
+    # ``final_objective_data`` for backwards compatibility with code
+    # written against earlier versions; new code should prefer the
+    # explicit split.
+    #
+    # ``final_gradient_norm`` is :math:`\\|\\nabla_\\theta
+    # \\tfrac{1}{2} \\|r(\\hat\\theta)\\|^2\\|` where ``r`` is the
+    # *residual the optimiser saw*. When ``penalty`` is supplied this
+    # includes the penalty contribution from the appended
+    # :math:`\\sqrt{p(\\theta)}` row (so the reported norm matches the
+    # convergence criterion the LM solver actually used); when
+    # ``penalty=None`` it is the unpenalised data-only gradient norm.
     final_objective: Float[Array, ""]
     final_gradient_norm: Float[Array, ""]
 
@@ -224,17 +256,34 @@ class Diagnostics:
     # Provenance
     optimizer_info: OptimizerInfo
 
+    # Split of the optimised criterion into data-only and full
+    # components. With ``penalty=None`` both equal ``final_objective``;
+    # with a penalty supplied ``final_objective_data == J_stat`` while
+    # ``final_objective_full == J_stat + p(theta_hat)``. Defaults to
+    # NaN so the dataclass can be constructed from older callsites that
+    # only supply ``final_objective``; the framework's
+    # ``build_diagnostics`` always populates them explicitly.
+    final_objective_data: Float[Array, ""] = dataclasses.field(
+        default_factory=lambda: jnp.asarray(jnp.nan)
+    )
+    final_objective_full: Float[Array, ""] = dataclasses.field(
+        default_factory=lambda: jnp.asarray(jnp.nan)
+    )
+
     # Hessian condition trio at theta_hat. See ``docs/design.org`` and
     # CLAUDE.md commitment 5: the information matrix is ``G' Lambda G``
     # (never numerical Hessian); ``cond_info`` reports the condition
     # number of that matrix.
     #
     # Keys:
-    #   - ``'raw'``: cond(G' Lambda G), Lambda = (V*)^{-1} at theta_hat.
-    #   - ``'data_only'``: cond(G' Lambda G) with the penalty
-    #     contribution suppressed. In v1 no ``PenaltyStrategy`` is
-    #     wired, so this equals ``'raw'``; once #7 (penalty hook) lands,
-    #     subtract the penalty Hessian contribution and recompute.
+    #   - ``'raw'``: cond(G' Lambda G + (1/2) H_p) at theta_hat with
+    #     Lambda = (V*)^{-1}. When no :class:`PenaltyStrategy` is
+    #     supplied H_p == 0 and this reduces to cond(G' Lambda G).
+    #   - ``'data_only'``: cond(G' Lambda G) with the penalty Hessian
+    #     contribution excluded. This is the asymptotic-inference
+    #     identifier (delta-method variance is built from the data
+    #     Hessian alone) and what you want when the penalty is a
+    #     stabiliser rather than a prior.
     #   - ``'exclude_gauge'``: alias to ``'raw'`` for v1. Once the v2
     #     manifold support lands, this will project out the
     #     K*(K-1)/2 PSDFixedRank gauge nullspace before computing the
@@ -244,8 +293,12 @@ class Diagnostics:
     # Lightweight optimiser-health summary at termination. Keys:
     #   - ``'iters'``: iteration / step count
     #     (mirrors ``optimizer_info.steps``).
-    #   - ``'grad_norm'``: ``||grad (1/2)||y||^2||`` at theta_hat
-    #     (mirrors ``final_gradient_norm``).
+    #   - ``'grad_norm'``: ``||grad (1/2) ||r||^2||`` at theta_hat,
+    #     where ``r`` is the *full* residual vector the optimiser saw.
+    #     When ``penalty`` is supplied this includes the penalty
+    #     contribution from the appended ``sqrt(p+eps)`` row; when
+    #     ``penalty=None`` it reduces to ``||grad (1/2) ||y||^2||``.
+    #     Mirrors ``final_gradient_norm``.
     #   - ``'step_norm'``: norm of the last accepted step, if the
     #     backend exposes it; otherwise ``None``.
     #   - ``'accepted_step_count'``: number of accepted (vs rejected)
@@ -433,6 +486,12 @@ class EstimationResult:
                 "tau_realised": float(jnp.asarray(self.diagnostics.tau_realised)),
                 "kappa_V": float(jnp.asarray(self.diagnostics.kappa_V)),
                 "final_objective": float(jnp.asarray(self.diagnostics.final_objective)),
+                "final_objective_data": float(
+                    jnp.asarray(self.diagnostics.final_objective_data)
+                ),
+                "final_objective_full": float(
+                    jnp.asarray(self.diagnostics.final_objective_full)
+                ),
             }
         )
 

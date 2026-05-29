@@ -44,6 +44,7 @@ from emu_gmm.diagnostics import (
     regularization_adjusted_pvalue,
 )
 from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -284,6 +285,7 @@ def estimate(
     optimizer: Optimizer | None = None,
     theta_init: ParamsLike,
     moment_names: tuple[str, ...] | None = None,
+    penalty: PenaltyStrategy | None = None,
 ) -> EstimationResult:
     """Estimate :math:`\\hat\\theta` by minimising
     :math:`Q_\\mu(\\theta) = \\| L_\\mu(\\theta)^{-1}\\, \\mathbb{E}_\\mu[\\psi(\\cdot,\\theta)] \\|^2`.
@@ -313,6 +315,12 @@ def estimate(
     moment_names : tuple of str, optional
         Override for moment labels. Precedence: model-return NamedArray
         > this kwarg > positional ``("m_0", "m_1", ...)``.
+    penalty : :class:`PenaltyStrategy`, optional
+        In-objective parameter penalty. When supplied, the criterion
+        becomes :math:`Q_{\\mu,\\mathrm{pen}}(\\theta) = Q_\\mu(\\theta) +
+        p(\\theta)` and the NLLS residual gets :math:`\\sqrt{p(\\theta)}`
+        appended so the LM Jacobian picks up the parameter-space ridge
+        via JAX AD. ``penalty=None`` preserves v1 behaviour bitwise.
 
     Returns
     -------
@@ -442,29 +450,66 @@ def estimate(
     # Residual closure: produces the whitened moment vector y. Built as
     # a factory so the iterated path can rebuild it per outer step with
     # a frozen :class:`Fixed`-weight closure over the current ``V_k``.
+    #
+    # When a penalty is supplied, append sqrt(p(theta)) as one extra row
+    # so the LM ||y||^2 surface absorbs the penalty without touching the
+    # solver. ``penalty=None`` keeps the residual shape and values
+    # bitwise identical to v1.
     def _make_residual_fn(
         weighting_for_solve: WeightingStrategy,
     ) -> Any:
-        def residual_fn(theta_flat: Float[Array, " K"]) -> Float[Array, " M"]:
-            theta = params_mod.unflatten_params(theta_flat, treedef)
-            if _cache_method is not None:
-                cached = _cache_method(model, theta)
-                m = cached[0]
-                # The minimal :class:`CovarianceStrategy` protocol does
-                # not advertise ``cached_intermediates``; concrete IID /
-                # Clustered / Synthetic strategies extend the signature
-                # with the kwarg and the signature probe above gates
-                # this call. ``Any`` cast bypasses mypy's protocol-narrow
-                # check.
-                V = cast(Any, covariance).covariance(
-                    model, theta, measure, cached_intermediates=cached
-                )
-            else:
-                m = measure.expectation(model, theta)
-                V = covariance.covariance(model, theta, measure)
-            V_star = _apply_anchored(V)
-            y = weighting_for_solve.whitening_residual(m, V_star, theta)
-            return y
+        if penalty is None:
+
+            def residual_fn(
+                theta_flat: Float[Array, " K"],
+            ) -> Float[Array, " M"]:
+                theta = params_mod.unflatten_params(theta_flat, treedef)
+                if _cache_method is not None:
+                    cached = _cache_method(model, theta)
+                    m = cached[0]
+                    # The minimal :class:`CovarianceStrategy` protocol
+                    # does not advertise ``cached_intermediates``;
+                    # concrete IID / Clustered / Synthetic strategies
+                    # extend the signature with the kwarg and the
+                    # signature probe above gates this call. ``Any``
+                    # cast bypasses mypy's protocol-narrow check.
+                    V = cast(Any, covariance).covariance(
+                        model, theta, measure, cached_intermediates=cached
+                    )
+                else:
+                    m = measure.expectation(model, theta)
+                    V = covariance.covariance(model, theta, measure)
+                V_star = _apply_anchored(V)
+                y = weighting_for_solve.whitening_residual(m, V_star, theta)
+                return y
+
+        else:
+
+            def residual_fn(
+                theta_flat: Float[Array, " K"],
+            ) -> Float[Array, " M"]:
+                theta = params_mod.unflatten_params(theta_flat, treedef)
+                if _cache_method is not None:
+                    cached = _cache_method(model, theta)
+                    m = cached[0]
+                    V = cast(Any, covariance).covariance(
+                        model, theta, measure, cached_intermediates=cached
+                    )
+                else:
+                    m = measure.expectation(model, theta)
+                    V = covariance.covariance(model, theta, measure)
+                V_star = _apply_anchored(V)
+                y = weighting_for_solve.whitening_residual(m, V_star, theta)
+                # The objective is ||y||^2 + p(theta); appending sqrt(p)
+                # as a residual row reproduces it exactly under ||.||^2.
+                # p is C^infty and >= 0, but sqrt(p) has a singular
+                # gradient where p = 0. We lift with a tiny floor so the
+                # LM Jacobian is finite at exact zero. The floor (1e-30)
+                # is far below float64 tolerance and dominated by any
+                # nonzero p.
+                p = penalty.penalty(theta)
+                extra = jnp.sqrt(p + 1e-30)
+                return jnp.concatenate([y, jnp.atleast_1d(extra)])
 
         return residual_fn
 
@@ -592,21 +637,17 @@ def estimate(
 
         # Half-objective gradient at the optimum --- folds into the
         # same fused kernel under jit, eliminating the standalone
-        # ``jax.grad(half_obj)`` retrace.
+        # ``jax.grad(half_obj)`` retrace. We compute ``0.5 * ||r||^2``
+        # by re-using the exact ``residual_fn`` the optimiser saw, so
+        # the reported gradient norm matches the LM convergence
+        # criterion bit-for-bit (and matches what users get when they
+        # reconstruct the residual by hand). When ``penalty`` is
+        # supplied the residual includes the appended sqrt(p+eps) row
+        # automatically; with ``penalty=None`` this reduces to the v1
+        # unpenalised data-only gradient norm.
         def _half(tf):
-            theta_inner = params_mod.unflatten_params(tf, treedef)
-            if _cache_method is not None:
-                inner_cached = _cache_method(model, theta_inner)
-                m_inner = inner_cached[0]
-                V_inner = cast(Any, covariance).covariance(
-                    model, theta_inner, measure, cached_intermediates=inner_cached
-                )
-            else:
-                m_inner = measure.expectation(model, theta_inner)
-                V_inner = covariance.covariance(model, theta_inner, measure)
-            V_star_inner = _apply_anchored(V_inner)
-            y_inner = weighting.whitening_residual(m_inner, V_star_inner, theta_inner)
-            return 0.5 * jnp.sum(y_inner * y_inner)
+            r = residual_fn(tf)
+            return 0.5 * jnp.sum(r * r)
 
         grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
         # J-test p-values (both kept as traced 0-d arrays even in the
@@ -673,18 +714,45 @@ def estimate(
     # boundary casts to Python floats.
     binding_ridge = _binding_ridge(regularization, tau_hat)
 
+    # Split the final objective into the *data* criterion and the
+    # *full* criterion (data + penalty). With penalty=None the two
+    # coincide and equal J_stat. With penalty supplied,
+    # final_objective_full = J_stat + p(theta_hat) and matches what
+    # ``optimizer_info.final_objective`` (== ||r||^2 at the optimum)
+    # reports.
+    if penalty is None:
+        final_objective_data = J_stat
+        final_objective_full = J_stat
+        penalty_hessian = None
+    else:
+        p_hat = penalty.penalty(theta_hat)
+        final_objective_data = J_stat
+        final_objective_full = J_stat + p_hat
+
+        # Penalty Hessian on the *flat* parameter axes: take the
+        # Hessian of theta_flat -> p(unflatten(theta_flat)). This is
+        # the natural (K, K) matrix to slot into the information-matrix
+        # split inside ``compute_cond_info``. The closure captures
+        # ``penalty`` and ``treedef`` from the outer scope; under jit
+        # this is a normal trace-time constant.
+        def _p_flat(tf: Float[Array, " K"]) -> Float[Array, ""]:
+            return penalty.penalty(params_mod.unflatten_params(tf, treedef))
+
+        penalty_hessian = jax.hessian(_p_flat)(theta_hat_flat)
+
     N_j_arr = _effective_n_per_moment(measure, theta_hat, M)
 
     # Hessian-condition trio (issue #10). G' Lambda G with
     # Lambda = (V_star_hat)^{-1} is the v1 information matrix
     # (CLAUDE.md commitment 5); cond_info reports its condition number
-    # along three views (raw / data_only / exclude_gauge). For v1
-    # data_only and exclude_gauge alias to raw; #7 (penalty hook) and
-    # the v2 manifold epic will distinguish them. ``compute_cond_info``
-    # operates on the *already-computed* ``G_hat`` and ``V_star_hat``
-    # returned from the jit'd block, so the cost is a small extra
-    # Cholesky + matmul --- not a full residual pipeline retrace.
-    cond_info = compute_cond_info(G_hat, V_star_hat)
+    # along three views (raw / data_only / exclude_gauge). When a
+    # ``penalty`` is supplied (issue #7), ``'data_only'`` excludes the
+    # penalty Hessian contribution while ``'raw'`` includes it; without
+    # a penalty all three views coincide. ``compute_cond_info`` operates
+    # on the *already-computed* ``G_hat`` and ``V_star_hat`` returned
+    # from the jit'd block, so the cost is a small extra Cholesky +
+    # matmul --- not a full residual pipeline retrace.
+    cond_info = compute_cond_info(G_hat, V_star_hat, penalty_hessian=penalty_hessian)
 
     # Optimiser-health summary. step_norm / accepted_step_count are
     # left as None because neither optimistix.LevenbergMarquardt nor
@@ -700,6 +768,8 @@ def estimate(
         binding_ridge=binding_ridge,
         cholesky_pivot_min=cholesky_pivot_min,
         final_objective=J_stat,
+        final_objective_data=final_objective_data,
+        final_objective_full=final_objective_full,
         final_gradient_norm=final_gradient_norm,
         N_j_array=N_j_arr,
         moment_residual_array=m_hat,

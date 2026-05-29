@@ -45,6 +45,8 @@ def build_diagnostics(
     optimizer_info: OptimizerInfo,
     cond_info: dict[str, float] | None = None,
     optimizer_health: dict[str, Any] | None = None,
+    final_objective_data: Any | None = None,
+    final_objective_full: Any | None = None,
 ) -> Diagnostics:
     """Assemble a :class:`Diagnostics` from raw estimator-pipeline values.
 
@@ -60,7 +62,14 @@ def build_diagnostics(
     final_objective, final_gradient_norm
         Scalar diagnostics produced during the estimation pipeline.
         May be Python scalars or 0-d JAX arrays; both are normalised to
-        :class:`jax.Array`.
+        :class:`jax.Array`. ``final_objective`` is the legacy alias for
+        ``final_objective_data``; see the split below.
+    final_objective_data, final_objective_full : optional
+        Split of the data-only criterion (``J_stat`` /
+        :math:`\\|y\\|^2`) and the full criterion the optimiser saw
+        (data plus any in-objective :class:`PenaltyStrategy`). When
+        omitted both default to ``final_objective`` so the unpenalised
+        path keeps a single value across the three fields.
     N_j_array : (M,) array
         Effective sample size per moment coordinate. For synthetic
         measures this is constant (``n_sim``); for empirical measures
@@ -83,11 +92,17 @@ def build_diagnostics(
     -------
     :class:`Diagnostics`
     """
+    if final_objective_data is None:
+        final_objective_data = final_objective
+    if final_objective_full is None:
+        final_objective_full = final_objective
     return Diagnostics(
         tau_realised=jnp.asarray(tau_realised),
         kappa_V=jnp.asarray(kappa_V),
         binding_ridge=jnp.asarray(binding_ridge),
         cholesky_pivot_min=jnp.asarray(cholesky_pivot_min),
+        final_objective_data=jnp.asarray(final_objective_data),
+        final_objective_full=jnp.asarray(final_objective_full),
         final_objective=jnp.asarray(final_objective),
         final_gradient_norm=jnp.asarray(final_gradient_norm),
         N_j=labels_mod.label_vector(jnp.asarray(N_j_array), moments_axis),
@@ -214,6 +229,7 @@ def regularization_adjusted_pvalue(
 def compute_cond_info(
     G: Float[Array, "M K"],
     V_star: Float[Array, "M M"],
+    penalty_hessian: Float[Array, "K K"] | None = None,
 ) -> dict[str, float]:
     """Condition number of the information matrix :math:`G' \\Lambda G`.
 
@@ -227,12 +243,17 @@ def compute_cond_info(
     The return value is a dict with three keys to mirror ManifoldGMM's
     ``compute_hessian_cond(data_only, exclude_gauge)`` (see issue #10):
 
-    - ``'raw'``: :math:`\\kappa(G' \\Lambda G)` as computed.
-    - ``'data_only'``: equals ``'raw'`` in v1. Once issue #7
-      (PenaltyStrategy hook) lands, the penalty Hessian contribution
-      should be subtracted before computing this number. Until then,
-      ``data_only == raw`` is the correct value because no penalty is
-      added to the information matrix in v1.
+    - ``'raw'``: :math:`\\kappa(G' \\Lambda G + \\tfrac{1}{2} H_p)`
+      --- the condition number of the *full* information matrix that
+      governs the curvature of the criterion the optimiser saw. When no
+      penalty is supplied :math:`H_p \\equiv 0` so this equals the
+      data-only number.
+    - ``'data_only'``: :math:`\\kappa(G' \\Lambda G)`, the data-only
+      information matrix with any in-objective :class:`PenaltyStrategy`
+      contribution excluded. This is the asymptotic-inference-relevant
+      quantity (delta-method variance is built from the data Hessian
+      alone) and the correct identifier proxy when the penalty is a
+      stabiliser rather than a prior.
     - ``'exclude_gauge'``: alias to ``'raw'`` for v1. The v2 manifold
       epic will reinterpret this as the condition of the information
       matrix projected onto the orthogonal complement of the gauge
@@ -246,6 +267,16 @@ def compute_cond_info(
     V_star : (M, M) array
         Regularised moment-variance matrix at :math:`\\hat\\theta`.
         Assumed symmetric PD.
+    penalty_hessian : (K, K) array, optional
+        :math:`H_p = \\nabla^2_\\theta p(\\hat\\theta)`, the Hessian of
+        the in-objective penalty at :math:`\\hat\\theta`. When supplied,
+        ``'raw'`` adds :math:`\\tfrac{1}{2} H_p` to the data information
+        matrix; ``'data_only'`` ignores it. The factor of one-half comes
+        from the NLLS embedding: the optimiser minimises
+        :math:`\\tfrac{1}{2}\\|r\\|^2 = \\tfrac{1}{2}(\\|y\\|^2 + p)`,
+        whose Hessian at the optimum (ignoring higher-order residual
+        curvature, the standard Gauss-Newton view) is
+        :math:`G' \\Lambda G + \\tfrac{1}{2} H_p`.
 
     Returns
     -------
@@ -259,22 +290,37 @@ def compute_cond_info(
     # used for Sigma_theta.
     L = jnp.linalg.cholesky(V_arr)
     Z = jax.scipy.linalg.solve_triangular(L, G_arr, lower=True)
-    info_matrix = Z.T @ Z
-    raw_arr = jnp.linalg.cond(info_matrix)
+    info_matrix_data = Z.T @ Z  # G' Lambda G, data-only.
+
+    # Data-only condition: never includes the penalty.
+    data_only_arr = jnp.linalg.cond(info_matrix_data)
+    try:
+        data_only: Any = float(data_only_arr)
+    except (TypeError, ValueError):
+        data_only = data_only_arr
+
+    # Raw / full condition: G' Lambda G + (1/2) H_p when a penalty is
+    # supplied, else just G' Lambda G. cond is scale-invariant so the
+    # (1/2) is only "correct" up to a global rescale, but we keep it
+    # explicit because the same matrix is the right one to use when
+    # mixing penalty and data contributions in any downstream sum.
+    if penalty_hessian is None:
+        info_matrix_full = info_matrix_data
+    else:
+        H_p = jnp.asarray(penalty_hessian)
+        info_matrix_full = info_matrix_data + 0.5 * H_p
+    raw_arr = jnp.linalg.cond(info_matrix_full)
     try:
         raw: Any = float(raw_arr)
     except (TypeError, ValueError):
-        # Traced under jit: leave the JAX scalar in place. The
-        # ``Diagnostics.cond_info`` dict is documented as a mapping of
-        # scalar values; under tracing those scalars are 0-d JAX arrays.
         raw = raw_arr
-    # In v1 there is no PenaltyStrategy contribution (see issue #7) and
-    # no manifold gauge nullspace (see v2 manifold epic), so data_only
-    # and exclude_gauge equal raw. When those features land, recompute
-    # here.
+
+    # ``exclude_gauge`` aliases to ``raw`` for v1: the flat-parameter
+    # path has no manifold gauge nullspace. v2 manifold epic will
+    # distinguish them.
     return {
         "raw": raw,
-        "data_only": raw,
+        "data_only": data_only,
         "exclude_gauge": raw,
     }
 
@@ -293,8 +339,13 @@ def build_optimizer_health(
         Backend-specific solver info. ``optimizer_info.steps`` becomes
         the ``'iters'`` field.
     final_gradient_norm : float
-        Norm of :math:`\\nabla_\\theta \\tfrac{1}{2}\\|y\\|^2` at the
-        optimum.
+        Norm of :math:`\\nabla_\\theta \\tfrac{1}{2}\\|r\\|^2` at the
+        optimum, where ``r`` is the *full* residual vector the
+        optimiser saw. When ``estimate(..., penalty=...)`` supplies an
+        in-objective penalty this includes the penalty contribution
+        from the appended :math:`\\sqrt{p(\\theta)}` row; without a
+        penalty it is the unpenalised data-only gradient norm
+        :math:`\\|\\nabla_\\theta \\tfrac{1}{2}\\|y\\|^2\\|`.
     step_norm : float, optional
         Norm of the last accepted step. Defaults to ``None`` because
         neither :class:`optimistix.LevenbergMarquardt` nor
