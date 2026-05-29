@@ -40,6 +40,25 @@ from emu_gmm._internal.labels import LabelContext
 # the framework only assumes the value is a valid JAX PyTree.
 ParamsLike = Any
 
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class Emu_GMM_DimensionError(ValueError):
+    """Raised when ``estimate()`` is given a degenerate problem dimension.
+
+    The framework requires ``M >= 1`` moments, ``K >= 1`` parameters, and
+    ``M >= K`` (no under-identified problems). Each of the three failures
+    has a distinct silent-fail mode in lower layers --- empty array
+    operations, ``jnp.stack`` of an empty list, or rank-deficient
+    inversion producing inf/nan ``Sigma_theta`` --- and surfacing them
+    as a typed error at the top of :func:`emu_gmm.estimate` lets users
+    distinguish "I mis-specified my model" from "I hit a JAX edge case".
+    """
+
+
 # A StructuralModel is any callable taking (x, theta) and returning
 # either a plain (M,) JAX array or a haliax NamedArray with a Moments
 # axis. The label adapter handles both.
@@ -299,4 +318,5 @@ __all__ = [
     "OptimizerInfo",
     "Diagnostics",
     "EstimationResult",
+    "Emu_GMM_DimensionError",
 ]

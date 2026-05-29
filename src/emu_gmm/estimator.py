@@ -40,6 +40,7 @@ from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
+    Emu_GMM_DimensionError,
     EstimationResult,
     Measure,
     Optimizer,
@@ -155,7 +156,36 @@ def estimate(
     # Probe M by evaluating the expectation once at theta_init.
     m_probe = measure.expectation(model, theta_init)
     m_probe_arr = jnp.asarray(m_probe)
+    if m_probe_arr.ndim == 0 or m_probe_arr.shape[0] == 0:
+        raise Emu_GMM_DimensionError(
+            "estimate() requires M >= 1 moments; the supplied measure "
+            "returned an empty moment vector at theta_init. For a "
+            "degenerate zero-moment problem there is nothing to estimate; "
+            "for a zero-parameter, M-moment over-identifying-restrictions "
+            "J-test use the helper requested in issue #29 "
+            "(``emu_gmm.j_test``), once it lands."
+        )
     M = int(m_probe_arr.shape[0])
+
+    # Probe K from the parameter dataclass before touching ``flatten_params``
+    # (which fails with an opaque ``jnp.stack of empty list`` error when
+    # the dataclass has zero fields).
+    K_probe = len(tuple(params_mod.param_names(theta_init)))
+    if K_probe == 0:
+        raise Emu_GMM_DimensionError(
+            "estimate() requires K >= 1 parameters; the supplied "
+            "theta_init has no fields. For a zero-parameter, M-moment "
+            "J-test of over-identifying restrictions use the helper "
+            "requested in issue #29 (``emu_gmm.j_test``), once it lands."
+        )
+    if K_probe > M:
+        raise Emu_GMM_DimensionError(
+            f"estimate() requires M >= K (over-/just-identified); got "
+            f"M={M} moments and K={K_probe} parameters (under-identified). "
+            "An under-identified problem has rank-deficient G' V^{-1} G "
+            "and yields inf/nan Sigma_theta. Reduce the parameter count, "
+            "add moments, or impose an identifying restriction."
+        )
 
     # Probe for labelled output by calling model on one sample observation,
     # if the measure exposes one.

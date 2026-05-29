@@ -57,6 +57,7 @@ from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
     Diagnostics,
+    Emu_GMM_DimensionError,
     EstimationResult,
     Measure,
     Optimizer,
@@ -98,6 +99,8 @@ __all__ = [
     "EstimationResult",
     "Diagnostics",
     "OptimizerInfo",
+    # Errors
+    "Emu_GMM_DimensionError",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",
