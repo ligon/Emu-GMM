@@ -33,6 +33,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.nan_safety import safe_x_for_psi
 from emu_gmm.types import ParamsLike, StructuralModel
 
 
@@ -136,9 +137,12 @@ class ClusteredCovariance:
             numer = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
             return _safe_outer_divide(numer, N_j)
 
-        # Pre-sanitise data so NaN-typed cells never enter the user's
-        # psi or its gradient (see :meth:`EmpiricalMeasure.expectation`).
-        x_safe = jnp.where(jnp.isnan(measure.x), 0.0, measure.x)
+        # Pre-sanitise data with the per-column observed-mean sentinel
+        # so partial residuals (``log``, ``1/x``, ``sqrt``) cannot
+        # introduce NaN/Inf at masked-out cells and poison reverse-mode
+        # AD (see :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`
+        # and :meth:`EmpiricalMeasure.expectation`).
+        x_safe = safe_x_for_psi(measure.x)
 
         def psi_at(x):
             return _to_plain(psi(x, theta))

@@ -351,12 +351,24 @@ class TestNaNAware:
     """NaN-as-missing semantics at the I/O boundary.
 
     The hot path is mask-based per ``docs/design.org``; the constructor
-    layer converts NaN cells into 0/1 masks and zeroes the NaN cells in
-    the stored ``x`` so that downstream JAX arithmetic and AD are NaN-free.
+    layer converts NaN cells into 0/1 masks and replaces the NaN cells
+    in the stored ``x`` with the per-column observed mean (see
+    :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`) so that
+    downstream JAX arithmetic and reverse-mode AD are NaN-free and
+    free of out-of-domain evaluations for partial residuals
+    (``log``, ``1/x``, ``sqrt``).
     """
 
     def test_from_pandas_infers_mask_from_nan(self):
-        """When no mask is supplied, ``~df.isna()`` becomes the mask."""
+        """When no mask is supplied, ``~df.isna()`` becomes the mask.
+
+        NaN cells in the stored ``x`` are replaced with the per-column
+        mean of the observed rows (here, ``mean(10.0, 30.0) = 20.0``
+        for column ``r1``); this keeps the stored array NaN-free *and*
+        keeps it inside the domain of partial residuals at masked-out
+        cells. The mask still controls aggregation, so the primal
+        moments are unchanged.
+        """
         df = pd.DataFrame(
             {
                 "r0": [1.0, 2.0, 3.0, 4.0],
@@ -367,11 +379,12 @@ class TestNaNAware:
         # Mask inferred per-cell from NaN.
         expected_mask = np.array([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [1.0, 0.0]])
         np.testing.assert_allclose(np.asarray(meas.mask), expected_mask)
-        # NaN cells in x are replaced with zero.
+        # NaN cells in x are replaced with the per-column observed mean
+        # (mean of 10.0 and 30.0 in column r1 is 20.0).
         assert not np.any(np.isnan(np.asarray(meas.x)))
         np.testing.assert_allclose(
             np.asarray(meas.x),
-            np.array([[1.0, 10.0], [2.0, 0.0], [3.0, 30.0], [4.0, 0.0]]),
+            np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 20.0]]),
         )
 
     def test_from_pandas_explicit_mask_overrides_nan_inference(self):
@@ -416,8 +429,14 @@ class TestNaNAware:
         meas = EmpiricalMeasure.from_nan_aware(x_np)
         expected_mask = np.array([[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
         np.testing.assert_allclose(np.asarray(meas.mask), expected_mask)
-        # NaN cells in x replaced with zero.
+        # NaN cells in x are replaced with the per-column observed mean
+        # (see :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`):
+        # column 0 mean = (1 + 2) / 2 = 1.5, column 1 mean = (20 + 30) / 2 = 25.
         assert not np.any(np.isnan(np.asarray(meas.x)))
+        np.testing.assert_allclose(
+            np.asarray(meas.x),
+            np.array([[1.0, 25.0], [2.0, 20.0], [1.5, 30.0]]),
+        )
         np.testing.assert_allclose(np.asarray(meas.weights), np.ones(3))
 
     def test_from_nan_aware_with_weights(self):
@@ -445,9 +464,11 @@ class TestNaNAware:
             # Returns the row verbatim; NaN cells reach the aggregator.
             return xi
 
-        # psi as written reads x[1, 0] = 0.0 (cleaned by from_nan_aware),
-        # so no NaN should hit the sum. Exercise the deeper guarantee
-        # by hand-crafting a measure where x has NaN at masked cells.
+        # psi as written reads x[1, 0] = column-mean sentinel (set by
+        # from_nan_aware --- see
+        # :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`), so no
+        # NaN should hit the sum. Exercise the deeper guarantee by
+        # hand-crafting a measure where x has NaN at masked cells.
         x_with_nan = jnp.array(
             [
                 [1.0, jnp.nan],
