@@ -105,18 +105,30 @@ class ClusteredCovariance:
         verifies this special case.
         """
 
+        # Pre-sanitise data so NaN-typed cells never enter the user's
+        # psi or its gradient (see :meth:`EmpiricalMeasure.expectation`).
+        x_safe = jnp.where(jnp.isnan(measure.x), 0.0, measure.x)
+
         def psi_at(x):
             return _to_plain(psi(x, theta))
 
-        psi_batch = jax.vmap(psi_at)(measure.x)  # (N, M)
+        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
         mask = measure.mask  # (N, M)
         weights = measure.weights  # (N,)
+
+        # NaN-safe contraction: replace psi_batch at masked-out cells
+        # with zero before multiplying by the weighted mask. Mirrors
+        # the guard in :class:`IIDCovariance` so that a user-supplied
+        # psi which returns NaN at masked-out rows still yields a
+        # finite cluster-totals covariance.
+        mask_bool = mask > 0.0
+        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
 
         # Per-coordinate sample size N_j (same as IIDCovariance).
         N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
 
         # Per-observation contribution to moment j: d_ij * w_i * psi_j.
-        contrib = mask * weights[:, None] * psi_batch  # (N, M)
+        contrib = mask * weights[:, None] * psi_safe  # (N, M)
 
         # Segment-sum into cluster totals. jax.ops.segment_sum operates
         # on the leading axis only, so we sum the (N, M) contribution

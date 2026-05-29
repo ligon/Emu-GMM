@@ -224,3 +224,41 @@ class TestUseWithStructuralModel:
         N = 30
         expected = x_np.T @ x_np / (N * N)
         np.testing.assert_allclose(np.asarray(V), expected, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestNaNSafety:
+    """The cluster-totals form NaN-cleans masked-out cells via where(...)."""
+
+    def test_nan_in_psi_at_masked_cells_does_not_poison(self):
+        """A psi returning NaN at masked-out cells still yields a finite V."""
+        # Two-moment psi; moment 1 missing on rows 0 and 1.
+        x = jnp.array(
+            [
+                [1.0, jnp.nan],
+                [2.0, jnp.nan],
+                [3.0, 30.0],
+                [4.0, 40.0],
+            ]
+        )
+        mask = jnp.array(
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+            ]
+        )
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(4))
+        V = IIDCovariance().covariance(_identity_psi, _P(0.0, 0.0), meas)
+        assert bool(jnp.all(jnp.isfinite(V)))
+        # V[0, 0] = sum_i (x_i)^2 / N_0^2 = (1 + 4 + 9 + 16) / 16 = 30 / 16.
+        assert float(V[0, 0]) == pytest.approx(30.0 / 16.0, rel=1e-6)
+        # V[1, 1] = sum over rows 2-3 of x_i^2 / N_1^2 = (900 + 1600) / 4.
+        assert float(V[1, 1]) == pytest.approx((900.0 + 1600.0) / 4.0, rel=1e-6)
+        # V[0, 1] uses pairwise overlap (rows 2-3): (3*30 + 4*40) / (4 * 2).
+        assert float(V[0, 1]) == pytest.approx(
+            (3.0 * 30.0 + 4.0 * 40.0) / (4.0 * 2.0), rel=1e-6
+        )

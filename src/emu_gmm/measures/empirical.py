@@ -22,6 +22,30 @@ index-name labels are tracked at the estimator level via
 a convenience for constructing the JAX arrays from a
 :class:`pandas.DataFrame`; downstream labelling is the caller's
 responsibility.
+
+NaN-as-missing semantics
+------------------------
+
+The hot path is fundamentally /mask-based/, not NaN-based: per
+``docs/design.org`` Section 5, "Rather than relying on floating-point
+NaN sentinels that contaminate the automatic differentiation tape, the
+missingness layout is captured as a dedicated boolean structure". At
+the I/O boundary, however, NaN is the natural sentinel for many
+real-data workflows (an asset return is missing for a non-holder; a
+seasonal contribution is missing for a household with no contemporary
+holdings of asset :math:`j`). To bridge the two, two facilities are
+provided:
+
+1. :meth:`from_pandas` infers the per-coordinate mask from
+   ``~df.isna()`` when no explicit mask is supplied, and replaces NaN
+   cells in the stored ``x`` array with zero so they cannot poison the
+   AD tape if a downstream model happens to read them.
+2. :meth:`expectation` and :meth:`jacobian` use :func:`jax.numpy.where`
+   to /zero out/ rows the mask excludes before multiplication, so a
+   model :math:`\\psi` that returns NaN on excluded rows --- a natural
+   pattern when the residual is only defined for holders --- still
+   produces a finite moment vector and a finite gradient. Without this
+   guard the JAX algebra ``0 * NaN = NaN`` poisons the sum.
 """
 
 from __future__ import annotations
@@ -98,7 +122,11 @@ class EmpiricalMeasure:
         psi : :data:`StructuralModel`
             Per-observation residual function. May return a plain
             ``(M,)`` array or a :class:`haliax.NamedArray`; the wrapper
-            is stripped internally.
+            is stripped internally. Cells where ``mask == 0`` may be
+            NaN (e.g., a residual that is only defined for "holders"):
+            the implementation zeroes them via :func:`jax.numpy.where`
+            before multiplication so that the JAX algebra
+            ``0 * NaN = NaN`` cannot poison the aggregate.
         theta : :data:`ParamsLike`
             User parameter dataclass.
 
@@ -110,13 +138,27 @@ class EmpiricalMeasure:
             zero rather than NaN.
         """
 
+        # Pre-sanitise the data array so that NaN cells (e.g., a
+        # non-holder's return) cannot enter the user's psi or its
+        # gradient. The "double where" pattern: evaluate psi on a
+        # NaN-free surrogate, then mask the result. Without this
+        # guard, reverse-mode AD would propagate the NaN through the
+        # untaken branch of any jnp.where on the output side
+        # (cotangent flow ignores branch selection).
+        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+
         def psi_at(x):
             return _to_plain(psi(x, theta))
 
-        psi_batch = jax.vmap(psi_at)(self.x)  # (N, M)
+        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+        # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
+        # the weight multiplication. Without this guard, NaN at a
+        # masked-out cell would propagate (0 * NaN = NaN in JAX).
+        mask_bool = self.mask > 0.0  # (N, M)
+        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
         # Pairwise per-coordinate mass: d_ij * w_i, broadcast across moments.
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
-        numer = jnp.sum(weight_mask * psi_batch, axis=0)  # (M,)
+        numer = jnp.sum(weight_mask * psi_safe, axis=0)  # (M,)
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom)
 
@@ -127,8 +169,16 @@ class EmpiricalMeasure:
         :mod:`emu_gmm._internal.params`) at the per-observation level,
         then applies the same mask / weight aggregation as
         :meth:`expectation`. Returns a plain ``(M, K)`` JAX array.
+
+        Like :meth:`expectation`, the implementation guards the sum
+        against NaN gradients at masked-out cells: rows for which
+        ``mask[i, j] == 0`` contribute zero to the moment-``j`` Jacobian
+        regardless of what ``jacfwd`` produces there.
         """
         flat_theta, treedef = flatten_params(theta)
+
+        # Pre-sanitise x (see :meth:`expectation` for the rationale).
+        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
             params = unflatten_params(flat, treedef)
@@ -137,9 +187,13 @@ class EmpiricalMeasure:
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
 
-        grad_batch = jax.vmap(grad_at)(self.x)  # (N, M, K)
+        grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
+        # NaN-safe: zero the gradient at masked-out (i, j) cells before
+        # weight multiplication so 0 * NaN cannot poison the (M, K) sum.
+        mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
+        grad_safe = jnp.where(mask_bool, grad_batch, 0.0)  # (N, M, K)
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
-        numer = jnp.sum(weight_mask[:, :, None] * grad_batch, axis=0)  # (M, K)
+        numer = jnp.sum(weight_mask[:, :, None] * grad_safe, axis=0)  # (M, K)
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom[:, None])
 
@@ -149,6 +203,8 @@ class EmpiricalMeasure:
         df: Any,
         weights: Any | None = None,
         mask: Any | None = None,
+        *,
+        nan_aware: bool = True,
     ) -> "EmpiricalMeasure":
         """Construct an :class:`EmpiricalMeasure` from a pandas DataFrame.
 
@@ -164,28 +220,46 @@ class EmpiricalMeasure:
         ----------
         df : :class:`pandas.DataFrame`
             Observations. Each column becomes a coordinate of ``x``.
+            When ``nan_aware`` is true (the default) and no explicit
+            ``mask`` is supplied, NaN cells are treated as missing: the
+            mask is inferred as ``~df.isna()`` and NaN cells in ``x``
+            are replaced with zero so they cannot poison downstream
+            JAX arithmetic.
         weights : :class:`pandas.Series` or array-like, optional
             Per-observation weights. Defaults to all-ones.
         mask : :class:`pandas.DataFrame` or array-like of shape ``(N, M)``,
-            optional. Per-coordinate observability. Defaults to all-ones
-            (no missingness). The number of moments ``M`` is inferred
-            from the mask's column count when one is supplied; otherwise
-            the caller is responsible for selecting a compatible model.
+            optional. Per-coordinate observability. When supplied, it
+            takes precedence over NaN-inferred missingness. When omitted
+            and ``nan_aware`` is true, ``~df.isna()`` is used; otherwise
+            an all-ones mask is constructed.
+        nan_aware : bool, keyword-only, default True
+            When true, NaN cells in ``df`` indicate per-cell
+            missingness and drive both the inferred mask (when no
+            explicit ``mask`` is given) and the NaN-cleaning of ``x``.
+            Set to false to preserve the legacy behaviour of all-ones
+            masking and verbatim NaN propagation in ``x``.
 
         Returns
         -------
         measure : :class:`EmpiricalMeasure`
+
+        Notes
+        -----
+        The NaN-aware path supports the seasonality / non-holder
+        pattern in :mod:`ManifoldGMM`: a per-asset return that is
+        defined only for households that hold the asset arrives as NaN
+        for non-holders, and the per-coordinate :math:`N_j` should
+        reflect the per-asset holder count, not the row count of the
+        ambient panel.
         """
         x_arr, _cols, _obs_name = labels_mod.normalise_x(df)
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
-        if mask is None:
-            # No mask supplied: defer to the user's downstream selection
-            # of M. We use the column count of x as a placeholder so that
-            # an all-ones mask of shape (N, D) is constructed; users who
-            # need M != D should pass an explicit mask.
-            m = int(x_arr.shape[1])
-        else:
+
+        # Determine M and resolve the mask. Precedence is:
+        # (1) explicit mask argument, (2) NaN-inferred mask when
+        # nan_aware is true, (3) all-ones default.
+        if mask is not None:
             # Probe shape of the supplied mask to determine M.
             if hasattr(mask, "shape"):
                 m_shape = tuple(int(s) for s in mask.shape)
@@ -197,8 +271,63 @@ class EmpiricalMeasure:
                     f"(N={n}, M); got {m_shape}"
                 )
             m = int(m_shape[1])
-        mask_arr = labels_mod.normalise_mask(mask, n, m)
+            mask_arr = labels_mod.normalise_mask(mask, n, m)
+        elif nan_aware:
+            # Infer mask from NaN cells: 1 where finite, 0 where NaN.
+            finite_mask = jnp.where(jnp.isnan(x_arr), 0.0, 1.0)
+            mask_arr = finite_mask.astype(jnp.float32)
+            m = int(x_arr.shape[1])
+        else:
+            m = int(x_arr.shape[1])
+            mask_arr = labels_mod.normalise_mask(None, n, m)
+
+        # NaN-clean x so downstream JAX arithmetic / vmap of psi is
+        # safe even where the user's psi happens to read masked-out
+        # cells. The mask still controls aggregation; this is purely a
+        # defensive substitution at the I/O boundary.
+        if nan_aware:
+            x_arr = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+
         return cls(x=x_arr, mask=mask_arr, weights=w_arr)
+
+    @classmethod
+    def from_nan_aware(
+        cls,
+        x: Any,
+        weights: Any | None = None,
+    ) -> "EmpiricalMeasure":
+        """Construct an :class:`EmpiricalMeasure` from an array containing NaN.
+
+        Convenience wrapper for the NaN-as-missing semantics described
+        in the module docstring. The per-coordinate mask is inferred
+        from ``~jnp.isnan(x)``, and NaN cells in the stored ``x`` are
+        replaced with zero so the hot path is NaN-free. Accepts any
+        2-D array-like that :func:`jax.numpy.asarray` can coerce; for
+        :class:`pandas.DataFrame` inputs use :meth:`from_pandas`
+        instead (which preserves column-label semantics).
+
+        Parameters
+        ----------
+        x : array-like, shape (N, D)
+            Observations with NaN as the missing-cell sentinel.
+        weights : array-like of length N, optional
+            Per-observation weights. Defaults to all-ones.
+
+        Returns
+        -------
+        measure : :class:`EmpiricalMeasure`
+        """
+        x_arr = jnp.asarray(x)
+        if x_arr.ndim != 2:
+            raise ValueError(
+                f"EmpiricalMeasure.from_nan_aware: expected a 2-D array, "
+                f"got shape {tuple(x_arr.shape)}"
+            )
+        n = int(x_arr.shape[0])
+        w_arr = labels_mod.normalise_weights(weights, n)
+        mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
+        x_clean = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+        return cls(x=x_clean, mask=mask_arr, weights=w_arr)
 
 
 __all__ = ["EmpiricalMeasure"]
