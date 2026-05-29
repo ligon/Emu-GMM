@@ -89,6 +89,43 @@ def _safe_divide(
     return jnp.where(denom == 0.0, jnp.zeros_like(out), out)
 
 
+def _assert_finite_weights(
+    weights: Float[Array, " N"],
+    *,
+    source: str,
+) -> None:
+    """Raise if ``weights`` contains NaN or +/-inf.
+
+    The double-where NaN guard in :meth:`EmpiricalMeasure.expectation`
+    and :meth:`jacobian` protects ``psi`` against NaN at masked-out
+    cells, but it is applied to the residual --- not to the
+    ``weights`` vector. The aggregator builds
+    ``weight_mask = self.mask * self.weights[:, None]`` and a NaN
+    weight propagates into ``weight_mask`` regardless of the mask
+    (``mask * NaN = NaN``), poisoning the per-coordinate sum. The
+    cheapest defence is to reject non-finite weights at the input
+    boundary: real weights (frequency, sampling, inverse-probability)
+    are always finite, and a NaN here is almost certainly an upstream
+    bug worth surfacing.
+
+    Parameters
+    ----------
+    weights : (N,) jax array
+        The normalised weights vector.
+    source : str
+        Name of the calling constructor, used to disambiguate the
+        error message (e.g. ``"from_pandas"`` vs ``"from_nan_aware"``).
+    """
+    if not bool(jnp.all(jnp.isfinite(weights))):
+        raise ValueError(
+            f"EmpiricalMeasure.{source}: weights contain non-finite values "
+            f"(NaN or +/-inf). A non-finite weight propagates through "
+            f"mask * weights and poisons the per-coordinate sum, regardless "
+            f"of any per-cell mask. Drop or impute the offending rows before "
+            f"constructing the measure."
+        )
+
+
 @jdc.pytree_dataclass
 class EmpiricalMeasure:
     """Sample-backed measure with per-coordinate observability mask.
@@ -334,6 +371,7 @@ class EmpiricalMeasure:
         x_arr, _cols, _obs_name = labels_mod.normalise_x(df)
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
+        _assert_finite_weights(w_arr, source="from_pandas")
 
         # Determine M and resolve the mask. Precedence is:
         # (1) explicit mask argument, (2) NaN-inferred mask when
@@ -428,6 +466,7 @@ class EmpiricalMeasure:
             )
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
+        _assert_finite_weights(w_arr, source="from_nan_aware")
         mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
         x_clean = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
         return cls(x=x_clean, mask=mask_arr, weights=w_arr)

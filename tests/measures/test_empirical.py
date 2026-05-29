@@ -628,3 +628,66 @@ class TestFromPandasExplicitMaskNaNConflict:
         assert "drop the mask" in msg
         assert "scrub NaN" in msg
         assert "nan_aware=False" in msg
+
+
+class TestNonFiniteWeightsRejected:
+    """Reject NaN / inf in the weights vector at construction time.
+
+    The NaN-safe ``double-where`` guard in :meth:`expectation` /
+    :meth:`jacobian` is applied to ``psi``, not to ``weights``: the
+    aggregator forms ``weight_mask = mask * weights[:, None]`` and any
+    NaN weight propagates regardless of the mask
+    (``0.0 * NaN = NaN`` in JAX). Real per-observation weights
+    (frequency, sampling, inverse-probability) are always finite, so
+    reject non-finite values at the input boundary --- the cheapest
+    defence and the loudest signal of an upstream bug.
+    """
+
+    def test_nan_weight_via_from_pandas_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = pd.Series([1.0, float("nan"), 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_pandas(df, weights=weights)
+
+    def test_inf_weight_via_from_pandas_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = np.array([1.0, np.inf, 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_pandas(df, weights=weights)
+
+    def test_negative_inf_weight_via_from_pandas_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = np.array([1.0, -np.inf, 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_pandas(df, weights=weights)
+
+    def test_nan_weight_via_from_nan_aware_raises(self):
+        x = np.array([[1.0], [2.0], [3.0]])
+        weights = np.array([1.0, float("nan"), 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_nan_aware(x, weights=weights)
+
+    def test_finite_weights_pass_through(self):
+        """Sanity: a normal weights vector still works after the guard."""
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = np.array([0.5, 1.0, 1.5])
+        meas = EmpiricalMeasure.from_pandas(df, weights=weights)
+        np.testing.assert_allclose(np.asarray(meas.weights), weights)
+
+    def test_default_weights_pass_through(self):
+        """Sanity: the all-ones default raises no spurious error."""
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        meas = EmpiricalMeasure.from_pandas(df)
+        np.testing.assert_allclose(np.asarray(meas.weights), np.ones(3))
+
+    def test_error_message_names_source_constructor(self):
+        """Error mentions which constructor was called for traceability."""
+        df = pd.DataFrame({"r0": [1.0, 2.0]})
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_pandas(df, weights=[1.0, float("nan")])
+        assert "from_pandas" in str(excinfo.value)
+
+        x = np.array([[1.0], [2.0]])
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_nan_aware(x, weights=[1.0, float("nan")])
+        assert "from_nan_aware" in str(excinfo.value)
