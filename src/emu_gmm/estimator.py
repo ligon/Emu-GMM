@@ -216,9 +216,7 @@ def _run_iterated_weighting(
         # magnitude (e.g. one component O(1), another O(1e6)). The
         # ``rescale_eps`` floor protects the limit |theta_k| -> 0, where
         # an absolute test on ``weighting_tol`` is still the right thing.
-        theta_scale = float(
-            jnp.maximum(jnp.linalg.norm(theta_next_flat), rescale_eps)
-        )
+        theta_scale = float(jnp.maximum(jnp.linalg.norm(theta_next_flat), rescale_eps))
         theta_k_flat = theta_next_flat
         if float(delta) < float(weighting.weighting_tol) * theta_scale:
             outer_status = "converged"
@@ -261,13 +259,16 @@ def _run_iterated_weighting(
     # (V == V_k at the fixed point) but differ when it does not, and the
     # CU-fallback value is the one consistent with how the rest of the
     # framework reports the IteratedWeighting objective downstream.
+    # Match the optimiser-side convention of reporting 0.5 * ||y||^2 (so
+    # this field is comparable across weighting strategies and across
+    # backends).
     y_final = cu_residual_fn(theta_k_flat)
-    final_objective_cu = jnp.sum(y_final * y_final)
+    final_objective_cu = 0.5 * jnp.sum(y_final * y_final)
 
     final_info = OptimizerInfo(
         steps=total_inner_steps,
         status=outer_status,
-        final_objective=final_objective_cu,
+        final_objective=final_objective_cu,  # type: ignore[arg-type]
         backend=last_info.backend,
     )
     return theta_k_flat, final_info, outer_status
