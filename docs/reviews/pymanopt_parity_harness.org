@@ -52,15 +52,38 @@ review without breaking the harness.
 
 Comparisons use =numpy.allclose(ref, cand, rtol=1e-9, atol=0.0)= in
 float64.  Both pymanopt and emu_gmm compute the same pure
-linear-algebra expressions (QR / SVD / polar projection); on identical
-=X=, =V=, =ambient= inputs they should agree to dense-BLAS roundoff.
-The threshold is deliberately strict: =1e-9= leaves ~6 digits of
-margin over double-precision roundoff and any disagreement at this
-level signals a real formula divergence (sign convention, transpose,
-factor-of-two), not numerical drift.
+linear-algebra expressions (Lyapunov solve for =projection=, ambient
+translation for =retraction=, SVD-based polar for =log= / =distance=);
+on identical =X=, =V=, =ambient= inputs they should agree to
+dense-BLAS roundoff.  The threshold is deliberately strict: =1e-9=
+leaves ~6 digits of margin over double-precision roundoff and any
+disagreement at this level signals a real formula divergence (sign
+convention, transpose, factor-of-two), not numerical drift.
+
+** Caveat on the SVD-routed ops
+
+=distance= goes through =log=, which is built on an SVD of =Y^T X=.
+Singular-vector signs are not unique; the SVD-routed ops are stable to
+roundoff in the *output* (=u @ vh= is sign-stable as a product even
+when =u= and =vh= individually flip), but the bound is set by SVD
+backward error rather than by BLAS matmul error.  In float64 the
+realised =max_abs_diff= on the =distance= cells is typically
+~1e-13--1e-14, well inside =rtol=1e-9=.  If a future change moves
+=PSDFixedRank.log= to a different SVD backend (e.g. JAX's
+=jnp.linalg.svd= on a GPU) and the conditioning of =Y^T X= is bad in
+some cells, expect drift up to ~1e-11; relaxing to =rtol=1e-8= in
+those cells would still be discriminating.
 
 If JAX's default float32 leaks in anywhere on the emu_gmm side, the
-threshold will catch it immediately; that is by design.
+=1e-9= threshold will catch it immediately; that is by design.
+
+** Tangent-vector storage convention
+
+The harness compares tangent vectors in the ambient =m x k=
+representation that pymanopt uses natively.  emu_gmm Chunk A (PR #39)
+adopted the same ambient storage for tangent vectors on
+=PSDFixedRank=, so the comparison is a direct element-wise equality
+of arrays of identical shape.  No basis change is applied.
 
 * Why standalone, not =pytest=
 
@@ -119,10 +142,15 @@ land before Chunk A.
 
 - Reference: =pymanopt= 2.2.1, =pymanopt.manifolds.PSDFixedRank=.
 - The harness assumes pymanopt's =PSDFixedRank= follows the
-  Y -> Y Y' representation with the "polar"-style retraction and
-  =dist= built on the canonical metric.  If Chunk A chooses a
-  different representation, the parity check will fail until the
-  harness is updated to map between the two parameterisations.
+  Y -> Y Y' representation.  In pymanopt 2.2.1 the retraction is
+  =exp= which is simple Euclidean translation: =retraction(Y, V) = Y + V=
+  (the quotient-manifold structure makes this a valid first-order
+  retraction).  =dist= is built on =log=, which projects via the SVD
+  of =Y^T X= and returns the canonical-metric chord length.  If Chunk A
+  chooses a different representation (e.g. a polar-style retraction
+  with a QR step, or a different log map), the parity check will fail
+  until the harness is updated to map between the two
+  parameterisations.
 - The shape grid covers full-rank (k = m / small), rank-deficient by 1,
   and the corner cases (k = 1).  Increase =N_SEEDS= or add larger
   =(m, k)= entries when stress-testing.
