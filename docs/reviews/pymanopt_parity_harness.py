@@ -44,8 +44,9 @@ from __future__ import annotations
 import sys
 import traceback
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -61,12 +62,12 @@ from pymanopt.manifolds import PSDFixedRank as PymanoptPSDFixedRank
 EMU_AVAILABLE: bool
 EMU_IMPORT_ERROR: str | None
 try:
-    from emu_gmm.manifolds import PSDFixedRank as EmuPSDFixedRank  # type: ignore
+    from emu_gmm.manifolds import PSDFixedRank as EmuPSDFixedRank
 
     EMU_AVAILABLE = True
     EMU_IMPORT_ERROR = None
-except Exception as exc:  # noqa: BLE001 - we deliberately swallow everything
-    EmuPSDFixedRank = None  # type: ignore[assignment]
+except Exception as exc:
+    EmuPSDFixedRank = None
     EMU_AVAILABLE = False
     EMU_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
@@ -253,12 +254,13 @@ def run() -> int:
                 #    our pymanopt-side plumbing).
                 try:
                     ref = _call_pymanopt(pym, op, X, ambient, V, Y)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     tallies[op].errored += 1
-                    first_failures.append(
-                        f"[pymanopt-ref ERROR] op={op} shape={shape} seed={seed}: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                    if len(first_failures) < 10:
+                        first_failures.append(
+                            f"[pymanopt-ref ERROR] op={op} shape={shape} seed={seed}: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
                     continue
 
                 # 2. emu_gmm candidate (skipped if not available).
@@ -272,7 +274,7 @@ def run() -> int:
                     # skipped (partial coverage).
                     tallies[op].skipped += 1
                     continue
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     tallies[op].errored += 1
                     if len(first_failures) < 10:
                         first_failures.append(
