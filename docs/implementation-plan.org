@@ -32,7 +32,7 @@ Resolved: option (b) with concrete shape. =estimate(...)= accepts plain JAX arra
 
 The open sub-question is where /moment labels/ enter the system: from a =StructuralModel= returning a =haliax.NamedArray=, from a =moment_names= kwarg on =estimate=, or both. Default policy in the sketch: both supported; model-return path takes precedence over the kwarg, kwarg over positional fallback. Revisit if this proves awkward in practice.
 
-** TODO Reconcile bibfile gap items                                        :S:
+** DONE Reconcile bibfile gap items                                       :S:
 The bibfile agent's gap list (Hansen-Heaton-Yaron 1996; Cameron-Miller 2015 or Wooldridge 2003; Wolter 2007; Nocedal-Wright 2006; Hayashi 2000; Horn-Johnson; Haliax software cite) needs a pass. Some likely live in =~/bibtex/main.bib= already. A second short agent pass can resolve these.
 
 Not blocking implementation; the docs cite the entries either way. Done before any next manuscript-direction work.
@@ -44,7 +44,7 @@ Not blocking implementation; the docs cite the entries either way. Done before a
 /Dependencies: none./
 /Acceptance: every module below has a passing pytest suite./
 
-** TODO src/emu_gmm/_internal/params.py                                    :M:
+** DONE src/emu_gmm/_internal/params.py                                    :M:
 Parameter dataclass ↔ flat JAX array conversion.
 
 - =flatten_params(params)=: returns =(flat_array, treedef)= via =jax.tree_util.tree_flatten=.
@@ -54,7 +54,7 @@ Parameter dataclass ↔ flat JAX array conversion.
 
 /Tests:/ round-trip on =EulerParams(beta=0.95, gamma=2.0)=; failure path with a non-scalar leaf; field-order preservation.
 
-** TODO src/emu_gmm/_internal/axes.py                                      :S:
+** DONE src/emu_gmm/_internal/axes.py                                      :S:
 Canonical Haliax =Axis= definitions.
 
 - Module-level =Params=, =ParamsDual=, =Moments=, =MomentsDual=, =Obs= as factory functions that take size and return an =ha.Axis=. (Cannot be module-level constants because size depends on the user's problem.)
@@ -62,7 +62,7 @@ Canonical Haliax =Axis= definitions.
 
 /Tests:/ factory returns axes with the expected names and sizes; =dual()= round-trip.
 
-** TODO src/emu_gmm/_internal/cholesky.py                                  :M:
+** DONE src/emu_gmm/_internal/cholesky.py                                  :M:
 Cholesky factor + forward/back substitution wrappers.
 
 - =cholesky(V) -> L=: thin wrapper around =jax.scipy.linalg.cholesky(V, lower=True)= with explicit error on non-PD.
@@ -72,7 +72,7 @@ Cholesky factor + forward/back substitution wrappers.
 
 /Tests:/ correctness against =scipy.linalg.solve_triangular= on a 5x5 PD matrix; verify =whiten= is the gradient of \(\tfrac{1}{2}\|y\|^2\) w.r.t. \(m\) equals \(\Lambda m\).
 
-** TODO src/emu_gmm/_internal/labels.py                                    :M:
+** DONE src/emu_gmm/_internal/labels.py                                    :M:
 Polymorphic-input adapter and label tracking.
 
 - =LabelContext= dataclass: =param_names=, =moment_names=, =variable_names=, =obs_names=. Static (non-traced) PyTree leaves so jit/vmap don't re-trace when labels change.
@@ -84,7 +84,7 @@ Polymorphic-input adapter and label tracking.
 
 /Tests:/ Round-trip on a pandas DataFrame (column names preserved); on a haliax NamedArray (coordinates preserved); on a plain array (positional names assigned); moment-name precedence policy on all three sources.
 
-** TODO src/emu_gmm/types.py                                               :M:
+** DONE src/emu_gmm/types.py                                               :M:
 Protocols, type aliases, result/diagnostics dataclasses.
 
 - =StructuralModel= type alias: =Callable[[Array, ParamsLike], Float[Array, "M"] | ha.NamedArray]= --- the return may be a plain array or a =NamedArray= with a =Moments= axis (used by the label adapter).
@@ -107,7 +107,7 @@ Protocols, type aliases, result/diagnostics dataclasses.
 /Dependencies: Phase 1./
 /Acceptance: =SyntheticMeasure= and =SyntheticCovariance= each have unit tests that pass; expectation values match an independently-computed reference on a known DGP./
 
-** TODO src/emu_gmm/measures/synthetic.py                                  :M:
+** DONE src/emu_gmm/measures/synthetic.py                                  :M:
 =SyntheticMeasure= dataclass.
 
 - Fields: =key= (=jax.Array=), =n_sim= (static int), =sampler= (Callable).
@@ -117,7 +117,7 @@ Protocols, type aliases, result/diagnostics dataclasses.
 
 /Tests:/ Constant DGP with known \(\mathbb{E}[\psi]\); verify =expectation= matches to within Monte Carlo error on \(n_{sim} = 10^5\). Sampler returning constants gives zero Jacobian for the sampler-path contribution.
 
-** TODO src/emu_gmm/covariance/synthetic.py                                :S:
+** DONE src/emu_gmm/covariance/synthetic.py                                :S:
 =SyntheticCovariance= Monte Carlo variance.
 
 - =covariance(psi, theta, measure)=: =vmap= =psi= over =measure= draws, centre, outer product, divide by =n_sim^2= (variance of the moment estimator).
@@ -131,7 +131,7 @@ Protocols, type aliases, result/diagnostics dataclasses.
 /Dependencies: Phase 1./
 /Acceptance: each strategy independently testable; composition (=residual_fn = weighting o regularization o measure o covariance=) tested in Phase 5./
 
-** TODO src/emu_gmm/weighting.py                                           :M:
+** DONE src/emu_gmm/weighting.py                                           :M:
 Three weighting strategies.
 
 - =Identity= --- whitening returns \(m\) unchanged (equivalent to \(L = I\)).
@@ -142,7 +142,7 @@ The =Fixed= constructor takes a \(V_0\) array and stores its Cholesky factor, no
 
 /Tests:/ For a known \(V\), =Identity= passes through; =Fixed(V)= whitens to identity-covariance on a simulated normal sample; =ContinuouslyUpdated()= passes a smoke test that AD through =whitening_residual= produces non-zero gradients w.r.t. =theta=.
 
-** TODO src/emu_gmm/regularization.py                                      :S:
+** DONE src/emu_gmm/regularization.py                                      :S:
 =DiagonalTikhonov= regulariser.
 
 - =apply(V, anchor=None)=: if =anchor= provided, compute \(\tau\) at the anchor's \(V\); otherwise compute \(\tau\) at the current \(V\). Return =(V_star, tau, kappa)=.
@@ -158,7 +158,7 @@ The =Fixed= constructor takes a \(V_0\) array and stores its Cholesky factor, no
 /Dependencies: Phase 1./
 /Acceptance: =optimistix_lm()= solves a known NLLS problem to machine precision; =scipy_lm()= solves the same problem to a looser tolerance./
 
-** TODO src/emu_gmm/optimizer.py                                           :M:
+** DONE src/emu_gmm/optimizer.py                                           :M:
 =Optimizer= protocol + factories.
 
 - =optimistix_lm(rtol=1e-8, atol=1e-8, max_steps=200)= → Optimizer callable. Wraps =optimistix.LevenbergMarquardt= and =optimistix.least_squares=.
@@ -174,7 +174,7 @@ The =Fixed= constructor takes a \(V_0\) array and stores its Cholesky factor, no
 /Dependencies: Phases 1, 2, 3, 4./
 /Acceptance: The Euler example in =docs/api-sketch.org= Section 5 runs end-to-end and converges./
 
-** TODO src/emu_gmm/diagnostics.py                                         :S:
+** DONE src/emu_gmm/diagnostics.py                                         :S:
 =Diagnostics= constructor helpers and logging hooks.
 
 - =collect_diagnostics(state)=: builds a =Diagnostics= from intermediate state computed during =estimate=.
@@ -182,7 +182,7 @@ The =Fixed= constructor takes a \(V_0\) array and stores its Cholesky factor, no
 
 /Tests:/ =Diagnostics= is a valid PyTree; =collect_diagnostics= populates all fields without =NaN=.
 
-** TODO src/emu_gmm/estimator.py                                           :L:
+** DONE src/emu_gmm/estimator.py                                           :L:
 The =estimate()= entry point.
 
 - Build a =LabelContext= via =_internal/labels= from the inputs:
@@ -218,7 +218,7 @@ The anchor-once-then-freeze policy is implemented by computing \(\tau\) at \(\th
 /Dependencies: Phase 5./
 /Acceptance: The analytical round-trip variant in =docs/api-sketch.org= Section 5 runs end-to-end and recovers \(\theta_0\) to within floating-point tolerance./
 
-** TODO src/emu_gmm/measures/analytical.py                                 :S:
+** DONE src/emu_gmm/measures/analytical.py                                 :S:
 =AnalyticalMeasure= dataclass.
 
 - Fields: =expectation_fn=, optional =jacobian_fn=.
@@ -227,7 +227,7 @@ The anchor-once-then-freeze policy is implemented by computing \(\tau\) at \(\th
 
 /Tests:/ Lognormal-MGF expectation matches Monte Carlo on \(n_{sim} \geq 10^5\).
 
-** TODO src/emu_gmm/covariance/analytical.py                               :S:
+** DONE src/emu_gmm/covariance/analytical.py                               :S:
 =AnalyticalCovariance= dataclass.
 
 - Field: =covariance_fn=.
@@ -235,7 +235,7 @@ The anchor-once-then-freeze policy is implemented by computing \(\tau\) at \(\th
 
 /Tests:/ Match against a known \(V(\theta)\) formula.
 
-** TODO Acceptance: analytical round-trip Euler example                    :S:
+** DONE Acceptance: analytical round-trip Euler example                   :S:
 The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
 
 ---
@@ -245,7 +245,7 @@ The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
 /Dependencies: Phase 5./
 /Acceptance: Unit tests against synthetic data fed via =EmpiricalMeasure= pass; no real-data acceptance test (waiting for data)./
 
-** TODO src/emu_gmm/measures/empirical.py                                  :M:
+** DONE src/emu_gmm/measures/empirical.py                                  :M:
 =EmpiricalMeasure= dataclass.
 
 - Fields: =x= (=(N, D)= array), =mask= (=(N, M)= 0/1), =weights= (=(N,)=).
@@ -255,14 +255,14 @@ The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
 
 /Tests:/ Coordinate-wise mean on uniform data matches simple =np.mean=; missingness handled correctly per coordinate; weights of all-ones equivalent to unweighted; =from_pandas= round-trip preserves column names through to a downstream =EstimationResult.V_X.coords=.
 
-** TODO src/emu_gmm/covariance/iid.py                                      :M:
+** DONE src/emu_gmm/covariance/iid.py                                      :M:
 =IIDCovariance= pairwise-overlap form.
 
 - =covariance(psi, theta, measure)=: =einsum= over the pairwise-overlap mask × \(\psi_j \psi_k\) × \(w_i^2\).
 
 /Tests:/ Special case with full mask and uniform weights matches =numpy.cov= on the \(\psi\) matrix; pairwise-overlap test with a strict-subset missingness pattern matches the analytic formula on a 3x3 toy.
 
-** TODO src/emu_gmm/covariance/clustered.py                                :M:
+** DONE src/emu_gmm/covariance/clustered.py                                :M:
 =ClusteredCovariance= cluster-totals form.
 
 - Resolve Section 6 question 2 (cluster ID representation) first: pad cluster IDs to a static maximum and use =jax.ops.segment_sum=.
@@ -271,7 +271,7 @@ The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
 
 /Tests:/ With each cluster of size 1, reduces to =IIDCovariance=; on a toy two-cluster example, matches the analytic cluster-robust formula.
 
-** TODO Synthetic acceptance test through EmpiricalMeasure                 :S:
+** DONE Synthetic acceptance test through EmpiricalMeasure                :S:
 Pre-generate synthetic Euler data from the same DGP as the Phase 5 demo. Feed it through =EmpiricalMeasure= + =IIDCovariance=. Verify the estimate is close to the synthetic-context result (modulo CRN vs frozen-sample noise).
 
 ---
@@ -281,13 +281,13 @@ Pre-generate synthetic Euler data from the same DGP as the Phase 5 demo. Feed it
 /Dependencies: Phases 5, 6, 7./
 /Acceptance: =pip install -e .= works; a fresh user can run the Euler demo from the README./
 
-** TODO src/emu_gmm/__init__.py public re-exports                          :S:
+** DONE src/emu_gmm/__init__.py public re-exports                          :S:
 Re-export user-facing names: =estimate=, =StructuralModel=, =SyntheticMeasure=, =AnalyticalMeasure=, =EmpiricalMeasure=, =SyntheticCovariance=, =IIDCovariance=, =ClusteredCovariance=, =AnalyticalCovariance=, =Identity=, =Fixed=, =ContinuouslyUpdated=, =DiagonalTikhonov=, =optimistix_lm=, =scipy_lm=, =EstimationResult=, =Diagnostics=.
 
-** TODO README.org quickstart                                              :S:
+** DONE README.org quickstart                                             :S:
 Replace the placeholder layout with a working quickstart that mirrors the Phase 5 acceptance test (synthetic Euler demo, 30 lines or so).
 
-** TODO Pre-commit + CI                                                    :S:
+** DONE Pre-commit + CI                                                   :S:
 - =pre-commit install= once locally and document in README.
 - Decide whether to add a =.github/workflows/= CI config. ManifoldGMM has none; defer unless the user wants it.
 
@@ -297,18 +297,18 @@ Replace the placeholder layout with a working quickstart that mirrors the Phase 
 
 These don't belong to a single phase; flagging them so they don't fall through the cracks.
 
-** TODO Test infrastructure                                                :S:
+** DONE Test infrastructure                                               :S:
 - =tests/conftest.py= with a deterministic =jax.random.PRNGKey= fixture.
 - A small set of shared synthetic-DGP fixtures (lognormal consumption, simple linear regression for cross-checking).
 - =@pytest.mark.slow= for tests over \(n_{sim} > 10^4\) or otherwise expensive.
 
-** TODO Numerical tolerance conventions                                    :S:
+** DONE Numerical tolerance conventions                                   :S:
 Document in =CLAUDE.md=: which tests check exact equality, which use =jnp.allclose(rtol=1e-5, atol=1e-7)=, which use Monte Carlo tolerance with explicit seed. Inconsistent tolerance is a common source of flaky tests.
 
-** TODO Type-checking discipline                                           :S:
+** DONE Type-checking discipline                                          :S:
 Decide once whether =mypy= runs against =src= and =tests= or only =src=. ManifoldGMM does both; we should too. Add =# type: ignore= comments only with a stated reason.
 
-** TODO Examples directory                                                 :S:
+** DONE Examples directory                                                :S:
 =examples/= directory with at least the Euler example as a runnable =.py= file (not just a docstring), tangled from =docs/api-sketch.org= if we want literate workflow. Defer until end of v1.
 
 ---

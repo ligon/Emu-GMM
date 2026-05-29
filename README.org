@@ -9,13 +9,53 @@ The most important architectural commitment is that variance construction is ort
 
 * Status
 
-Pre-alpha; v0.1.0a0.  The architecture is documented; implementation is just beginning.  See =docs/= for the design specification, the MCAR asymptotic theory, and the v1 API sketch.
+v1 implementation complete (v0.1.0a0): 226 tests pass, =make quick-check= clean. The three measure paths (synthetic, analytical, empirical) all run end-to-end against the bundled multi-asset Euler example. The architecture and theoretical scope are pinned in =docs/=.
+
+* Quickstart
+
+Bootstrap and try the worked example:
+
+#+begin_src shell
+make setup                                 # poetry install + .venv/
+poetry run python examples/run_euler.py    # multi-asset Hansen-Singleton demo
+#+end_src
+
+The minimal estimation surface in code (synthetic-data variant):
+
+#+begin_src python
+import jax
+from emu_gmm import estimate, SyntheticMeasure, SyntheticCovariance
+from emu_gmm.examples.euler import (
+    EulerParams, euler_residual, euler_sampler_factory,
+)
+
+measure = SyntheticMeasure(
+    key=jax.random.PRNGKey(0),
+    n_sim=5000,
+    sampler=euler_sampler_factory(5000),
+)
+
+result = estimate(
+    model=euler_residual,
+    measure=measure,
+    covariance=SyntheticCovariance(),
+    theta_init=EulerParams(beta=0.9, gamma=1.0),
+)
+
+print(f"beta = {result.theta_hat.beta:.4f}  (truth 0.96)")
+print(f"gamma = {result.theta_hat.gamma:.4f}  (truth 2.00)")
+print(f"J-stat = {result.J_stat:.3f}  dof={result.J_dof}  p={result.J_pvalue:.3f}")
+print(result.to_pandas()["Sigma_theta"])
+#+end_src
+
+The same =euler_residual= drives the analytical and empirical variants of the demo; only the =Measure= / =CovarianceStrategy= change. See =docs/api-sketch.org= Section 5 for the three side-by-side, and =examples/run_euler.py= for the runnable script.
 
 * Documents
 
-- =docs/design.org= --- architecture specification.
-- =docs/mcar-asymptotics.org= --- companion theoretical note; consistency, asymptotic normality, and PD properties of the pairwise-overlap estimator under MCAR.
-- =docs/api-sketch.org= --- v1 API surface; module layout, types, and a worked Euler-equation example.
+- =docs/design.org= --- architecture specification (four review rounds; stable).
+- =docs/api-sketch.org= --- v1 API surface; module layout, types, worked example.
+- =docs/implementation-plan.org= --- phased task list (Phases 1-7 complete).
+- =docs/mcar-asymptotics.org= --- companion theoretical note; consistency, asymptotic normality, PD properties of the pairwise-overlap estimator under MCAR.
 - =docs/refs.bib= --- project-local bibliography (entries not in =~/bibtex/main.bib=).
 
 * Setup
@@ -26,26 +66,72 @@ Requires Python >= 3.11 and [[https://python-poetry.org/][Poetry]].
 make setup
 #+end_src
 
-This runs =poetry install= and creates =.venv/= in the project root.  Activate with =direnv allow= or =poetry shell=.
+This runs =poetry install= and creates =.venv/= in the project root. Activate with =direnv allow= or =poetry shell=.
 
 * Development
 
 #+begin_src shell
-make check         # lint + black + mypy + tests
-make quick-check   # same but skips slow tests
+make check         # ruff + black + mypy + full pytest
+make quick-check   # same, skipping slow tests
 make test          # pytest only
+#+end_src
+
+To install pre-commit hooks (ruff + black on every commit):
+
+#+begin_src shell
+poetry run pre-commit install
 #+end_src
 
 * Layout
 
 #+begin_example
-docs/                 design and theoretical specifications
-src/emu_gmm/          implementation (in progress)
-tests/                test suite
-Makefile              build automation
-pyproject.toml        Poetry configuration
-poetry.lock           pinned dependencies (committed)
+docs/                      design specs and theoretical notes
+src/emu_gmm/
+    __init__.py            public API re-exports
+    types.py               protocols + EstimationResult / Diagnostics
+    estimator.py           the estimate() entry point
+    measures/              SyntheticMeasure, AnalyticalMeasure, EmpiricalMeasure
+    covariance/            SyntheticCovariance, AnalyticalCovariance,
+                           IIDCovariance, ClusteredCovariance
+    weighting.py           Identity, Fixed, ContinuouslyUpdated
+    regularization.py      DiagonalTikhonov
+    optimizer.py           optimistix_lm, scipy_lm
+    diagnostics.py         build_diagnostics, log_to_stdout
+    examples/              shared example models (euler.py)
+    _internal/             axes, params, cholesky, labels (private)
+tests/                     test suite mirroring src/emu_gmm/
+examples/                  runnable demo scripts
+Makefile                   build automation
+pyproject.toml             Poetry configuration
+poetry.lock                pinned dependencies (committed)
 #+end_example
+
+* Public API
+
+The user-facing imports::
+
+#+begin_src python
+from emu_gmm import (
+    # Entry point
+    estimate,
+    # Measures
+    SyntheticMeasure, AnalyticalMeasure, EmpiricalMeasure,
+    # Covariance strategies
+    SyntheticCovariance, AnalyticalCovariance,
+    IIDCovariance, ClusteredCovariance,
+    # Weighting strategies
+    Identity, Fixed, ContinuouslyUpdated,
+    # Regularization
+    DiagonalTikhonov,
+    # Optimisers
+    optimistix_lm, scipy_lm,
+    # Result types
+    EstimationResult, Diagnostics, OptimizerInfo,
+    # Protocols (for typing your own implementations)
+    Measure, CovarianceStrategy, WeightingStrategy,
+    RegularizationStrategy, Optimizer, StructuralModel,
+)
+#+end_src
 
 * License
 

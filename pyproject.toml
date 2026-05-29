@@ -17,11 +17,12 @@ classifiers = [
 dependencies = [
   "jax>=0.4.25",
   "jaxtyping>=0.2.30",
-  "haliax>=1.3",
+  "haliax @ git+https://github.com/stanford-crfm/haliax.git",
   "jax_dataclasses>=1.6.1",
   "optimistix>=0.0.7",
   "numpy>=1.26",
-  "scipy>=1.11"
+  "scipy>=1.11",
+  "pandas>=2.0"
 ]
 
 [tool.poetry]
@@ -32,11 +33,14 @@ packages = [{ include = "emu_gmm", from = "src" }]
 python = ">=3.11,<4.0"
 jax = ">=0.4.25"
 jaxtyping = ">=0.2.30"
-haliax = ">=1.3"
+# Pin to GitHub master: PyPI haliax 1.3 imports jax._src.tree_util.BuiltInKeyEntry
+# which current JAX no longer exposes. GitHub master is compatible.
+haliax = { git = "https://github.com/stanford-crfm/haliax.git" }
 jax_dataclasses = ">=1.6.1"
 optimistix = ">=0.0.7"
 numpy = ">=1.26"
 scipy = ">=1.11"
+pandas = ">=2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"
@@ -59,10 +63,16 @@ line-length = 88
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+extend-exclude = [".claude", ".coder-session", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
-ignore = ["E501"]
+# E501 (line length): handled by black.
+# F722 (syntax error in forward annotation), F821 (undefined name in
+# forward annotation), UP037 (remove quotes from type annotation):
+# all false positives on jaxtyping shape strings like
+# Float[Array, "M K"]. Suppressed project-wide.
+ignore = ["E501", "F722", "F821", "UP037"]
 
 [tool.ruff.lint.isort]
 known-third-party = ["jax", "jaxtyping", "haliax", "jax_dataclasses", "optimistix", "numpy", "scipy"]

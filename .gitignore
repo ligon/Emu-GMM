@@ -21,11 +21,11 @@ dist/
 .idea/
 .vscode/
 
-# Tangled scripts (Org-babel generates these on demand)
-examples/*.py
-
 # Coder session scaffolding
 .coder-session/
+
+# Claude Code worktrees (temporary; created by isolation: worktree)
+.claude/
 
 # OS metadata
 .DS_Store
