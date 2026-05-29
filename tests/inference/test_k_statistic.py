@@ -1,9 +1,12 @@
 """Tests for emu_gmm.inference.k_statistic.
 
-Three cases cover the algebraic identities and the asymptotic distribution:
+Covers the algebraic identities, the asymptotic distribution, the
+Kleibergen D-tilde orthogonalisation property (reparameterisation
+invariance of K under linear transformations of m), and the
+jit / vmap compatibility of the helper.
 
-(a) Just-identified case (M = p): G_tilde is square; col(G_tilde) = R^M;
-    P_G = I; K = J; S = 0 exactly.
+(a) Just-identified case (M = p): D_tilde_w is square; col = R^M;
+    P_D = I; K = J; S = 0 exactly.
 
 (b) Over-identified case with the analytical Euler example evaluated at
     (BETA_TRUE, GAMMA_TRUE): the analytical expectation is exactly zero
@@ -11,10 +14,19 @@ Three cases cover the algebraic identities and the asymptotic distribution:
 
 (c) Chi-squared distributional sanity: under the null, with V chosen to
     match the actual sampling distribution, K should be distributed
-    chi^2_p. We construct an explicit Gaussian-moment toy where m | H_0
-    is exactly N(0, V), and check that the empirical quantiles of K over
-    a moderate Monte Carlo replication agree with the chi^2_p quantiles
-    to within Monte Carlo error.
+    chi^2_p. The vmapped kernel approximates the asymptotic limit law to
+    within Monte Carlo error.
+
+(d) Convenience overload: passing an EstimationResult evaluates at theta_hat.
+
+(e) Kleibergen D-tilde correctness: the K stat is invariant under
+    invertible linear reparameterisations of the moment vector
+    m -> A m. This is the central property the D-tilde construction
+    delivers (the raw-G form is invariant only when A is orthogonal in
+    the V metric).
+
+(f) jit / vmap compatibility: k_statistic compiles and vmaps cleanly,
+    matching the contract of every other public helper in the framework.
 """
 
 from __future__ import annotations
@@ -32,9 +44,10 @@ from emu_gmm.examples.euler import (
     EulerParams,
     euler_analytical_expectation,
     euler_residual,
+    euler_sampler_factory,
 )
 from emu_gmm.inference import KStatisticResult, k_statistic
-from emu_gmm.measures import AnalyticalMeasure
+from emu_gmm.measures import AnalyticalMeasure, SyntheticMeasure
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -317,3 +330,199 @@ class TestAcceptsEstimationResult:
         ks_at_hat = k_statistic(result, measure, cov, model=euler_residual)
         # Convergence to the truth -> m_hat ~ 0 -> J ~ 0 -> K, S ~ 0.
         assert float(ks_at_hat.J) < 1e-8
+
+
+# ---------------------------------------------------------------------------
+# (e) Kleibergen D-tilde correctness: K is invariant under invertible linear
+# reparameterisations of the moment vector.
+# ---------------------------------------------------------------------------
+
+
+class TestDTildeReparameterisationInvariance:
+    """The Kleibergen K-stat with D-tilde is invariant under m -> A m.
+
+    Concretely: replace the moment vector by ``A @ m`` (an invertible
+    linear reparameterisation), and the corresponding variance becomes
+    ``A V A'``, the Jacobian ``A G``, and the score covariance tensor
+    ``Sigma_jm_new[j] = A Sigma_jm[j] A'``. Plugged into
+
+       D_tilde_j = A G_j - A Sigma_jm[j] A' (A V A')^{-1} A m
+                = A (G_j - Sigma_jm[j] V^{-1} m)
+                = A D_tilde_j_original
+
+    the whitened residual ``L_new^{-1} (A m) = U L^{-1} m`` for some
+    orthogonal U (any factor of ``A V A' = (A L)(A L)'`` differs from
+    ``A L`` by orthogonal rotation), so K, J, S are all invariant by
+    construction.
+
+    The raw-G form would only deliver this invariance when ``A`` is
+    orthogonal in the V metric; under a generic ``A`` the raw-G K
+    statistic shifts. So this test directly distinguishes the D-tilde
+    form from the old raw-G form.
+    """
+
+    N_SIM = 5000
+    P = 2
+    M = 3
+
+    def _build(self, seed: int):
+        sampler = euler_sampler_factory(self.N_SIM)
+        measure = SyntheticMeasure(
+            key=jax.random.PRNGKey(seed), n_sim=self.N_SIM, sampler=sampler
+        )
+        # Identity covariance so the test is about D-tilde, not weighting.
+        cov = _identity_cov_factory(N_ASSETS)
+        return measure, cov
+
+    def _reparam_setup(self, base_measure, A):
+        """Wrap the synthetic measure under m -> A m.
+
+        Achieved by composing the user residual with a (constant) linear
+        map: ``A @ psi(x, theta)``. The synthetic measure path computes
+        moment / Jacobian contributions automatically by chain rule.
+        """
+        A_arr = jnp.asarray(A)
+
+        def reparam_residual(x, theta):
+            psi = euler_residual(x, theta)
+            return A_arr @ psi
+
+        # Per-moment cov also rotates: A I A' = A A'.
+        def cov_fn(model, theta):
+            del model, theta
+            return A_arr @ A_arr.T
+
+        return reparam_residual, AnalyticalCovariance(covariance_fn=cov_fn)
+
+    def test_K_invariant_under_reparameterisation(self):
+        """A misspecified theta_0 -> non-zero m; K should agree across A."""
+        measure, cov = self._build(seed=42)
+        # Deliberately mis-specified theta_0 so m != 0 and the D-tilde
+        # correction is non-trivial. (At m = 0 the test is vacuous.)
+        theta_0 = EulerParams(beta=0.85, gamma=3.0)
+        # Baseline K under the identity reparameterisation.
+        res_id = k_statistic(theta_0, measure, cov, model=euler_residual)
+        # A non-orthogonal A: a shear + scale that mixes moments.
+        A = jnp.array([[1.0, 0.3, -0.2], [0.0, 1.4, 0.5], [0.7, 0.0, 1.1]])
+        reparam_residual, cov_A = self._reparam_setup(measure, A)
+        res_A = k_statistic(theta_0, measure, cov_A, model=reparam_residual)
+        # K and J are coordinate-free under D-tilde + correct V rotation.
+        assert float(res_A.K) == pytest.approx(float(res_id.K), rel=1e-6, abs=1e-8)
+        assert float(res_A.J) == pytest.approx(float(res_id.J), rel=1e-6, abs=1e-8)
+        assert float(res_A.S) == pytest.approx(float(res_id.S), rel=1e-6, abs=1e-8)
+
+    def test_K_plus_S_equals_J(self):
+        """Algebraic identity must continue to hold under D-tilde."""
+        measure, cov = self._build(seed=7)
+        theta_0 = EulerParams(beta=0.85, gamma=3.0)
+        res = k_statistic(theta_0, measure, cov, model=euler_residual)
+        assert float(res.K) + float(res.S) == pytest.approx(float(res.J), abs=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# (f) jit / vmap compatibility.
+# ---------------------------------------------------------------------------
+
+
+class TestJitVmapCompatibility:
+    """k_statistic compiles under jit and vmaps over batches of theta_0.
+
+    The contract is the same as estimate() and J-stat: all array fields
+    are 0-d JAX arrays, the dofs are static, and the helper threads
+    through the standard tracing boundaries.
+    """
+
+    M = 3
+    P = 2
+
+    def _setup(self):
+        sampler = euler_sampler_factory(500)
+        measure = SyntheticMeasure(
+            key=jax.random.PRNGKey(0), n_sim=500, sampler=sampler
+        )
+        cov = _identity_cov_factory(N_ASSETS)
+        return measure, cov
+
+    def test_jit_compiles_and_matches_eager(self):
+        measure, cov = self._setup()
+        theta_0 = EulerParams(beta=0.92, gamma=2.5)
+        eager = k_statistic(theta_0, measure, cov, model=euler_residual)
+
+        def kernel(theta):
+            return k_statistic(theta, measure, cov, model=euler_residual)
+
+        # Force a recompile via jit by jit-wrapping the result-producing
+        # core (k_statistic returns a pytree dataclass, which jit handles).
+        jitted = jax.jit(kernel)
+        traced = jitted(theta_0)
+        # K, S, J should agree between eager and jitted execution.
+        assert float(traced.K) == pytest.approx(float(eager.K), rel=1e-9, abs=1e-12)
+        assert float(traced.S) == pytest.approx(float(eager.S), rel=1e-9, abs=1e-12)
+        assert float(traced.J) == pytest.approx(float(eager.J), rel=1e-9, abs=1e-12)
+        # p-values are now JAX arrays, not Python floats; they should
+        # also agree.
+        assert float(traced.p_K) == pytest.approx(float(eager.p_K), abs=1e-10)
+        assert float(traced.p_J) == pytest.approx(float(eager.p_J), abs=1e-10)
+
+    def test_vmap_over_theta_batch(self):
+        """vmap over a batch of theta_0; result fields stack on the leading axis."""
+        measure, cov = self._setup()
+
+        # Stack two thetas on the leaves: beta=[0.95, 0.90], gamma=[2.0, 2.5].
+        betas = jnp.asarray([0.95, 0.90])
+        gammas = jnp.asarray([2.0, 2.5])
+
+        def kernel(beta, gamma):
+            theta = EulerParams(beta=beta, gamma=gamma)
+            return k_statistic(theta, measure, cov, model=euler_residual)
+
+        batched = jax.vmap(kernel)(betas, gammas)
+        assert batched.K.shape == (2,)
+        assert batched.S.shape == (2,)
+        assert batched.J.shape == (2,)
+        # dofs are static — same scalar for every entry of the batch.
+        assert batched.df_K == self.P
+        assert batched.df_J == self.M
+
+    def test_p_values_are_jax_arrays_not_python_floats(self):
+        """The rewrite returns p_K/p_S/p_J as 0-d JAX arrays so vmap works."""
+        measure, cov = self._setup()
+        theta_0 = EulerParams(beta=0.95, gamma=2.0)
+        res = k_statistic(theta_0, measure, cov, model=euler_residual)
+        # Each p-value is a 0-d JAX array, not a Python float — required
+        # for vmap and jit transparency.
+        assert hasattr(res.p_K, "shape")
+        assert res.p_K.shape == ()
+        assert hasattr(res.p_J, "shape")
+        assert res.p_J.shape == ()
+
+
+# ---------------------------------------------------------------------------
+# (g) Under-identified problems are rejected with a clear error.
+# ---------------------------------------------------------------------------
+
+
+class TestUnderIdentifiedRaises:
+    """M < p should raise ValueError, not silently return a degenerate result."""
+
+    def test_under_identified_raises(self):
+        @jdc.pytree_dataclass
+        class _ThreeParams:
+            a: float
+            b: float
+            c: float
+
+        def exp_fn(model, theta):
+            del model
+            # 2 moments, 3 parameters -> M < p.
+            return jnp.array([theta.a + theta.b, theta.b + theta.c])
+
+        measure = AnalyticalMeasure(expectation_fn=exp_fn)
+        cov = _identity_cov_factory(2)
+        with pytest.raises(ValueError, match="under-identified"):
+            k_statistic(
+                _ThreeParams(a=0.0, b=0.0, c=0.0),
+                measure,
+                cov,
+                model=_noop_model,
+            )

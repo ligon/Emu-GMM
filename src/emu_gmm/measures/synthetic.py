@@ -100,5 +100,60 @@ class SyntheticMeasure:
 
         return jax.jacfwd(fn)(flat_theta)
 
+    def moment_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "n_sim M"]:
+        """Per-draw moment contributions ``g_s(theta) = psi(x_s, theta)``.
+
+        Returns the ``(n_sim, M)`` matrix of per-draw evaluations of
+        ``psi`` against the sampler's CRN-frozen draws. This is the
+        building block downstream resampling and identification-robust
+        inference (e.g. the Kleibergen K-statistic) consume. The
+        analogue of :meth:`EmpiricalMeasure.moment_contributions`, but
+        backed by the synthetic sampler rather than the observed data.
+        """
+        x_batch = self._draws(theta)
+
+        def psi_at(x):
+            return _to_plain(psi(x, theta))
+
+        return jax.vmap(psi_at)(x_batch)
+
+    def jacobian_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "n_sim M K"]:
+        """Per-draw Jacobian contributions ``D_s(theta) = grad_theta psi(x_s, theta)``.
+
+        Returns the ``(n_sim, M, K)`` tensor of per-draw Jacobians,
+        suitable for estimating :math:`\\Sigma_{G_j, m}` (Kleibergen 2005
+        eq. 8) in the synthetic-measure setting. Mirrors
+        :meth:`EmpiricalMeasure.jacobian_contributions` but with CRN
+        draws standing in for observed rows.
+
+        The sampler draws are produced once via :meth:`_draws` and held
+        fixed across the per-draw Jacobian computation, so
+        ``jax.jacfwd`` differentiates ``psi`` (and not the sampler) with
+        respect to ``theta`` --- which is correct for a CRN
+        construction. If the sampler depends on ``theta``, the resulting
+        Jacobian contribution captures only the residual's parameter
+        dependence at the held draws; pair it with a user-supplied
+        ``score_cov_fn`` to inference if the sampler-dependence matters.
+        """
+        flat_theta, treedef = flatten_params(theta)
+        # Materialise draws at the current theta and freeze them; the
+        # per-draw Jacobian then differentiates psi alone, mirroring the
+        # empirical case where x is observation data and not a function
+        # of theta.
+        x_batch = self._draws(theta)
+
+        def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
+            params = unflatten_params(flat, treedef)
+            return _to_plain(psi(x, params))
+
+        def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
+            return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
+
+        return jax.vmap(grad_at)(x_batch)
+
 
 __all__ = ["SyntheticMeasure"]
