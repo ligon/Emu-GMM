@@ -57,6 +57,7 @@ from emu_gmm.measures import (
     EmpiricalMeasure,
     SyntheticMeasure,
 )
+from emu_gmm.numerics import ridge_inverse
 from emu_gmm.optimizer import optimistix_lm, scipy_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -98,6 +99,8 @@ __all__ = [
     "CUE",
     # Regularization
     "DiagonalTikhonov",
+    # Numerics helpers
+    "ridge_inverse",
     # Optimisers
     "optimistix_lm",
     "scipy_lm",
