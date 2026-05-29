@@ -194,6 +194,125 @@ class TestJacobian:
 # ---------------------------------------------------------------------------
 
 
+class TestMomentContributions:
+    """The per-row ``g_i(theta)`` primitive that downstream resampling
+    routines (bootstrap, K-statistic) read off the measure.
+
+    Issue #2 / port-blocker: Seasonality scripts rely on a
+    per-observation moment matrix to build their own inference
+    procedures. The expectation aggregates with ``1 / N_j``; this method
+    returns the un-normalised, mask-weighted contributions so that
+    callers can recombine them however the downstream procedure needs.
+    """
+
+    def test_shape_and_dtype(self):
+        meas = EmpiricalMeasure(
+            x=jnp.zeros((5, 2)),
+            mask=jnp.ones((5, 2)),
+            weights=jnp.ones(5),
+        )
+        theta = _LinearParams(a=0.0, b=1.0)
+        g = meas.moment_contributions(_two_moment_residual, theta)
+        assert g.shape == (5, 2)
+        assert g.dtype == jnp.float64
+
+    def test_unit_weights_no_mask_matches_raw_psi(self):
+        """With all-ones mask and weights, contributions equal psi(x_i)."""
+        key = jax.random.PRNGKey(2)
+        x = jax.random.normal(key, (20, 1))
+        meas = EmpiricalMeasure(
+            x=x,
+            mask=jnp.ones((20, 1)),
+            weights=jnp.ones(20),
+        )
+        theta = _LinearParams(a=0.5, b=2.0)
+        g = meas.moment_contributions(_linear_residual, theta)
+        psi_batch = jax.vmap(lambda xi: _linear_residual(xi, theta))(x)
+        assert jnp.allclose(g, psi_batch)
+
+    def test_mask_zeros_out_unobserved_rows(self):
+        """Rows where mask[i, j] == 0 produce zero contribution to moment j."""
+        x = jnp.array(
+            [
+                [1.0, 10.0],
+                [2.0, 20.0],
+                [3.0, 30.0],
+                [4.0, 40.0],
+            ]
+        )
+        mask = jnp.array(
+            [
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ]
+        )
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(4))
+        theta = _LinearParams(a=0.0, b=1.0)
+        g = meas.moment_contributions(_two_moment_residual, theta)
+        # Moment 0 = a + x[0] = x[0]. Rows 0..2 visible; row 3 masked.
+        np.testing.assert_allclose(np.asarray(g[:, 0]), [1.0, 2.0, 3.0, 0.0])
+        # Moment 1 = b * x[1] = x[1]. Rows 0, 3 visible; rows 1, 2 masked.
+        np.testing.assert_allclose(np.asarray(g[:, 1]), [10.0, 0.0, 0.0, 40.0])
+
+    def test_weights_multiply_contribution(self):
+        """Each contribution scales by w_i (not w_i^2: this is the linear form)."""
+        x = jnp.array([[1.0], [2.0], [3.0]])
+        weights = jnp.array([0.5, 1.0, 2.0])
+        meas = EmpiricalMeasure(
+            x=x,
+            mask=jnp.ones((3, 1)),
+            weights=weights,
+        )
+        theta = _LinearParams(a=0.0, b=1.0)
+        g = meas.moment_contributions(_linear_residual, theta)
+        # g_i = d_i * w_i * x_i = [0.5, 2.0, 6.0].
+        np.testing.assert_allclose(np.asarray(g[:, 0]), [0.5, 2.0, 6.0])
+
+    def test_sum_normalised_recovers_expectation(self):
+        """Round-trip: sum_i g_ij / N_j == expectation()_j.
+
+        This is the consistency relation that makes ``moment_contributions``
+        the primitive of ``expectation``: the only difference between the
+        two is the per-coordinate normalisation by N_j.
+        """
+        key = jax.random.PRNGKey(3)
+        x = jax.random.normal(key, (50, 1))
+        weights = jax.random.uniform(jax.random.PRNGKey(4), (50,)) + 0.5
+        meas = EmpiricalMeasure(
+            x=x,
+            mask=jnp.ones((50, 1)),
+            weights=weights,
+        )
+        theta = _LinearParams(a=0.3, b=-1.2)
+        g = meas.moment_contributions(_linear_residual, theta)
+        N_j = jnp.sum(meas.mask * meas.weights[:, None], axis=0)  # (M,)
+        recovered = jnp.sum(g, axis=0) / N_j
+        expected = meas.expectation(_linear_residual, theta)
+        assert jnp.allclose(recovered, expected)
+
+    def test_jits(self):
+        x = jnp.linspace(0.0, 1.0, 20).reshape(20, 1)
+        meas = EmpiricalMeasure(
+            x=x,
+            mask=jnp.ones((20, 1)),
+            weights=jnp.ones(20),
+        )
+        theta = _LinearParams(a=0.5, b=2.0)
+
+        @jax.jit
+        def compute(m, t):
+            return m.moment_contributions(_linear_residual, t)
+
+        eager = meas.moment_contributions(_linear_residual, theta)
+        jit_result = compute(meas, theta)
+        assert jnp.allclose(eager, jit_result)
+
+
+# ---------------------------------------------------------------------------
+
+
 class TestFromPandas:
     def test_dataframe_round_trip(self):
         """DataFrame -> measure -> x array matches df.to_numpy()."""

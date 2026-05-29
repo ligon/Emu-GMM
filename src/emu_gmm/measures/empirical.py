@@ -162,6 +162,54 @@ class EmpiricalMeasure:
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom)
 
+    def moment_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "N M"]:
+        """Per-observation, mask-weighted moment contributions ``g_i(theta)``.
+
+        Returns the ``(N, M)`` matrix whose ``(i, j)`` entry is
+
+        .. math::
+           g_{ij}(\\theta) \\;=\\; d_{ij}\\, w_i\\, \\psi_j(x_i, \\theta),
+
+        i.e. the per-observation contribution that summed-then-normalised
+        produces :meth:`expectation`. Rows where ``mask[i, j] == 0`` are
+        zeroed; rows where ``mask[i, j] == 1`` carry ``w_i * psi_j``.
+
+        This is the building block downstream callers need for
+        bootstrap, K-statistic, and other resampling-based inference
+        routines: those procedures resample / reweight at the
+        per-observation level and need access to the raw
+        ``g_i(\\theta)`` matrix without normalisation. Combined with
+        :meth:`jacobian` and a :class:`~emu_gmm.types.CovarianceStrategy`
+        applied at ``theta`` (which gives the cluster- or iid-aware
+        ``Omega_hat(theta)``), these three primitives match the surface
+        that ManifoldGMM's ``MomentRestriction`` exposes for the same
+        downstream machinery.
+
+        Parameters
+        ----------
+        psi : :data:`StructuralModel`
+            Per-observation residual function.
+        theta : :data:`ParamsLike`
+            User parameter dataclass.
+
+        Returns
+        -------
+        g : (N, M) jax array
+            ``g_ij = d_ij * w_i * psi_j(x_i, theta)``; the masked,
+            weighted per-observation moment matrix. No ``1 / N_j``
+            normalisation is applied --- the caller decides how to
+            aggregate (sum, weighted sum, cluster-sum, bootstrap-resample).
+        """
+
+        def psi_at(x):
+            return _to_plain(psi(x, theta))
+
+        psi_batch = jax.vmap(psi_at)(self.x)  # (N, M)
+        weight_mask = self.mask * self.weights[:, None]  # (N, M)
+        return weight_mask * psi_batch
+
     def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
         """Per-coordinate weighted mean of :math:`\\nabla_\\theta \\psi`.
 
