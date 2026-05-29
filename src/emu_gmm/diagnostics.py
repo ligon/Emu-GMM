@@ -6,6 +6,11 @@ the end of an estimation. This module provides:
 - :func:`build_diagnostics`: assemble a :class:`Diagnostics` from the
   raw arrays and scalars computed by the estimator pipeline, wrapping
   the per-moment fields in labelled :class:`haliax.NamedArray` instances.
+- :func:`compute_cond_info`: build the Hessian condition trio
+  (``raw`` / ``data_only`` / ``exclude_gauge``) at theta_hat from
+  ``G`` and ``V*``. See CLAUDE.md commitment 5 and issue #10.
+- :func:`build_optimizer_health`: assemble the optimiser-health summary
+  dict from an :class:`OptimizerInfo` and a final gradient norm.
 - :func:`log_to_stdout`: a simple console logger usable as a per-step
   hook during optimisation; prints :math:`\\tau`, :math:`\\kappa(V^\\star)`,
   and the current objective.
@@ -18,6 +23,7 @@ from typing import Any
 import haliax as ha
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg
 import jax.scipy.stats
 from jaxtyping import Array, Float
 
@@ -37,6 +43,8 @@ def build_diagnostics(
     moment_residual_array: Float[Array, " M"],
     moments_axis: ha.Axis,
     optimizer_info: OptimizerInfo,
+    cond_info: dict[str, float] | None = None,
+    optimizer_health: dict[str, Any] | None = None,
 ) -> Diagnostics:
     """Assemble a :class:`Diagnostics` from raw estimator-pipeline values.
 
@@ -63,6 +71,13 @@ def build_diagnostics(
         Axis for the labelled per-moment outputs.
     optimizer_info : :class:`OptimizerInfo`
         Backend-specific solver info.
+    cond_info : dict, optional
+        Hessian condition trio at theta_hat. See
+        :func:`compute_cond_info`. Defaults to an empty dict if the
+        caller has not computed it (e.g. unit tests).
+    optimizer_health : dict, optional
+        Lightweight optimiser-health summary. See
+        :func:`build_optimizer_health`. Defaults to an empty dict.
 
     Returns
     -------
@@ -80,6 +95,10 @@ def build_diagnostics(
             jnp.asarray(moment_residual_array), moments_axis
         ),
         optimizer_info=optimizer_info,
+        cond_info=dict(cond_info) if cond_info is not None else {},
+        optimizer_health=(
+            dict(optimizer_health) if optimizer_health is not None else {}
+        ),
     )
 
 
@@ -192,6 +211,124 @@ def regularization_adjusted_pvalue(
     return jax.scipy.stats.chi2.sf(J_stat / c, v)
 
 
+def compute_cond_info(
+    G: Float[Array, "M K"],
+    V_star: Float[Array, "M M"],
+) -> dict[str, float]:
+    """Condition number of the information matrix :math:`G' \\Lambda G`.
+
+    Per CLAUDE.md commitment 5 the v1 information matrix is constructed
+    as :math:`G' \\Lambda G` with :math:`\\Lambda = (V^\\star)^{-1}`,
+    realised via the Cholesky factor of :math:`V^\\star`. This routine
+    reports :math:`\\kappa(G' \\Lambda G)` --- a direct identifier
+    proxy that catches near-rank-deficient :math:`G` even when
+    :math:`V^\\star` is well conditioned.
+
+    The return value is a dict with three keys to mirror ManifoldGMM's
+    ``compute_hessian_cond(data_only, exclude_gauge)`` (see issue #10):
+
+    - ``'raw'``: :math:`\\kappa(G' \\Lambda G)` as computed.
+    - ``'data_only'``: equals ``'raw'`` in v1. Once issue #7
+      (PenaltyStrategy hook) lands, the penalty Hessian contribution
+      should be subtracted before computing this number. Until then,
+      ``data_only == raw`` is the correct value because no penalty is
+      added to the information matrix in v1.
+    - ``'exclude_gauge'``: alias to ``'raw'`` for v1. The v2 manifold
+      epic will reinterpret this as the condition of the information
+      matrix projected onto the orthogonal complement of the gauge
+      nullspace; for the flat-parameter v1 the gauge group is trivial
+      and the two coincide.
+
+    Parameters
+    ----------
+    G : (M, K) array
+        Moment-Jacobian at :math:`\\hat\\theta`, ``E_mu[grad_theta psi]``.
+    V_star : (M, M) array
+        Regularised moment-variance matrix at :math:`\\hat\\theta`.
+        Assumed symmetric PD.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{'raw': ..., 'data_only': ..., 'exclude_gauge': ...}``.
+    """
+    G_arr = jnp.asarray(G)
+    V_arr = jnp.asarray(V_star)
+    # Information matrix via Cholesky of V*. Match estimator.py's
+    # construction so the reported cond is the cond of the same matrix
+    # used for Sigma_theta.
+    L = jnp.linalg.cholesky(V_arr)
+    Z = jax.scipy.linalg.solve_triangular(L, G_arr, lower=True)
+    info_matrix = Z.T @ Z
+    raw_arr = jnp.linalg.cond(info_matrix)
+    try:
+        raw: Any = float(raw_arr)
+    except (TypeError, ValueError):
+        # Traced under jit: leave the JAX scalar in place. The
+        # ``Diagnostics.cond_info`` dict is documented as a mapping of
+        # scalar values; under tracing those scalars are 0-d JAX arrays.
+        raw = raw_arr
+    # In v1 there is no PenaltyStrategy contribution (see issue #7) and
+    # no manifold gauge nullspace (see v2 manifold epic), so data_only
+    # and exclude_gauge equal raw. When those features land, recompute
+    # here.
+    return {
+        "raw": raw,
+        "data_only": raw,
+        "exclude_gauge": raw,
+    }
+
+
+def build_optimizer_health(
+    optimizer_info: OptimizerInfo,
+    final_gradient_norm: float,
+    step_norm: float | None = None,
+    accepted_step_count: int | None = None,
+) -> dict[str, Any]:
+    """Build the optimiser-health summary dict (issue #10).
+
+    Parameters
+    ----------
+    optimizer_info : :class:`OptimizerInfo`
+        Backend-specific solver info. ``optimizer_info.steps`` becomes
+        the ``'iters'`` field.
+    final_gradient_norm : float
+        Norm of :math:`\\nabla_\\theta \\tfrac{1}{2}\\|y\\|^2` at the
+        optimum.
+    step_norm : float, optional
+        Norm of the last accepted step. Defaults to ``None`` because
+        neither :class:`optimistix.LevenbergMarquardt` nor
+        :func:`scipy.optimize.least_squares` expose this directly in
+        their result objects.
+    accepted_step_count : int, optional
+        Number of accepted (vs rejected) LM steps. Defaults to ``None``
+        for the same reason as ``step_norm``.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{'iters': int, 'grad_norm': float, 'step_norm': float | None,
+        'accepted_step_count': int | None}``.
+    """
+    iters_val = optimizer_info.steps
+    try:
+        iters: Any = int(iters_val)
+    except (TypeError, ValueError):
+        # Traced under jit: leave the JAX scalar in place.
+        iters = iters_val
+    try:
+        grad_norm: Any = float(final_gradient_norm)
+    except (TypeError, ValueError):
+        # Traced under jit: leave the JAX scalar in place.
+        grad_norm = final_gradient_norm
+    return {
+        "iters": iters,
+        "grad_norm": grad_norm,
+        "step_norm": step_norm,
+        "accepted_step_count": accepted_step_count,
+    }
+
+
 def log_to_stdout(prefix: str = "[emu-gmm]") -> Any:
     """Return a callable that prints per-step diagnostics to stdout.
 
@@ -227,6 +364,8 @@ def log_to_stdout(prefix: str = "[emu-gmm]") -> Any:
 
 __all__ = [
     "build_diagnostics",
+    "build_optimizer_health",
+    "compute_cond_info",
     "log_to_stdout",
     "regularization_adjusted_pvalue",
 ]
