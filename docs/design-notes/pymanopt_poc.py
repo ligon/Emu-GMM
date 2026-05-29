@@ -13,6 +13,9 @@ Outputs (printed to stdout):
 - whether jax.jit composes (we try it as a smoke test on the cost)
 """
 
+# ruff: noqa: E402
+# Imports below the float64 config update intentionally come after a
+# non-import statement.
 from __future__ import annotations
 
 import jax
@@ -21,6 +24,7 @@ import numpy as np
 
 # Force float64
 from jax import config as _jax_config
+
 _jax_config.update("jax_enable_x64", True)
 
 import pymanopt
@@ -38,6 +42,7 @@ M_target = Y_true @ Y_true.T  # numpy float64
 manifold = PSDFixedRank(n=m, k=k)
 print("Manifold point dtype:", manifold.random_point().dtype)
 
+
 # Define cost using pymanopt.function.jax decorator. The decorator
 # requires the function reference the manifold.
 @pymanopt.function.jax(manifold)
@@ -47,6 +52,7 @@ def cost(Y):
     # so jax.grad can differentiate.
     diff = Y @ Y.T - jnp.asarray(M_target)
     return 0.5 * jnp.sum(diff * diff)
+
 
 problem = pymanopt.Problem(manifold, cost)
 
@@ -81,8 +87,10 @@ Y_hat = result.point
 print("type(Y_hat):", type(Y_hat).__name__)
 print("dtype(Y_hat):", getattr(Y_hat, "dtype", "n/a"))
 print("Y_hat:\n", Y_hat)
-print("residual ||Y_hat Y_hat^T - M_target||_F:",
-      float(np.linalg.norm(Y_hat @ Y_hat.T - M_target)))
+print(
+    "residual ||Y_hat Y_hat^T - M_target||_F:",
+    float(np.linalg.norm(Y_hat @ Y_hat.T - M_target)),
+)
 print("iterations:", result.iterations)
 print("cost at solution:", result.cost)
 print("jit_ok:", jit_ok, "vmap_ok:", vmap_ok)

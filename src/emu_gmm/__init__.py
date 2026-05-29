@@ -52,7 +52,7 @@ from emu_gmm.diagnostics import (
     compute_cond_info,
 )
 from emu_gmm.estimator import estimate
-from emu_gmm.inference import KStatisticResult, k_statistic
+from emu_gmm.inference import JTestResult, KStatisticResult, j_test, k_statistic
 from emu_gmm.measures import (
     AnalyticalMeasure,
     EmpiricalMeasure,
@@ -108,6 +108,9 @@ __all__ = [
     # Optimisers
     "optimistix_lm",
     "scipy_lm",
+    # Inference helpers
+    "j_test",
+    "JTestResult",
     # Result / diagnostics types
     "EstimationResult",
     "Diagnostics",
