@@ -125,6 +125,7 @@ def _make_result() -> t.EstimationResult:
         J_stat=jnp.asarray(1.3),
         J_dof=1,
         J_pvalue=jnp.asarray(0.25),
+        J_pvalue_adjusted=jnp.asarray(0.25),
         converged=True,
         iterations=12,
         theta_init=_EulerParams(beta=0.9, gamma=1.5),

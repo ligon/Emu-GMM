@@ -215,9 +215,18 @@ class EstimationResult:
     # J-test. ``J_stat`` and ``J_pvalue`` are 0-d JAX arrays so
     # ``estimate`` is jit / vmap compatible; ``float(result.J_stat)``
     # outside trace recovers a Python scalar. ``J_dof`` is a static int.
+    #
+    # ``J_pvalue`` is the *nominal* chi^2_{M-K} survival function value.
+    # ``J_pvalue_adjusted`` is the regularisation-adjusted survival
+    # function under the weighted-chi^2 limit of
+    # mcar-asymptotics.org Theorem 6; it equals ``J_pvalue`` when the
+    # ridge is not binding (tau <= tau_threshold) and differs (via a
+    # Welch-Satterthwaite approximation to the generalised chi-squared)
+    # when it binds.
     J_stat: Float[Array, ""]
     J_dof: int
     J_pvalue: Float[Array, ""]
+    J_pvalue_adjusted: Float[Array, ""]
 
     # Status. ``converged`` is a Python bool derived from the optimiser's
     # discrete status enum (or the sentinel ``"traced"`` under jit/vmap).
@@ -290,6 +299,7 @@ class EstimationResult:
                 "J_stat": float(jnp.asarray(self.J_stat)),
                 "J_dof": int(self.J_dof),
                 "J_pvalue": float(jnp.asarray(self.J_pvalue)),
+                "J_pvalue_adjusted": float(jnp.asarray(self.J_pvalue_adjusted)),
                 "converged": bool(self.converged),
                 "iterations": int(self.iterations),
                 "tau_realised": float(jnp.asarray(self.diagnostics.tau_realised)),

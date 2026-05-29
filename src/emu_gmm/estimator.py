@@ -35,7 +35,7 @@ from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
-from emu_gmm.diagnostics import build_diagnostics
+from emu_gmm.diagnostics import build_diagnostics, regularization_adjusted_pvalue
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -283,8 +283,22 @@ def estimate(
         # is not. The dof is a static Python int (it comes from M and K,
         # which are static closure variables).
         J_pvalue = jax.scipy.stats.chi2.sf(J_stat, J_dof)
+        # Regularisation-adjusted p-value: weighted-chi^2 limit per
+        # mcar-asymptotics.org Theorem 6. Computed unconditionally and
+        # surfaced as ``J_pvalue_adjusted`` so users can compare against
+        # the nominal value; we then pick between them based on whether
+        # the ridge is binding.
+        J_pvalue_adjusted_unbinding = J_pvalue  # tau ~= 0 case
+        J_pvalue_adjusted_binding = regularization_adjusted_pvalue(
+            J_stat, V_hat, V_star_hat, G_hat
+        )
+        binding_flag = jnp.asarray(_binding_ridge(regularization, tau_hat))
+        J_pvalue_adjusted = jnp.where(
+            binding_flag, J_pvalue_adjusted_binding, J_pvalue_adjusted_unbinding
+        )
     else:
         J_pvalue = jnp.asarray(jnp.nan)  # under- or just-identified
+        J_pvalue_adjusted = jnp.asarray(jnp.nan)
 
     # Labelled outputs.
     Params = axes_mod.params_axis(K)
@@ -341,6 +355,7 @@ def estimate(
         J_stat=J_stat,
         J_dof=J_dof,
         J_pvalue=J_pvalue,
+        J_pvalue_adjusted=J_pvalue_adjusted,
         converged=converged,
         iterations=iterations,
         theta_init=theta_init,
