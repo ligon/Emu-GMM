@@ -16,10 +16,17 @@ Plus the dataclasses that :func:`emu_gmm.estimate` returns:
 - :class:`EstimationResult` --- estimate, inference, provenance, labels.
 
 All protocols are ``@runtime_checkable`` so ``isinstance(impl, Protocol)``
-works in user code. Result dataclasses are plain
-:func:`dataclasses.dataclass` instances (not JAX PyTrees) since they are
-constructed once at the end of an estimation and not threaded through
-``jit`` boundaries.
+works in user code. :class:`OptimizerInfo` is a
+``@jdc.pytree_dataclass`` so that the ``(theta_opt, info)`` tuple an
+:class:`Optimizer` returns can be threaded through ``jax.jit`` and
+``jax.vmap`` --- this is what the ``optimistix_lm`` adapter advertises.
+The two string-typed fields (``status``, ``backend``) ride on the
+pytree treedef as ``jdc.static_field()``. :class:`Diagnostics` and
+:class:`EstimationResult` remain plain :func:`dataclasses.dataclass`
+instances: they are constructed once at the end of an estimation and
+not threaded through ``jit`` boundaries directly (the surrounding
+:func:`emu_gmm.estimate` returns scalar fields, not the result object,
+to anything inside a jit boundary).
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import haliax as ha
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import pandas as pd
 import scipy.stats
 from jaxtyping import Array, Float
@@ -158,14 +166,25 @@ class Optimizer(Protocol):
 # ---------------------------------------------------------------------------
 
 
-@dataclasses.dataclass(frozen=True)
+@jdc.pytree_dataclass
 class OptimizerInfo:
-    """Backend-specific info from one optimiser run."""
+    """Backend-specific info from one optimiser run.
 
-    steps: int
-    status: str  # "converged" | "max_iterations" | "diverged" | other
-    final_objective: float
-    backend: str  # "optimistix" | "scipy" | other
+    Registered as a JAX PyTree via :func:`jax_dataclasses.pytree_dataclass`
+    so that ``(theta_opt, info)`` tuples returned by an :class:`Optimizer`
+    are valid JAX values --- traceable through :func:`jax.jit` and
+    :func:`jax.vmap`. The ``steps`` and ``final_objective`` fields are
+    traced (typically 0-d JAX scalars under jit, Python ints/floats
+    eagerly); ``status`` and ``backend`` are strings and so are marked
+    as static fields, mirroring the pattern in
+    :mod:`emu_gmm.measures.synthetic` for callable / hyperparameter
+    fields.
+    """
+
+    steps: Any  # traced; typically int (eager) or 0-d JAX int array (jit)
+    final_objective: Any  # traced; Python float (eager) or 0-d JAX float (jit)
+    status: str = jdc.static_field()  # type: ignore[attr-defined]
+    backend: str = jdc.static_field()  # type: ignore[attr-defined]
 
 
 @dataclasses.dataclass(frozen=True)

@@ -110,8 +110,8 @@ class _OptimistixLM:
 
         info = OptimizerInfo(
             steps=steps,
+            final_objective=final_objective,
             status=status,
-            final_objective=final_objective,  # type: ignore[arg-type]
             backend="optimistix",
         )
         return theta_opt, info
@@ -223,8 +223,8 @@ class _ScipyLM:
 
         info = OptimizerInfo(
             steps=steps,
-            status=status,
             final_objective=final_objective,
+            status=status,
             backend="scipy",
         )
         return theta_opt, info
