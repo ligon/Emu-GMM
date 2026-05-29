@@ -38,14 +38,25 @@ provided:
 
 1. :meth:`from_pandas` infers the per-coordinate mask from
    ``~df.isna()`` when no explicit mask is supplied, and replaces NaN
-   cells in the stored ``x`` array with zero so they cannot poison the
-   AD tape if a downstream model happens to read them.
+   cells in the stored ``x`` array with the per-column mean of the
+   *observed* rows of that column (see
+   :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`). The mean is a
+   strictly stronger guarantee than the previous ``0.0`` constant: it
+   lies inside the domain of ``log``, ``1/x``, ``sqrt`` and similar
+   partial residuals whenever any observed cell does, and so prevents
+   the user's :math:`\\psi` from producing NaN / Inf at masked-out
+   cells. The mask still controls aggregation, so the primal value is
+   unchanged.
 2. :meth:`expectation` and :meth:`jacobian` use :func:`jax.numpy.where`
    to /zero out/ rows the mask excludes before multiplication, so a
    model :math:`\\psi` that returns NaN on excluded rows --- a natural
    pattern when the residual is only defined for holders --- still
    produces a finite moment vector and a finite gradient. Without this
-   guard the JAX algebra ``0 * NaN = NaN`` poisons the sum.
+   guard the JAX algebra ``0 * NaN = NaN`` poisons the sum, and
+   reverse-mode AD propagates the NaN cotangent through the untaken
+   ``where`` branch on the primal side regardless of the output mask
+   (see ``docs/reviews/v1x-jax-ad-review.org`` and
+   :mod:`emu_gmm._internal.nan_safety`).
 """
 
 from __future__ import annotations
@@ -59,6 +70,7 @@ import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import labels as labels_mod
+from emu_gmm._internal.nan_safety import safe_x_for_psi
 from emu_gmm._internal.params import flatten_params, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
 
@@ -199,12 +211,20 @@ class EmpiricalMeasure:
         """
         # Pre-sanitise the data array so that NaN cells (e.g., a
         # non-holder's return) cannot enter the user's psi or its
-        # gradient. The "double where" pattern: evaluate psi on a
-        # NaN-free surrogate, then mask the result. Without this
-        # guard, reverse-mode AD would propagate the NaN through the
-        # untaken branch of any jnp.where on the output side
-        # (cotangent flow ignores branch selection).
-        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+        # gradient. The naive "double where" pattern --- replace NaN
+        # with a fixed constant (e.g. 0.0), vmap psi, mask the result
+        # --- is unsafe under *reverse-mode* AD whenever psi is partial
+        # at the chosen constant: ``log(0) = -inf``, ``1 / 0 = inf``,
+        # and ``sqrt(-x)`` returns NaN, and reverse-mode AD propagates
+        # the cotangent through the untaken ``where`` branch on the
+        # primal side. The result is a NaN gradient on a converged
+        # solution (see ``docs/reviews/v1x-jax-ad-review.org``).
+        # Instead we substitute the per-column observed mean: that
+        # value lies inside psi's domain whenever any observed cell of
+        # the column does, so log / division / sqrt all stay finite.
+        # The output mask still zeroes the contribution to the primal,
+        # so the aggregate is unchanged.
+        x_safe = safe_x_for_psi(self.x)
 
         def psi_at(x):
             return _to_plain(psi(x, theta))
@@ -303,8 +323,9 @@ class EmpiricalMeasure:
         traverses it.
         """
 
-        # Pre-sanitise x (see :meth:`expectation` for the rationale).
-        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+        # Pre-sanitise x with the per-column observed-mean sentinel
+        # (see :meth:`expectation` for the reverse-mode AD rationale).
+        x_safe = safe_x_for_psi(self.x)
 
         def psi_at(x):
             return _to_plain(psi(x, theta))
@@ -333,8 +354,9 @@ class EmpiricalMeasure:
         """
         flat_theta, treedef = flatten_params(theta)
 
-        # Pre-sanitise x (see :meth:`expectation` for the rationale).
-        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+        # Pre-sanitise x with the per-column observed-mean sentinel
+        # (see :meth:`expectation` for the reverse-mode AD rationale).
+        x_safe = safe_x_for_psi(self.x)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
             params = unflatten_params(flat, treedef)
@@ -461,15 +483,25 @@ class EmpiricalMeasure:
         # cells. The mask still controls aggregation; this is purely a
         # defensive substitution at the I/O boundary.
         #
+        # The sentinel used is the per-column mean of the *observed*
+        # rows of that column (see
+        # :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`); this
+        # lies inside the domain of partial residuals like ``log``,
+        # ``1/x``, and ``sqrt`` whenever any observed cell does, and
+        # so keeps reverse-mode AD well-defined at masked-out cells.
+        # Substituting the previous fixed constant (``0.0``) silently
+        # produced NaN cotangents for such residuals even though the
+        # mask zeroed the primal contribution.
+        #
         # Gating: scrub x only when ``nan_aware`` is true AND the mask
         # was inferred from NaN. If the user supplied an explicit mask
-        # alongside NaN-laden x, silently rewriting NaN cells to 0
-        # would turn an unobserved value into a "real" observation at
-        # any (i, j) the user marked observable, biasing N_j and the
+        # alongside NaN-laden x, silently rewriting NaN cells would
+        # turn an unobserved value into a "real" observation at any
+        # (i, j) the user marked observable, biasing N_j and the
         # moment sum. The conflict is almost always user error, so
         # raise loudly instead of guessing.
         if nan_aware and mask is None:
-            x_arr = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+            x_arr = safe_x_for_psi(x_arr)
         elif nan_aware and mask is not None and bool(jnp.any(jnp.isnan(x_arr))):
             raise ValueError(
                 "EmpiricalMeasure.from_pandas: an explicit mask was supplied "
@@ -521,7 +553,12 @@ class EmpiricalMeasure:
         w_arr = labels_mod.normalise_weights(weights, n)
         _assert_finite_weights(w_arr, source="from_nan_aware")
         mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
-        x_clean = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+        # Substitute the per-column observed-mean sentinel at NaN cells
+        # rather than ``0.0`` so that partial residuals like
+        # ``log(x[0])`` or ``1.0 / x[1]`` cannot produce a NaN cotangent
+        # at masked-out cells under reverse-mode AD (see
+        # :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`).
+        x_clean = safe_x_for_psi(x_arr)
         return cls(x=x_clean, mask=mask_arr, weights=w_arr)
 
 
