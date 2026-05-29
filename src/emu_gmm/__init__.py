@@ -52,7 +52,14 @@ from emu_gmm.diagnostics import (
     compute_cond_info,
 )
 from emu_gmm.estimator import estimate
-from emu_gmm.inference import JTestResult, KStatisticResult, j_test, k_statistic
+from emu_gmm.inference import (
+    JTestResult,
+    KStatisticResult,
+    WildBootstrapResult,
+    j_test,
+    k_statistic,
+    moment_wild_bootstrap,
+)
 from emu_gmm.measures import (
     AnalyticalMeasure,
     EmpiricalMeasure,
@@ -121,6 +128,9 @@ __all__ = [
     "build_diagnostics",
     "build_optimizer_health",
     "compute_cond_info",
+    # Inference
+    "moment_wild_bootstrap",
+    "WildBootstrapResult",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",
