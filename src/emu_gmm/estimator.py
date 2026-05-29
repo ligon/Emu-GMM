@@ -637,7 +637,12 @@ def estimate(
 
         # Half-objective gradient at the optimum --- folds into the
         # same fused kernel under jit, eliminating the standalone
-        # ``jax.grad(half_obj)`` retrace.
+        # ``jax.grad(half_obj)`` retrace. When ``penalty`` is supplied
+        # the residual includes the appended sqrt(p+eps) row (see
+        # ``_make_residual_fn``), so this gradient includes the penalty
+        # contribution --- the correct quantity to compare against the
+        # LM convergence tolerance. With ``penalty=None`` this reduces
+        # to the v1 unpenalised gradient norm.
         def _half(tf):
             theta_inner = params_mod.unflatten_params(tf, treedef)
             if _cache_method is not None:
@@ -651,7 +656,14 @@ def estimate(
                 V_inner = covariance.covariance(model, theta_inner, measure)
             V_star_inner = _apply_anchored(V_inner)
             y_inner = weighting.whitening_residual(m_inner, V_star_inner, theta_inner)
-            return 0.5 * jnp.sum(y_inner * y_inner)
+            base = 0.5 * jnp.sum(y_inner * y_inner)
+            if penalty is not None:
+                # The optimiser saw ``r = concat(y, sqrt(p + eps))`` and
+                # minimised ``0.5 * ||r||^2 = 0.5 * (||y||^2 + p + eps)``;
+                # take ``grad`` of that surface so the reported norm
+                # matches what the LM saw at convergence.
+                base = base + 0.5 * (penalty.penalty(theta_inner) + 1e-30)
+            return base
 
         grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
         # J-test p-values (both kept as traced 0-d arrays even in the
@@ -718,18 +730,45 @@ def estimate(
     # boundary casts to Python floats.
     binding_ridge = _binding_ridge(regularization, tau_hat)
 
+    # Split the final objective into the *data* criterion and the
+    # *full* criterion (data + penalty). With penalty=None the two
+    # coincide and equal J_stat. With penalty supplied,
+    # final_objective_full = J_stat + p(theta_hat) and matches what
+    # ``optimizer_info.final_objective`` (== ||r||^2 at the optimum)
+    # reports.
+    if penalty is None:
+        final_objective_data = J_stat
+        final_objective_full = J_stat
+        penalty_hessian = None
+    else:
+        p_hat = penalty.penalty(theta_hat)
+        final_objective_data = J_stat
+        final_objective_full = J_stat + p_hat
+
+        # Penalty Hessian on the *flat* parameter axes: take the
+        # Hessian of theta_flat -> p(unflatten(theta_flat)). This is
+        # the natural (K, K) matrix to slot into the information-matrix
+        # split inside ``compute_cond_info``. The closure captures
+        # ``penalty`` and ``treedef`` from the outer scope; under jit
+        # this is a normal trace-time constant.
+        def _p_flat(tf: Float[Array, " K"]) -> Float[Array, ""]:
+            return penalty.penalty(params_mod.unflatten_params(tf, treedef))
+
+        penalty_hessian = jax.hessian(_p_flat)(theta_hat_flat)
+
     N_j_arr = _effective_n_per_moment(measure, theta_hat, M)
 
     # Hessian-condition trio (issue #10). G' Lambda G with
     # Lambda = (V_star_hat)^{-1} is the v1 information matrix
     # (CLAUDE.md commitment 5); cond_info reports its condition number
-    # along three views (raw / data_only / exclude_gauge). For v1
-    # data_only and exclude_gauge alias to raw; #7 (penalty hook) and
-    # the v2 manifold epic will distinguish them. ``compute_cond_info``
-    # operates on the *already-computed* ``G_hat`` and ``V_star_hat``
-    # returned from the jit'd block, so the cost is a small extra
-    # Cholesky + matmul --- not a full residual pipeline retrace.
-    cond_info = compute_cond_info(G_hat, V_star_hat)
+    # along three views (raw / data_only / exclude_gauge). When a
+    # ``penalty`` is supplied (issue #7), ``'data_only'`` excludes the
+    # penalty Hessian contribution while ``'raw'`` includes it; without
+    # a penalty all three views coincide. ``compute_cond_info`` operates
+    # on the *already-computed* ``G_hat`` and ``V_star_hat`` returned
+    # from the jit'd block, so the cost is a small extra Cholesky +
+    # matmul --- not a full residual pipeline retrace.
+    cond_info = compute_cond_info(G_hat, V_star_hat, penalty_hessian=penalty_hessian)
 
     # Optimiser-health summary. step_norm / accepted_step_count are
     # left as None because neither optimistix.LevenbergMarquardt nor
@@ -745,6 +784,8 @@ def estimate(
         binding_ridge=binding_ridge,
         cholesky_pivot_min=cholesky_pivot_min,
         final_objective=J_stat,
+        final_objective_data=final_objective_data,
+        final_objective_full=final_objective_full,
         final_gradient_norm=final_gradient_norm,
         N_j_array=N_j_arr,
         moment_residual_array=m_hat,

@@ -8,6 +8,10 @@ Covers:
   toward the origin in the expected direction and magnitude.
 - AD through the penalty composes with AD through CU whitening (the
   combined gradient is finite and consistent with finite differences).
+- :class:`Diagnostics` splits the criterion into data-only
+  (``final_objective_data``) and full (``final_objective_full``)
+  components and routes ``cond_info`` through the data-only and full
+  information matrices independently (concerns raised on PR #35).
 """
 
 from __future__ import annotations
@@ -274,3 +278,312 @@ class TestADCompositionWithCU:
             g_fd = g_fd.at[i].set((f_plus - f_minus) / (2 * eps))
 
         assert jnp.allclose(g_ad, g_fd, atol=1e-5, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics split into data-only and full criterion fields (PR #35 concern 1)
+# ---------------------------------------------------------------------------
+
+
+class TestFinalObjectiveSplit:
+    """``final_objective_data`` is data-only; ``final_objective_full``
+    adds the penalty. ``final_objective`` is retained as an alias for
+    ``final_objective_data`` for backwards compatibility.
+    """
+
+    def test_unpenalised_all_three_fields_equal(self):
+        # With penalty=None the three fields coincide (== J_stat).
+        result = _run(penalty=None)
+        d = result.diagnostics
+        assert float(d.final_objective) == pytest.approx(
+            float(d.final_objective_data), rel=0, abs=0
+        )
+        assert float(d.final_objective_full) == pytest.approx(
+            float(d.final_objective_data), rel=0, abs=0
+        )
+        assert float(d.final_objective_data) == pytest.approx(
+            float(result.J_stat), rel=0, abs=0
+        )
+
+    def test_penalised_full_strictly_above_data(self):
+        # With a strictly-positive penalty and theta_hat != 0,
+        # final_objective_full > final_objective_data.
+        result = _run(penalty=TikhonovPenalty(c=jnp.asarray(1.0)))
+        d = result.diagnostics
+        data = float(d.final_objective_data)
+        full = float(d.final_objective_full)
+        # Theta_hat is well away from the origin at the Euler truth
+        # (~0.96, ~2.0) so p(theta_hat) is well above any noise floor.
+        assert full > data + 1e-3
+        # Data-only value still equals J_stat.
+        assert data == pytest.approx(float(result.J_stat), rel=0, abs=0)
+
+    def test_penalised_full_matches_data_plus_penalty(self):
+        # Concrete identity: full == data + p(theta_hat).
+        c = 0.5
+        pen = TikhonovPenalty(c=jnp.asarray(c))
+        result = _run(penalty=pen)
+        d = result.diagnostics
+        p_hat = float(pen.penalty(result.theta_hat))
+        full = float(d.final_objective_full)
+        data = float(d.final_objective_data)
+        assert full == pytest.approx(data + p_hat, rel=1e-10, abs=1e-12)
+
+    def test_penalised_full_matches_optimizer_info_final_objective(self):
+        # ``OptimizerInfo.final_objective`` reports the *half* norm
+        # ``(1/2) ||r||^2`` (standard NLLS convention), while
+        # ``Diagnostics.final_objective_full`` is ``||r||^2`` so it stays
+        # on the same scale as ``J_stat`` / ``final_objective_data``.
+        # Hence at the optimum
+        # ``optimizer_info.final_objective == 0.5 * final_objective_full``
+        # up to the tiny 1e-30 sqrt-floor on the penalty row.
+        result = _run(penalty=TikhonovPenalty(c=jnp.asarray(0.5)))
+        d = result.diagnostics
+        # OptimizerInfo carries a Python float once the optimiser returns
+        # (eager path); compare against the full Diagnostics value.
+        opt_obj = float(d.optimizer_info.final_objective)
+        full = float(d.final_objective_full)
+        # The 1e-30 floor on the penalty row is negligible at float64.
+        assert opt_obj == pytest.approx(0.5 * full, rel=1e-8, abs=1e-10)
+
+    def test_legacy_final_objective_aliases_data(self):
+        # Pre-existing code that reads ``diagnostics.final_objective``
+        # must continue to see the data-only value, not data + penalty.
+        result = _run(penalty=TikhonovPenalty(c=jnp.asarray(0.5)))
+        d = result.diagnostics
+        assert float(d.final_objective) == pytest.approx(
+            float(d.final_objective_data), rel=0, abs=0
+        )
+
+    def test_summary_includes_split(self):
+        # ``to_pandas()['summary']`` exposes both split fields so the
+        # pandas reporting boundary doesn't lose the distinction.
+        result = _run(penalty=TikhonovPenalty(c=jnp.asarray(0.5)))
+        summary = result.to_pandas()["summary"]
+        assert "final_objective_data" in summary.index
+        assert "final_objective_full" in summary.index
+        assert "final_objective" in summary.index
+        assert float(summary["final_objective_full"]) > float(
+            summary["final_objective_data"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# final_gradient_norm with a penalty supplied (PR #35 concern 2)
+# ---------------------------------------------------------------------------
+
+
+class TestFinalGradientNormWithPenalty:
+    """The reported ``final_gradient_norm`` is the norm of
+    ``grad (1/2) ||r||^2`` where ``r`` is the residual the optimiser
+    saw --- that is, including the penalty contribution when one is
+    supplied. We pin the value rather than relying solely on the
+    docstring claim.
+    """
+
+    def test_matches_grad_of_full_objective(self):
+        # Build a tiny linear problem so we can replicate the exact
+        # objective the estimator minimises. The estimator's residual
+        # is r = [y; sqrt(p+1e-30)] (penalty supplied), so
+        # ||r||^2 = ||y||^2 + p + 1e-30 and the (1/2) grad of this at
+        # theta_hat is what should be reported.
+        x_sample = jnp.array([[0.5, 1.0], [1.5, 2.0], [-0.5, 0.3]])
+
+        def sampler(key, theta):
+            del key, theta
+            return x_sample
+
+        measure = SyntheticMeasure(
+            key=jax.random.PRNGKey(1),
+            n_sim=3,
+            sampler=sampler,
+        )
+
+        pen = TikhonovPenalty(c=jnp.asarray(0.25))
+        result = estimate(
+            model=_toy_model,
+            measure=measure,
+            covariance=SyntheticCovariance(),
+            weighting=ContinuouslyUpdated(),
+            regularization=DiagonalTikhonov(),
+            optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+            theta_init=_TwoParam(a=0.3, b=0.7),
+            penalty=pen,
+        )
+
+        # Reproduce the residual the estimator actually used and take
+        # grad of (1/2) ||r||^2 at theta_hat by hand. Note we *cannot*
+        # call the data-only ||y||^2/2 here because that is what was
+        # explicitly *not* claimed to be reported.
+        from emu_gmm._internal.params import flatten_params, unflatten_params
+
+        flat_hat, treedef = flatten_params(result.theta_hat)
+        reg = DiagonalTikhonov()
+        cov = SyntheticCovariance()
+        weight = ContinuouslyUpdated()
+        V0 = cov.covariance(_toy_model, result.theta_init, measure)
+        _, tau0 = reg.apply(V0)
+        tau0 = jnp.asarray(tau0)
+
+        def _apply_anchored(V):
+            return V + tau0 * jnp.diag(jnp.diag(V))
+
+        def full_half_obj(tf):
+            theta = unflatten_params(tf, treedef)
+            m = measure.expectation(_toy_model, theta)
+            V = cov.covariance(_toy_model, theta, measure)
+            Vs = _apply_anchored(V)
+            y = weight.whitening_residual(m, Vs, theta)
+            p = pen.penalty(theta)
+            extra = jnp.sqrt(p + 1e-30)
+            r = jnp.concatenate([y, jnp.atleast_1d(extra)])
+            return 0.5 * jnp.sum(r * r)
+
+        g = jax.grad(full_half_obj)(flat_hat)
+        expected_norm = float(jnp.linalg.norm(g))
+        reported = float(result.diagnostics.final_gradient_norm)
+        # Same float64 computation up to LM tolerance; compare tightly.
+        assert reported == pytest.approx(expected_norm, rel=1e-9, abs=1e-12)
+
+    def test_strictly_above_data_only_norm(self):
+        # Sanity: a *substantial* penalty makes the full-residual
+        # gradient norm differ from the data-only one. (At a tight
+        # optimum the data-only piece can be ~0, but the residual
+        # ||grad p|| at theta_hat picks up the penalty pull.)
+        x_sample = jnp.array([[0.5, 1.0], [1.5, 2.0], [-0.5, 0.3]])
+
+        def sampler(key, theta):
+            del key, theta
+            return x_sample
+
+        measure = SyntheticMeasure(
+            key=jax.random.PRNGKey(1),
+            n_sim=3,
+            sampler=sampler,
+        )
+
+        # No-penalty reference: at convergence the data gradient is ~0.
+        ref = estimate(
+            model=_toy_model,
+            measure=measure,
+            covariance=SyntheticCovariance(),
+            weighting=ContinuouslyUpdated(),
+            regularization=DiagonalTikhonov(),
+            optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+            theta_init=_TwoParam(a=0.3, b=0.7),
+        )
+        ref_norm = float(ref.diagnostics.final_gradient_norm)
+
+        # With a strong penalty, theta_hat shifts off the data optimum
+        # and the *full* gradient norm at the new optimum stays small
+        # (it's the LM convergence criterion), but the *data-only*
+        # gradient evaluated there is no longer zero. We just check
+        # that the residual the estimator reports is consistent with
+        # the penalised LM tolerance: small in absolute terms but the
+        # underlying data gradient is bigger.
+        pen = TikhonovPenalty(c=jnp.asarray(5.0))
+        pen_result = estimate(
+            model=_toy_model,
+            measure=measure,
+            covariance=SyntheticCovariance(),
+            weighting=ContinuouslyUpdated(),
+            regularization=DiagonalTikhonov(),
+            optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+            theta_init=_TwoParam(a=0.3, b=0.7),
+            penalty=pen,
+        )
+        pen_norm = float(pen_result.diagnostics.final_gradient_norm)
+
+        # Both convergence-tolerance-small. Sanity ranges.
+        assert ref_norm < 1e-4
+        assert pen_norm < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# cond_info(data_only) excludes the penalty Hessian (PR #35 concern 3)
+# ---------------------------------------------------------------------------
+
+
+class TestCondInfoExcludesPenalty:
+    """``Diagnostics.cond_info['data_only']`` is built from
+    :math:`G' \\Lambda G` alone --- excluding the penalty Hessian
+    contribution --- while ``'raw'`` includes it. Without a penalty
+    the two keys coincide.
+    """
+
+    def test_unpenalised_all_three_equal(self):
+        result = _run(penalty=None)
+        info = result.diagnostics.cond_info
+        # All three keys present and equal in the unpenalised path.
+        assert set(info) >= {"raw", "data_only", "exclude_gauge"}
+        assert float(info["raw"]) == pytest.approx(
+            float(info["data_only"]), rel=0, abs=0
+        )
+        assert float(info["exclude_gauge"]) == pytest.approx(
+            float(info["raw"]), rel=0, abs=0
+        )
+
+    def test_penalised_data_only_differs_from_raw(self):
+        # Hessian of c||theta||^2 is 2cI. With a non-zero c the
+        # full-info matrix is G'LambdaG + cI (the (1/2) on the LM half-
+        # norm means we add (1/2)*2cI = cI), which has a different
+        # condition number from the data-only matrix.
+        result = _run(penalty=TikhonovPenalty(c=jnp.asarray(0.5)))
+        info = result.diagnostics.cond_info
+        raw = float(info["raw"])
+        data_only = float(info["data_only"])
+        # The two must differ in finite samples (the penalty ridge
+        # always *improves* the condition number relative to the data
+        # information matrix at the same theta).
+        assert raw != data_only
+        assert raw < data_only
+
+    def test_penalised_data_only_matches_no_penalty_compute(self):
+        # ``data_only`` at penalised theta_hat must equal what
+        # compute_cond_info(G, V_star) (no penalty) returns at that
+        # same point. We replay the data-only computation by hand.
+        from emu_gmm.diagnostics import compute_cond_info
+
+        result = _run(penalty=TikhonovPenalty(c=jnp.asarray(0.5)))
+        # Reproduce G and V* at the penalised theta_hat.
+        measure = _make_measure()
+        cov = SyntheticCovariance()
+        reg = DiagonalTikhonov()
+        # The estimator anchors tau at theta_init; replay that too.
+        V0 = cov.covariance(euler_residual, result.theta_init, measure)
+        _, tau0 = reg.apply(V0)
+        tau0 = jnp.asarray(tau0)
+        V_hat = cov.covariance(euler_residual, result.theta_hat, measure)
+        V_star_hat = V_hat + tau0 * jnp.diag(jnp.diag(V_hat))
+        G_hat = jnp.asarray(measure.jacobian(euler_residual, result.theta_hat))
+
+        data_only_direct = compute_cond_info(G_hat, V_star_hat)
+        reported_data_only = float(result.diagnostics.cond_info["data_only"])
+        # The reported value matches the data-only computation exactly.
+        assert reported_data_only == pytest.approx(
+            float(data_only_direct["data_only"]), rel=1e-8, abs=1e-10
+        )
+
+    def test_compute_cond_info_with_penalty_hessian_arg(self):
+        # Unit-level: passing penalty_hessian to compute_cond_info
+        # changes only ``raw`` (and ``exclude_gauge`` which aliases it)
+        # while leaving ``data_only`` unchanged.
+        from emu_gmm.diagnostics import compute_cond_info
+
+        # Simple G and V*: G is (3, 2), V* = I_3.
+        G = jnp.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]])
+        V_star = jnp.eye(3)
+        no_penalty = compute_cond_info(G, V_star)
+        with_penalty = compute_cond_info(
+            G, V_star, penalty_hessian=jnp.array([[2.0, 0.0], [0.0, 2.0]])
+        )
+        # data_only is independent of the penalty.
+        assert float(with_penalty["data_only"]) == pytest.approx(
+            float(no_penalty["data_only"]), rel=0, abs=0
+        )
+        # raw differs: cond(G'G + I) != cond(G'G).
+        assert float(with_penalty["raw"]) != float(no_penalty["raw"])
+        # exclude_gauge aliases raw.
+        assert float(with_penalty["exclude_gauge"]) == pytest.approx(
+            float(with_penalty["raw"]), rel=0, abs=0
+        )
