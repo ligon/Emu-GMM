@@ -1,0 +1,134 @@
+#+TITLE: Pymanopt-parity verification harness for v2 PSDFixedRank
+#+AUTHOR: Ethan Ligon (with Claude)
+#+DATE: 2026-05-29
+
+* What this is
+
+A standalone verifier (not a =pytest= test) that compares the JAX-native
+=emu_gmm.manifolds.PSDFixedRank= implementation produced by Chunk A of
+the v2 cascade against the reference =pymanopt.manifolds.PSDFixedRank=
+across a large random ensemble of inputs.
+
+The harness lives at
+[[file:pymanopt_parity_harness.py][=docs/reviews/pymanopt_parity_harness.py=]],
+and is intended as an at-PR-review-time confidence check, not as a
+pre-existing regression in =tests/=.  The longer-term home for the
+parity tests, after sign-off, is a marked-slow =pytest= test inside the
+=v2-psd-fixed-rank= test module.
+
+* What it tests
+
+For each of =N_SEEDS = 100= random seeds and each shape in
+
+#+begin_src python
+SHAPES = [(3, 1), (3, 2), (5, 1), (5, 2), (5, 3), (8, 2), (8, 3), (10, 3)]
+#+end_src
+
+the harness draws
+
+- =X=, =Y= — two random points on =PSDFixedRank(m, k)= via
+  =pymanopt.random_point()=;
+- =V= — a random tangent vector at =X= via
+  =pymanopt.random_tangent_vector(X)=;
+- =ambient= — an arbitrary =m × k= matrix in =R^{m × k}= sampled
+  i.i.d. standard normal (used as the Euclidean-gradient input for the
+  projection and =euclidean_to_riemannian_gradient= ops).
+
+and compares pymanopt vs. emu_gmm on:
+
+| operation              | pymanopt method                       | emu_gmm method (expected)             |
+|------------------------+---------------------------------------+---------------------------------------|
+| =projection=           | =projection(X, ambient)=              | =projection(X, ambient)=              |
+| =retraction=           | =retraction(X, V)=                    | =retraction(X, V)=                    |
+| =riemannian_gradient=  | =euclidean_to_riemannian_gradient(X,a)= | =riemannian_gradient(X, ambient)=     |
+| =distance=             | =dist(X, Y)=                          | =distance(X, Y)=  (alias =dist=)     |
+
+The harness accepts either =riemannian_gradient= or
+=euclidean_to_riemannian_gradient= on the emu_gmm side, and either
+=distance= or =dist=, so naming conventions can be settled at PR
+review without breaking the harness.
+
+* Tolerance and what =rtol=1e-9= means
+
+Comparisons use =numpy.allclose(ref, cand, rtol=1e-9, atol=0.0)= in
+float64.  Both pymanopt and emu_gmm compute the same pure
+linear-algebra expressions (QR / SVD / polar projection); on identical
+=X=, =V=, =ambient= inputs they should agree to dense-BLAS roundoff.
+The threshold is deliberately strict: =1e-9= leaves ~6 digits of
+margin over double-precision roundoff and any disagreement at this
+level signals a real formula divergence (sign convention, transpose,
+factor-of-two), not numerical drift.
+
+If JAX's default float32 leaks in anywhere on the emu_gmm side, the
+threshold will catch it immediately; that is by design.
+
+* Why standalone, not =pytest=
+
+1. The harness needs to run *before* =emu_gmm.manifolds= exists on
+   ~main~, so it can validate the pymanopt-side plumbing during
+   review.  A =pytest= test would either be collected and crash on the
+   missing import, or be marked =skip= and provide no signal at all.
+2. The output is meant to be read in a PR comment thread (summary
+   table + first-10 mismatches), not aggregated by a test runner.
+3. The 100 × 8 × 4 = 3200-call grid is intentionally larger than the
+   regression suite should ever run; it is a one-shot acceptance
+   check, not a CI gate.
+
+* How to run it
+
+Right now (pre-Chunk-A):
+
+#+begin_src sh
+poetry run python docs/reviews/pymanopt_parity_harness.py
+#+end_src
+
+Expected output: the pymanopt side runs cleanly, every emu_gmm
+comparison is reported as =skipped=, and the script exits 0.  The
+captured stub output is in
+[[file:pymanopt_parity_harness_stub_output.txt][=pymanopt_parity_harness_stub_output.txt=]].
+
+After Chunk A lands (issue #3 / PR #28):
+
+1. Check out the Chunk A branch (or any branch that has it merged in):
+   #+begin_src sh
+   git checkout chunk-a-branch
+   git cherry-pick <commit that adds pymanopt_parity_harness.py and .org>
+   #+end_src
+   or, equivalently, merge =reviews/pymanopt-parity-harness= in.
+2. Re-run the same command.  The deferred =try/except= for
+   =emu_gmm.manifolds= now succeeds; the harness compares the two
+   implementations cell-by-cell and prints a pass/fail table per
+   operation.
+3. Any mismatch is reported with the seed, shape, operation,
+   max-abs/relative diff, and the first 8 raveled entries of both
+   sides — enough to localise sign-convention or transpose bugs.
+
+The harness deliberately avoids importing =emu_gmm.manifolds= at top
+level; the import is wrapped in =try/except= and the result drives a
+module-level =EMU_AVAILABLE= flag.  This is what makes it safe to
+land before Chunk A.
+
+* Exit codes
+
+| code | meaning                                                     |
+|------+-------------------------------------------------------------|
+|    0 | All present-side comparisons passed; or emu_gmm absent so only the pymanopt side ran cleanly |
+|    1 | At least one =MISMATCH= or runtime error on either side     |
+
+* Provenance / scope
+
+- Reference: =pymanopt= 2.2.1, =pymanopt.manifolds.PSDFixedRank=.
+- The harness assumes pymanopt's =PSDFixedRank= follows the
+  Y -> Y Y' representation with the "polar"-style retraction and
+  =dist= built on the canonical metric.  If Chunk A chooses a
+  different representation, the parity check will fail until the
+  harness is updated to map between the two parameterisations.
+- The shape grid covers full-rank (k = m / small), rank-deficient by 1,
+  and the corner cases (k = 1).  Increase =N_SEEDS= or add larger
+  =(m, k)= entries when stress-testing.
+
+* See also
+
+- =docs/design.org= — overall architecture.
+- =docs/api-sketch.org= — v1 API surface.
+- Issue #3, PR #28 — v2 cascade epic and Chunk A.
