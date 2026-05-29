@@ -78,6 +78,15 @@ class ClusteredCovariance:
         psi: StructuralModel,
         theta: ParamsLike,
         measure: Any,
+        cached_intermediates: (
+            tuple[
+                Float[Array, " M"],
+                Float[Array, "N M"],
+                Float[Array, "N M"],
+                Float[Array, " M"],
+            ]
+            | None
+        ) = None,
     ) -> Float[Array, "M M"]:
         """Construct :math:`V_X(\\theta)` via cluster-total outer products.
 
@@ -90,6 +99,16 @@ class ClusteredCovariance:
         measure
             An :class:`~emu_gmm.measures.empirical.EmpiricalMeasure`
             instance exposing ``x``, ``mask``, and ``weights``.
+        cached_intermediates : optional 4-tuple
+            ``(m, psi_safe, weight_mask, N_j)`` produced by a previous
+            call to
+            :meth:`EmpiricalMeasure.expectation_and_contributions`. When
+            supplied, this routine reuses the cached ``psi_safe``,
+            ``weight_mask``, and ``N_j``, avoiding a redundant
+            ``jax.vmap(psi)`` pass (see
+            ``docs/reviews/v1x-performance-review.org`` finding #4).
+            Back-compat: when ``None``, falls through to the
+            self-computing path.
 
         Returns
         -------
@@ -104,6 +123,18 @@ class ClusteredCovariance:
         test ``tests/covariance/test_clustered.py::test_singleton_clusters``
         verifies this special case.
         """
+        if cached_intermediates is not None:
+            _m, psi_safe, weight_mask, N_j = cached_intermediates
+            # Per-observation contribution to moment j: d_ij * w_i * psi_j.
+            # ``weight_mask`` already encodes d_ij * w_i, so multiply
+            # directly by ``psi_safe``.
+            contrib = weight_mask * psi_safe  # (N, M)
+            segment_ids = self.cluster_ids.astype(jnp.int32)
+            cluster_totals = jax.ops.segment_sum(
+                contrib, segment_ids, num_segments=self.n_clusters
+            )  # (n_clusters, M)
+            numer = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
+            return _safe_outer_divide(numer, N_j)
 
         # Pre-sanitise data so NaN-typed cells never enter the user's
         # psi or its gradient (see :meth:`EmpiricalMeasure.expectation`).

@@ -23,7 +23,8 @@ Section 7 for the architectural spec.
 
 from __future__ import annotations
 
-from typing import Any
+import inspect
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -242,11 +243,52 @@ def estimate(
             return regularization.apply_fixed_tau(V, tau_anchor)
         return V + tau_anchor * jnp.diag(jnp.diag(V))
 
+    # Detect whether the measure / covariance combination supports the
+    # shared ``expectation_and_contributions`` primitive. When the
+    # measure exposes ``moments_and_contributions``
+    # (:class:`~emu_gmm.measures.synthetic.SyntheticMeasure`) or
+    # ``expectation_and_contributions``
+    # (:class:`~emu_gmm.measures.empirical.EmpiricalMeasure`) AND the
+    # paired covariance strategy accepts ``cached_intermediates`` in
+    # its ``covariance`` signature, the residual closure runs
+    # ``vmap(psi)`` once and threads the cached payload into the
+    # covariance strategy --- halving the per-step ``vmap`` cost (see
+    # ``docs/reviews/v1x-performance-review.org`` findings #4 and #5).
+    # Third-party covariance strategies that do not advertise
+    # ``cached_intermediates`` are routed through the back-compat path
+    # that calls ``measure.expectation`` and ``covariance.covariance``
+    # separately, preserving the v1 contract.
+    try:
+        _cov_sig = inspect.signature(covariance.covariance)
+        _cov_accepts_cache = "cached_intermediates" in _cov_sig.parameters
+    except (TypeError, ValueError):  # builtins / C-extensions
+        _cov_accepts_cache = False
+    _emp_cache_method = getattr(measure, "expectation_and_contributions", None)
+    _syn_cache_method = getattr(measure, "moments_and_contributions", None)
+    if _cov_accepts_cache and _emp_cache_method is not None:
+        _cache_method = _emp_cache_method
+    elif _cov_accepts_cache and _syn_cache_method is not None:
+        _cache_method = _syn_cache_method
+    else:
+        _cache_method = None
+
     # Residual closure: produces the whitened moment vector y.
     def residual_fn(theta_flat: Float[Array, " K"]) -> Float[Array, " M"]:
         theta = params_mod.unflatten_params(theta_flat, treedef)
-        m = measure.expectation(model, theta)
-        V = covariance.covariance(model, theta, measure)
+        if _cache_method is not None:
+            cached = _cache_method(model, theta)
+            m = cached[0]
+            # The minimal :class:`CovarianceStrategy` protocol does not
+            # advertise ``cached_intermediates``; concrete IID / Clustered
+            # / Synthetic strategies extend the signature with the kwarg
+            # and the signature probe above gates this call. ``Any``
+            # cast bypasses mypy's protocol-narrow check.
+            V = cast(Any, covariance).covariance(
+                model, theta, measure, cached_intermediates=cached
+            )
+        else:
+            m = measure.expectation(model, theta)
+            V = covariance.covariance(model, theta, measure)
         V_star = _apply_anchored(V)
         y = weighting.whitening_residual(m, V_star, theta)
         return y

@@ -72,6 +72,15 @@ class IIDCovariance:
         psi: StructuralModel,
         theta: ParamsLike,
         measure: Any,
+        cached_intermediates: (
+            tuple[
+                Float[Array, " M"],
+                Float[Array, "N M"],
+                Float[Array, "N M"],
+                Float[Array, " M"],
+            ]
+            | None
+        ) = None,
     ) -> Float[Array, "M M"]:
         """Construct :math:`V_X(\\theta)` for the supplied measure.
 
@@ -84,12 +93,39 @@ class IIDCovariance:
         measure
             An :class:`~emu_gmm.measures.empirical.EmpiricalMeasure`
             instance exposing ``x``, ``mask``, and ``weights``.
+        cached_intermediates : optional 4-tuple
+            ``(m, psi_safe, weight_mask, N_j)`` produced by a previous
+            call to
+            :meth:`EmpiricalMeasure.expectation_and_contributions`. When
+            supplied, this routine reuses the cached ``psi_safe`` and
+            ``N_j`` rather than running ``jax.vmap(psi)`` and rebuilding
+            the weight mask --- the shared-primitive consolidation
+            that halves ``vmap(psi)`` calls per ``residual_fn`` (see
+            ``docs/reviews/v1x-performance-review.org`` finding #4).
+            Back-compat: when ``None``, falls through to the
+            self-computing path.
 
         Returns
         -------
         V : (M, M) jax array
             Symmetric PSD by construction.
         """
+        if cached_intermediates is not None:
+            _m, psi_safe, weight_mask, N_j = cached_intermediates
+            # The IID estimator uses w_i^2 in the pairwise sum (not
+            # the d_ij * w_i product squared), so derive w^2 from the
+            # measure weights directly. Cached weight_mask is sufficient
+            # for the d_ij * d_ik mask combination.
+            weights = measure.weights  # (N,)
+            w2 = weights * weights  # (N,)
+            # weighted_psi: d_ij * psi_safe with masked-out rows zeroed.
+            # weight_mask already encodes d_ij * w_i; to recover the
+            # IID closed form (sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k),
+            # factor out w_i to get d_ij and multiply back with w^2.
+            mask = measure.mask  # (N, M)
+            weighted_psi = mask * psi_safe  # (N, M)
+            numer = jnp.einsum("i,ij,ik->jk", w2, weighted_psi, weighted_psi)
+            return _safe_outer_divide(numer, N_j)
 
         # Pre-sanitise data so NaN-typed cells (a non-holder's return)
         # never enter the user's psi or its gradient. See the matching
