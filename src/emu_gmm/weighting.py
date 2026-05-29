@@ -179,6 +179,11 @@ class ContinuouslyUpdated:
     traces through the dependence of :math:`L` on :math:`\\theta` via
     :math:`V(\\theta)`. This is the default v1 weighting strategy.
 
+    Also exported as the alias :data:`CUE` (continuously-updated
+    estimator), the more common name in the econometrics literature
+    following Hansen, Heaton & Yaron (1996, "Finite-Sample Properties
+    of Some Alternative GMM Estimators", JBES 14(3), 262--280).
+
     Has no traced or static state.
     """
 
@@ -209,4 +214,12 @@ class ContinuouslyUpdated:
         return forward_solve(L, m)
 
 
-__all__ = ["Identity", "Fixed", "ContinuouslyUpdated"]
+#: Econometrics-literature alias for :class:`ContinuouslyUpdated`. See
+#: Hansen, Heaton & Yaron (1996), "Finite-Sample Properties of Some
+#: Alternative GMM Estimators", JBES 14(3), 262--280, where the
+#: continuously-updated estimator (CUE) is introduced as an alternative
+#: to the two-step and iterated GMM weighting schemes.
+CUE = ContinuouslyUpdated
+
+
+__all__ = ["Identity", "Fixed", "ContinuouslyUpdated", "CUE"]

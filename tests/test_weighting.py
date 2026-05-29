@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from emu_gmm import types as t
 from emu_gmm._internal.cholesky import cholesky
-from emu_gmm.weighting import ContinuouslyUpdated, Fixed, Identity
+from emu_gmm.weighting import CUE, ContinuouslyUpdated, Fixed, Identity
 
 
 @jdc.pytree_dataclass
@@ -280,3 +280,13 @@ class TestContinuouslyUpdated:
         y_eager = strategy.whitening_residual(m, V, theta)
         y_jit = compute(strategy, m, V, theta)
         assert jnp.allclose(y_eager, y_jit, atol=1e-6)
+
+    def test_cue_alias(self):
+        """``CUE`` is the econometrics-literature alias for
+        ``ContinuouslyUpdated`` (Hansen-Heaton-Yaron 1996).
+
+        It is the *same* class object, not a subclass; ``CUE()`` and
+        ``ContinuouslyUpdated()`` are interchangeable at every call
+        site.
+        """
+        assert CUE is ContinuouslyUpdated
