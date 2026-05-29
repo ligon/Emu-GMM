@@ -1,0 +1,115 @@
+#+TITLE: emu-gmm v1 Session Handoff
+#+AUTHOR: Sue (Claude Opus 4.7)
+#+DATE: 2026-05-28
+#+OPTIONS: toc:nil num:nil
+
+Brief handoff note from the v1 build session. Most context lives in the
+files this points at; this note is for orienting the next session.
+
+* Status: v1 shipped
+
+37 commits from initial design doc (=a1d8e25=) to v1 complete (=217fefc=).
+=make quick-check= clean. 226 tests passing. =poetry run python
+examples/run_euler.py= runs end-to-end through all three measure paths.
+
+Recovery on the bundled multi-asset Euler example (truth $(\beta,\gamma)=(0.96, 2.00)$):
+
+| Context    | $\hat\beta$ | $\hat\gamma$ | iter |
+|------------+-------------+--------------+------|
+| Synthetic  | 0.962       | 2.08         |   12 |
+| Analytical | 0.96 (FP)   | 2.0 (FP)     |   14 |
+| Empirical  | 0.959       | 2.012        |   10 |
+
+Same =StructuralModel=, three pairings, one =estimate()= call.
+
+* Where to read first if picking this up cold
+
+1. =CLAUDE.md= --- agent-facing context. Up to date as of session end.
+   Read the "Architectural commitments worth knowing" section before
+   any non-trivial code change.
+2. =docs/implementation-plan.org= --- all 28 items marked DONE.
+3. =docs/api-sketch.org= Section 5 --- the worked example in three
+   contexts; same as =tests/test_estimator*.py=.
+4. =src/emu_gmm/examples/euler.py= --- shared model module used by
+   all acceptance tests and the runnable demo. If you switch the
+   example, this is the single file to edit.
+
+* What's queued for v2 (catalogued in =CLAUDE.md=)
+
+- SMM matching (=EmpiricalMeasure= + =SyntheticMeasure= in one moment
+  vector with $(1+1/S)$ inflation).
+- =StratifiedCovariance=, =ReplicateWeightCovariance= (BRR / jackknife
+  / bootstrap).
+- =Iterated= weighting (subsumed by CU for v1).
+- =EigenvalueFloor=, =NearestPSD= regularisers.
+- Structured identification-failure taxonomy as typed reports
+  (currently surfaced as raw diagnostics; see =design.org= Section 5.4).
+- Quadrature engine for =AnalyticalMeasure= (user currently supplies
+  closed-form =expectation_fn=).
+- Real-data acceptance test on the empirical path. Synthetic-data
+  variant exists; deferred until actual data lands.
+
+* Open coordination items
+
+1. *Upstream push.* Local =main= is 37 commits ahead of =ligon/main=;
+   the =ligon= remote is set to =no_push=. To upstream the work:
+   - Pull from =/var/tmp/coder-mirrors/Emu-GMM/= (or wherever the
+     mirror's main is) at =/home/ligon/Projects/Emu-GMM/=, OR
+   - Change the push URL on the =ligon= remote.
+2. *Stale upstream file.* =citation_suggestions= sits in
+   =/home/ligon/Projects/Emu-GMM/= (the upstream working tree) from
+   a prior review pass. Now superseded by the gap-fill work in
+   =docs/refs.bib=. Delete or archive at your convenience.
+3. *cq entries.* 6 distinct knowledge units (plus 1 duplicate)
+   proposed via =/cq:reflect=, stored at the =local= tier. No team
+   sync triggered (no =CQ_TEAM_ADDR= set during this session). If
+   you want them to land in a shared commons, configure the team
+   address and re-propose, or sync manually.
+4. *Bibfile gap audit.* Caught one mislocated citation
+   (=horn-johnson13 Section 7.6=, removed in =74e04b9=). The other
+   15 inline citations were verified for context-correctness; the
+   bibtex metadata (ISBNs, page ranges, etc.) was verified by the
+   gap-fill agent against publisher web pages but not re-audited
+   in this session.
+
+* Reproduction
+
+#+begin_src shell
+make setup                                  # poetry install + .venv/
+make quick-check                            # ruff + black + mypy + pytest
+poetry run python examples/run_euler.py    # full demo across 3 contexts
+#+end_src
+
+* Notable non-obvious decisions worth knowing about
+
+1. *Float64 enabled by default* at =src/emu_gmm/__init__.py=. JAX's
+   float32 default is a deep-learning convention; for a statistics
+   framework, float32 silently degrades both optimiser convergence
+   and recovery accuracy. Documented in commit =74e04b9= and in
+   =CLAUDE.md=. Users can override after import.
+2. *haliax pinned to git master* in =pyproject.toml=. PyPI haliax
+   1.3 imports a removed JAX private API.
+3. *Ruff suppresses F722, F821, UP037 project-wide.* These are
+   jaxtyping shape-string false positives, not real bugs.
+4. *=examples/euler.py= is the canonical demo*. Three acceptance
+   tests + =examples/run_euler.py= all depend on it. Hansen-Singleton
+   1982 setup; 3 risky assets, M=3, K=2, J_dof=1.
+5. *=scipy_lm()= adapter is available but unused in the demo.*
+   Before float64, the empirical path required it to certify
+   convergence. With float64, =optimistix_lm()= works everywhere.
+   The adapter stays in =optimizer.py= for users who want it.
+
+* What I'd do next, given a free hour
+
+In rough priority order:
+
+1. Push to upstream (item 1 under "Open coordination items").
+2. Pre-commit hooks: run =poetry run pre-commit install= once so
+   future commits auto-format. Currently the =.pre-commit-config.yaml=
+   is configured but not activated.
+3. One or two of the v2 items, depending on which is most useful
+   to whatever real estimation comes next. =Iterated= weighting is
+   the cheapest (it's a strict subset of CU); =ReplicateWeightCovariance=
+   would be the highest-leverage if real survey data is incoming.
+
+End of handoff.
