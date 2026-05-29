@@ -101,10 +101,18 @@ class IIDCovariance:
         # Per-coordinate effective sample size N_j = sum_i d_ij * w_i.
         N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
 
+        # NaN-mask semantics: drop NaN at masked positions before the sum.
+        # 0 * NaN = NaN under IEEE arithmetic, so masked-out rows whose
+        # residual evaluates to NaN (e.g. because an input column was NaN
+        # under pandas missing-data convention) would otherwise poison V.
+        # Replace NaN with 0 only at masked positions; observed-position
+        # NaN still propagates and surfaces as a NaN moment in V.
+        psi_safe = jnp.where(mask == 0.0, 0.0, psi_batch)
+
         # Pairwise overlap numerator: sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k.
         # einsum: i is summed; j, k are kept.
         w2 = weights * weights  # (N,)
-        weighted_psi = mask * psi_batch  # (N, M); zero out masked-out rows
+        weighted_psi = mask * psi_safe  # (N, M); zero out masked-out rows
         numer = jnp.einsum("i,ij,ik->jk", w2, weighted_psi, weighted_psi)
 
         return _safe_outer_divide(numer, N_j)

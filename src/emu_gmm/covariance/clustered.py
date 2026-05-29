@@ -115,8 +115,13 @@ class ClusteredCovariance:
         # Per-coordinate sample size N_j (same as IIDCovariance).
         N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
 
+        # NaN-mask semantics: drop NaN at masked positions before the sum.
+        # See IIDCovariance for the same rationale; 0 * NaN = NaN would
+        # otherwise poison the cluster totals.
+        psi_safe = jnp.where(mask == 0.0, 0.0, psi_batch)
+
         # Per-observation contribution to moment j: d_ij * w_i * psi_j.
-        contrib = mask * weights[:, None] * psi_batch  # (N, M)
+        contrib = mask * weights[:, None] * psi_safe  # (N, M)
 
         # Segment-sum into cluster totals. jax.ops.segment_sum operates
         # on the leading axis only, so we sum the (N, M) contribution

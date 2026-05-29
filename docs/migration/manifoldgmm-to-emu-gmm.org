@@ -1,0 +1,191 @@
+#+TITLE: Porting Consumers from =manifoldgmm.GMM= to =emu_gmm.estimate=
+#+AUTHOR: emu-gmm
+#+OPTIONS: toc:2
+
+This note documents the port pattern from
+[[file:../../../ManifoldGMM][ManifoldGMM]]'s class-based driver
+=manifoldgmm.GMM(restriction=...).estimate(...)= to Emu-GMM's functional
+=emu_gmm.estimate(...)=. The trigger was the Seasonality call-site
+inventory tracked in [[https://github.com/ligon/Emu-GMM/issues/1][Emu-GMM
+issue #1]]; the same pattern applies to any consumer that today
+constructs a =GMM= driver around a =MomentRestriction=.
+
+* Mapping
+
+| ManifoldGMM (v1)                                    | Emu-GMM                                                                         |
+|-----------------------------------------------------+---------------------------------------------------------------------------------|
+| =MomentRestriction(g, X)=                           | =EmpiricalMeasure(x=X, mask=..., weights=...)= (or =EmpiricalMeasure.from_pandas=) |
+| =GMM(restriction=r)=                                | (no driver class --- bundle parameters at the =estimate= call site)             |
+| =g(theta, X)= per-observation residual              | =psi(x, theta)= per-observation residual (argument order swapped)               |
+| =restriction.clusters=                              | =ClusteredCovariance(cluster_ids=...)=                                          |
+| =gmm.estimate(weighting='two_step')=                | =weighting=ContinuouslyUpdated()= (CU subsumes two-step in v1)                  |
+| =gmm.estimate(weighting='cu')=                      | =weighting=ContinuouslyUpdated()= (default)                                     |
+| =res.theta_array=                                   | =result.theta_hat= (preserves the user's parameter dataclass type)              |
+| =res.criterion_value=                               | =result.J_stat=                                                                 |
+| =res.cov_matrix=                                    | =result.Sigma_theta= (labelled =haliax.NamedArray=)                             |
+| Manifold-aware =Positive(1, 1)= parameter           | Flat \(\mathbb{R}^K\) (Riemannian manifold for params deferred to v2)           |
+
+** Argument-order convention
+
+ManifoldGMM's =moment_func= signature is =g(theta, X)=; Emu-GMM's
+=StructuralModel= signature is =psi(x, theta)=, where =x= is a *single*
+observation row, not the whole sample. The implications are:
+
+1. *Order is swapped.* You must call your residual with the observation
+   first, parameters second.
+2. *=psi= is per-observation.* The framework handles =vmap= /
+   integration internally; your residual sees one row at a time.
+
+The signature change is intentional --- it's the v1 commitment to
+=Measure= as the integration operator (see =docs/design.org= Section
+2). Consumers that today batch over =X= inside =g= must hoist the
+per-observation kernel into a =psi(x, theta)= form.
+
+** Missing-data convention (the NaN-mask story)
+
+Seasonality's Euler scripts (and most pandas-backed call sites) carry
+missingness as NaN inside =X=. ManifoldGMM's =MomentRestriction= uses
+=nansum= / =np.where(isnan, 0, .)= internally. Emu-GMM mirrors this
+boundary behaviour:
+
+- =EmpiricalMeasure.from_pandas(df)= derives the observability mask
+  from =~df.isna().any(axis=1)= and replaces NaN in =x= with =0=. The
+  mask is then the authoritative source of observability; downstream
+  computations never see NaN inputs.
+- If you construct =EmpiricalMeasure= directly with =mask= and =x=,
+  NaN entries at *masked-out* positions are still safely dropped from
+  the moment estimator, the Jacobian, and the covariance. NaN at
+  *observed* (=mask = 1=) positions propagates --- that case is a
+  residual-evaluation bug, not a missingness signal.
+
+* Worked example: simple GMM port
+
+** Before (ManifoldGMM v1)
+
+#+BEGIN_SRC python
+import numpy as np
+from manifoldgmm import GMM, MomentRestriction
+
+def g(theta, X):
+    """Residual: psi_j(theta, X) over all rows j = 0, ..., N-1."""
+    return X[:, :-1] - theta[0] * X[:, [-1]]  # shape (N, M)
+
+X = ...  # (N, D) numpy array, possibly with NaN
+restriction = MomentRestriction(g=g, X=X)
+gmm = GMM(restriction=restriction)
+result = gmm.estimate(theta0=np.zeros(M), weighting='cu')
+
+theta_hat = result.theta_array
+J_stat = result.criterion_value
+#+END_SRC
+
+** After (Emu-GMM)
+
+#+BEGIN_SRC python
+import jax.numpy as jnp
+import jax_dataclasses as jdc
+from emu_gmm import (
+    EmpiricalMeasure,
+    IIDCovariance,
+    ContinuouslyUpdated,
+    estimate,
+)
+
+@jdc.pytree_dataclass
+class Theta:
+    theta: jnp.ndarray  # length-M parameter vector
+
+def psi(x, t):
+    """Per-observation residual: returns (M,) vector."""
+    return x[:-1] - t.theta * x[-1]
+
+# Boundary conversion: NaN-aware mask derivation from a pandas DataFrame.
+measure = EmpiricalMeasure.from_pandas(df)         # df: shape (N, D)
+# Or, with explicit JAX arrays:
+#   measure = EmpiricalMeasure(
+#       x=x_jax, mask=mask_jax, weights=jnp.ones(N),
+#   )
+
+result = estimate(
+    model=psi,
+    measure=measure,
+    covariance=IIDCovariance(),                   # or ClusteredCovariance(...)
+    weighting=ContinuouslyUpdated(),              # default; CU subsumes two-step
+    theta_init=Theta(theta=jnp.zeros(M)),
+)
+
+theta_hat = result.theta_hat.theta
+J_stat = result.J_stat                            # already a Python float
+#+END_SRC
+
+* Cluster-robust path
+
+ManifoldGMM keeps =cluster_ids= on the =MomentRestriction= and the
+driver dispatches automatically. In Emu-GMM clustering is a separate
+strategy on the same =EmpiricalMeasure=:
+
+#+BEGIN_SRC python
+from emu_gmm import ClusteredCovariance
+
+result = estimate(
+    model=psi,
+    measure=measure,
+    covariance=ClusteredCovariance(
+        cluster_ids=cluster_ids_jax,
+        n_clusters=int(cluster_ids_jax.max()) + 1,
+    ),
+    theta_init=Theta(theta=jnp.zeros(M)),
+)
+#+END_SRC
+
+The =Measure= / =CovarianceStrategy= split is one of the v1
+architectural commitments (=CLAUDE.md=, point 1): the same
+=EmpiricalMeasure= pairs with =IIDCovariance= or =ClusteredCovariance=
+without changes elsewhere in the pipeline.
+
+* Weighting policy
+
+| ManifoldGMM call           | Emu-GMM equivalent             |
+|----------------------------+--------------------------------|
+| =weighting='two_step'=     | =ContinuouslyUpdated()=        |
+| =weighting='cu'=           | =ContinuouslyUpdated()=        |
+| =weighting='identity'=     | =Identity()=                   |
+| =weighting='fixed', W=...= | =Fixed(V0=...)= (note: pass V0 not W; the framework's whitening uses \(V^{-1/2}\) internally) |
+
+CU and two-step are *asymptotically equivalent* but not identical in
+finite samples (=CLAUDE.md=, point 4). Emu-GMM v1 makes CU the
+default; iterated weighting (the literal two-step path) is deferred to
+v2 because CU captures the same asymptotic behaviour with a smoother
+finite-sample objective.
+
+* Result-field translation table
+
+| ManifoldGMM =GMMResult=        | Emu-GMM =EstimationResult=                          |
+|--------------------------------+-----------------------------------------------------|
+| =result.theta_array=           | =result.theta_hat= (preserves dataclass)            |
+| =result.criterion_value=       | =result.J_stat= (Python float)                      |
+| =result.optimizer_report=      | =result.diagnostics.optimizer_info= (dataclass)     |
+| =result.cov_matrix=            | =result.Sigma_theta= (=haliax.NamedArray=)          |
+| =result.moment_cov=            | =result.V_X= (=haliax.NamedArray=)                  |
+| (computed downstream)          | =result.J_dof=, =result.J_pvalue= (computed inline) |
+
+For DataFrame-ready output: =result.to_pandas()= materialises the
+labelled fields.
+
+* What this port does *not* cover (yet, in v1)
+
+These ManifoldGMM features have no v1 Emu-GMM equivalent and are
+deferred to v2+ (see =CLAUDE.md= "Deferred to v2+"):
+
+- =Positive(1, 1)= and other Riemannian parameter spaces. Use a flat
+  reparameterisation (e.g. =log_sigma= rather than =sigma=) in v1.
+- =LoggingTrustRegions= optimiser. Use =optimistix_lm()= (default) or
+  =scipy_lm()=.
+- =MomentWildBootstrap= and similar inference helpers; bootstrap loops
+  must be written by the caller in v1.
+- =KStatisticResult=, =ridge_inverse=, and other identification helpers.
+- =StratifiedCovariance=, =ReplicateWeightCovariance=.
+- True iterated weighting (subsumed by CU for v1).
+
+If your call site exercises one of these features, the migration is
+*not* mechanical --- coordinate with the maintainer before porting.

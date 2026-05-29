@@ -231,6 +231,170 @@ class TestFromPandas:
 # ---------------------------------------------------------------------------
 
 
+class TestNanMaskSemantics:
+    """NaN-laden residual rows at mask=0 positions are dropped, not propagated.
+
+    Surfaces the "port from manifoldgmm.GMM(restriction=...)" use case
+    (issue #1): consumers that hand the framework pandas DataFrames with
+    NaN-encoded missingness expect the natural pandas convention --- NaN
+    means "missing, drop from the moment estimator" --- to be respected
+    through the autodiff tape.
+    """
+
+    def test_expectation_drops_nan_at_masked_positions(self):
+        """NaN in psi(x_i, theta) is zeroed where mask[i, j] == 0."""
+        # Row 1 has NaN; mask says row 1 is unobservable for moment 0.
+        x = jnp.array([[1.0], [float("nan")], [3.0]])
+        mask = jnp.array([[1.0], [0.0], [1.0]])
+        weights = jnp.ones(3)
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=weights)
+
+        def psi(xi, theta):
+            return jnp.array([xi[0] + theta])
+
+        m = meas.expectation(psi, jnp.asarray(0.0))
+        # Expected: weighted mean of rows 0, 2 (1.0 and 3.0) = 2.0
+        assert jnp.isfinite(m).all()
+        assert float(m[0]) == pytest.approx(2.0, abs=1e-6)
+
+    def test_jacobian_drops_nan_at_masked_positions(self):
+        """NaN in grad psi(x_i, theta) is zeroed where mask[i, j] == 0."""
+        x = jnp.array([[1.0], [float("nan")], [3.0]])
+        mask = jnp.array([[1.0], [0.0], [1.0]])
+        weights = jnp.ones(3)
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=weights)
+
+        # psi has theta.mu * x[0] so d/dtheta = x[0]. NaN at row 1 must
+        # not propagate.
+        @jdc.pytree_dataclass
+        class P:
+            mu: float
+
+        def psi(xi, theta):
+            return jnp.array([theta.mu * xi[0]])
+
+        G = meas.jacobian(psi, P(mu=0.5))
+        # d psi / d theta = x[0]; masked mean over rows 0, 2 = (1+3)/2 = 2.
+        assert jnp.isfinite(G).all()
+        assert float(G[0, 0]) == pytest.approx(2.0, abs=1e-6)
+
+    def test_observed_nan_still_propagates(self):
+        """NaN at an observed (mask=1) position is *not* silently dropped.
+
+        That case is a genuine residual-evaluation bug, not a missingness
+        signal; surfacing it as a NaN moment is the right behaviour.
+        """
+        x = jnp.array([[1.0], [float("nan")], [3.0]])
+        # Mask claims row 1 IS observed: the user is asserting psi(x_1, .)
+        # is well-defined despite the NaN input.
+        mask = jnp.array([[1.0], [1.0], [1.0]])
+        weights = jnp.ones(3)
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=weights)
+
+        def psi(xi, theta):
+            return jnp.array([xi[0]])
+
+        m = meas.expectation(psi, jnp.asarray(0.0))
+        assert jnp.isnan(m[0])
+
+    def test_from_pandas_derives_mask_from_nan(self):
+        """``from_pandas`` with no explicit mask derives one from NaN positions."""
+        df = pd.DataFrame(
+            {
+                "x0": [1.0, float("nan"), 3.0, 4.0],
+                "x1": [10.0, 20.0, float("nan"), 40.0],
+            }
+        )
+        meas = EmpiricalMeasure.from_pandas(df)
+        # Row 1 and row 2 each have at least one NaN -> unobserved.
+        expected_mask = jnp.array(
+            [
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 1.0],
+            ]
+        )
+        np.testing.assert_allclose(np.asarray(meas.mask), np.asarray(expected_mask))
+        # NaN in x is replaced with zero so it doesn't poison the AD tape.
+        assert not bool(jnp.any(jnp.isnan(meas.x)))
+
+    def test_from_pandas_no_nan_yields_all_ones_mask(self):
+        """When df has no NaN, the derived mask is all-ones."""
+        df = pd.DataFrame({"x0": [1.0, 2.0, 3.0], "x1": [10.0, 20.0, 30.0]})
+        meas = EmpiricalMeasure.from_pandas(df)
+        np.testing.assert_allclose(np.asarray(meas.mask), np.ones((3, 2)))
+
+    def test_from_pandas_explicit_mask_strips_nan_x(self):
+        """Explicit-mask path still zeros NaN in x to keep AD finite."""
+        df = pd.DataFrame({"x0": [1.0, float("nan"), 3.0], "x1": [10.0, 20.0, 30.0]})
+        # User asserts row 1 is unobservable on moment 0 but observable on
+        # moment 1.
+        mask = pd.DataFrame({"m0": [1.0, 0.0, 1.0], "m1": [1.0, 1.0, 1.0]})
+        meas = EmpiricalMeasure.from_pandas(df, mask=mask)
+        # NaN stripped from x.
+        assert not bool(jnp.any(jnp.isnan(meas.x)))
+        # Mask preserved verbatim.
+        np.testing.assert_allclose(np.asarray(meas.mask), mask.to_numpy())
+
+    def test_end_to_end_nan_in_psi_via_estimator(self):
+        """End-to-end: estimator runs on NaN-laden empirical data via mask.
+
+        Over-identified two-moment model: psi(x, theta) = [x - mu,
+        (x - mu)^2 - sigma^2]. NaN rows are dropped via the mask. The
+        estimator should converge to the unmasked-sample mean and the
+        unmasked-sample (uncentered) second moment.
+        """
+        import jax
+        from emu_gmm import (
+            ContinuouslyUpdated,
+            DiagonalTikhonov,
+            IIDCovariance,
+            estimate,
+            optimistix_lm,
+        )
+
+        @jdc.pytree_dataclass
+        class _TwoParam:
+            mu: float
+            sigma2: float
+
+        key = jax.random.PRNGKey(0)
+        n = 500
+        x_clean = jax.random.normal(key, (n, 1))
+        # Inject NaN into 80 rows at random.
+        nan_idx = jax.random.choice(key, n, (80,), replace=False)
+        x = x_clean.at[nan_idx, 0].set(jnp.nan)
+        # Single column -> single moment dimension D = 1; widen the mask
+        # to cover M = 2 moments so the row drops for both.
+        mask = jnp.ones((n, 2)).at[nan_idx, 0].set(0.0).at[nan_idx, 1].set(0.0)
+
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(n))
+
+        def psi(xi, theta):
+            d = xi[0] - theta.mu
+            return jnp.array([d, d * d - theta.sigma2])
+
+        r = estimate(
+            model=psi,
+            measure=meas,
+            covariance=IIDCovariance(),
+            weighting=ContinuouslyUpdated(),
+            regularization=DiagonalTikhonov(),
+            optimizer=optimistix_lm(),
+            theta_init=_TwoParam(mu=0.5, sigma2=2.0),
+        )
+        unmasked = jnp.array(mask[:, 0], dtype=bool)
+        expected_mu = float(jnp.mean(x_clean[unmasked, 0]))
+        expected_sigma2 = float(jnp.mean((x_clean[unmasked, 0] - expected_mu) ** 2))
+        assert float(r.theta_hat.mu) == pytest.approx(expected_mu, abs=1e-3)
+        assert float(r.theta_hat.sigma2) == pytest.approx(expected_sigma2, abs=1e-3)
+        assert r.converged
+
+
+# ---------------------------------------------------------------------------
+
+
 class TestJit:
     def test_expectation_jits(self):
         x = jnp.linspace(0.0, 1.0, 20).reshape(20, 1)

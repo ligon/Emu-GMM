@@ -224,3 +224,39 @@ class TestUseWithStructuralModel:
         N = 30
         expected = x_np.T @ x_np / (N * N)
         np.testing.assert_allclose(np.asarray(V), expected, atol=1e-7)
+
+
+class TestNanMaskSemantics:
+    """NaN at mask=0 positions does not poison the covariance.
+
+    Mirrors the empirical-measure NaN handling (see issue #1 port pattern).
+    """
+
+    def test_nan_in_x_at_masked_row_does_not_poison(self):
+        # 5 rows; row 2 has NaN in column 0 and is masked out.
+        x = jnp.array(
+            [
+                [1.0, 0.5],
+                [2.0, 0.6],
+                [float("nan"), 0.7],
+                [4.0, 0.8],
+                [5.0, 0.9],
+            ]
+        )
+        mask = jnp.array(
+            [
+                [1.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+            ]
+        )
+        weights = jnp.ones(5)
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=weights)
+
+        def psi(xi, theta):
+            return jnp.array([xi[0], xi[1]])
+
+        V = IIDCovariance().covariance(psi, _P(0.0, 0.0), meas)
+        assert jnp.all(jnp.isfinite(V))

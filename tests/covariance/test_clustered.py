@@ -189,3 +189,40 @@ class TestJit:
         V_eager = cov.covariance(_identity_psi, theta, meas)
         V_jit = compute(cov, theta, meas)
         assert jnp.allclose(V_eager, V_jit, atol=1e-7)
+
+
+class TestNanMaskSemantics:
+    """NaN at mask=0 positions does not poison the cluster-totals form."""
+
+    def test_nan_in_x_at_masked_row_does_not_poison(self):
+        # 6 rows in 3 clusters. Row 2 has NaN, masked out on moment 0.
+        x = jnp.array(
+            [
+                [1.0, 0.5],
+                [2.0, 0.6],
+                [float("nan"), 0.7],
+                [4.0, 0.8],
+                [5.0, 0.9],
+                [6.0, 1.0],
+            ]
+        )
+        mask = jnp.array(
+            [
+                [1.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 1.0],
+            ]
+        )
+        weights = jnp.ones(6)
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=weights)
+        cluster_ids = jnp.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0])
+        cov = ClusteredCovariance(cluster_ids=cluster_ids, n_clusters=3)
+
+        def psi(xi, theta):
+            return jnp.array([xi[0], xi[1]])
+
+        V = cov.covariance(psi, _P(0.0, 0.0), meas)
+        assert jnp.all(jnp.isfinite(V))

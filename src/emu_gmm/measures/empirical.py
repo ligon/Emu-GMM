@@ -108,6 +108,18 @@ class EmpiricalMeasure:
             ``(1 / N_j) * sum_i d_ij * w_i * psi_j(x_i, theta)`` for
             each coordinate ``j``; coordinates with ``N_j = 0`` map to
             zero rather than NaN.
+
+        Notes
+        -----
+        NaN-mask semantics: residual entries where ``mask[i, j] = 0`` are
+        zeroed out before the weighted sum. This means a moment function
+        that returns NaN on a row whose mask entry is zero (e.g. because
+        an input column is NaN under the standard pandas missing-data
+        convention) does not poison the integral. The framework treats
+        the mask as the authoritative source of observability; NaN in
+        ``psi`` at masked positions is silently dropped. NaN at an
+        observed (``mask = 1``) position still propagates --- that case
+        is a genuine residual evaluation error, not a missingness signal.
         """
 
         def psi_at(x):
@@ -116,7 +128,11 @@ class EmpiricalMeasure:
         psi_batch = jax.vmap(psi_at)(self.x)  # (N, M)
         # Pairwise per-coordinate mass: d_ij * w_i, broadcast across moments.
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
-        numer = jnp.sum(weight_mask * psi_batch, axis=0)  # (M,)
+        # NaN-mask semantics: drop NaN at masked positions before summing.
+        # We replace NaN with 0 only where mask=0; observed-position NaNs
+        # are preserved and propagate (legitimately surfacing model bugs).
+        psi_safe = jnp.where(self.mask == 0.0, 0.0, psi_batch)
+        numer = jnp.sum(weight_mask * psi_safe, axis=0)  # (M,)
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom)
 
@@ -127,6 +143,12 @@ class EmpiricalMeasure:
         :mod:`emu_gmm._internal.params`) at the per-observation level,
         then applies the same mask / weight aggregation as
         :meth:`expectation`. Returns a plain ``(M, K)`` JAX array.
+
+        NaN-mask semantics: matches :meth:`expectation`. Gradient entries
+        ``grad[i, j, k]`` with ``mask[i, j] = 0`` are zeroed before the
+        weighted sum so that NaN at masked positions does not poison the
+        Jacobian (or the autodiff tape into which it feeds via the
+        inference engine's :math:`G' \\Lambda G` step).
         """
         flat_theta, treedef = flatten_params(theta)
 
@@ -139,7 +161,10 @@ class EmpiricalMeasure:
 
         grad_batch = jax.vmap(grad_at)(self.x)  # (N, M, K)
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
-        numer = jnp.sum(weight_mask[:, :, None] * grad_batch, axis=0)  # (M, K)
+        # NaN-mask semantics: zero out gradient entries at masked positions.
+        # The mask is (N, M); broadcast over the (N, M, K) gradient.
+        grad_safe = jnp.where(self.mask[:, :, None] == 0.0, 0.0, grad_batch)
+        numer = jnp.sum(weight_mask[:, :, None] * grad_safe, axis=0)  # (M, K)
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom[:, None])
 
@@ -164,40 +189,69 @@ class EmpiricalMeasure:
         ----------
         df : :class:`pandas.DataFrame`
             Observations. Each column becomes a coordinate of ``x``.
+            NaN entries are taken as the pandas missing-data sentinel:
+            when no explicit ``mask`` is supplied the mask is derived
+            from the non-NaN positions of ``df`` (any row with any NaN
+            is treated as unobserved for *all* moments). The NaN entries
+            of ``x`` are then replaced by ``0`` so they do not poison
+            the autodiff tape downstream --- the mask is the
+            authoritative source of observability.
         weights : :class:`pandas.Series` or array-like, optional
             Per-observation weights. Defaults to all-ones.
         mask : :class:`pandas.DataFrame` or array-like of shape ``(N, M)``,
-            optional. Per-coordinate observability. Defaults to all-ones
-            (no missingness). The number of moments ``M`` is inferred
+            optional. Per-coordinate observability. When omitted, derived
+            from ``~df.isna().any(axis=1)`` broadcast across all moments
+            (a single row-level observability indicator replicated to
+            ``M = D`` columns). The number of moments ``M`` is inferred
             from the mask's column count when one is supplied; otherwise
             the caller is responsible for selecting a compatible model.
 
         Returns
         -------
         measure : :class:`EmpiricalMeasure`
+
+        Notes
+        -----
+        The "row-level mask broadcast across moments" default is the
+        simplest pandas convention. Per-coordinate masks (where some
+        moments are observable on rows that other moments are not) must
+        be passed explicitly via the ``mask=`` kwarg; design.org Section
+        2 calls this the pairwise-overlap missingness pattern.
         """
         x_arr, _cols, _obs_name = labels_mod.normalise_x(df)
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
         if mask is None:
-            # No mask supplied: defer to the user's downstream selection
-            # of M. We use the column count of x as a placeholder so that
-            # an all-ones mask of shape (N, D) is constructed; users who
-            # need M != D should pass an explicit mask.
+            # No mask supplied: derive from NaN positions when present.
+            # Row-level observability indicator (1 if no NaN in the row),
+            # broadcast across all D moments. Users who need a fine-
+            # grained per-coordinate mask must pass mask= explicitly.
             m = int(x_arr.shape[1])
+            row_observed = (~jnp.any(jnp.isnan(x_arr), axis=1)).astype(jnp.float32)
+            mask_arr = jnp.broadcast_to(row_observed[:, None], (n, m))
+            # Replace NaN in x with 0 so masked entries don't poison
+            # downstream tape (e.g. via jacfwd through psi(x, theta)).
+            x_arr = jnp.where(jnp.isnan(x_arr), jnp.zeros_like(x_arr), x_arr)
+            return cls(x=x_arr, mask=mask_arr, weights=w_arr)
+        # Explicit mask path.
+        if hasattr(mask, "shape"):
+            m_shape = tuple(int(s) for s in mask.shape)
         else:
-            # Probe shape of the supplied mask to determine M.
-            if hasattr(mask, "shape"):
-                m_shape = tuple(int(s) for s in mask.shape)
-            else:
-                m_shape = jnp.asarray(mask).shape
-            if len(m_shape) != 2 or m_shape[0] != n:
-                raise ValueError(
-                    f"EmpiricalMeasure.from_pandas: mask must have shape "
-                    f"(N={n}, M); got {m_shape}"
-                )
-            m = int(m_shape[1])
+            m_shape = jnp.asarray(mask).shape
+        if len(m_shape) != 2 or m_shape[0] != n:
+            raise ValueError(
+                f"EmpiricalMeasure.from_pandas: mask must have shape "
+                f"(N={n}, M); got {m_shape}"
+            )
+        m = int(m_shape[1])
         mask_arr = labels_mod.normalise_mask(mask, n, m)
+        # With an explicit mask the user has declared per-coordinate
+        # observability; replace NaN in x with 0 so that AD does not
+        # propagate NaN through psi for rows the user marked as missing.
+        # The expectation/jacobian methods further guard against NaN at
+        # masked positions in psi's *output*. NaN at observed positions
+        # is a genuine residual evaluation error and will surface.
+        x_arr = jnp.where(jnp.isnan(x_arr), jnp.zeros_like(x_arr), x_arr)
         return cls(x=x_arr, mask=mask_arr, weights=w_arr)
 
 
