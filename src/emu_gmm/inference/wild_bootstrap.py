@@ -52,16 +52,32 @@ keeps the bootstrap loop vmappable across replicates.
 
 The same V used for the analytic J-test must be passed into the
 bootstrap to keep the calibration consistent --- typically obtained
-from ``EstimationResult.V_X.array`` post-regularisation.
+from ``EstimationResult.V_X``. Passing the labelled
+:class:`haliax.NamedArray` directly is supported; the helper
+auto-unwraps to the underlying array.
+
+JIT / vmap compatibility
+------------------------
+
+The returned :class:`WildBootstrapResult` is a
+``@jdc.pytree_dataclass`` whose scalar fields (``p_value``,
+``J_observed``) are 0-d JAX arrays and whose ``sign`` / ``n_boot``
+fields are static (hashable). The helper itself routes through
+:func:`jax.scipy.stats.chi2.sf` / :func:`jax.numpy.mean`-free arithmetic
+on traced arrays, so the public ``moment_wild_bootstrap`` traces under
+``jax.jit`` and composes under ``jax.vmap``. Match: the same
+jit / vmap commitment the rest of the framework honours (see
+``docs/reviews/v1x-api-design.org`` §1).
 """
 
 from __future__ import annotations
 
-import dataclasses
-from typing import Literal
+from typing import Any, Literal
 
+import haliax as ha
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import cholesky as cho
@@ -80,37 +96,59 @@ _MAMMEN_B = (_SQRT5 + 1.0) / 2.0
 _MAMMEN_PA = (_SQRT5 + 1.0) / (2.0 * _SQRT5)
 
 
-@dataclasses.dataclass(frozen=True)
+@jdc.pytree_dataclass
 class WildBootstrapResult:
     """Return type for :func:`moment_wild_bootstrap`.
+
+    Pytree-dataclass so the record survives ``jax.jit`` / ``jax.vmap``
+    boundaries. Scalar diagnostics are 0-d JAX arrays (traced); the
+    sign label and replicate count are static fields (hashable, used
+    only for re-tracing on shape / configuration change).
 
     Attributes
     ----------
     J_boot : (n_boot,) jax array
         The bootstrap J-statistics, one per replicate.
-    p_value : float
+    p_value : 0-d jax array
         Empirical right-tail probability
-        ``mean(J_boot >= J_observed)``.
-    J_observed : float
+        ``mean(J_boot >= J_observed)``. 0-d so it traces under ``jit`` /
+        ``vmap``; cast with ``float(result.p_value)`` at the eager
+        boundary if you want a Python scalar.
+    J_observed : 0-d jax array
         The analytic J-statistic at ``theta_hat`` evaluated against the
         same ``V`` used for whitening; included so callers can
         reproduce the p-value calculation and so ``p_value`` is
         self-contained.
-    sign : str
+    sign : str (static)
         The sign-distribution used: ``"rademacher"`` or ``"mammen"``.
-    n_boot : int
+    n_boot : int (static)
         Number of bootstrap replicates.
     theta_boot : None
         Reserved for a future refit-per-replicate variant. Always
-        ``None`` in v1.
+        ``None`` in v1; the field is kept on the dataclass so the v2
+        addition is a non-breaking change.
     """
 
     J_boot: Float[Array, " B"]
-    p_value: float
-    J_observed: float
-    sign: str
-    n_boot: int
-    theta_boot: None = None
+    p_value: Float[Array, ""]
+    J_observed: Float[Array, ""]
+    sign: str = jdc.static_field()  # type: ignore[attr-defined]
+    n_boot: int = jdc.static_field()  # type: ignore[attr-defined]
+    theta_boot: Any = jdc.static_field(default=None)  # type: ignore[attr-defined]
+
+
+def _to_plain(value: Any) -> Float[Array, "..."]:
+    """Strip a :class:`haliax.NamedArray` wrapper if present.
+
+    Mirrors the same helper in the covariance subpackage. The wild-
+    bootstrap docstring guides callers to pass
+    ``EstimationResult.V_X`` directly; ``V_X`` is a NamedArray, so
+    without this unwrap ``jnp.asarray(V_X)`` would raise. Plain JAX
+    arrays pass through unchanged.
+    """
+    if isinstance(value, ha.NamedArray):
+        return jnp.asarray(value.array)
+    return jnp.asarray(value)
 
 
 def _draw_rademacher(key: jax.Array, n_clusters: int) -> Float[Array, " C"]:
@@ -178,7 +216,7 @@ def moment_wild_bootstrap(
     n_boot: int,
     key: jax.Array,
     sign: Literal["rademacher", "mammen"] = "rademacher",
-    V: Float[Array, "M M"] | None = None,
+    V: Float[Array, "M M"] | ha.NamedArray | None = None,
 ) -> WildBootstrapResult:
     """Cluster-wild bootstrap of the J-statistic (refit-free).
 
@@ -199,7 +237,8 @@ def moment_wild_bootstrap(
         responsibility.
     n_boot : int, keyword-only
         Number of bootstrap replicates. Each replicate produces one
-        ``J^*`` value.
+        ``J^*`` value. Static (treated as a shape parameter under
+        ``jit``); changing ``n_boot`` triggers a re-trace.
     key : :class:`jax.Array`, keyword-only
         PRNG key. Split internally to draw the per-replicate signs.
     sign : ``"rademacher"`` or ``"mammen"``, default ``"rademacher"``
@@ -207,17 +246,23 @@ def moment_wild_bootstrap(
         ManifoldGMM reference; Mammen gives a third-moment correction
         (``E[eta^3] = 1``) that is sometimes preferred for asymmetric
         residuals.
-    V : (M, M) jax array, optional, keyword-only
+    V : (M, M) jax array or :class:`haliax.NamedArray`, optional, keyword-only
         The (regularised) variance matrix at ``theta_hat`` to whiten
         the bootstrap moments. When omitted the function recomputes it
         by calling ``covariance.covariance(model, theta_hat, measure)``;
         callers who already have ``EstimationResult.V_X`` should pass
-        it directly to avoid the extra evaluation and to guarantee the
-        Cholesky factor matches the one used by the analytic J-test.
+        it directly (either the NamedArray or its ``.array``) to avoid
+        the extra evaluation and to guarantee the Cholesky factor
+        matches the one used by the analytic J-test. The helper
+        auto-unwraps a :class:`haliax.NamedArray` to its underlying
+        array.
 
     Returns
     -------
     :class:`WildBootstrapResult`
+        Pytree-dataclass with traced scalar fields; survives ``jit`` /
+        ``vmap`` and composes with the rest of the framework's pytree
+        protocols.
 
     Notes
     -----
@@ -233,6 +278,12 @@ def moment_wild_bootstrap(
     /within/ each cluster and independent /across/ clusters. The
     cluster IDs are read off ``covariance``; the same array used for
     the analytic ``ClusteredCovariance`` is the right choice here.
+
+    JIT / vmap behaviour: the scalar diagnostics (``p_value``,
+    ``J_observed``) are 0-d JAX arrays rather than Python floats, so
+    the helper traces under ``jax.jit`` and composes under
+    ``jax.vmap``. Cast with ``float(...)`` at the eager boundary if a
+    Python scalar is needed.
     """
     if sign not in ("rademacher", "mammen"):
         raise ValueError(
@@ -250,15 +301,17 @@ def moment_wild_bootstrap(
 
     # Variance at theta_hat. Caller-supplied V wins to guarantee a match
     # with the regularised analytic V the EstimationResult exposes.
+    # Auto-unwrap a haliax NamedArray (the natural ``result.V_X`` hand-off)
+    # rather than letting jnp.asarray choke on the wrapper object.
     if V is None:
-        V_arr = jnp.asarray(covariance.covariance(model, theta_hat, measure))
+        V_arr = _to_plain(covariance.covariance(model, theta_hat, measure))
     else:
-        V_arr = jnp.asarray(V)
+        V_arr = _to_plain(V)
     L = cho.cholesky(V_arr)  # (M, M) lower-triangular
 
     # Analytic J at theta_hat against the same V.
     m_hat = measure.expectation(model, theta_hat)
-    y_hat = cho.forward_solve(L, jnp.asarray(m_hat))
+    y_hat = cho.forward_solve(L, _to_plain(m_hat))
     J_observed_arr = jnp.sum(y_hat * y_hat)
 
     cluster_ids = covariance.cluster_ids
@@ -280,12 +333,15 @@ def moment_wild_bootstrap(
 
     J_boot = jax.vmap(one_replicate)(keys)  # (n_boot,)
 
-    p_value_arr = jnp.mean((J_boot >= J_observed_arr).astype(jnp.float64))
+    # Keep p_value and J_observed as 0-d traced arrays so the helper
+    # traces cleanly under jit / vmap. Eager callers cast via float()
+    # at the boundary.
+    p_value_arr = jnp.mean((J_boot >= J_observed_arr).astype(J_boot.dtype))
 
     return WildBootstrapResult(
         J_boot=J_boot,
-        p_value=float(p_value_arr),
-        J_observed=float(J_observed_arr),
+        p_value=p_value_arr,
+        J_observed=J_observed_arr,
         sign=sign,
         n_boot=int(n_boot),
         theta_boot=None,

@@ -22,6 +22,7 @@ Three contracts:
 
 from __future__ import annotations
 
+import haliax as ha
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
@@ -457,3 +458,201 @@ class TestReExport:
 
         assert hasattr(emu_gmm, "moment_wild_bootstrap")
         assert hasattr(emu_gmm, "WildBootstrapResult")
+
+
+# ---------------------------------------------------------------------------
+# JIT / vmap compatibility
+# ---------------------------------------------------------------------------
+#
+# Per `docs/reviews/v1x-api-design.org` §1 (HIGH) and the framework's
+# documented jit/vmap commitment, the inference helpers must trace under
+# `jax.jit` and compose under `jax.vmap`. The original
+# `moment_wild_bootstrap` violated this by casting traced scalars
+# (`p_value`, `J_observed`) to Python floats inside the eager return
+# path. Fix: the scalar diagnostics ride as 0-d JAX arrays through a
+# pytree-dataclass; the eager boundary is the caller's `float(...)`
+# cast.
+
+
+class TestJitVmapCompatibility:
+    """The public helper traces under jit and vmaps over PRNG keys."""
+
+    def test_jit_returns_traced_scalars(self):
+        """Wrapping `moment_wild_bootstrap` in `jax.jit` succeeds and
+        the returned `p_value` / `J_observed` are 0-d JAX arrays."""
+        measure, covariance, theta_0 = _build_h0_setup(seed=30, N=40, n_clusters=4)
+
+        # `n_boot` and `sign` are static (shape / dispatch parameters);
+        # `key` is the only traced PRNG input we vmap over below.
+        def run(key):
+            return moment_wild_bootstrap(
+                _residual_psi,
+                theta_0,
+                measure,
+                covariance,
+                n_boot=20,
+                key=key,
+                sign="rademacher",
+            )
+
+        eager = run(jax.random.PRNGKey(31))
+        jitted = jax.jit(run)(jax.random.PRNGKey(31))
+
+        # Round-trip identity: the same key produces the same draws.
+        assert jnp.allclose(jitted.J_boot, eager.J_boot)
+        assert jnp.allclose(jitted.p_value, eager.p_value)
+        assert jnp.allclose(jitted.J_observed, eager.J_observed)
+
+        # Traced scalars are 0-d arrays, not Python floats.
+        assert jnp.asarray(jitted.p_value).ndim == 0
+        assert jnp.asarray(jitted.J_observed).ndim == 0
+
+    def test_vmap_over_keys_returns_batched_pvalues(self):
+        """Vmapping over the PRNG key produces a leading batch dim on
+        every traced field of `WildBootstrapResult`."""
+        measure, covariance, theta_0 = _build_h0_setup(seed=32, N=40, n_clusters=4)
+
+        def run(key):
+            return moment_wild_bootstrap(
+                _residual_psi,
+                theta_0,
+                measure,
+                covariance,
+                n_boot=20,
+                key=key,
+                sign="rademacher",
+            )
+
+        keys = jax.random.split(jax.random.PRNGKey(33), 4)
+        batched = jax.vmap(run)(keys)
+
+        # 4 replicates, each yielding 20 bootstrap J's.
+        assert batched.J_boot.shape == (4, 20)
+        assert batched.p_value.shape == (4,)
+        assert batched.J_observed.shape == (4,)
+        # Static fields rebuild verbatim (vmap leaves them untouched).
+        assert batched.sign == "rademacher"
+        assert batched.n_boot == 20
+
+    def test_jit_then_vmap_composes(self):
+        """`jit(vmap(...))` traces end-to-end and matches eager."""
+        measure, covariance, theta_0 = _build_h0_setup(seed=34, N=40, n_clusters=4)
+
+        def run(key):
+            return moment_wild_bootstrap(
+                _residual_psi,
+                theta_0,
+                measure,
+                covariance,
+                n_boot=10,
+                key=key,
+                sign="rademacher",
+            ).p_value
+
+        keys = jax.random.split(jax.random.PRNGKey(35), 3)
+        eager = jax.vmap(run)(keys)
+        jitted = jax.jit(jax.vmap(run))(keys)
+        assert jnp.allclose(eager, jitted)
+
+    def test_p_value_is_traced_array(self):
+        """`p_value` survives as a traced JAX array, not a Python float
+        baked in at trace time."""
+        measure, covariance, theta_0 = _build_h0_setup(seed=36, N=40, n_clusters=4)
+        result = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=20,
+            key=jax.random.PRNGKey(37),
+            sign="rademacher",
+        )
+        # Either jax.Array or numpy array of zero shape; not Python float.
+        assert hasattr(result.p_value, "shape")
+        assert hasattr(result.J_observed, "shape")
+        # And eager-cast still works at the boundary.
+        assert 0.0 <= float(result.p_value) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# V= NamedArray boundary
+# ---------------------------------------------------------------------------
+#
+# Per the PR #32 review HIGH finding #2: the docstring instructs callers
+# to pass `EstimationResult.V_X` (a haliax NamedArray) directly into the
+# `V=` kwarg. The original implementation called `jnp.asarray(V)` which
+# raises on a NamedArray. Fix: auto-unwrap NamedArray via `_to_plain`
+# at the input boundary.
+
+
+class TestNamedArrayVAcceptance:
+    """The `V=` kwarg accepts a labelled `haliax.NamedArray` directly.
+
+    The docstring of `moment_wild_bootstrap` points users at
+    `result.V_X` (a NamedArray, not the underlying `.array`); the
+    helper must therefore unwrap the wrapper rather than choking on it.
+    """
+
+    def test_namedarray_V_passes_through(self):
+        """Passing a NamedArray V= matches passing the underlying array."""
+        measure, covariance, theta_0 = _build_h0_setup(seed=40, N=40, n_clusters=4)
+
+        # One-moment problem (matching _build_h0_setup); fabricate the
+        # NamedArray exactly the way `EstimationResult.V_X` does.
+        Moments = ha.Axis("moments", 1)
+        MomentsDual = ha.Axis("moments_dual", 1)
+        V_plain = jnp.array([[2.5]])
+        V_named = ha.named(V_plain, (Moments, MomentsDual))
+
+        result_plain = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=30,
+            key=jax.random.PRNGKey(41),
+            V=V_plain,
+        )
+        result_named = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=30,
+            key=jax.random.PRNGKey(41),
+            V=V_named,
+        )
+
+        # The two paths must produce identical bootstrap draws and
+        # identical analytic J / p-value: the only difference is the
+        # wrapper type.
+        assert jnp.allclose(result_plain.J_boot, result_named.J_boot)
+        assert jnp.allclose(result_plain.p_value, result_named.p_value)
+        assert jnp.allclose(result_plain.J_observed, result_named.J_observed)
+
+    def test_namedarray_V_from_estimation_result_shape(self):
+        """The natural caller gesture --- pass `result.V_X` straight
+        through without an `.array` unwrap --- does not raise.
+
+        `EstimationResult.V_X` is shaped (M, M) with axes
+        (moments, moments_dual); this is the canonical hand-off
+        documented in the helper's docstring.
+        """
+        measure, covariance, theta_0 = _build_h0_setup(seed=42, N=40, n_clusters=4)
+        Moments = ha.Axis("moments", 1)
+        MomentsDual = ha.Axis("moments_dual", 1)
+        V_X_named = ha.named(jnp.eye(1) * 3.0, (Moments, MomentsDual))
+
+        # Smoke: does not raise; returns a valid WildBootstrapResult.
+        result = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=15,
+            key=jax.random.PRNGKey(43),
+            V=V_X_named,
+        )
+        assert isinstance(result, WildBootstrapResult)
+        assert result.J_boot.shape == (15,)
+        assert 0.0 <= float(result.p_value) <= 1.0
