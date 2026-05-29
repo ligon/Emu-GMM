@@ -175,3 +175,143 @@ class TestDiagonalTikhonov:
         V_star_jit, tau_jit = compute(reg, V)
         assert jnp.allclose(V_star_eager, V_star_jit, atol=1e-6)
         assert float(tau_eager) == pytest.approx(float(tau_jit), rel=1e-6)
+
+
+class TestDiagonalVCase:
+    """Regression tests for the diagonal-V dispatch.
+
+    Before the fix, ``V_star = V + tau * diag(V)`` reduced to
+    ``(1 + tau) V`` on diagonal ``V``, leaving ``kappa(V_star) =
+    kappa(V)`` regardless of ``tau``. The bisection would saturate at
+    ``_TAU_MAX`` and the regulariser silently returned a useless
+    answer. Diagonal ``V`` arises naturally from ``IIDCovariance`` and
+    ``ClusteredCovariance`` on uncorrelated moments, and from
+    ``SyntheticCovariance`` on independent simulation draws --- so the
+    bug is on a realistic code path, not a corner case.
+
+    The fix dispatches to ``V + tau * (tr(V)/M) * I`` (an additive
+    eigenvalue shift) when ``V`` is detected as (near-)diagonal. See
+    ``docs/reviews/v1x-jax-ad-review.org`` (HIGH finding #2) and
+    ``src/emu_gmm/regularization.py`` for the rationale.
+    """
+
+    def test_ill_conditioned_diagonal_V_brings_kappa_under_target(self):
+        """Diagonal V with kappa = 1e8: regulariser must produce
+        ``tau > 0`` AND drive ``kappa(V_star) <= kappa_target``.
+
+        Before the fix this returned ``tau = _TAU_MAX = 1000`` with
+        ``kappa(V_star) = 1e8`` --- regularisation completely failed
+        with no error raised.
+        """
+        # Construct a diagonal V spanning kappa = 1e8.
+        eigvals = jnp.array([1.0, 1.0e-4, 1.0e-8])
+        V = _diag_V(eigvals)
+        # Sanity check: input really is ill-conditioned and exactly
+        # diagonal.
+        assert float(jnp.linalg.cond(V)) == pytest.approx(1.0e8, rel=1e-6)
+        assert jnp.allclose(V - jnp.diag(jnp.diag(V)), 0.0)
+
+        kappa_target = 1.0e4
+        reg = DiagonalTikhonov(kappa_target=kappa_target)
+        V_star, tau = reg.apply(V)
+
+        # tau must be strictly positive (we did regularise) and
+        # well below the saturation cap.
+        assert float(tau) > 0.0
+        assert float(tau) < 999.0
+
+        # And the realised condition number must actually meet the
+        # target (accept small bisection-precision overshoot).
+        kappa_star = float(jnp.linalg.cond(V_star))
+        assert kappa_star <= kappa_target * 1.01
+
+    def test_extremely_ill_conditioned_diagonal_V(self):
+        """Diagonal V with kappa = 1e12: still works. (Probe in
+        v1x-jax-ad-review reported kappa=1e15 saturating at TAU_MAX
+        before the fix.)"""
+        eigvals = jnp.array([1.0, 1.0e-6, 1.0e-12])
+        V = _diag_V(eigvals)
+        reg = DiagonalTikhonov(kappa_target=1.0e6)
+        V_star, tau = reg.apply(V)
+        assert float(tau) > 0.0
+        kappa_star = float(jnp.linalg.cond(V_star))
+        assert kappa_star <= 1.0e6 * 1.01
+
+    def test_well_conditioned_diagonal_V_is_no_op(self):
+        """Diagonal V already under target: short-circuit to tau=0."""
+        V = _diag_V(jnp.array([1.0, 2.0, 4.0]))
+        reg = DiagonalTikhonov(kappa_target=1.0e6)
+        V_star, tau = reg.apply(V)
+        assert float(tau) == pytest.approx(0.0, abs=1e-10)
+        assert jnp.allclose(V_star, V)
+
+    def test_diagonal_branch_uses_additive_identity_shift(self):
+        """Verify the algebraic form of the diagonal-branch ridge:
+        ``V_star = V + tau * (tr(V)/M) * I``.
+
+        This is the formula that actually shifts the eigenvalues
+        additively and makes regularisation effective on diagonal V.
+        """
+        eigvals = jnp.array([1.0, 1.0e-4, 1.0e-8])
+        V = _diag_V(eigvals)
+        reg = DiagonalTikhonov(kappa_target=1.0e4)
+        V_star, tau = reg.apply(V)
+        M = V.shape[0]
+        scale = float(jnp.trace(V) / M)
+        expected = V + float(tau) * scale * jnp.eye(M, dtype=V.dtype)
+        assert jnp.allclose(V_star, expected, atol=1e-10)
+
+    def test_apply_fixed_tau_consistent_with_apply_on_diagonal_V(self):
+        """Anchor-once-then-freeze path: ``apply_fixed_tau(V, tau)``
+        must reproduce the ``V_star`` from ``apply(V)`` on a diagonal
+        ``V``. Otherwise the anchored optimisation surface would not
+        match the surface the bisection optimised against.
+        """
+        eigvals = jnp.array([1.0, 1.0e-4, 1.0e-8])
+        V = _diag_V(eigvals)
+        reg = DiagonalTikhonov(kappa_target=1.0e4)
+        V_star, tau = reg.apply(V)
+        V_star_fixed = reg.apply_fixed_tau(V, tau)
+        assert jnp.allclose(V_star_fixed, V_star, atol=1e-12)
+
+    def test_non_diagonal_path_uses_canonical_diag_formula(self):
+        """Regression guard: non-diagonal ``V`` must still go through
+        the canonical ``V + tau * diag(V)`` branch (per-moment
+        scale-equivariant; CLAUDE.md commitment 3). Verified by checking
+        the diagonal-entry identity ``V_star[i,i] = V[i,i] * (1+tau)``,
+        which only holds for the canonical formula.
+        """
+        V = _ill_conditioned_V(target_kappa=1.0e6, dim=3)
+        reg = DiagonalTikhonov(kappa_target=1.0e3)
+        V_star, tau = reg.apply(V)
+        for i in range(3):
+            assert float(V_star[i, i]) == pytest.approx(
+                float(V[i, i]) * (1.0 + float(tau)), rel=1e-5
+            )
+
+    def test_diagonal_dispatch_jits(self):
+        """The diagonal-V dispatch must trace under jit."""
+        V = _diag_V(jnp.array([1.0, 1.0e-4, 1.0e-8]))
+        reg = DiagonalTikhonov(kappa_target=1.0e4)
+
+        @jax.jit
+        def compute(r, vv):
+            return r.apply(vv)
+
+        V_star_eager, tau_eager = reg.apply(V)
+        V_star_jit, tau_jit = compute(reg, V)
+        assert jnp.allclose(V_star_eager, V_star_jit, atol=1e-10)
+        assert float(tau_eager) == pytest.approx(float(tau_jit), rel=1e-6)
+
+    def test_apply_fixed_tau_jits_on_diagonal_V(self):
+        V = _diag_V(jnp.array([1.0, 1.0e-4, 1.0e-8]))
+        reg = DiagonalTikhonov(kappa_target=1.0e4)
+        tau = jnp.asarray(0.1)
+
+        @jax.jit
+        def compute(r, vv, tt):
+            return r.apply_fixed_tau(vv, tt)
+
+        eager = reg.apply_fixed_tau(V, tau)
+        jitted = compute(reg, V, tau)
+        assert jnp.allclose(eager, jitted, atol=1e-12)
