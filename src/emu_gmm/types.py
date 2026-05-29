@@ -40,6 +40,25 @@ from emu_gmm._internal.labels import LabelContext
 # the framework only assumes the value is a valid JAX PyTree.
 ParamsLike = Any
 
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class Emu_GMM_DimensionError(ValueError):
+    """Raised when ``estimate()`` is given a degenerate problem dimension.
+
+    The framework requires ``M >= 1`` moments, ``K >= 1`` parameters, and
+    ``M >= K`` (no under-identified problems). Each of the three failures
+    has a distinct silent-fail mode in lower layers --- empty array
+    operations, ``jnp.stack`` of an empty list, or rank-deficient
+    inversion producing inf/nan ``Sigma_theta`` --- and surfacing them
+    as a typed error at the top of :func:`emu_gmm.estimate` lets users
+    distinguish "I mis-specified my model" from "I hit a JAX edge case".
+    """
+
+
 # A StructuralModel is any callable taking (x, theta) and returning
 # either a plain (M,) JAX array or a haliax NamedArray with a Moments
 # axis. The label adapter handles both.
@@ -150,22 +169,25 @@ class Diagnostics:
     """Numerical diagnostics from one estimation run.
 
     Scalar fields capture the regularisation choice and convergence
-    metrics. Labelled fields (``N_j``, ``moment_residual``) carry
-    moment-axis coordinates and are usable in pandas-style inspection
-    via :meth:`EstimationResult.to_pandas`.
+    metrics. They are stored as 0-d JAX arrays so that ``estimate()``
+    traces through ``jit`` and ``vmap``; ``float(diagnostic_field)`` at
+    the eager boundary recovers a Python scalar. Labelled fields
+    (``N_j``, ``moment_residual``) carry moment-axis coordinates and are
+    usable in pandas-style inspection via
+    :meth:`EstimationResult.to_pandas`.
     """
 
     # Regularisation
-    tau_realised: float
-    kappa_V: float
-    binding_ridge: bool
+    tau_realised: Float[Array, ""]
+    kappa_V: Float[Array, ""]
+    binding_ridge: Any  # 0-d bool JAX array
 
     # Cholesky
-    cholesky_pivot_min: float
+    cholesky_pivot_min: Float[Array, ""]
 
     # Optimisation
-    final_objective: float
-    final_gradient_norm: float
+    final_objective: Float[Array, ""]
+    final_gradient_norm: Float[Array, ""]
 
     # Labelled per-moment
     N_j: ha.NamedArray  # axis [Moments]
@@ -190,14 +212,28 @@ class EstimationResult:
     # Variance at theta_hat, axes [Moments, MomentsDual]
     V_X: ha.NamedArray
 
-    # J-test
-    J_stat: float
+    # J-test. ``J_stat`` and ``J_pvalue`` are 0-d JAX arrays so
+    # ``estimate`` is jit / vmap compatible; ``float(result.J_stat)``
+    # outside trace recovers a Python scalar. ``J_dof`` is a static int.
+    #
+    # ``J_pvalue`` is the *nominal* chi^2_{M-K} survival function value.
+    # ``J_pvalue_adjusted`` is the regularisation-adjusted survival
+    # function under the weighted-chi^2 limit of
+    # mcar-asymptotics.org Theorem 6; it equals ``J_pvalue`` when the
+    # ridge is not binding (tau <= tau_threshold) and differs (via a
+    # Welch-Satterthwaite approximation to the generalised chi-squared)
+    # when it binds.
+    J_stat: Float[Array, ""]
     J_dof: int
-    J_pvalue: float
+    J_pvalue: Float[Array, ""]
+    J_pvalue_adjusted: Float[Array, ""]
 
-    # Status
+    # Status. ``converged`` is a Python bool derived from the optimiser's
+    # discrete status enum (or the sentinel ``"traced"`` under jit/vmap).
+    # ``iterations`` is whatever the backend supplied: a Python int from
+    # SciPy, a 0-d JAX int array from optimistix (so it traces under jit).
     converged: bool
-    iterations: int
+    iterations: Any
 
     # Provenance (echoed from the call site)
     theta_init: Any
@@ -256,16 +292,19 @@ class EstimationResult:
             index=moment_names,
             name="moment_residual",
         )
+        # Summary is the eager-only consumer boundary: cast 0-d JAX
+        # arrays to Python floats so the resulting Series is ergonomic.
         summary = pd.Series(
             {
-                "J_stat": self.J_stat,
-                "J_dof": self.J_dof,
-                "J_pvalue": self.J_pvalue,
-                "converged": self.converged,
-                "iterations": self.iterations,
-                "tau_realised": self.diagnostics.tau_realised,
-                "kappa_V": self.diagnostics.kappa_V,
-                "final_objective": self.diagnostics.final_objective,
+                "J_stat": float(jnp.asarray(self.J_stat)),
+                "J_dof": int(self.J_dof),
+                "J_pvalue": float(jnp.asarray(self.J_pvalue)),
+                "J_pvalue_adjusted": float(jnp.asarray(self.J_pvalue_adjusted)),
+                "converged": bool(self.converged),
+                "iterations": int(self.iterations),
+                "tau_realised": float(jnp.asarray(self.diagnostics.tau_realised)),
+                "kappa_V": float(jnp.asarray(self.diagnostics.kappa_V)),
+                "final_objective": float(jnp.asarray(self.diagnostics.final_objective)),
             }
         )
 
@@ -289,4 +328,5 @@ __all__ = [
     "OptimizerInfo",
     "Diagnostics",
     "EstimationResult",
+    "Emu_GMM_DimensionError",
 ]

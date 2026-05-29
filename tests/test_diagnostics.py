@@ -35,11 +35,13 @@ class TestBuildDiagnostics:
             optimizer_info=_stub_optimizer_info(),
         )
         assert isinstance(d, Diagnostics)
-        assert d.tau_realised == pytest.approx(0.001)
-        assert d.kappa_V == pytest.approx(1e3)
-        assert d.binding_ridge is False
-        assert d.cholesky_pivot_min == pytest.approx(0.05)
-        assert d.final_objective == pytest.approx(0.5)
+        # Scalar diagnostics are kept as 0-d JAX arrays so the estimator
+        # traces under jit / vmap; ``float(...)`` recovers the scalar.
+        assert float(d.tau_realised) == pytest.approx(0.001)
+        assert float(d.kappa_V) == pytest.approx(1e3)
+        assert bool(d.binding_ridge) is False
+        assert float(d.cholesky_pivot_min) == pytest.approx(0.05)
+        assert float(d.final_objective) == pytest.approx(0.5)
 
     def test_labelled_per_moment_fields(self):
         Moments = axes_mod.moments_axis(2)

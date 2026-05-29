@@ -28,18 +28,19 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
-import scipy.stats
+import jax.scipy.stats
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
-from emu_gmm.diagnostics import build_diagnostics
+from emu_gmm.diagnostics import build_diagnostics, regularization_adjusted_pvalue
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
+    Emu_GMM_DimensionError,
     EstimationResult,
     Measure,
     Optimizer,
@@ -84,16 +85,20 @@ def _effective_n_per_moment(
     return jnp.ones(m)
 
 
-def _binding_ridge(regularization: RegularizationStrategy, tau: float) -> bool:
+def _binding_ridge(
+    regularization: RegularizationStrategy, tau: Float[Array, ""]
+) -> Float[Array, ""]:
     """Whether the regularisation ridge is "binding" relative to its threshold.
 
-    Only :class:`DiagonalTikhonov` exposes a ``tau_threshold``. Other
+    Returns a traced 0-d boolean JAX array so the result can flow
+    through ``jit`` / ``vmap`` without forcing a concrete-Python boundary.
+    Only :class:`DiagonalTikhonov` exposes a ``tau_threshold``; other
     regularisers default to ``False``.
     """
     threshold = getattr(regularization, "tau_threshold", None)
     if threshold is None:
-        return False
-    return float(tau) > float(threshold)
+        return jnp.asarray(False)
+    return jnp.asarray(tau) > jnp.asarray(threshold)
 
 
 def estimate(
@@ -151,7 +156,36 @@ def estimate(
     # Probe M by evaluating the expectation once at theta_init.
     m_probe = measure.expectation(model, theta_init)
     m_probe_arr = jnp.asarray(m_probe)
+    if m_probe_arr.ndim == 0 or m_probe_arr.shape[0] == 0:
+        raise Emu_GMM_DimensionError(
+            "estimate() requires M >= 1 moments; the supplied measure "
+            "returned an empty moment vector at theta_init. For a "
+            "degenerate zero-moment problem there is nothing to estimate; "
+            "for a zero-parameter, M-moment over-identifying-restrictions "
+            "J-test use the helper requested in issue #29 "
+            "(``emu_gmm.j_test``), once it lands."
+        )
     M = int(m_probe_arr.shape[0])
+
+    # Probe K from the parameter dataclass before touching ``flatten_params``
+    # (which fails with an opaque ``jnp.stack of empty list`` error when
+    # the dataclass has zero fields).
+    K_probe = len(tuple(params_mod.param_names(theta_init)))
+    if K_probe == 0:
+        raise Emu_GMM_DimensionError(
+            "estimate() requires K >= 1 parameters; the supplied "
+            "theta_init has no fields. For a zero-parameter, M-moment "
+            "J-test of over-identifying restrictions use the helper "
+            "requested in issue #29 (``emu_gmm.j_test``), once it lands."
+        )
+    if K_probe > M:
+        raise Emu_GMM_DimensionError(
+            f"estimate() requires M >= K (over-/just-identified); got "
+            f"M={M} moments and K={K_probe} parameters (under-identified). "
+            "An under-identified problem has rank-deficient G' V^{-1} G "
+            "and yields inf/nan Sigma_theta. Reduce the parameter count, "
+            "add moments, or impose an identifying restriction."
+        )
 
     # Probe for labelled output by calling model on one sample observation,
     # if the measure exposes one.
@@ -180,12 +214,35 @@ def estimate(
     theta_init_flat, treedef = params_mod.flatten_params(theta_init)
     K = int(theta_init_flat.shape[0])
 
+    # Anchor-once-then-freeze tau policy (design.org §5; CLAUDE.md
+    # commitment 3). Compute V at theta_init, run the adaptive tau
+    # search once, freeze the resulting tau; the residual closure then
+    # applies the *same* tau deterministically at every theta. This
+    # preserves smoothness of the residual surface (a hard requirement
+    # for LM and other Jacobian-based optimisers) and the delta-method
+    # argument that yields asymptotic normality.
+    V0 = covariance.covariance(model, theta_init, measure)
+    _V0_star, tau_anchor = regularization.apply(V0)
+    # Cast tau_anchor to a 0-d JAX array we can close over and reuse.
+    tau_anchor = jnp.asarray(tau_anchor)
+
+    def _apply_anchored(V: Float[Array, "M M"]) -> Float[Array, "M M"]:
+        """Apply the ridge at the anchored ``tau_anchor`` deterministically.
+
+        Prefer ``regularization.apply_fixed_tau`` when the strategy
+        exposes it; fall back to the algebraic form for arbitrary
+        third-party implementations of :class:`RegularizationStrategy`.
+        """
+        if hasattr(regularization, "apply_fixed_tau"):
+            return regularization.apply_fixed_tau(V, tau_anchor)
+        return V + tau_anchor * jnp.diag(jnp.diag(V))
+
     # Residual closure: produces the whitened moment vector y.
     def residual_fn(theta_flat: Float[Array, " K"]) -> Float[Array, " M"]:
         theta = params_mod.unflatten_params(theta_flat, treedef)
         m = measure.expectation(model, theta)
         V = covariance.covariance(model, theta, measure)
-        V_star, _tau = regularization.apply(V)
+        V_star = _apply_anchored(V)
         y = weighting.whitening_residual(m, V_star, theta)
         return y
 
@@ -193,10 +250,13 @@ def estimate(
     theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)
     theta_hat = params_mod.unflatten_params(theta_hat_flat, treedef)
 
-    # Inference quantities at theta_hat.
+    # Inference quantities at theta_hat. Use the *anchored* tau here too,
+    # so reported diagnostics are consistent with the surface the
+    # optimiser actually saw.
     m_hat = jnp.asarray(measure.expectation(model, theta_hat))
     V_hat = covariance.covariance(model, theta_hat, measure)
-    V_star_hat, tau_hat = regularization.apply(V_hat)
+    V_star_hat = _apply_anchored(V_hat)
+    tau_hat = tau_anchor
 
     # G = E_mu[grad_theta psi] : (M, K).
     G_hat = measure.jacobian(model, theta_hat)
@@ -212,15 +272,33 @@ def estimate(
     # Use jnp.linalg.inv for v1; under-identified problems will yield NaN.
     Sigma_theta_arr = jnp.linalg.inv(info_matrix)
 
-    # J-stat.
+    # J-stat. Keep as a 0-d JAX array so the result flows through
+    # ``jit`` / ``vmap``; users cast at the eager boundary (e.g. inside
+    # ``to_pandas``).
     y_hat = weighting.whitening_residual(m_hat, V_star_hat, theta_hat)
-    J_stat_arr = jnp.sum(y_hat * y_hat)
-    J_stat = float(J_stat_arr)
+    J_stat = jnp.sum(y_hat * y_hat)
     J_dof = max(M - K, 0)
     if J_dof > 0:
-        J_pvalue = float(scipy.stats.chi2.sf(J_stat, J_dof))
+        # ``jax.scipy.stats.chi2.sf`` is traceable; ``scipy.stats.chi2.sf``
+        # is not. The dof is a static Python int (it comes from M and K,
+        # which are static closure variables).
+        J_pvalue = jax.scipy.stats.chi2.sf(J_stat, J_dof)
+        # Regularisation-adjusted p-value: weighted-chi^2 limit per
+        # mcar-asymptotics.org Theorem 6. Computed unconditionally and
+        # surfaced as ``J_pvalue_adjusted`` so users can compare against
+        # the nominal value; we then pick between them based on whether
+        # the ridge is binding.
+        J_pvalue_adjusted_unbinding = J_pvalue  # tau ~= 0 case
+        J_pvalue_adjusted_binding = regularization_adjusted_pvalue(
+            J_stat, V_hat, V_star_hat, G_hat
+        )
+        binding_flag = jnp.asarray(_binding_ridge(regularization, tau_hat))
+        J_pvalue_adjusted = jnp.where(
+            binding_flag, J_pvalue_adjusted_binding, J_pvalue_adjusted_unbinding
+        )
     else:
-        J_pvalue = float("nan")  # under- or just-identified
+        J_pvalue = jnp.asarray(jnp.nan)  # under- or just-identified
+        J_pvalue_adjusted = jnp.asarray(jnp.nan)
 
     # Labelled outputs.
     Params = axes_mod.params_axis(K)
@@ -231,10 +309,14 @@ def estimate(
     Sigma_theta = labels_mod.label_matrix(Sigma_theta_arr, Params, ParamsDual)
     V_X = labels_mod.label_matrix(V_star_hat, Moments, MomentsDual)
 
-    # Diagnostics.
-    kappa_V = float(jnp.linalg.cond(V_star_hat))
-    binding_ridge = _binding_ridge(regularization, float(tau_hat))
-    cholesky_pivot_min = float(jnp.min(jnp.diag(L)))
+    # Diagnostics. All scalars are kept as 0-d JAX arrays so the
+    # ``estimate`` call traces cleanly under ``jit`` / ``vmap``. The
+    # eager-only ``to_pandas`` / ``__repr__`` boundary casts to Python
+    # floats; user code that does ``float(result.J_stat)`` continues to
+    # work because 0-d JAX arrays are float()-castable outside of trace.
+    kappa_V = jnp.linalg.cond(V_star_hat)
+    binding_ridge = _binding_ridge(regularization, tau_hat)
+    cholesky_pivot_min = jnp.min(jnp.diag(L))
 
     # Gradient of (1/2)||y||^2 at the optimum.
     def half_obj(tf: Float[Array, " K"]) -> Float[Array, ""]:
@@ -242,12 +324,12 @@ def estimate(
         return 0.5 * jnp.sum(y * y)
 
     final_grad = jax.grad(half_obj)(theta_hat_flat)
-    final_gradient_norm = float(jnp.linalg.norm(final_grad))
+    final_gradient_norm = jnp.linalg.norm(final_grad)
 
     N_j_arr = _effective_n_per_moment(measure, theta_hat, M)
 
     diagnostics = build_diagnostics(
-        tau_realised=float(tau_hat),
+        tau_realised=tau_hat,
         kappa_V=kappa_V,
         binding_ridge=binding_ridge,
         cholesky_pivot_min=cholesky_pivot_min,
@@ -259,7 +341,12 @@ def estimate(
         optimizer_info=optimizer_info,
     )
 
+    # ``converged`` and ``iterations`` are derived from the optimiser's
+    # info. Under ``jit`` / ``vmap`` the status is the literal string
+    # ``"traced"`` and steps are a 0-d JAX array; both must avoid
+    # ``int()`` / Python branches that touch traced values.
     converged = optimizer_info.status in ("converged", "traced")
+    iterations = optimizer_info.steps
 
     return EstimationResult(
         theta_hat=theta_hat,
@@ -268,8 +355,9 @@ def estimate(
         J_stat=J_stat,
         J_dof=J_dof,
         J_pvalue=J_pvalue,
+        J_pvalue_adjusted=J_pvalue_adjusted,
         converged=converged,
-        iterations=int(optimizer_info.steps),
+        iterations=iterations,
         theta_init=theta_init,
         measure=measure,
         covariance=covariance,
