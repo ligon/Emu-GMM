@@ -125,5 +125,37 @@ class DiagonalTikhonov:
         V_star = _apply_tau(V, tau)
         return V_star, tau
 
+    def apply_fixed_tau(
+        self,
+        V: Float[Array, "M M"],
+        tau: Float[Array, ""],
+    ) -> Float[Array, "M M"]:
+        """Return :math:`V + \\tau \\cdot \\operatorname{diag}(V)` at a fixed,
+        externally supplied :math:`\\tau`.
+
+        This is the "anchor-once-then-freeze" application path: the
+        :func:`emu_gmm.estimator.estimate` driver calls
+        :meth:`apply` once at :math:`\\theta_{\\mathrm{init}}` to obtain a
+        ``tau_anchor``; subsequent evaluations during optimisation route
+        through :meth:`apply_fixed_tau` with that anchored ``tau`` so the
+        residual surface is deterministic and :math:`C^1` in
+        :math:`\\theta`. See ``docs/design.org`` Section 5 and CLAUDE.md
+        commitment 3 for the policy.
+
+        Parameters
+        ----------
+        V : (M, M) symmetric (typically PSD) array.
+        tau : scalar array
+            The anchored ridge magnitude, computed by an earlier
+            :meth:`apply` call. May be a Python float or a 0-d JAX array.
+
+        Returns
+        -------
+        V_star : (M, M) array
+            The regularised matrix :math:`V + \\tau \\cdot \\operatorname{diag}(V)`.
+        """
+        tau_arr = jnp.asarray(tau)
+        return _apply_tau(V, tau_arr)
+
 
 __all__ = ["DiagonalTikhonov"]

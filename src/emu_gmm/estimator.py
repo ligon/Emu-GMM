@@ -180,12 +180,35 @@ def estimate(
     theta_init_flat, treedef = params_mod.flatten_params(theta_init)
     K = int(theta_init_flat.shape[0])
 
+    # Anchor-once-then-freeze tau policy (design.org §5; CLAUDE.md
+    # commitment 3). Compute V at theta_init, run the adaptive tau
+    # search once, freeze the resulting tau; the residual closure then
+    # applies the *same* tau deterministically at every theta. This
+    # preserves smoothness of the residual surface (a hard requirement
+    # for LM and other Jacobian-based optimisers) and the delta-method
+    # argument that yields asymptotic normality.
+    V0 = covariance.covariance(model, theta_init, measure)
+    _V0_star, tau_anchor = regularization.apply(V0)
+    # Cast tau_anchor to a 0-d JAX array we can close over and reuse.
+    tau_anchor = jnp.asarray(tau_anchor)
+
+    def _apply_anchored(V: Float[Array, "M M"]) -> Float[Array, "M M"]:
+        """Apply the ridge at the anchored ``tau_anchor`` deterministically.
+
+        Prefer ``regularization.apply_fixed_tau`` when the strategy
+        exposes it; fall back to the algebraic form for arbitrary
+        third-party implementations of :class:`RegularizationStrategy`.
+        """
+        if hasattr(regularization, "apply_fixed_tau"):
+            return regularization.apply_fixed_tau(V, tau_anchor)
+        return V + tau_anchor * jnp.diag(jnp.diag(V))
+
     # Residual closure: produces the whitened moment vector y.
     def residual_fn(theta_flat: Float[Array, " K"]) -> Float[Array, " M"]:
         theta = params_mod.unflatten_params(theta_flat, treedef)
         m = measure.expectation(model, theta)
         V = covariance.covariance(model, theta, measure)
-        V_star, _tau = regularization.apply(V)
+        V_star = _apply_anchored(V)
         y = weighting.whitening_residual(m, V_star, theta)
         return y
 
@@ -193,10 +216,13 @@ def estimate(
     theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)
     theta_hat = params_mod.unflatten_params(theta_hat_flat, treedef)
 
-    # Inference quantities at theta_hat.
+    # Inference quantities at theta_hat. Use the *anchored* tau here too,
+    # so reported diagnostics are consistent with the surface the
+    # optimiser actually saw.
     m_hat = jnp.asarray(measure.expectation(model, theta_hat))
     V_hat = covariance.covariance(model, theta_hat, measure)
-    V_star_hat, tau_hat = regularization.apply(V_hat)
+    V_star_hat = _apply_anchored(V_hat)
+    tau_hat = tau_anchor
 
     # G = E_mu[grad_theta psi] : (M, K).
     G_hat = measure.jacobian(model, theta_hat)
