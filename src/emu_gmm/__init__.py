@@ -7,7 +7,7 @@ The public API is re-exported here for convenience::
         SyntheticMeasure, SyntheticCovariance,
         AnalyticalMeasure, AnalyticalCovariance,
         EmpiricalMeasure, IIDCovariance, ClusteredCovariance,
-        Identity, Fixed, ContinuouslyUpdated,
+        Identity, Fixed, ContinuouslyUpdated, IteratedWeighting,
         DiagonalTikhonov,
         optimistix_lm, scipy_lm,
         EstimationResult, Diagnostics, OptimizerInfo,
@@ -82,7 +82,13 @@ from emu_gmm.types import (
     StructuralModel,
     WeightingStrategy,
 )
-from emu_gmm.weighting import CUE, ContinuouslyUpdated, Fixed, Identity
+from emu_gmm.weighting import (
+    CUE,
+    ContinuouslyUpdated,
+    Fixed,
+    Identity,
+    IteratedWeighting,
+)
 
 try:
     __version__ = version("emu-gmm")
@@ -110,6 +116,7 @@ __all__ = [
     "Fixed",
     "ContinuouslyUpdated",
     "CUE",
+    "IteratedWeighting",
     # Regularization
     "DiagonalTikhonov",
     # Numerics helpers
