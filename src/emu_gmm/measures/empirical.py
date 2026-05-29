@@ -162,6 +162,72 @@ class EmpiricalMeasure:
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom)
 
+    def moment_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "N M"]:
+        """Per-observation, mask-weighted moment contributions ``g_i(theta)``.
+
+        Returns the ``(N, M)`` matrix whose ``(i, j)`` entry is
+
+        .. math::
+           g_{ij}(\\theta) \\;=\\; d_{ij}\\, w_i\\, \\psi_j(x_i, \\theta),
+
+        i.e. the per-observation contribution that summed-then-normalised
+        produces :meth:`expectation`. Rows where ``mask[i, j] == 0`` are
+        zeroed; rows where ``mask[i, j] == 1`` carry ``w_i * psi_j``.
+
+        This is the building block downstream callers need for
+        bootstrap, K-statistic, and other resampling-based inference
+        routines: those procedures resample / reweight at the
+        per-observation level and need access to the raw
+        ``g_i(\\theta)`` matrix without normalisation. Combined with
+        :meth:`jacobian` and a :class:`~emu_gmm.types.CovarianceStrategy`
+        applied at ``theta`` (which gives the cluster- or iid-aware
+        ``Omega_hat(theta)``), these three primitives match the surface
+        that ManifoldGMM's ``MomentRestriction`` exposes for the same
+        downstream machinery.
+
+        Parameters
+        ----------
+        psi : :data:`StructuralModel`
+            Per-observation residual function.
+        theta : :data:`ParamsLike`
+            User parameter dataclass.
+
+        Returns
+        -------
+        g : (N, M) jax array
+            ``g_ij = d_ij * w_i * psi_j(x_i, theta)``; the masked,
+            weighted per-observation moment matrix. No ``1 / N_j``
+            normalisation is applied --- the caller decides how to
+            aggregate (sum, weighted sum, cluster-sum, bootstrap-resample).
+
+        Notes
+        -----
+        Like :meth:`expectation` and :meth:`jacobian`, this method
+        adopts the "double where" NaN-safe pattern: NaN cells in
+        ``self.x`` are zeroed before invoking ``psi``, and masked-out
+        ``(i, j)`` cells are zeroed in the output before the weight
+        multiplication so that ``0 * NaN = NaN`` cannot poison the
+        returned matrix or any downstream reverse-mode AD that
+        traverses it.
+        """
+
+        # Pre-sanitise x (see :meth:`expectation` for the rationale).
+        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+
+        def psi_at(x):
+            return _to_plain(psi(x, theta))
+
+        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+        # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
+        # the weight multiplication (mirrors the pattern in
+        # :meth:`expectation` and :meth:`jacobian`).
+        mask_bool = self.mask > 0.0  # (N, M)
+        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
+        weight_mask = self.mask * self.weights[:, None]  # (N, M)
+        return weight_mask * psi_safe
+
     def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
         """Per-coordinate weighted mean of :math:`\\nabla_\\theta \\psi`.
 
