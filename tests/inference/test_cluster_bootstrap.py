@@ -428,3 +428,146 @@ class TestArgumentValidation:
                 n_boot=0,
                 key=jax.random.PRNGKey(0),
             )
+
+
+# ---------------------------------------------------------------------------
+# Parameter-name labelling (HIGH #1 in PR #37 review)
+# ---------------------------------------------------------------------------
+
+
+class TestParamNamesPreserved:
+    """The parameter names from ``theta_init``'s dataclass survive
+    through to :attr:`ClusterBootstrapResult.coords` and the
+    :attr:`ClusterBootstrapResult.param_names` field.
+    """
+
+    def test_coords_parameters_matches_input_param_names(self):
+        """``result.coords['parameters']`` echoes the dataclass field
+        names in PyTree-flatten order (the same order that
+        ``EstimationResult.coef_table`` indexes by).
+        """
+        from emu_gmm._internal import params as params_mod
+
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=5, obs_per_cluster=8, seed=0
+        )
+        theta_init = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
+        expected_names = tuple(params_mod.param_names(theta_init))
+        # Sanity: EulerParams has fields (beta, gamma) in that order.
+        assert expected_names == ("beta", "gamma")
+
+        result = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=theta_init,
+            measure=measure,
+            covariance=covariance,
+            n_boot=3,
+            key=jax.random.PRNGKey(0),
+        )
+
+        # The result carries the parameter names verbatim ...
+        assert result.param_names == expected_names
+        # ... and exposes them via the ``coords`` mapping under the
+        # canonical ``parameters`` axis key, so downstream tabular
+        # gestures (``pd.Series(boot_se, index=result.coords['parameters'])``)
+        # match ``EstimationResult.coef_table.index``.
+        assert result.coords["parameters"] == expected_names
+        # The bootstrap axis carries positional replicate indices.
+        assert result.coords["bootstrap"] == (0, 1, 2)
+
+
+# ---------------------------------------------------------------------------
+# Inner-failure surfacing (HIGH #2 in PR #37 review)
+# ---------------------------------------------------------------------------
+
+
+class TestInnerFailureSurfacing:
+    """A deliberately-failing inner ``estimate()`` call must surface
+    as either (a) a non-convergence flag (for documented divergence
+    pathways) or (b) a raised exception (for everything else,
+    including programming bugs in the user's ``psi`` function).
+
+    The previous code wrapped the inner call in ``except Exception``
+    which silently turned a bug-driven ``TypeError`` into a NaN row.
+    The fix is to catch only the documented divergence exceptions
+    and let everything else propagate.
+    """
+
+    def test_user_bug_propagates_rather_than_being_swallowed(self, monkeypatch):
+        """A ``TypeError`` raised from inside ``estimate()`` -- standing
+        in for any bug in the user's ``psi`` function -- must surface
+        as a raised exception, not as a swallowed NaN row.
+        """
+        # Pull the *submodule* out of ``sys.modules``; the package
+        # ``emu_gmm.inference`` re-exports the function of the same
+        # name as the submodule, so a plain ``import`` of
+        # ``emu_gmm.inference.cluster_bootstrap`` resolves to the
+        # function (Python attribute lookup wins over the submodule).
+        # ``sys.modules`` is the canonical way to grab the module
+        # object regardless of any name shadowing in the parent
+        # package, which is exactly what ``monkeypatch.setattr``
+        # needs to rebind the ``estimate`` name that
+        # ``cluster_bootstrap`` looks up at call time.
+        import sys
+
+        cb_mod = sys.modules["emu_gmm.inference.cluster_bootstrap"]
+
+        def _buggy_estimate(*args, **kwargs):
+            # Stand-in for a bug in the user's psi function: a
+            # TypeError that the old broad ``except Exception``
+            # would have silently masked as ``convergence=False``.
+            raise TypeError(
+                "intentional bug: user's psi function returned the wrong type"
+            )
+
+        monkeypatch.setattr(cb_mod, "estimate", _buggy_estimate)
+
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=4, obs_per_cluster=5, seed=0
+        )
+        with pytest.raises(TypeError, match="intentional bug"):
+            cluster_bootstrap(
+                model=euler_residual,
+                theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+                measure=measure,
+                covariance=covariance,
+                n_boot=2,
+                key=jax.random.PRNGKey(0),
+            )
+
+    def test_documented_divergence_surfaces_as_non_convergence_flag(self, monkeypatch):
+        """A ``LinAlgError`` raised from inside ``estimate()`` --
+        standing in for a singular-matrix divergence -- is one of
+        the documented bootstrap-divergence pathways and must
+        surface as ``convergence=False`` plus a NaN row in
+        ``theta_boot`` / ``J_boot``, *not* as a raised exception.
+        """
+        # See ``test_user_bug_propagates_rather_than_being_swallowed``
+        # for why we go through ``sys.modules``.
+        import sys
+
+        cb_mod = sys.modules["emu_gmm.inference.cluster_bootstrap"]
+
+        def _diverging_estimate(*args, **kwargs):
+            raise np.linalg.LinAlgError(
+                "intentional divergence: singular V on this bootstrap world"
+            )
+
+        monkeypatch.setattr(cb_mod, "estimate", _diverging_estimate)
+
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=4, obs_per_cluster=5, seed=0
+        )
+        result = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+            measure=measure,
+            covariance=covariance,
+            n_boot=3,
+            key=jax.random.PRNGKey(0),
+        )
+        # All three replicates diverged in the documented way: the
+        # framework records this on the result rather than raising.
+        assert not np.any(result.convergence)
+        assert np.all(np.isnan(np.asarray(result.theta_boot.array)))
+        assert np.all(np.isnan(np.asarray(result.J_boot)))

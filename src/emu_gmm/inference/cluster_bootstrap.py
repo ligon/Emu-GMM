@@ -96,7 +96,8 @@ the estimator on each replicate.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 
 import haliax as ha
 import jax
@@ -112,6 +113,7 @@ from emu_gmm.measures.empirical import EmpiricalMeasure
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
+    Emu_GMM_DimensionError,
     ParamsLike,
     RegularizationStrategy,
     StructuralModel,
@@ -136,7 +138,10 @@ class ClusterBootstrapResult:
         Per-replicate parameter estimates, with axes
         ``(bootstrap, parameters)`` and shape ``(n_boot, K)``. The
         ``parameters`` axis carries the names from the user's
-        parameter dataclass.
+        parameter dataclass via :attr:`param_names` and
+        :attr:`coords` (haliax's :class:`Axis` itself only stores a
+        single name + size, not per-coordinate labels, so the
+        coordinate strings live on this result object).
     J_boot : :class:`jax.numpy.ndarray`
         Per-replicate J statistic, shape ``(n_boot,)``. ``NaN`` for
         replicates whose solver diverged.
@@ -149,12 +154,45 @@ class ClusterBootstrapResult:
         already-consumed key prevents accidental reuse upstream;
         callers who want to continue the random stream should derive
         a fresh key from their original seed.
+    param_names : tuple[str, ...]
+        Parameter names matching ``theta_boot``'s ``parameters`` axis,
+        in PyTree-flatten order. Lifted from the user's parameter
+        dataclass via :func:`emu_gmm._internal.params.param_names`
+        and carried through so downstream tabular gestures
+        (``pd.Series(boot_se, index=result.param_names)``) work
+        without the caller re-reading the dataclass.
     """
 
     theta_boot: ha.NamedArray
     J_boot: jnp.ndarray
     convergence: np.ndarray
     key: jax.Array
+    param_names: tuple[str, ...]
+
+    @property
+    def coords(self) -> Mapping[str, tuple[str | int, ...]]:
+        """Per-axis coordinate labels for :attr:`theta_boot`.
+
+        Returns a read-only mapping with two keys:
+
+        * ``"parameters"`` --- the parameter names from
+          :attr:`param_names`, aligned with the ``parameters`` axis
+          of ``theta_boot``.
+        * ``"bootstrap"`` --- positional replicate indices
+          ``(0, 1, ..., n_boot - 1)``.
+
+        haliax's :class:`Axis` only carries a name + size, not
+        per-coordinate strings, so this mapping is the framework's
+        analogue of :attr:`xarray.DataArray.coords` for the cluster
+        bootstrap output. Construction is cheap (no array copies).
+        """
+        n_boot = int(self.theta_boot.array.shape[0])
+        return MappingProxyType(
+            {
+                axes_mod.PARAMS_NAME: tuple(self.param_names),
+                "bootstrap": tuple(range(n_boot)),
+            }
+        )
 
 
 def _cluster_row_indices(cluster_ids: np.ndarray, n_clusters: int) -> list[np.ndarray]:
@@ -333,6 +371,15 @@ def cluster_bootstrap(
 
     for b in range(n_boot):
         boot_measure, boot_cov = _resample_one(measure, rows_by_cluster, drawn_all[b])
+        # NB: do *not* wrap this call in a broad ``except Exception``.
+        # The framework's optimisers (``optimistix_lm`` with
+        # ``throw=False``, ``scipy_lm``) report non-convergence via
+        # ``result.converged`` / ``info.status`` rather than raising.
+        # Only the *known*, *intentional* divergence pathways below
+        # are caught and surfaced as a convergence flag; everything
+        # else (TypeErrors from a buggy ``psi``, ValueErrors from
+        # measure construction, etc.) propagates so the user can see
+        # the real bug instead of a silent NaN row.
         try:
             result = estimate(
                 model=model,
@@ -343,37 +390,58 @@ def cluster_bootstrap(
                 optimizer=optimizer,
                 theta_init=theta_init,
             )
-            theta_hat_flat, _ = params_mod.flatten_params(result.theta_hat)
-            theta_boot[b] = np.asarray(theta_hat_flat)
-            J_boot[b] = float(result.J_stat)
-            convergence[b] = bool(result.converged)
-        except Exception:  # pragma: no cover - defensive on solver failure
+        except (
+            np.linalg.LinAlgError,
+            FloatingPointError,
+            Emu_GMM_DimensionError,
+        ):
+            # Documented bootstrap-divergence pathways:
+            #   * LinAlgError: a Cholesky / inv inside the regulariser
+            #     hit a non-PD matrix that the adaptive ridge could
+            #     not rescue (e.g. a draw of identical clusters).
+            #   * FloatingPointError: only raised when the host has
+            #     opted into strict NaN checks via
+            #     ``jax.config.update('jax_debug_nans', True)``; in
+            #     that mode an LM iterate that produces NaNs is a
+            #     legitimate "this bootstrap world is degenerate"
+            #     signal, not a programming error.
+            #   * Emu_GMM_DimensionError: a draw of all-empty clusters
+            #     could in principle collapse the working sample to
+            #     zero rows (``_resample_one`` guards against this by
+            #     falling back to the original sample, but if a
+            #     future refactor surfaces a degenerate world the
+            #     dimension check should still be treated as
+            #     non-convergence rather than a hard failure).
             theta_boot[b] = np.nan
             J_boot[b] = np.nan
             convergence[b] = False
+            continue
+        theta_hat_flat, _ = params_mod.flatten_params(result.theta_hat)
+        theta_boot[b] = np.asarray(theta_hat_flat)
+        J_boot[b] = float(result.J_stat)
+        convergence[b] = bool(result.converged)
 
     # Label the (n_boot, K) array along the canonical parameters axis;
     # the bootstrap-replicate axis carries no semantic labels (just a
     # replicate index) so we leave it as a plain axis named "bootstrap".
+    # The parameter-name tuple is carried on the result via
+    # ``param_names`` (and accessible as ``result.coords['parameters']``)
+    # because haliax's :class:`Axis` only stores a single axis name +
+    # size, not per-coordinate strings -- the framework's standing
+    # convention for parameter-named labels (see
+    # :class:`emu_gmm._internal.labels.LabelContext`).
     boot_axis = ha.Axis(name="bootstrap", size=n_boot)
     params_axis = axes_mod.params_axis(K)
     theta_boot_named = labels_mod.label_matrix(
         jnp.asarray(theta_boot), boot_axis, params_axis
     )
-    # Re-thread the parameter names through the LabelContext-style
-    # convention: NamedArray axis labels live elsewhere; we keep the
-    # parameter-name tuple available via the labels attribute on the
-    # outer result if a downstream user needs it. For now, we attach
-    # them as an axis-name suffix by passing the names directly --
-    # haliax's `named` only takes axes, so they are recovered via
-    # ``param_names`` on the user's dataclass when materialising.
-    del param_names  # silenced: see comment above
 
     return ClusterBootstrapResult(
         theta_boot=theta_boot_named,
         J_boot=jnp.asarray(J_boot),
         convergence=convergence,
         key=key,
+        param_names=param_names,
     )
 
 
