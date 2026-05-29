@@ -4,6 +4,31 @@
 #+OPTIONS: toc:nil num:t todo:t
 #+TODO: TODO(t) DOING(g) BLOCKED(b) | DONE(d) DROPPED(x)
 
+* Section 0: Status of this plan
+
+*Plan version 2: supersedes PR #28 (merged at 771bead0).* This
+revision resolves nine HIGH-severity inconsistencies identified by the
+plan-review sweep against the v1 surface in =src/emu_gmm/=. The
+review trio that drives this revision lives at:
+
+- =docs/reviews/plan-section-2-probe.org= (§2 decision probe; two HIGH
+  findings on ambient-vs-quotient framing).
+- =docs/reviews/plan-section-13-literature.org= (literature sweep; five
+  medium additions; three issue-worthy follow-ups).
+- =docs/reviews/plan-fidelity.org= (plan-fidelity adversarial review;
+  seven HIGH findings on optimizer protocol, =manifold_spec=,
+  CLAUDE.md commitment 4, Phase 4 acceptance, =ManifoldLeaf=
+  back-compat, =tangent_basis_names= ordering, =J_dof= contract).
+
+A short Section 2 records each contested decision and its
+disposition; everything downstream of §2 has been rewritten against
+those decisions, not patched.
+
+The v2.0 acceptance target is unchanged: a K-Aggregators-style
+=Product(PSDFixedRank(m, K), Euclidean(...), Euclidean(...))=
+parameter shape estimated via =RiemannianLM= with a labelled
+tangent-space =Sigma_theta= and a reported =gauge_nullspace_dim=.
+
 * Section 1: Scope and Sequencing
 
 This plan operationalises *Path A* of the pymanopt-integration memo
@@ -18,23 +43,29 @@ Euclidean(...))= is the concrete v2 acceptance target.
 Sequencing:
 
 1. /Manifold foundations/ --- the type machinery (=ManifoldParam=
-   protocol, relaxed PyTree contract) plus the trivial =Euclidean=
-   reference. Reproduces v1 behaviour on the existing acceptance
-   tests; no inference changes yet.
+   protocol, =ManifoldSpec= type, =ManifoldLeaf= PyTree node, relaxed
+   PyTree contract) plus the trivial =Euclidean= reference and the
+   =tangent_basis_names= function. Reproduces v1 behaviour on the
+   existing acceptance tests; no inference changes yet.
 2. /PSDFixedRank/ --- the hard one. Numerical-equivalence tests
-   against pymanopt's NumPy implementation.
+   against pymanopt's NumPy implementation, including the
+   Lyapunov-solve AD adjoint.
 3. /Product manifold/ --- composition; per-factor dispatch.
-4. /RiemannianLM/ --- NLLS-on-a-manifold solver with retraction at
-   each step. =OptimistixManifoldAdapter= so the v1 API still works
-   when every leaf is Euclidean.
-5. /Estimator + Jacobian/ --- manifold-aware unflatten; Riemannian
-   info matrix; gauge-aware condition number.
+4. /Optimiser surface/ --- =RiemannianOptimizer= protocol and
+   =RiemannianLM=; =OptimistixManifoldAdapter= so the v1 API still
+   works for users with all-Euclidean parameter PyTrees.
+5. /Estimator + Jacobian/ --- manifold-aware unflatten;
+   protocol-version dispatch; Riemannian info matrix; gauge-aware
+   condition number; =J_dof= contract change.
 6. /Result + Diagnostics/ --- =theta_hat= carries manifold structure;
    =.components()= accessor (K-Agg idiom); tangent-space
-   =Sigma_theta=; =gauge_nullspace_dim=.
+   =Sigma_theta=; =gauge_nullspace_dim=; =Sigma_theta_basis=;
+   spectral-gap diagnostic.
 7. /Optional pymanopt adapter/ --- =from_pymanopt(M)= under the
-   =[manifold]= extra; advertised non-JIT.
-8. /Polish/ --- v2 quickstart, CLAUDE.md update, deferrals refresh.
+   =[manifold]= extra; advertised non-JIT, advertised
+   bootstrap/vmap caveat.
+8. /Polish/ --- v2 quickstart, CLAUDE.md update, deferrals refresh,
+   companion mcar-asymptotics-riemannian note.
 
 Each phase has dependencies, tasks, and an acceptance criterion. The
 first non-trivial end-to-end run is at the end of Phase 5
@@ -44,108 +75,373 @@ at the end of Phase 6.
 
 Effort estimates follow the v1 convention: /S/ ≈ 1--2 hours, /M/ ≈
 half-day, /L/ ≈ full day, /XL/ ≈ multi-day. Calibrated against
-/Sue + Claude pair-of-hours/, not solo developer time.
+/Sue + Claude pair-of-hours/, not solo developer time. The v2 estimates
+have been recalibrated (several items moved from L to XL) per the
+plan-fidelity review.
 
 ---
 
-* Section 2: Pre-Implementation Decisions
+* Section 2: Pre-Implementation Decisions (v2 dispositions)
 
-A small number of choices need to land before any v2 code is written.
-Each materially affects how downstream phases look.
+Twelve pre-implementation decisions land here. Each is the disposition
+of a HIGH or MEDIUM finding in the review trio at =docs/reviews/=.
+Where the disposition overrides the review subagent's recommendation,
+the written reason is given.
 
-** TODO Decide embedded vs quotient metric on =PSDFixedRank=          :M:
+** §2.1 Storage convention on =PSDFixedRank= --- DECIDED: ambient-shape with gauge bookkeeping
 
-Pymanopt's =PSDFixedRank= (=psd.py:7-70=) parameterises
-\(X = Y Y^\top\) with the canonical Euclidean metric on \(Y\) and
-identifies \(Y \sim YQ\) for orthogonal \(Q \in O(k)\); the quotient
-geometry has dimension \(kn - k(k-1)/2\). The K-Aggregators code
-needs =exclude_gauge=True= semantics (gauge: the K(K-1)/2 nullspace
-on a rank-K factor).
+Pymanopt's =PSDFixedRank(n, k)= (=psd.py:7-70=) parameterises
+\(X = Y Y^\top\) with \(Y \in \mathbb{R}^{n \times k}\), identifies
+\(Y \sim YQ\) for \(Q \in O(k)\), and reports quotient dimension
+\(kn - k(k-1)/2\). The §2-probe review (=plan-section-2-probe.org=
+Probes A and B) showed that the previous plan's "embedded vs
+quotient" framing conflated two orthogonal questions: /the metric/
+(both options use the same horizontal projection) and /the storage
+shape/ for tangent vectors (ambient \((n,k)\) matrices vs.
+horizontal-basis coordinates of length \(kn - k(k-1)/2\)).
 
-Two options:
+*Disposition:* v2.0 ships /ambient-shape storage/ for tangent vectors
+on =PSDFixedRank=. A tangent vector =T= at point =Y= is represented
+as an array of shape =(n, k)= (the same shape as =Y=). The horizontal
+projection is performed by =manifold.projection= whenever it is
+needed; the projection's image, expressed in ambient-shape
+coordinates, has rank =manifold.dimension - manifold.gauge_dim= but
+is stored in an ambient =n*k= -shaped buffer.
 
-1. /Embedded metric/ (= the ambient Euclidean inner product on \(Y\)).
-   Easier: =projection=, =retraction=, =inner_product= all match the
-   pymanopt source exactly. Gauge direction shows up in
-   =Sigma_theta= as a K(K-1)/2 -dimensional nullspace that the user
-   must filter out.
-2. /Quotient metric/ (= the projection to the horizontal subspace at
-   each step). The same as pymanopt's projection step (see
-   =psd.py:30-34=, the Lyapunov solve), but consistently applied
-   inside =RiemannianLM=. =Sigma_theta= then lives on the quotient
-   tangent space and the gauge is intrinsically zero rather than
-   marginalised out.
+*Reasoning (overriding horizontal-basis storage):*
 
-/Recommendation pending decision:/ embedded metric, with an explicit
-=gauge_nullspace_dim= field on =EstimationResult= (Phase 6) and a
-=Sigma_theta= condition-number check that treats the K(K-1)/2 small
-eigenvalues as expected gauge. This matches pymanopt's existing
-geometry and Boumal §7. The quotient route is cleaner but adds a
-Lyapunov solve at every step of =RiemannianLM=, and the K-Aggregators
-gauge filter is an established pattern.
+1. /Pymanopt projection convention./ Pymanopt's =projection=
+   (=psd.py:30-34=) is the horizontal projection: input and output
+   are both =(n,k)= ambient matrices. Ambient-shape storage means
+   every pymanopt parity test compares array-to-array with no basis
+   transformation; horizontal-basis storage would require us to
+   maintain a basis-change step inside every parity assertion.
+2. /JIT/vmap-friendliness./ Tangent vectors in ambient storage have
+   a fixed shape, independent of the point. JAX's =jit= and =vmap=
+   compile cleanly; horizontal-basis representation would require a
+   per-point basis matrix carried alongside, breaking
+   shape-statically-known compilation.
+3. /Gauge bookkeeping is cheap./ The gauge nullspace dimension
+   =gauge_dim = k*(k-1)//2= is exposed as a class attribute on
+   =PSDFixedRank= and surfaced to the user as
+   =result.diagnostics.gauge_nullspace_dim=. Users who need
+   horizontal-basis coordinates can apply the basis change in
+   post-processing (deferred to v2.1).
 
-This decision lives at the top because it propagates: Phase 2's
-operator definitions, Phase 5's info-matrix shape, and Phase 6's
-=Sigma_theta= interpretation all depend on it.
+This decision propagates to Phase 2 (operator definitions return
+=(n,k)= arrays), Phase 5 (info matrix sized
+=(manifold.dimension, manifold.dimension)= where
+=manifold.dimension = n*k=, the /ambient/ dimension; rank is
+=n*k - k(k-1)/2 = dimension - gauge_dim=, *not*
+=dimension - 2*gauge_dim=), and Phase 6 (labels and
+=Sigma_theta_basis= reflect ambient indexing).
 
-** TODO Tangent-space inner product convention                        :S:
+*Definition (load-bearing):* =manifold.dimension= is the /ambient/
+\(n k\) for =PSDFixedRank(n, k)=. =manifold.gauge_dim= is \(k(k-1)/2\).
+The /information dimension/ \(\dim_{\mathrm{info}} =
+\mathrm{dimension} - \mathrm{gauge\_dim}\) is the rank of the
+asymptotic information matrix and the rank of =Sigma_theta_arr=.
+The Phase 5 rank assertion is
+=rank(Sigma_theta_arr) == manifold.dimension - manifold.gauge_dim=
+(equivalently, =rank == n*k - k(k-1)/2= for =PSDFixedRank(n,k)=).
 
-The tangent space at \(Y \in \mathrm{PSDFixedRank}\) inherits the
-Frobenius inner product \(\langle \dot Y_1, \dot Y_2 \rangle =
-\mathrm{tr}(\dot Y_1^\top \dot Y_2)\); pymanopt does this via
-=np.tensordot(..., axes=tangent_vector.ndim)= (=psd.py:17-22=). For
-=Product=, the inner product is the sum across factors
-(=product.py:64-67=).
+This replaces the previous plan's =manifold.dimension = n*k -
+k(k-1)/2= (the quotient dimension) and reconciles Phase 2/Phase 5
+arithmetic that previously double-counted the gauge subtraction.
 
-Decision needed: do we expose =manifold.inner_product(point, u, v)= as
-a public method (Boumal convention) or fold it into the more
-JAX-natural pattern of "tangent vectors are JAX PyTrees and the inner
-product is =jax.tree_util.tree_reduce(jnp.sum, jax.tree_map(jnp.vdot,
-u, v))="? The latter composes with =vmap= and =jit= more cleanly but
-hides the Riemannian structure from users porting from pymanopt.
+** §2.2 Drop the "embedded vs quotient" framing --- DECIDED: recast as ambient vs horizontal-basis
 
-/Recommendation pending decision:/ expose =manifold.inner_product= as
-the canonical surface and provide a JAX-PyTree default implementation
-when a subclass doesn't override.
+The =plan-section-2-probe.org= review (Probe A and Verdict §2.1)
+flagged that "embedded metric" terminology misleads a pymanopt-savvy
+reader: pymanopt's projection is /already/ the horizontal projection,
+so both options were quotient-aware. The previous plan's framing
+implied the embedded route skipped the Lyapunov solve; in fact both
+routes pay that cost.
 
-** TODO Decide how =Sigma_theta= is exposed                           :M:
+*Disposition:* throughout this revision, the language is
+/ambient-shape storage with gauge-nullspace bookkeeping/ (v2.0) vs.
+/horizontal-basis-coordinate storage/ (deferred to v2.1). The word
+"embedded" is reserved for the metric (Boumal §3.6: the metric
+inherited from the ambient inner product), which is unambiguously
+what we use under both candidate storage choices. The word
+"quotient" is reserved for the manifold structure itself, which is
+what =PSDFixedRank= /is/, not a runtime option.
 
-Three positions are defensible:
+** §2.3 Tangent-space inner product as a per-manifold method --- DECIDED: =manifold.inner_product= (unchanged from v1 plan)
 
-1. /Tangent-space coordinates at \(\hat\theta\)./ Pure: the asymptotic
-   covariance lives where the central limit theorem on the manifold
-   says it should. Cost: users need a basis to interpret it. For
-   =Euclidean= leaves the basis is the identity, so v1 users see no
-   change; for =PSDFixedRank= the basis is the horizontal subspace.
-2. /Lifted to the embedded ambient space./ For =PSDFixedRank(n, k)=,
-   that is the \(n \times k\) ambient matrix space. Easy to read,
-   but the K(K-1)/2 gauge directions show up as a near-zero subspace
-   (regardless of the metric choice in §2.1).
-3. /Lifted to the parameter-of-interest \(X = Y Y^\top\) space./ The
-   geometric pull-back of =Sigma_theta= along \(Y \mapsto Y Y^\top\).
-   Most useful for downstream inference on the PSD matrix itself
-   (which is what K-Aggregators consumes), but most expensive to
-   compute and the chain rule is non-trivial.
+The literature sweep (=plan-section-13-literature.org= §2.2 verdict)
+and the §2-probe (§2.2 verdict) both endorse the previous plan: expose
+=manifold.inner_product(point, u, v)= as a public method (Boumal
+convention), with a JAX-PyTree default implementation for subclasses
+that don't override.
 
-/Recommendation pending decision:/ default to option (1)
-(tangent-space coordinates), with a =result.Sigma_theta_ambient()=
-accessor for option (2). Defer option (3) to v2.1 (it requires the
-pull-back machinery for any user-defined map).
+*Disposition:* unchanged from the previous plan. Recorded here because
+it is referenced by Phase 1 protocol surface and by the Phase 4
+=RiemannianLM= tangent-space least-squares solver.
 
-This decision propagates to Phase 6 (=EstimationResult= shape).
+** §2.4 =Sigma_theta= exposure --- DECIDED: tangent-space coordinates with basis recorded
 
-** TODO Decide v2.0 minimum acceptance criterion                      :S:
+The previous plan defaulted to tangent-space coordinates at
+\(\hat\theta\) with an =Sigma_theta_ambient()= accessor for lifted
+form and deferred the pull-back to v3+. The literature sweep
+(=plan-section-13-literature.org= Q3 verdict) vindicates this default
+(it is the only one the intrinsic Cramér--Rao literature endorses)
+and adds two requirements: an explicit =Sigma_theta_basis= record on
+=EstimationResult= (Smith 2005 §III.B) and the spectral-gap
+diagnostic in =Diagnostics= (Boumal--Singer 2014 §6.2).
 
-The memo §"Suggested scoping" sketches /v2.0/ as
-=PSDFixedRank + Euclidean + Product + RiemannianLM + Sigma_theta on
-the tangent space=. The memo's open question #4 floats a "v2.0 ships
-Euclidean only; v2.1 adds PSDFixedRank" path as a risk-reduction
-alternative. Decide which.
+The §2-probe (Probe A under §2.3) raised a labelling concern: with
+ambient-shape storage, the labels =L_t_00..L_t_{n-1,k-1}= number
+\(n k\) entries but only \(n k - k(k-1)/2\) of them carry independent
+information. The fix lives in Phase 6: the labels reflect the
+ambient indexing, and =Sigma_theta_basis= identifies which directions
+are gauge.
 
-/Recommendation pending decision:/ ship the full thing in v2.0
-(=PSDFixedRank= is the only Phase 2 task with real numerical risk;
-delaying it doesn't materially reduce Phase 1/3/4 risk and would
-leave K-Aggregators blocked).
+*Disposition:* default to tangent-space coordinates (option 1 from
+the previous plan §2.3); add =result.Sigma_theta_basis= as a
+first-class field; add =result.Sigma_theta_ambient()= accessor;
+add a spectral-gap diagnostic; defer the pull-back along
+\(Y \mapsto YY^\top\) to v2.1 (tracked as a separate issue).
+
+** §2.5 v2.0 minimum acceptance --- DECIDED: full =PSDFixedRank=
+
+The §2-probe Probe B for §2.4 confirmed the previous plan's call:
+"v2.0 = Euclidean only" is the lower-risk path, but K-Aggregators is
+blocked otherwise. =MAX_K=3= in K-Aggregators puts the gauge fraction
+at 25% of the quotient dimension, well-separated from numerical
+noise.
+
+*Disposition:* ship the full thing in v2.0. Flag the gauge-fraction
+scaling in Phase 2's docstring: at \(K \to m\) the gauge dominates
+and the spectral-gap diagnostic becomes unreliable. Users in that
+regime should switch to horizontal-basis storage (v2.1).
+
+** §2.6 Optimiser protocol surface --- DECIDED: dual protocols with dispatch on parameter type
+
+The plan-fidelity review's first HIGH finding (§"Optimizer protocol
+surface conflict between Phase 4 and Phase 5") flagged that the
+previous plan introduced =RiemannianOptimizer= without saying how it
+coexists with v1's flat-vector =Optimizer= or how =estimate=
+dispatches.
+
+*Disposition:* v2 keeps the v1 =Optimizer= protocol unchanged (it
+takes =Float[Array, " K"]= for =theta_init= and a flat-vector
+=residual_fn=, satisfied by =_OptimistixLM= at =optimizer.py:60-117=
+and =_ScipyLM= at =optimizer.py:189-193=). v2 /adds/ a
+=RiemannianOptimizer= protocol that takes
+=(residual_fn: Callable[[ParamsPyTree], Array], theta_init:
+ParamsPyTree, manifold_spec)=. =estimate= dispatches on the
+=manifold_spec= produced by Phase 1's =flatten_params=:
+
+- /All leaves Euclidean/. =estimate= uses the v1 =Optimizer=
+  protocol (no change for v1 users). The user's =optimistix_lm()=
+  call site is unchanged. Internally, =estimate= recognises the v1
+  protocol from the user-supplied optimiser's signature and routes
+  to v1 semantics. =OptimistixManifoldAdapter= is /not/ involved
+  on this path; it exists only for the case where the user
+  explicitly requests a Riemannian context with an all-Euclidean
+  tree.
+- /Any leaf has a non-trivial ManifoldParam/. =estimate= requires
+  a =RiemannianOptimizer=. The default if the user passes nothing
+  is =RiemannianLM()=. If the user passes the v1 =optimistix_lm()=
+  while having a non-Euclidean leaf, =estimate= raises a clear
+  =TypeError= directing them to =RiemannianLM= or
+  =OptimistixManifoldAdapter(optimistix_lm())=.
+- /=OptimistixManifoldAdapter= for the all-Euclidean case./ This
+  adapter wraps a v1 =Optimizer= (e.g., =optimistix_lm()=) and
+  presents the =RiemannianOptimizer= signature so it can be passed
+  as =optimizer=...= to =estimate= when the caller wants the
+  Riemannian dispatch path. For default v1 usage on an
+  all-Euclidean tree the adapter is not required.
+
+The dispatch is a separate task in Phase 5
+(=_resolve_optimizer(manifold_spec, user_optimizer)=). The
+user-visible API is unchanged for v1 users.
+
+** §2.7 =manifold_spec= definition --- DECIDED: frozen dataclass with =jdc.static_field= semantics
+
+The plan-fidelity review's second HIGH finding (§"=manifold_spec= is
+referenced but never defined") demanded an explicit type.
+
+*Disposition:* =manifold_spec= is a frozen
+=@dataclasses.dataclass(frozen=True)= (hashable) named =ManifoldSpec=
+with the following fields, all consumed by downstream phases:
+
+#+BEGIN_SRC python
+@dataclass(frozen=True)
+class ManifoldSpec:
+    leaf_specs: tuple[LeafSpec, ...]    # per-leaf metadata in PyTree-leaf-walk order
+    total_ambient_dim: int              # sum of ambient sizes per leaf
+    total_dimension: int                # sum of manifold.dimension across leaves
+    total_gauge_dim: int                # sum of manifold.gauge_dim across leaves
+
+@dataclass(frozen=True)
+class LeafSpec:
+    offset: int                         # offset into the flat ambient buffer
+    ambient_shape: tuple[int, ...]
+    manifold: ManifoldParam             # the manifold instance
+    field_name: str | None              # the user dataclass field name (None for unnamed leaves)
+#+END_SRC
+
+=ManifoldSpec= is jit-hashable (because =@dataclass(frozen=True)=
+generates =__hash__=) and can be used as a =jdc.static_field= on
+=ManifoldLeaf= or passed as a static argument to =jit=. The
+=manifold= inside =LeafSpec= is itself a frozen JDC dataclass whose
+concrete fields are sizes (no traced arrays), so the hash composes
+correctly.
+
+The =ManifoldParam= protocol surface specified in Phase 1 is what
+=LeafSpec.manifold= satisfies:
+
+- =dimension: int=
+- =gauge_dim: int= (defaults to 0 for non-quotient manifolds; see §2.9
+  below; required by protocol)
+- =ambient_shape: tuple[int, ...]=
+- =projection(point, vector) -> tangent_vector=
+- =retraction(point, tangent_vector) -> point=
+- =inner_product(point, u, v) -> scalar=
+- =norm(point, tangent_vector) -> scalar=
+- =euclidean_to_riemannian_gradient(point, euclidean_gradient) -> tangent=
+- =vector_transport(point_a, point_b, tangent_vector_a) -> tangent=
+- =distance(point_a, point_b) -> scalar= (optional; defaults provided)
+- =random_point(key) -> point=
+- =random_tangent_vector(key, point) -> tangent=
+- =zero_vector(point) -> tangent=
+
+*Why both =treedef= and =manifold_spec= (not redundant)?* The
+v1 =treedef= alone cannot carry per-leaf =ambient_shape= because the
+v1 invariant uses 0-d leaves uniformly. =manifold_spec= carries the
+per-leaf metadata; =treedef= carries the structural skeleton. Both
+are required for unflatten.
+
+** §2.8 =ManifoldLeaf= back-compat for v1 trees --- DECIDED: scalar leaves stay scalar
+
+The plan-fidelity review's HIGH finding on §3 (=ManifoldLeaf= breaks
+the documented 0-d-leaf invariant at =params.py:52-56=) demanded a
+concrete answer for existing v1 dataclasses (=EulerParams(beta=0.95,
+gamma=2.0)= and the like) that don't wrap leaves in =ManifoldLeaf=.
+
+*Disposition:* =flatten_params= on a v1-style tree (every leaf is a
+0-d scalar, no =ManifoldLeaf= wrapping) produces a flat array
+/bitwise identical/ to v1. The =manifold_spec= for such a tree has
+=total_ambient_dim = total_dimension = K_v1=, =total_gauge_dim = 0=,
+and one =LeafSpec= per scalar with =ambient_shape=()=, =manifold=
+=Euclidean()= (a /zero-dimensional shape/ Euclidean with
+=ambient_shape=()= and =dimension=1=).
+
+*Crucially:* the implicit =Euclidean(1)= wrapping referenced in the
+previous plan is dropped. A 0-d scalar v1 leaf maps to =Euclidean()=
+(empty shape, =dimension=1=), /not/ =Euclidean(1)= (shape =(1,)=,
+=dimension=1=). The two have the same flat size but the
+=ambient_shape= distinction matters for the round-trip: =Euclidean()=
+unflattens to a 0-d JAX scalar, =Euclidean(1)= would unflatten to a
+1-D length-1 array, breaking v1 dataclass field types.
+
+The bitwise-identical contract is verified in Phase 1 by running all
+v1 acceptance tests against the v2 flatten/unflatten path: any v1
+tree must produce the same flat array, the same =treedef= (up to the
+v2 augmentation), and the same reconstruction.
+
+** §2.9 CLAUDE.md commitment 4 reconciliation: CU + Riemannian Jacobian --- DECIDED: derive in Phase 5
+
+The plan-fidelity review's HIGH finding on commitment 4 demanded that
+the plan reconcile "Don't silently drop the \(\nabla_\theta V\) term"
+(CLAUDE.md commitment 4) with Phase 5's use of =measure.jacobian=
+on moments (rather than on residuals).
+
+*Disposition:* under CU on a Riemannian manifold, the asymptotic
+covariance is \((G^\top V^{-1} G)^{-1}\) with =G= the /Riemannian/
+Jacobian of moments, by the same Z-estimator argument as in
+van der Vaart (1998) §5.4. The \(\nabla_\theta V\) term enters the CU
+/gradient/ during optimisation but vanishes in the asymptotic info
+matrix because the FOC sets the relevant gradient component to zero.
+
+Phase 5 must:
+
+1. Build the residual function so that JAX AD picks up the
+   \(\nabla_\theta V\) dependence through CU during optimisation
+   (preserves CLAUDE.md commitment 4 for the optimiser; matches v1
+   pattern at =estimator.py:184-190=).
+2. Use =measure.jacobian= directly on moments (not on residuals) for
+   the post-hoc info matrix at \(\hat\theta\) (matches v1
+   =estimator.py:202-214=).
+3. Apply =manifold.euclidean_to_riemannian_gradient= per leaf so
+   =G_hat= is the /Riemannian/ Jacobian of moments at \(\hat\theta\);
+   the info matrix is =G_riem.T @ Lambda @ G_riem=.
+
+A written derivation lives in the Phase 8 companion note
+=docs/mcar-asymptotics-riemannian.org= (subsection "CU + Riemannian:
+the \(\nabla_\theta V\) term") citing van der Vaart §5.4. A Phase 5
+test exercises a CU residual under a =ManifoldParam= and verifies
+the optimiser converges (commitment 4 honoured) and the Phase 5
+info matrix agrees with a numerical-derivative reference within
+=rtol=1e-4=.
+
+The same reconciliation applies to v1 today (=estimator.py:202=); v2
+does not change this contract.
+
+** §2.10 =tangent_basis_names= moved to Phase 1 --- DECIDED
+
+The plan-fidelity Phase-dependency finding (§"Phase 6 depends on
+Phase 5 which depends on a label-flattening function not specified
+until Phase 6") demanded that =tangent_basis_names= move forward.
+
+*Disposition:* =tangent_basis_names(manifold_spec, param_names)= is
+specified in Phase 1 alongside the =ManifoldParam= protocol. It is a
+pure function from =(ManifoldSpec, tuple[str, ...])= to
+=tuple[str, ...]= and Phase 5 uses it directly to label
+=Sigma_theta=. Phase 6 retains the =components()= accessor and
+=Sigma_theta_basis= recording, but the label generation is no longer
+a Phase 6 surprise.
+
+** §2.11 =J_dof= contract change --- DECIDED: explicit Phase 5 task
+
+The plan-fidelity review's MEDIUM finding (=J_dof= documented in §13
+but no Phase 5 task) and the §13 literature sweep's Q4 finding both
+demanded explicit handling. The literature sweep also added a
+contract requirement: the residual function must be gauge-invariant
+for =J_dof = M - dim_info= to be correct.
+
+*Disposition:* Phase 5 has an explicit task to change
+=J_dof = M - K_v1= (v1, =estimator.py:219=) to
+=J_dof = M - (manifold.dimension - manifold.gauge_dim) = M -
+dim_info= (v2). The contract --- /the residual function must be
+gauge-invariant in the sense that \(\nabla_\theta g\) lies in the
+horizontal subspace at \(\theta_0\)/ --- is added to Phase 5
+acceptance and a deliberately-violating test asserts that =J_stat=
+fails calibration when it is broken.
+
+For non-quotient manifolds (e.g., =Euclidean=, full-rank SPD) where
+=gauge_dim = 0=, the rule reduces to
+=J_dof = M - manifold.dimension=, which collapses to the v1 form
+when =manifold.dimension == K_v1=.
+
+** §2.12 Phase 4 acceptance criterion --- DECIDED: split into two criteria
+
+The plan-fidelity review's HIGH finding (§"Acceptance criterion for
+Phase 4 RiemannianLM is vague") and the §2-probe Verdict §2.4
+demanded a concrete, automatable test.
+
+*Disposition:* Phase 4 acceptance splits into two criteria:
+
+(a) /All-Euclidean equivalence with v1 =optimistix_lm=/. For an
+all-Euclidean parameter PyTree, =OptimistixManifoldAdapter= +
+=optimistix_lm()= produces output bitwise identical
+(=jnp.array_equal=) to the v1 =estimate(..., optimizer=optimistix_lm())=
+path on the v1 Euler test. No tolerance --- the adapter adds no
+numerics, it only re-shapes I/O.
+
+(b) /=PSDFixedRank= toy NLLS recovers a known target/. A
+synthetic-moments problem with =Y_true: PSDFixedRank(4, 2)= sampled;
+=X_true = Y_true @ Y_true.T=; residual function
+=r(Y) = vec(Y @ Y.T - X_true + noise)=. =RiemannianLM= must converge
+in <100 LM steps and recover =Y_hat= with =norm(Y_hat @ Y_hat.T -
+X_true) <= 1e-6= (the gauge-quotient-aware metric; individual
+entries of =Y= are unidentified).
+
+The previous "bitwise-equivalently to optimistix" phrasing is
+dropped: the bitwise claim holds only for the adapter path, not for
+=RiemannianLM= itself, and the previous plan conflated the two.
 
 ---
 
@@ -155,7 +451,12 @@ leave K-Aggregators blocked).
 /Acceptance: all v1 acceptance tests continue to pass with the new
 =ManifoldParam=-aware =flatten_params= / =unflatten_params= path; a
 trivial =Euclidean(n)= leaf round-trips through the v1 estimator and
-returns the same =EstimationResult= within float64 tolerance./
+returns the same =EstimationResult= within float64 tolerance. The
+v1 acceptance tests are: =tests/test_estimator.py=
+(end-to-end Euler), =tests/test_estimator_analytical.py=,
+=tests/test_estimator_empirical.py=, =tests/test_params.py= (flatten
+contract), =tests/test_labels.py= (=param_names= on v1 dataclasses)
+and =tests/test_diagnostics.py= (gradient norms / condition numbers)./
 
 ** TODO src/emu_gmm/manifolds/__init__.py                              :S:
 
@@ -165,45 +466,30 @@ New package. Re-exports =ManifoldParam=, =Euclidean=, =PSDFixedRank=,
 ** TODO src/emu_gmm/manifolds/base.py                                  :M:
 
 =ManifoldParam= protocol (=@runtime_checkable=, no inheritance from
-ABC) modelled on pymanopt's =Manifold= surface (see
-=.venv/.../pymanopt/manifolds/manifold.py=) but JAX-native:
+ABC) per §2.7 surface above. Per §2.9, =gauge_dim= is /part of the
+protocol/ (not a =getattr=-with-default lookup): =Euclidean=
+declares =gauge_dim = 0=, =PSDFixedRank= declares
+=gauge_dim = k*(k-1)//2=, =Product= sums per factor.
 
-- =dimension: int= --- intrinsic manifold dimension (different from
-  ambient shape for =PSDFixedRank=).
-- =ambient_shape: tuple[int, ...]= --- shape of one point in the
-  ambient embedding.
-- =projection(point, vector)= --- ambient \(\to\) tangent-space
-  projection.
-- =retraction(point, tangent_vector)= --- the (cheap, smooth) map
-  from the tangent space at =point= to the manifold. Replaces
-  =exp= in the optimiser hot path.
-- =inner_product(point, u, v)= --- tangent inner product (§2.2).
-- =norm(point, tangent_vector)= --- defaults to
-  =jnp.sqrt(self.inner_product(point, u, u))=.
-- =euclidean_to_riemannian_gradient(point, euclidean_gradient)= ---
-  for =Euclidean= and =PSDFixedRank= this is the projection;
-  Boumal §3.6.
-- =vector_transport(point_a, point_b, tangent_vector_a)= --- the
-  cheap-pseudo-parallel-transport used by manifold trust-region
-  methods. For v2.0 we ship "projection at the new point" (matches
-  =psd.py:63-64=); upgrade path noted.
-- =distance(point_a, point_b)= --- intrinsic geodesic distance.
-  Optional; defaults to retraction-based approximation.
-- =random_point(key)=, =random_tangent_vector(key, point)= ---
-  JAX-PRNG-keyed analogues of pymanopt's =np.random=-based methods
-  (=psd.py:55-61=).
-- =zero_vector(point)= --- shape-matched zero in the tangent space.
+The =ambient_shape= attribute is what =manifold_spec= consumes for
+flatten/unflatten shape bookkeeping. The =dimension= attribute is
+the ambient flat size (=np.prod(ambient_shape)= for native
+manifolds); this matches §2.1's "ambient \(n k\)" definition for
+=PSDFixedRank=.
 
 /Tests:/ structural --- protocol membership check via
-=isinstance(Euclidean(3), ManifoldParam)=.
+=isinstance(Euclidean(3), ManifoldParam)=; =gauge_dim= and
+=dimension= attributes exist on every concrete subclass.
 
 ** TODO src/emu_gmm/manifolds/euclidean.py                             :M:
 
 Port from =.venv/.../pymanopt/manifolds/euclidean.py:7-65=. JAX-pure.
 Trivial reference implementation; documents the contract.
 
-- =Euclidean(*shape: int)=. Stores =shape=, =dimension=
-  (=int(np.prod(shape))=).
+- =Euclidean(*shape: int)=. Stores =shape= (the =ambient_shape=
+  alias), =dimension= (=int(np.prod(shape))=, with =np.prod(()) = 1=
+  for the 0-d shape case).
+- =gauge_dim = 0=.
 - =projection= and =retraction= are identity (vector and
   =point + tangent_vector=).
 - =inner_product= is =jnp.sum(u * v)= for real arrays
@@ -215,46 +501,82 @@ Trivial reference implementation; documents the contract.
 
 /Tests:/ identity properties (projection idempotent, retraction
 adds, inner product matches Frobenius); equivalence with
-pymanopt's =Euclidean= on a random shape grid.
+pymanopt's =Euclidean= on a random shape grid; =Euclidean()= (empty
+shape) behaves correctly for the v1 scalar case --- v2 unflatten of
+a single-element flat array reconstructs a 0-d JAX scalar.
 
-** TODO src/emu_gmm/_internal/params.py manifold-aware update          :L:
+** TODO src/emu_gmm/_internal/params.py manifold-aware update          :XL:
 
-/This is the central type-system change./ Today (=params.py:43-58=)
-=flatten_params= forces every leaf to be a 0-d scalar; under v2,
-leaves may be either scalars (treated as a trivial =Euclidean(1)=)
-or =ManifoldParam=-tagged arrays of arbitrary shape.
+/This is the central type-system change./ Re-estimated XL (from L)
+per the plan-fidelity review's MEDIUM finding on this task. Today
+(=params.py:43-58=) =flatten_params= forces every leaf to be a 0-d
+scalar; under v2, leaves may be either scalars (treated as
+=Euclidean()= per §2.8) or =ManifoldLeaf=-wrapped arrays of
+arbitrary shape.
 
-- New =ManifoldLeaf= wrapper (PyTree leaf) carrying =(array,
-  manifold)=. The manifold is a JDC static field so jit/vmap don't
-  re-trace on manifold identity.
+- New =ManifoldLeaf= wrapper (PyTree leaf, custom-registered via
+  =jax.tree_util.register_pytree_node_class=). Carries
+  =(array, manifold)=. The manifold is a JDC static auxdata so
+  jit/vmap don't re-trace on manifold identity. =ManifoldLeaf=
+  acts as an /opaque/ PyTree leaf: =jax.tree_util.tree_leaves= sees
+  it as a single leaf, not as the wrapped array.
 - =flatten_params(params) -> (flat_array, treedef, manifold_spec)=:
   walks the PyTree once collecting =(shape, manifold)= per leaf;
-  returns a flat ambient-space concatenation plus a =manifold_spec=
-  describing offsets, shapes, and manifold tags.
+  returns a flat ambient-space concatenation plus a =ManifoldSpec=
+  describing offsets, shapes, and manifold tags (per §2.7).
 - =unflatten_params(flat_array, treedef, manifold_spec)=: splits
-  =flat_array= by manifold-spec offsets, reshapes each block to its
-  ambient shape, and reconstructs the user's PyTree.
-- Backward compatibility: when no leaf is wrapped in a =ManifoldLeaf=
-  (i.e. every leaf is a 0-d scalar), =flatten_params= must produce
-  exactly the v1 output. Existing v1 tests in =tests/= must pass
-  unchanged.
-- The =0-d scalar leaf= invariant in the v1 docstring becomes the
-  v1-compat path; the v2 invariant is "each leaf has a manifold
-  tag" with the implicit-=Euclidean(1)= rule covering bare scalars.
+  =flat_array= by =leaf_specs= offsets, reshapes each block to its
+  =ambient_shape=, and reconstructs the user's PyTree via
+  =jax.tree_util.tree_unflatten=.
+- Backward compatibility (per §2.8): when no leaf is wrapped in a
+  =ManifoldLeaf= (every leaf is a 0-d scalar or 0-d array),
+  =flatten_params= produces a flat array /bitwise identical/ to v1
+  and a =ManifoldSpec= with one =Euclidean()= per leaf (not
+  =Euclidean(1)=). The =treedef= is the standard JAX treedef for
+  the original tree (unchanged from v1); the augmentation is the
+  separate =manifold_spec= return value.
 
-/Tests:/ (a) v1 round-trip: flat=Euclidean(=EulerParams(beta=0.95,
-gamma=2.0)=) is the same =(2,)= array as before; (b) v2 round-trip:
-=KAggParams(L=Y, mu=mu, sigma=sigma)= with =L: PSDFixedRank(m, K)=
-and =mu, sigma: Euclidean(d)= flattens to a single ambient vector
-and unflattens back to the original PyTree; (c) manifold-spec
-preserved across =jax.tree_util.tree_flatten= -- =tree_unflatten=
-on the tangent-vector PyTree.
+/Tests:/ (a) v1 round-trip: flat for =EulerParams(beta=0.95,
+gamma=2.0)= is the same =(2,)= array as before, and
+=manifold_spec.total_ambient_dim == 2=,
+=manifold_spec.total_gauge_dim == 0=, and the per-leaf
+=ambient_shape == ()=; (b) v2 round-trip:
+=KAggParams(L=ManifoldLeaf(Y, PSDFixedRank(m, K)),
+mu=ManifoldLeaf(mu, Euclidean(d)),
+sigma=ManifoldLeaf(sigma, Euclidean(d)))= flattens to a single
+ambient vector of length =m*K + 2*d= and unflattens back; (c)
+=manifold_spec= preserved across =jax.tree_util.tree_flatten= --
+=tree_unflatten= on a tangent-vector PyTree.
+
+** TODO src/emu_gmm/_internal/labels.py: =tangent_basis_names=         :M:
+
+Per §2.10 (moved from Phase 6). Pure function:
+=tangent_basis_names(manifold_spec: ManifoldSpec,
+param_names: tuple[str, ...]) -> tuple[str, ...]=. Returns one
+label per ambient coordinate (NOT per quotient coordinate; the
+labels number =manifold.dimension= entries, of which =gauge_dim=
+are gauge directions). For =PSDFixedRank(n, k)= with field name
+=L=, labels are =["L_t_00", "L_t_01", ..., "L_t_{n-1,k-1}"]=
+(length \(n k\)). For =Euclidean((d,))= with field name =mu=,
+labels are =["mu_t_0", ..., "mu_t_{d-1}"]= (length =d=). For
+=Euclidean()= (scalar) with field name =beta=, the label is
+=("beta",)= (preserved exactly as v1 =param_names= returns, so v1
+users see no label change).
+
+The =_t_= infix denotes "tangent" and is the v2 convention.
+
+/Tests:/ a tree of shapes =(PSDFixedRank(3,2), Euclidean((2,)),
+Euclidean())= with field names =(L, mu, beta)= produces exactly
+=("L_t_00", "L_t_01", "L_t_10", "L_t_11", "L_t_20", "L_t_21",
+"mu_t_0", "mu_t_1", "beta")=. v1 trees produce labels identical to
+v1 =param_names=.
 
 ** TODO Acceptance: v1 estimator round-trip unchanged                  :S:
 
-Run all v1 acceptance tests under the v2 =params.py= path. Output
-must be bitwise identical (or float64-tolerance equal) to v1. This
-is the "do no harm" gate before Phase 2.
+Run all v1 acceptance tests (enumerated above) under the v2
+=params.py= path. Output must be float64-tolerance equal to v1;
+flat arrays must be bitwise identical (per §2.8). This is the "do
+no harm" gate before Phase 2.
 
 ---
 
@@ -266,32 +588,41 @@ agree with pymanopt's =PSDFixedRank(n, k)= on a 5--10 case grid of
 random (point, tangent_vector) pairs to within
 =rtol=1e-10, atol=1e-12= for projection / inner product, and
 =rtol=1e-6= for retraction / distance (looser because of the
-Lyapunov-solve sensitivity)./
+Lyapunov-solve sensitivity). The Lyapunov-solve AD adjoint is
+exercised by =jacfwd(projection)= against a hand-computed reference
+within =rtol=1e-8=./
 
-** TODO src/emu_gmm/manifolds/psd_fixed_rank.py                        :L:
+** TODO src/emu_gmm/manifolds/psd_fixed_rank.py                        :XL:
 
-JAX implementations of each operator. Reference =psd.py:7-70=. The
-heart of the port is the Lyapunov solve in =projection=
-(=psd.py:30-34=); JAX has =jax.scipy.linalg.solve= but no direct
-=solve_continuous_lyapunov=. Decision: implement Bartels--Stewart
-via QR/Schur on small matrices (\(k \times k\), so cheap), or use a
-=jax.scipy.linalg.lu_solve= against the Kronecker form
+Re-estimated XL (from L) per the plan-fidelity review's MEDIUM
+finding on AD adjoint work. JAX implementations of each operator.
+Reference =psd.py:7-70=. The heart of the port is the Lyapunov solve
+in =projection= (=psd.py:30-34=); JAX has =jax.scipy.linalg.solve=
+but no direct =solve_continuous_lyapunov=.
+
+Lyapunov-solve strategy (decided here, per plan-fidelity
+Recommendation 10): use the Kronecker form
 \((I_k \otimes Y^\top Y + Y^\top Y \otimes I_k) \mathrm{vec}(\Omega)
-= \mathrm{vec}(\text{AS})\). The Kronecker form is the most
-straightforward to JAX-vmap; the cost is \(O(k^6)\) rather than
-\(O(k^3)\), but for K-Aggregators's K=5..20 this is negligible.
+= \mathrm{vec}(Y^\top A_s)\) where \(A_s\) is the symmetric part of
+the input. Solve via =jax.scipy.linalg.solve= on a
+\(k^2 \times k^2\) system. Cost \(O(k^6)\) per call, negligible at
+K-Agg's =MAX_K=3=.
 
-- =projection(point, vector)= --- =psd.py:30-34=.
-  Compute \(\Omega\) by the Lyapunov solve. Return
-  =vector - point @ Omega=.
-- =retraction(point, tangent_vector)= --- =psd.py:46-49=.
-  Just =point + tangent_vector=; the manifold is closed under
-  addition as long as rank doesn't drop (assertion documented but
-  not enforced in JAX-pure path; the optimiser is responsible for
-  step-size control).
+AD adjoint: =jacfwd(projection)= and =vjp(projection)= are
+differentiable through =solve= because JAX implements the
+implicit-function-theorem adjoint of =solve= correctly. Verified by
+an explicit test against a hand-computed reference Jacobian on a
+small case.
+
+- =projection(point, vector)= --- =psd.py:30-34=. Compute \(\Omega\)
+  via the Kronecker Lyapunov solve. Return =vector - point @ Omega=.
+- =retraction(point, tangent_vector)= --- =psd.py:46-49=. Just
+  =point + tangent_vector=; the manifold is closed under addition
+  as long as rank doesn't drop. The optimiser is responsible for
+  step-size control.
 - =euclidean_to_riemannian_gradient(point, euclidean_gradient)= ---
-  =psd.py:38-40=. Identity (because the quotient projection happens
-  on the tangent vector, not the gradient).
+  =psd.py:38-40=. Identity (the projection happens on the tangent
+  vector, not the gradient).
 - =inner_product(point, u, v)= --- =psd.py:17-22=. Frobenius.
 - =norm(point, tangent_vector)= --- =psd.py:27-28=. Frobenius norm.
 - =distance(point_a, point_b)= --- =psd.py:24-25=. Calls =log= and
@@ -300,21 +631,27 @@ straightforward to JAX-vmap; the cost is \(O(k^6)\) rather than
   at new point" (=psd.py:63-64=).
 - =random_point(key)= --- =psd.py:55-56=. =jax.random.normal(key,
   (n, k))=.
-- =random_tangent_vector(key, point)= --- =psd.py:58-61=.
-  Project a random ambient vector to the tangent space and
-  normalise.
+- =random_tangent_vector(key, point)= --- =psd.py:58-61=. Project a
+  random ambient vector to the tangent space and normalise.
 - =zero_vector(point)= --- zeros of shape =(n, k)=.
-- Class attribute =dimension = k * n - k * (k - 1) // 2= per
-  =psd.py:113=.
-- Class attribute =gauge_dim = k * (k - 1) // 2= --- new; consumed
-  by Phase 6 diagnostics.
+- Class attribute =ambient_shape = (n, k)=.
+- Class attribute =dimension = n * k= (per §2.1: the /ambient/
+  \(n k\)). This is /different from/ pymanopt's =dim= attribute,
+  which is the quotient \(k n - k(k-1)/2\); the difference is
+  documented in the docstring.
+- Class attribute =gauge_dim = k * (k - 1) // 2= --- consumed by
+  Phase 6 diagnostics and by the Phase 5 info-matrix rank check.
+- *Docstring caveat (per §2-probe Probe C):* at \(K \to m\) the
+  gauge fraction grows. Above \(K/m \approx 0.7\) the
+  spectral-gap diagnostic becomes unreliable and the user should
+  consider horizontal-basis storage (v2.1).
 
 /Tests:/ pymanopt parity, in =tests/manifolds/test_psd_fixed_rank.py=:
 - Sample 10 random points and tangent vectors from each library;
   cross-check =projection=, =inner_product=, =norm=, =retraction=,
   =distance=.
-- Verify =jit(projection)= and =vmap(projection)= work
-  (the v1 hot-path contract).
+- Verify =jit(projection)= and =vmap(projection)= work (the v1
+  hot-path contract).
 - Verify =projection= is idempotent: applying twice equals once
   within tolerance.
 - Verify =euclidean_to_riemannian_gradient= followed by projection
@@ -322,6 +659,9 @@ straightforward to JAX-vmap; the cost is \(O(k^6)\) rather than
 - Gauge property: random orthogonal \(Q \in O(k)\); confirm
   =projection(YQ, vector_at_YQ) - Q.T @ projection(Y, vector)= is
   small (modulo the action of the gauge group).
+- /AD adjoint exercise:/ =jacfwd(projection)= against a
+  hand-computed reference Jacobian on a small \((n=3, k=2)\) case
+  within =rtol=1e-8=. This is the Phase 4 prerequisite.
 
 ---
 
@@ -330,11 +670,14 @@ straightforward to JAX-vmap; the cost is \(O(k^6)\) rather than
 /Dependencies: Phases 1, 2./
 /Acceptance: =Product(PSDFixedRank(m, K), Euclidean(d1),
 Euclidean(d2))= operators delegate factor-wise and return PyTrees
-of tangent vectors; pymanopt parity test on a 5-case grid passes./
+of tangent vectors; pymanopt parity test on a 5-case grid passes;
+=Product.gauge_dim= correctly sums per factor and
+=Product.dimension= correctly sums =manifold.dimension= per factor
+(=m K + d1 + d2= for the example)./
 
 ** TODO src/emu_gmm/manifolds/product.py                              :M:
 
-Port =.venv/.../pymanopt/manifolds/product.py:10-131= but with two
+Port =.venv/.../pymanopt/manifolds/product.py:10-131= with two
 JAX-native adaptations:
 
 1. Replace pymanopt's =_ProductTangentVector= list-with-arithmetic
@@ -359,30 +702,42 @@ Operators (each delegating per factor, summing scalars):
   key per factor, delegate.
 - =dimension= --- =sum(M.dimension for M in self.manifolds)=
   (=product.py:30=).
-- =gauge_dim= --- =sum(getattr(M, "gauge_dim", 0) for M in
-  self.manifolds)=. (Phase 6 consumer.)
+- =gauge_dim= --- =sum(M.gauge_dim for M in self.manifolds)=. Note:
+  /not/ =getattr= with default; per §2.7 =gauge_dim= is part of the
+  protocol so =Euclidean.gauge_dim = 0= is declared, not
+  defaulted-by-absence.
+- =ambient_shape= --- raises =NotImplementedError= (Products don't
+  have a single ambient shape; the spec carries per-factor shapes).
+  =ambient_shape= is consumed only by leaf-level code; =Product= is
+  used as a factor /inside/ a leaf only when explicitly wrapped, and
+  Phase 1's =ManifoldSpec= carries per-leaf shapes.
 - Reject nested products: raise =ValueError= matching
   =product.py:24-25=. Users compose by flattening at construction.
 
 /Tests:/ pymanopt parity on the K-Aggregators target shape
 =Product(PSDFixedRank(m=4, K=3), Euclidean(2), Euclidean(2))=;
 verify =jit(product.projection)= works; verify =gauge_dim= sums
-correctly.
+correctly (=3*(3-1)/2 = 3=).
 
 ---
 
 * Section 6: Phase 4 --- =RiemannianLM= and Optimiser Surface
 
 /Dependencies: Phases 1--3./
-/Acceptance: =RiemannianLM= recovers a known PSD matrix from
-synthetic moments in a stand-alone test (Boumal §6.4-style
-problem), and falls back to optimistix LM bitwise-equivalently
-when every leaf of the parameter PyTree is =Euclidean=./
+/Acceptance (two criteria, per §2.12):
+(a) all-Euclidean equivalence: =OptimistixManifoldAdapter= +
+=optimistix_lm()= produces bitwise-identical output to the v1
+=estimate(..., optimizer=optimistix_lm())= path on the existing
+v1 Euler test (=jnp.array_equal=, no tolerance);
+(b) =PSDFixedRank= toy NLLS: a synthetic-moments problem with
+=Y_true: PSDFixedRank(4, 2)=, residual =vec(Y @ Y.T - X_true)= where
+=X_true = Y_true @ Y_true.T + noise=; =RiemannianLM= converges in
+<100 LM steps with =norm(Y_hat @ Y_hat.T - X_true) <= 1e-6=./
 
-** TODO src/emu_gmm/manifolds/optimizer.py: RiemannianOptimizer       :M:
+** TODO src/emu_gmm/manifolds/optimizer.py: =RiemannianOptimizer=     :M:
 
 A new protocol parallel to =types.Optimizer= (=types.py:118-130=)
-but with a manifold-aware signature:
+with a manifold-aware signature:
 
 #+BEGIN_SRC python
 class RiemannianOptimizer(Protocol):
@@ -390,20 +745,25 @@ class RiemannianOptimizer(Protocol):
         self,
         residual_fn: Callable[[ParamsPyTree], Array],
         theta_init: ParamsPyTree,
-        manifold: ManifoldParam,
+        manifold_spec: ManifoldSpec,
     ) -> tuple[ParamsPyTree, OptimizerInfo]: ...
 #+END_SRC
 
 Note the contrast with v1: =theta_init= is the original PyTree (not
 a flat array), and the optimiser owns the flat<->PyTree round-trip
-via =flatten_params= internally. This avoids the awkwardness of
-"flat array on a manifold" (which is meaningless for
-=PSDFixedRank=).
+via =flatten_params= internally. This avoids "flat array on a
+manifold", which is meaningless for =PSDFixedRank=.
 
-** TODO src/emu_gmm/manifolds/riemannian_lm.py                         :L:
+The v1 =Optimizer= protocol (=types.Optimizer=) is unchanged; the
+two protocols coexist per §2.6.
 
-Riemannian Gauss--Newton via per-step retraction. Boumal §6.4
-("Riemannian Gauss--Newton for nonlinear least squares").
+** TODO src/emu_gmm/manifolds/riemannian_lm.py                         :XL:
+
+Re-estimated XL (from L) per the plan-fidelity review (tangent-LS
+solve with gauge handling). Riemannian Gauss--Newton via per-step
+retraction. Boumal §6.4 ("Riemannian Gauss--Newton for nonlinear
+least squares"); Adachi--Okuno--Takeda 2022 (arXiv:2210.00253) for
+the LM globalisation and convergence properties.
 
 Pseudocode for one step:
 
@@ -432,62 +792,117 @@ Key design decisions:
   inner-product Gram matrix; for =Euclidean= leaves this reduces to
   the standard normal equation; for =PSDFixedRank= it remains a
   least-squares solve in ambient \(Y\)-space because the embedded
-  metric coincides with the ambient Frobenius (per §2.1
-  decision).
-- LM damping parameter follows Levenberg--Marquardt:
-  =lambda <- 0.5 * lambda= on accept, =lambda <- 2 * lambda= on
-  reject; initialise to =1e-3 * ||J^T J||_F=.
+  metric (Boumal §3.6) coincides with the ambient Frobenius (per
+  §2.2 framing).
+- /Gauge-aware LM floor./ Per the plan-fidelity MEDIUM finding on
+  the tangent-LS solve: =lambda_k= has a /floor/:
+  =lambda_k >= max(1e-12, gauge_floor)= where =gauge_floor= is a
+  small constant chosen to prevent the LM normal equation from
+  becoming numerically singular along the gauge subspace as
+  =lambda_k -> 0= on accept steps. The previous plan's
+  =lambda <- 0.5 * lambda= on accept could shrink =lambda_k= to
+  zero; the floor prevents the gauge directions from going
+  singular.
+- LM damping schedule: =lambda <- max(gauge_floor, 0.5 * lambda)=
+  on accept, =lambda <- 2 * lambda= on reject; initialise to
+  =1e-3 * ||J^T J||_F=.
 - Convergence: norm of Riemannian gradient
   =manifold.norm(theta_k, J_riem_k.T @ r_k)= below =atol + rtol *
   norm(r_k)=; max-steps cap matches v1's =max_steps=200=.
 - Return =OptimizerInfo(backend="riemannian_lm", ...)= per v1's
   convention.
+- /JIT/vmap contract./ =RiemannianLM= is JIT-pure when every factor
+  of =manifold_spec= is a native manifold (=Euclidean=,
+  =PSDFixedRank=, =Product= of natives). When any factor is
+  =from_pymanopt=, =RiemannianLM= falls back to a non-JIT Python
+  loop (per §7 and §13). The JIT-ness is conditional on the spec
+  and documented at the class level. This resolves the
+  plan-fidelity MEDIUM finding on JIT vs non-JIT inconsistency.
 
-/Tests:/ Boumal §6.4 dictionary-recovery problem on
-=PSDFixedRank(n=5, k=3)=; verify convergence to a known
-\(\hat\theta\) in <50 steps with =J_stat= below 1e-10.
+/Tests:/ Phase 4 acceptance criterion (b) above; AD adjoint
+verification (=jacfwd= through the inner loop matches a numerical
+reference); =jit(RiemannianLM())(...)= compiles successfully for
+all-native specs.
 
 ** TODO src/emu_gmm/manifolds/optimistix_adapter.py                    :M:
 
-=OptimistixManifoldAdapter=: wraps the existing =optimistix_lm=
-(=optimizer.py:120-143=) so it conforms to =RiemannianOptimizer=.
-For all-Euclidean PyTrees, it flattens to a single ambient vector,
-calls =optimistix_lm=, and reconstructs the PyTree. For mixed
+=OptimistixManifoldAdapter=: wraps a v1 =Optimizer= (e.g.,
+=optimistix_lm()=) so it conforms to =RiemannianOptimizer=. For
+all-Euclidean PyTrees, it flattens to a single ambient vector, calls
+the wrapped optimiser, and reconstructs the PyTree. For mixed
 PyTrees containing =PSDFixedRank= leaves, it raises a clear error
 pointing the user to =RiemannianLM=.
 
-The point of this adapter: v1 users who never touch =PSDFixedRank=
-see no API drift. They can still pass =optimizer=optimistix_lm()= to
-=estimate=, and =estimate= internally wraps it.
+Per §2.6: this adapter wraps any v1 =Optimizer= for an
+all-Euclidean parameter PyTree. It does /not/ replace the v1
+protocol; it is a bridge for users who explicitly request a
+Riemannian context with an all-Euclidean tree.
 
-/Tests:/ all-Euclidean parameter PyTree: result matches v1
-estimator on the Phase 5 Euler example bitwise (within float64
-tolerance); =PSDFixedRank= leaf present: raises =ValueError= with
-a clear message.
+/Tests:/ Phase 4 acceptance criterion (a) above.
 
 ---
 
 * Section 7: Phase 5 --- Estimator + Riemannian Jacobian
 
 /Dependencies: Phases 1--4./
-/Acceptance: =estimate(...)= with a =Product(PSDFixedRank, Euclidean)=
-parameter PyTree runs end-to-end on a synthetic-moments problem;
-=Sigma_theta= is finite and has the expected rank (manifold dimension
-minus gauge dimension)./
+/Acceptance: =estimate(...)= with a =Product(PSDFixedRank,
+Euclidean, Euclidean)= parameter PyTree runs end-to-end on a
+synthetic-moments problem; =Sigma_theta= is finite with
+=rank == manifold.dimension - manifold.gauge_dim= where rank is
+measured by =jnp.linalg.matrix_rank= with
+=tol = 1e-10 * jnp.linalg.norm(info_matrix)= (absolute threshold,
+not data-dependent rcond, per the plan-fidelity MEDIUM finding on
+tolerance specification); =J_dof= equals
+=M - (manifold.dimension - manifold.gauge_dim)= per §2.11; gauge-
+invariance contract on the residual is exercised by a
+deliberately-violating test that asserts =J_stat= miscalibrates./
+
+** TODO src/emu_gmm/estimator.py: optimiser dispatch                   :M:
+
+Per §2.6. New helper:
+
+#+BEGIN_SRC python
+def _resolve_optimizer(
+    manifold_spec: ManifoldSpec,
+    user_optimizer: Optimizer | RiemannianOptimizer | None,
+) -> tuple[Optimizer | RiemannianOptimizer, Literal["v1", "v2"]]: ...
+#+END_SRC
+
+Dispatch:
+
+1. If =user_optimizer is None= and =manifold_spec.total_gauge_dim ==
+   0= and every =leaf_spec.manifold= is =Euclidean=, default to
+   =optimistix_lm()= and route through the v1 protocol. v1 users see
+   no change.
+2. If =user_optimizer is None= and any leaf is non-Euclidean,
+   default to =RiemannianLM()= and route through the v2 protocol.
+3. If =user_optimizer= satisfies the v1 =Optimizer= protocol and the
+   spec is all-Euclidean, route through v1 (no adapter wrapping).
+4. If =user_optimizer= satisfies the v1 =Optimizer= protocol but the
+   spec has any non-Euclidean leaf, raise =TypeError= directing the
+   user to wrap in =OptimistixManifoldAdapter= or use
+   =RiemannianLM=.
+5. If =user_optimizer= satisfies the v2 =RiemannianOptimizer=
+   protocol, route through v2 regardless of the spec.
+
+Protocol detection: =Optimizer= takes =(residual_fn, theta_init:
+Float[Array, " K"])=; =RiemannianOptimizer= takes
+=(residual_fn, theta_init: ParamsPyTree, manifold_spec)=. Detection
+by signature inspection (=inspect.signature=) at dispatch time. The
+two protocols are distinguishable.
 
 ** TODO src/emu_gmm/estimator.py: manifold-aware residual closure      :L:
 
 Touchpoints in =estimator.py:184-194=:
 
-- =theta_init_flat, treedef = params_mod.flatten_params(theta_init)=
-  picks up a third return value: =manifold_spec=.
+- =theta_init_flat, treedef, manifold_spec =
+  params_mod.flatten_params(theta_init)= (the third return value is
+  new in v2 per §2.7).
 - =residual_fn= closure: unflattens via the v2
-  =unflatten_params(theta_flat, treedef, manifold_spec)=.
-- Dispatch: if every leaf is =Euclidean=, route to
-  =OptimistixManifoldAdapter=; otherwise route to =RiemannianLM=
-  (or whatever the user passed as =optimizer=). This dispatch
-  lives in a new =_resolve_optimizer(manifold_spec, user_optimizer)=
-  helper to keep =estimate= readable.
+  =unflatten_params(theta_flat, treedef, manifold_spec)= for v1
+  protocol; for v2 protocol the closure takes the PyTree directly
+  and the optimiser owns the flat round-trip.
+- Dispatch delegated to =_resolve_optimizer=.
 
 ** TODO src/emu_gmm/estimator.py: Riemannian Jacobian and info matrix  :L:
 
@@ -499,34 +914,95 @@ Touchpoints in =estimator.py:201-214=:
   delegates to =jacfwd=, which handles PyTrees natively; no measure
   changes required.
 - Per-leaf, apply =manifold.euclidean_to_riemannian_gradient(theta,
-  G_block)= to get the tangent-space Jacobian.
+  G_block)= to get the tangent-space Jacobian. For =PSDFixedRank=
+  this is the identity (per Boumal §3.6 the embedded gradient is
+  the Euclidean gradient projected to the tangent space, but the
+  pymanopt convention is that the Jacobian is already in ambient
+  storage and the projection happens at consumption).
 - Flatten the per-leaf tangent Jacobians into one =(M,
-  manifold.dimension)= matrix in a canonical basis. The basis is:
-  for =Euclidean(shape)= the identity flatten; for =PSDFixedRank(n,
-  k)= an ambient-space flatten (since the embedded metric matches
-  Frobenius). For =Product=, concatenate factor blocks.
+  manifold.dimension)= matrix in a canonical basis. The basis is
+  the ambient-storage flatten (per §2.1): for =Euclidean(shape)= the
+  identity flatten; for =PSDFixedRank(n, k)= an ambient flatten of
+  shape =(M, n*k)=. For =Product=, concatenate factor blocks.
 - Info matrix =G_riem.T @ Lambda @ G_riem= where =Lambda = V^{-1}=.
   This matrix has size =(manifold.dimension, manifold.dimension)=
-  (note: /not/ =(ambient_dim, ambient_dim)=).
-- /Gauge handling./ Per §2.1, the embedded metric carries
-  =gauge_dim= small eigenvalues that are intrinsic to the gauge,
-  not finite-sample noise. =Sigma_theta_arr = pinv(info_matrix,
-  rcond=...) = with a documented threshold; the rank of
-  =Sigma_theta_arr= must equal
-  =manifold.dimension - manifold.gauge_dim= within tolerance.
+  (= the /ambient/ total per §2.1). It has rank
+  =manifold.dimension - manifold.gauge_dim= in the limit, with the
+  =gauge_dim= smallest eigenvalues approaching zero.
+- /Gauge handling per ManifoldGMM PR #33./ =Sigma_theta_arr =
+  pinv_eigvalrule(info_matrix, drop_smallest=manifold.gauge_dim)= ---
+  drop the =gauge_dim= smallest eigenvalues /by count/, not by
+  threshold (per §13 literature sweep finding 3; ManifoldGMM PR #33).
+  The eigenvalue-by-count rule is robust to spectral-gap drift
+  with sample size.
+- *vmap compatibility:* =pinv_eigvalrule= takes =drop_smallest= as a
+  /static/ argument (a Python int, not a traced array), so
+  =vmap(estimate)(...)= works on a fixed-spec PyTree. Per-replicate
+  =gauge_dim= is a property of =manifold_spec= (static), not data.
+  Resolves the plan-fidelity MEDIUM concern about data-dependent
+  rcond breaking vmap.
 - =kappa_V= still meaningful (it's on the moment-space covariance,
-  not the info matrix); =kappa_info= is a new gauge-aware
-  condition number reported in diagnostics.
+  not the info matrix); =kappa_info_eff= is a new gauge-aware
+  condition number reported in diagnostics (ratio of largest
+  eigenvalue to (=gauge_dim+1=)-th smallest, i.e., the largest
+  /information/ direction over the smallest).
+
+** TODO src/emu_gmm/estimator.py: =J_dof= contract change              :S:
+
+Per §2.11. Replace =J_dof = M - K_v1= (v1, =estimator.py:219=) with:
+
+#+BEGIN_SRC python
+J_dof = M - (manifold_spec.total_dimension - manifold_spec.total_gauge_dim)
+#+END_SRC
+
+For all-Euclidean specs (=total_gauge_dim == 0=) this reduces to
+=J_dof = M - K_v1=, recovering v1 behaviour. For =PSDFixedRank(n, k)=
+in the spec, this gives =J_dof = M - (n*k - k(k-1)/2) = M - dim_info=,
+matching Hansen (1982) Theorem 3.1 and Kleibergen (2005) on the
+quotient.
+
+/Gauge invariance contract:/ the residual function must be
+gauge-invariant in the sense that \(\nabla_\theta g\) lies in the
+horizontal subspace at \(\theta_0\). This is automatic when the
+moment function itself is gauge-invariant (as for K-Aggregators'
+\(X = Y Y^\top\) parameterised moments); when violated, the J
+statistic miscalibrates. A Phase 5 test exercises this: a residual
+=r(Y) = Y[0,0]= (deliberately gauge-non-invariant on
+=PSDFixedRank(3, 2)=) on synthetic data must produce a J statistic
+that does NOT match the =chi2_{M-dim_info}= reference. The contract
+is documented in the docstring of =estimate=.
+
+** TODO CU + Riemannian \(\nabla_\theta V\) reconciliation             :S:
+
+Per §2.9. Add the written derivation as a subsection of
+=docs/mcar-asymptotics-riemannian.org= (Phase 8 task). The Phase 5
+implementation does not change: the residual closure preserves the
+CU dependence (CLAUDE.md commitment 4); =measure.jacobian= remains
+the post-hoc Jacobian-of-moments at \(\hat\theta\). The derivation
+shows the equivalence asymptotically (van der Vaart §5.4).
+
+A Phase 5 test exercises a CU residual under a =ManifoldParam=:
+=Product(PSDFixedRank(3, 2), Euclidean(1))=, CU weighting, synthetic
+moments. The optimiser converges (commitment 4 honoured); the Phase
+5 info matrix agrees with a numerical-derivative reference at
+\(\hat\theta\) within =rtol=1e-4=.
 
 ** TODO Acceptance: Phase 5 synthetic =PSDFixedRank= test              :M:
 
 Generate a synthetic moments problem mimicking a small
 K-Aggregators-style use: \(\theta = (Y, \mu, \sigma)\) with =Y:
 PSDFixedRank(4, 2)=, =mu: Euclidean(2)=, =sigma: Euclidean(2)=. DGP
-known. Verify =estimate(..., optimizer=RiemannianLM())= recovers
-\(\theta_0\) modulo gauge to within tolerance; verify
-=Sigma_theta= has rank
-=manifold.dimension - manifold.gauge_dim=.
+known. Verify:
+
+- =estimate(..., optimizer=RiemannianLM())= recovers \(\theta_0\)
+  modulo gauge (=norm(Y_hat @ Y_hat.T - Y_true @ Y_true.T) <= 1e-4=
+  on noisy data).
+- =Sigma_theta_arr= has rank =manifold.dimension -
+  manifold.gauge_dim= = =(4*2) + 2 + 2 - 1= = 11 (gauge_dim from
+  =PSDFixedRank(4,2)= = =2*(2-1)/2= = 1).
+- =J_dof == M - 11=.
+- The gauge-violation test produces a J statistic that does NOT
+  match the reference distribution.
 
 ---
 
@@ -535,7 +1011,9 @@ known. Verify =estimate(..., optimizer=RiemannianLM())= recovers
 /Dependencies: Phase 5./
 /Acceptance: =result.theta_hat= round-trips through the K-Agg
 =.components()= idiom; =result.Sigma_theta= is labelled in
-tangent-space coordinates; =gauge_nullspace_dim= reported./
+tangent-space coordinates via the Phase 1 =tangent_basis_names=;
+=gauge_nullspace_dim= reported; =Sigma_theta_basis= recorded;
+spectral-gap diagnostic reported./
 
 ** TODO src/emu_gmm/types.py: =EstimationResult.theta_hat=             :S:
 
@@ -549,29 +1027,87 @@ Accessor matching the K-Aggregators pattern
 =result.theta.components()=. Returns a dict mapping leaf-field-name
 to =(ambient_array, manifold)= pairs. For =Product= parameters this
 is the natural way to inspect the per-factor estimates without
-unflattening manually. Wire through =labels.param_names= so the
+unflattening manually. Wire through =labels.param_names= (the
+existing v1 function, which returns top-level field names) so the
 dict keys are the user's dataclass field names.
 
-** TODO src/emu_gmm/types.py: =Sigma_theta= axis labels                :M:
+Per the plan-fidelity MEDIUM finding on =param_names= reuse: the two
+use-cases (=components()= keys vs. =Sigma_theta= row/column labels)
+are served by /different/ functions. =labels.param_names= keeps its
+v1 contract (top-level field names, raises on nested dataclasses
+per =params.py:134-138=). =labels.tangent_basis_names= (Phase 1) is
+the v2 addition for the flat tangent-basis labels. No reuse, no
+ambiguity.
 
-The labelled =Sigma_theta= today (=types.py:189=, axes =[Params,
-ParamsDual]=) sits on a flat ambient parameter space of length =K=.
-Under v2, =Sigma_theta= lives on the tangent space of dimension
-=manifold.dimension=. =Params= and =ParamsDual= retain their roles
-but their size becomes =manifold.dimension=, and the coordinate
-labels become a flattened "manifold tangent basis" naming
-convention. For a =Product= with named factors =(L, mu, sigma)=
-the labels look like
-=["L_t_00", "L_t_01", ..., "mu_t_0", "sigma_t_0", "sigma_t_1"]=
-(=_t_= = "tangent"). The exact label format lives in
-=_internal/labels.tangent_basis_names(manifold_spec, param_names)=.
+** TODO src/emu_gmm/types.py: =Sigma_theta= axis labels                :S:
+
+(Re-estimated S from M because =tangent_basis_names= moved to Phase
+1.) The labelled =Sigma_theta= today (=types.py:189=, axes =[Params,
+ParamsDual]=) sits on a flat ambient parameter space of length
+=K_v1=. Under v2, =Sigma_theta= lives on the tangent space of
+ambient dimension =manifold_spec.total_dimension=. =Params= and
+=ParamsDual= retain their roles but their size becomes
+=total_dimension=, and the coordinate labels are produced by
+=tangent_basis_names(manifold_spec, param_names)= (Phase 1).
+
+** TODO src/emu_gmm/types.py: =EstimationResult.Sigma_theta_basis=     :M:
+
+Per §2.4 (literature sweep finding 1, Smith 2005 §III.B). New field.
+A record of the basis in which =Sigma_theta= is reported. For
+=Euclidean= leaves the basis is trivially the identity. For
+=PSDFixedRank= leaves the basis is the ambient-shape storage with
+gauge nullspace; the field records the =ambient_shape= per leaf,
+the =manifold= per leaf, and the =gauge_nullspace_dim=. The field
+is a frozen dataclass:
+
+#+BEGIN_SRC python
+@dataclass(frozen=True)
+class SigmaThetaBasis:
+    ambient_shape_per_leaf: tuple[tuple[int, ...], ...]
+    leaf_names: tuple[str, ...]
+    manifold_per_leaf: tuple[ManifoldParam, ...]
+    total_dimension: int
+    total_gauge_dim: int
+    flat_label_names: tuple[str, ...]   # = tangent_basis_names(...)
+#+END_SRC
+
+Without this, users cannot interpret the covariance (literature
+sweep finding 1).
+
+** TODO src/emu_gmm/types.py: =EstimationResult.Sigma_theta_ambient()= :S:
+
+Accessor that returns =Sigma_theta= reshaped to the ambient block
+structure: a dict mapping leaf-field-name to an ambient-shaped block
+of the covariance. For =PSDFixedRank(n, k)= the block is shape
+=(n, k, n, k)= (covariance between the =(i,j)= and =(i',j')=
+ambient entries). Convenience for users who want ambient indexing
+without manually unflattening.
 
 ** TODO src/emu_gmm/types.py: =Diagnostics.gauge_nullspace_dim=        :S:
 
 New field. Populated by =build_diagnostics= from
-=manifold.gauge_dim=. Documents the intrinsic null-space dimension
-of the info matrix; users can subtract from =Sigma_theta='s nominal
-rank to verify "I am seeing the gauge, not numerical noise".
+=manifold_spec.total_gauge_dim=. Documents the intrinsic null-space
+dimension of the info matrix; users can subtract from
+=Sigma_theta=' s nominal rank to verify "I am seeing the gauge, not
+numerical noise".
+
+** TODO src/emu_gmm/types.py: =Diagnostics.spectral_gap=               :M:
+
+Per §13 literature sweep finding 2. New field: the ratio between
+the (=gauge_dim+1=)-th smallest eigenvalue and the =gauge_dim=-th
+smallest eigenvalue of the info matrix. Boumal--Singer 2014 §6.2:
+under good identification on the quotient, this ratio is large
+(\(\gg 1\)); under weak identification it collapses toward 1.
+Useful for the open Q1 sub-question (literature sweep) and as a
+finite-sample identification health check.
+
+** TODO src/emu_gmm/types.py: =EstimationResult.wald_ellipsoid(level)= :S:
+
+Convenience method per literature sweep §Q3 implication. Returns a
+callable that samples from =exp_{theta_hat}(v)= where
+=v ~ N(0, chi2_{dim_info, level} * Sigma_theta_arr)=. Wraps the
+existing =retraction= as a first-order =exp= approximation. Cheap;
+makes the geodesic interpretation tangible.
 
 ** TODO src/emu_gmm/diagnostics.py: tangent-space gradient norm        :S:
 
@@ -587,8 +1123,11 @@ used.
 Run the Phase 5 acceptance test; verify =result.components()=
 returns the right keys with the right factor shapes;
 =result.Sigma_theta.to_pandas()= produces a DataFrame indexed by
-the tangent-basis names; =result.diagnostics.gauge_nullspace_dim=
-equals =manifold.gauge_dim=.
+=tangent_basis_names=; =result.diagnostics.gauge_nullspace_dim=
+equals =manifold_spec.total_gauge_dim=;
+=result.diagnostics.spectral_gap= is large (=>= 1e6=) on the
+well-conditioned synthetic problem; =result.Sigma_theta_basis= is
+populated.
 
 ---
 
@@ -597,18 +1136,22 @@ equals =manifold.gauge_dim=.
 /Dependencies: Phase 1./
 /Acceptance: =from_pymanopt(some_pymanopt_manifold).projection(...)=
 calls into pymanopt, drops out of JIT, and returns a JAX array;
-this is the explicit non-JIT path; documentation flags that./
+this is the explicit non-JIT path; documentation flags that. CI
+matrix installs the =[manifold]= extra for this test; the test is
+skipped otherwise./
 
 ** TODO pyproject.toml: =[tool.poetry.extras.manifold]=                :S:
 
-Add =pymanopt= as an optional dependency under the =manifold=
-extra. Document in README that users wanting =from_pymanopt= must
-install =pip install 'emu-gmm[manifold]'=.
+Add =pymanopt= as an optional dependency under the =manifold= extra.
+Document in README that users wanting =from_pymanopt= must install
+=pip install 'emu-gmm[manifold]'=. CI matrix change:
+=tests/manifolds/test_pymanopt_adapter.py= is skipped unless the
+extra is installed; one CI job installs the extra explicitly.
 
 ** TODO src/emu_gmm/manifolds/pymanopt_adapter.py                      :M:
 
-=from_pymanopt(pymanopt_manifold) -> ManifoldParam=. A thin
-adapter that:
+=from_pymanopt(pymanopt_manifold) -> ManifoldParam=. A thin adapter
+that:
 
 - Stores =pymanopt_manifold= as a static field on a
   =@dataclasses.dataclass= (not JDC --- the wrapped manifold isn't
@@ -617,18 +1160,31 @@ adapter that:
   to NumPy at the boundary, calls the pymanopt method, converts
   the NumPy result back to JAX. =jax.pure_callback= is the right
   vehicle for AD compatibility.
-- =dimension= and =gauge_dim= are read from the pymanopt
-  manifold's =dim= attribute and (where applicable) a heuristic.
+- =dimension= and =gauge_dim= are read from the pymanopt manifold's
+  =dim= attribute and the manifold class (e.g., =Stiefel(n, k).dim=
+  is \(n k - k(k+1)/2\); =gauge_dim= is determined per class with a
+  conservative default of 0 and a documented per-class table).
 - Cannot be used inside =jit=: documented in the docstring with a
   =UserWarning= raised at construction time. =RiemannianLM= will
   fall back to a non-jit branch when any factor of the parameter
-  PyTree comes from =from_pymanopt=.
+  PyTree comes from =from_pymanopt=. This /resolves/ the
+  plan-fidelity MEDIUM JIT-inconsistency finding: =RiemannianLM=
+  advertises "JIT-pure when every factor of =manifold_spec= is
+  native; non-JIT otherwise" and the bootstrap/vmap claim (§13.4)
+  is qualified to the native path.
+- /Vector transport convention./ Per plan-fidelity MEDIUM finding:
+  pymanopt's =vector_transport= may not match "projection at new
+  point". =from_pymanopt= delegates to the pymanopt manifold's
+  transport and notes the convention in the docstring; users who
+  mix adapted and native factors in a =Product= should verify the
+  conventions match for their use case.
 
 /Tests:/ structural --- =from_pymanopt(pymanopt.manifolds.Stiefel(5,
-3)).projection(point, vector)= returns the same array as
-=pymanopt's Stiefel.projection= on round-tripped inputs; raises a
-=UserWarning= at construction time; raises a clear error if used
-inside a =jit= context.
+3)).projection(point, vector)= returns the same array as pymanopt's
+=Stiefel.projection= on round-tripped inputs; raises a =UserWarning=
+at construction time; raises a clear error if used inside a =jit=
+context. Test marked =@pytest.mark.skipif(not _has_pymanopt())= so
+CI without the extra passes.
 
 ---
 
@@ -637,52 +1193,96 @@ inside a =jit= context.
 /Dependencies: Phases 5, 6, 7./
 /Acceptance: =pip install -e .= still works; the README v2
 quickstart runs end-to-end; CLAUDE.md flags the new architectural
-commitments./
+commitments; =docs/mcar-asymptotics-riemannian.org= companion note
+exists and cites the literature-sweep references./
 
 ** TODO src/emu_gmm/__init__.py public re-exports                      :S:
 
 Add =Euclidean=, =PSDFixedRank=, =Product=, =RiemannianLM=,
-=from_pymanopt= (with an =ImportError= fallback if the =manifold=
-extra isn't installed).
+=OptimistixManifoldAdapter=, =from_pymanopt= (with an =ImportError=
+fallback if the =manifold= extra isn't installed).
 
 ** TODO README.org v2 quickstart                                       :S:
 
 Add a section after the v1 Euler demo: a K-Aggregators-style
 =PSDFixedRank= GMM example, ~40 lines. Synthetic data, a
 =Product(PSDFixedRank(m=4, K=2), Euclidean(2))= parameter shape.
+Include a one-paragraph note on the geodesic interpretation of
+=Sigma_theta= per literature sweep §Q3 ("retraction vs exp; the
+\(O(\|v\|^2)\) error is asymptotically negligible").
 
 ** TODO CLAUDE.md update                                               :S:
 
-- Add "Architectural commitment 6: Riemannian when the parameter
-  space is a manifold." Sketch what this means for =Sigma_theta=,
-  for the gauge, and for the info-matrix interpretation.
-- Update "What's not done yet" to reflect v2 status.
+(Per task step 6: the worktree may update CLAUDE.md if the
+main-facing surface changes; here it does, so we update CLAUDE.md
+with a new commitment 9.)
+
+- Add "Architectural commitment 9: v2 manifold support. The
+  parameter space may be a Riemannian manifold (e.g.,
+  =PSDFixedRank=). Storage is ambient-shape with
+  =gauge_nullspace_dim= reported as a first-class diagnostic.
+  =Sigma_theta= is in tangent-space coordinates with
+  =Sigma_theta_basis= recorded. =J_dof= is
+  =M - (manifold.dimension - manifold.gauge_dim)=. The CU +
+  Riemannian reconciliation of commitment 4 lives in
+  =docs/mcar-asymptotics-riemannian.org=."
+- Update "What's not done yet" / Status to reflect v2 status.
 - Note the =from_pymanopt= adapter under "Sibling repos worth
   knowing about" as the bridge to exotic geometries.
 
+** TODO docs/mcar-asymptotics-riemannian.org companion note            :M:
+
+Content per literature sweep recommendations:
+
+- Consistency on the manifold: cite Smith 2005 Thm 4 and Newey--
+  McFadden 1994 §3.
+- Asymptotic normality: cite Smith 2005 Thm 5; the manifold-Wald
+  limit \(\sqrt{n} \mathrm{Log}_{\theta_0}(\hat\theta) \to_d
+  N_T(0, F^{-1})\).
+- Intrinsic Cramér--Rao: cite Boumal 2013 (quotient CRB) and Boumal--
+  Singer 2014 §3.2 + Lemma 3.4 (gauge nullspace of the Fisher
+  information).
+- CU + Riemannian reconciliation: van der Vaart 1998 §5.4
+  (Z-estimator argument). Concrete derivation of the asymptotic
+  formula \((G_R^\top V^{-1} G_R)^{-1}\) where \(G_R\) is the
+  Riemannian Jacobian.
+- MCAR-on-quotient PD: stated as an open question with the
+  Schur-complement conjecture sketched (literature sweep §Q2 open
+  sub-question). Tracked separately as a v2.1 issue.
+
 ** TODO Update v2 deferrals list                                       :S:
 
-Refresh =implementation-plan.org= Section 13 (or add a v2-deferrals
-section here) listing what /v3+/ should pick up:
+Refresh =implementation-plan.org= (or update §14 of this plan)
+listing what /v2.1+/ should pick up:
 
 - Stiefel / Grassmann / SPD-full / Sphere as JAX-native manifolds
   (today they live behind =from_pymanopt=).
 - True Riemannian trust-region (Boumal §6.5) for cases where LM is
   insufficient.
-- Quotient-metric =PSDFixedRank= if the embedded-metric gauge
-  marginalisation proves awkward.
-- =Sigma_theta= pull-back to the parameter-of-interest space
-  (§2.3 option 3).
+- Horizontal-basis-coordinate storage for =PSDFixedRank= if the
+  ambient-storage gauge bookkeeping proves awkward in the
+  \(K \to m\) regime.
+- =Sigma_theta= pull-back along \(Y \mapsto Y Y^\top\) (§2.4
+  option 3; tracked as a separate issue).
+- Weak-identification-on-quotient diagnostic (Kleibergen
+  K-statistic applied to the manifold case; tracked as a separate
+  issue).
+- MCAR-on-quotient positive-definiteness companion proof (tracked
+  as a separate issue).
 
 ---
 
 * Section 11: Cross-Cutting Concerns
 
-** TODO Test infrastructure for pymanopt parity                        :S:
+** TODO Test infrastructure for pymanopt parity                        :M:
 
-A new =tests/manifolds/conftest.py= provides a =rng= fixture and
-a =compare_to_pymanopt(jax_op, pymanopt_op, n_cases)= helper. Each
-manifold test follows the same template.
+(Re-estimated M from S per the plan-fidelity LOW finding on
+cross-library helper cost.) A new =tests/manifolds/conftest.py=
+provides a =rng= fixture and a
+=compare_to_pymanopt(jax_op, pymanopt_op, n_cases, rtol, atol)=
+helper. Each manifold test follows the same template. Helper
+handles the JAX <-> NumPy round-trip and the per-op tolerance choice
+(SVD-based ops like =distance= and =log= use the looser =rtol=1e-6=).
 
 ** TODO Numerical tolerances for Riemannian ops                        :S:
 
@@ -699,38 +1299,65 @@ Confirm =mypy= is happy with the relaxed =flatten_params= signature
 (it returns a triple, not a pair, in v2). Add
 =# type: ignore[override]= only at the v1 compatibility shim.
 
+** TODO Bootstrap and vmap                                              :S:
+
+Per literature sweep §Q3 finding on bootstrap and §13.4 of the
+previous plan. =vmap(estimate)(bootstrap_keys)= is the recommended
+bootstrap pattern. Per §2.6, this works /only/ when the parameter
+spec is fully native (no =from_pymanopt= factor). The
+=Sigma_theta_arr= computation uses the count-based pinv rule (Phase
+5) with =drop_smallest= as a static argument, so vmap is clean.
+
+Bootstrap alignment: bootstrap replicates produce
+\(\hat\theta^{(b)}\) on the manifold; the empirical bootstrap
+covariance and the asymptotic =Sigma_theta= live in different
+charts. The §2-probe (Probe B under §2.3) flagged this. The Phase 6
+docstring records the alignment requirement: to compare
+=Sigma_theta_arr= to the empirical bootstrap covariance, the user
+must align each replicate via =manifold.log(theta_hat, theta_hat_b)=
+and form the empirical covariance of the log-images. The aligner is
+documented but not shipped in v2.0 (it requires the =log= operator;
+available as a post-processor recipe in the README).
+
 ---
 
 * Section 12: Phase Dependencies Summary
 
 #+BEGIN_SRC text
-Phase 0 (Section 2 decisions: §2.1 metric choice, §2.2 inner product,
-         §2.3 Sigma_theta exposure, §2.4 v2.0 scope)
+Phase 0 (Section 2 decisions: §2.1--§2.12 dispositions)
   |
   v
-Phase 1 (foundations: ManifoldParam, Euclidean, v2 params.py)
+Phase 1 (foundations: ManifoldParam protocol, ManifoldSpec dataclass,
+         ManifoldLeaf custom PyTree node, Euclidean, v2 params.py,
+         tangent_basis_names)
   |
-  +----> Phase 2 (PSDFixedRank + pymanopt parity tests)
+  +----> Phase 2 (PSDFixedRank + pymanopt parity tests +
+  |              Lyapunov AD adjoint)
   |              |
   |              v
   +----> Phase 3 (Product manifold)
                   |
                   v
-            Phase 4 (RiemannianLM + OptimistixManifoldAdapter)
+            Phase 4 (RiemannianOptimizer protocol, RiemannianLM,
+                     OptimistixManifoldAdapter; two-criterion
+                     acceptance)
                   |
                   v
-            Phase 5 (estimator + Riemannian Jacobian + info matrix
-                     + FIRST V2 ACCEPTANCE)
+            Phase 5 (estimator dispatch + Riemannian Jacobian +
+                     info matrix + J_dof contract + FIRST V2
+                     ACCEPTANCE)
                   |
                   v
             Phase 6 (EstimationResult.components(); tangent-coord
-                     Sigma_theta; gauge_nullspace_dim;
-                     manifold-aware diagnostics)
+                     Sigma_theta with Sigma_theta_basis;
+                     gauge_nullspace_dim; spectral_gap;
+                     wald_ellipsoid; manifold-aware diagnostics)
                   |
                   +----> Phase 7 (from_pymanopt adapter; [manifold] extra)
                   |
                   v
-            Phase 8 (README v2 quickstart; CLAUDE.md; deferrals)
+            Phase 8 (README v2 quickstart; CLAUDE.md;
+                     mcar-asymptotics-riemannian.org; deferrals)
 #+END_SRC
 
 Phase 1 is the bottleneck (it touches =_internal/params.py=, which
@@ -739,69 +1366,111 @@ across worktrees once Phase 1 lands; Phase 4 depends on both. Phase
 7 is parallelisable with Phase 6 once Phase 1 is in.
 
 The =OptimistixManifoldAdapter= (Phase 4) is the load-bearing piece
-of the "do no harm" guarantee: it lets v1 users with all-Euclidean
-parameter PyTrees keep using =optimistix_lm()= without code change.
+of the "do no harm" guarantee for the case where a user explicitly
+asks for a Riemannian path with an all-Euclidean PyTree. For the
+default v1 path (no manifold annotations, no =RiemannianLM= passed),
+=estimate= keeps the v1 protocol unchanged and the adapter is not
+involved.
+
+** Effort estimate summary (recalibrated)
+
+| Phase | Task                                       | Estimate |
+|-------+--------------------------------------------+----------|
+| 1     | =params.py= v2 update                      | XL       |
+| 1     | =tangent_basis_names=                      | M        |
+| 1     | =Euclidean= / =base= / =__init__=          | S+M+M    |
+| 2     | =PSDFixedRank= + Lyapunov AD adjoint       | XL       |
+| 3     | =Product=                                  | M        |
+| 4     | =RiemannianOptimizer= protocol             | M        |
+| 4     | =RiemannianLM= + LM floor                  | XL       |
+| 4     | =OptimistixManifoldAdapter=                | M        |
+| 5     | optimiser dispatch                         | M        |
+| 5     | residual closure + Jacobian                | L + L    |
+| 5     | =J_dof= contract change                    | S        |
+| 5     | CU + Riemannian derivation                 | S        |
+| 5     | acceptance test                            | M        |
+| 6     | =components()=, =Sigma_theta_basis=, etc.  | mostly S/M |
+| 7     | pymanopt adapter                           | M        |
+| 8     | polish, companion note                     | S + M    |
+
+Aggregate: 3 XL + several L + many M/S. Two further realistic
+risks (per plan-fidelity): the Lyapunov-solve AD adjoint may
+require careful unit testing (within the Phase 2 XL), and the
+=RiemannianLM= tangent-LS solve with the gauge floor may require
+tuning (within the Phase 4 XL).
 
 ---
 
 * Section 13: Open Theoretical Questions
 
 These are questions the v1 mcar-asymptotics note doesn't answer and
-that Phase 5--6 implementations will surface concretely.
+that Phase 5--6 implementations will surface concretely. Each entry
+records the literature-sweep finding (=docs/reviews/plan-section-
+13-literature.org=) and the v2 plan disposition.
 
-** Gauge identification under quotient geometry
+** Gauge identification under quotient geometry (Q1)
 
 For =PSDFixedRank(n, k)=, the K(K-1)/2 -dimensional gauge subgroup
 (=O(k)= acting on the right of \(Y\)) means \(\theta_0\) is only
-identified up to an equivalence class. Two practical issues:
+identified up to an equivalence class. The literature sweep
+(Boumal--Singer 2014 §3.2 + Lemma 3.4; Boumal 2013) confirms:
 
-1. /Are J-test asymptotics affected?/ Hansen (1982) gives \(J \sim
-   \chi^2_{M - K}\). On a manifold, the right degrees-of-freedom
-   count is \(M - \dim(\mathcal{M})\), where
-   \(\dim(\mathcal{M}) = kn - k(k-1)/2\). The =J_dof= in
-   =estimator.py:219= becomes =M - manifold.dimension=, /not/
-   =M - K_ambient=. Phase 5 implementation note.
-2. /Is Sigma_theta well-defined?/ Yes on the tangent space (it is
-   constructed as the inverse of a horizontal-subspace operator);
-   ambiguous if reported on the ambient space (which is why §2.3
-   defaults to tangent coordinates).
+1. /J-test asymptotics/: \(J \sim \chi^2_{M - \dim_{\mathrm{info}}}\)
+   where \(\dim_{\mathrm{info}} = \mathrm{dimension} -
+   \mathrm{gauge\_dim}\). Phase 5 implements the change explicitly
+   (§2.11).
+2. /=Sigma_theta= well-defined/: yes on the tangent space (Phase 5
+   constructs it as the count-based pinv).
 
-** Sigma_theta in non-Euclidean tangent spaces
+Open sub-question: does pairwise overlap (the v1 MCAR condition)
+suffice for positive-definiteness of the /horizontal-block/ info
+matrix? Tracked as a separate v2.1 issue (MCAR-on-quotient PD
+companion note).
 
-The Cramér--Rao bound generalises to manifolds (Smith 2005; Boumal
-§7.4): the asymptotic distribution at \(\hat\theta\) is
-\(\sqrt{n}(\hat\theta - \theta_0) \to N_T(0, \Sigma_\theta)\) where
-\(N_T\) is a tangent-space Gaussian. /What does that mean
-geometrically?/ The =Sigma_theta= tells the user the dispersion of
-\(\hat\theta\) /along the geodesics emanating from \(\theta_0\)/.
-For =Euclidean=, geodesics are straight lines and this collapses to
-the v1 picture; for =PSDFixedRank=, geodesics are exponentials of
-tangent vectors (which the embedded metric approximates by
-retraction). This is internally consistent but the README v2
-quickstart needs to flag it for users porting from frequentist
-intuition.
+** Sigma_theta in non-Euclidean tangent spaces (Q3 in lit sweep)
 
-** Consistency and asymptotic normality on the manifold
+The Cramér--Rao bound generalises to manifolds (Smith 2005 §III.B;
+Boumal 2023 §3.6). =Sigma_theta_arr= reports dispersion of
+\(\hat\theta\) along geodesics emanating from \(\theta_0\). For
+=Euclidean=, geodesics are straight lines; for =PSDFixedRank=,
+geodesics are exponentials approximated by retraction. The
+\(O(\|v\|^2)\) error of retraction-vs-exp is asymptotically
+negligible. Phase 6 records the basis (=Sigma_theta_basis=) and
+provides =wald_ellipsoid(level)=. README quickstart flags the
+geodesic interpretation.
 
-The v1 mcar-asymptotics note ([[file:mcar-asymptotics.org][docs/mcar-asymptotics.org]]) establishes
-consistency, asymptotic normality, and positive-definiteness of the
-info matrix under MCAR for the Euclidean case. The Riemannian
-generalisation should be straightforward: replace gradients with
-Riemannian gradients, replace \(\sqrt{n}(\hat\theta - \theta_0)\)
-with \(\sqrt{n} \mathrm{Log}_{\theta_0}(\hat\theta)\), and rerun
-the proofs against Smith (2005). Phase 8 candidate: a short
-=docs/mcar-asymptotics-riemannian.org= companion note.
+** Consistency and asymptotic normality on the manifold (Q2)
+
+Per literature sweep: Smith 2005 Thm 4 (Lie group with bi-invariant
+metric) + Thm 5 (general Riemannian) + Newey--McFadden 1994 §3 (GMM
+regularity translated via Boumal §5.3). Mechanical translation; no
+new theorem required. Phase 8 companion note records the proof.
 
 ** Bootstrap and vmap
 
-The v1 commitment "estimate() must be JIT/vmap-compatible" means
-bootstrap-via-vmap should work for the Riemannian case too. The
-=RiemannianLM= solver is pure JAX and =jit=/=vmap=-friendly by
-construction; the open question is whether =Sigma_theta_arr =
-pinv(info_matrix)= (Phase 5) survives =vmap=. =jnp.linalg.pinv=
-does support =vmap=, but the gauge-dimension rcond threshold may
-need to be a static field rather than data-dependent. Worth a
-spot-check at the end of Phase 5.
+Per literature sweep §Q3 and the §2-probe Probe B under §2.3. The
+=RiemannianLM= solver is JIT/vmap-friendly when every factor is
+native. =vmap(estimate)(bootstrap_keys)= produces replicates;
+empirical-covariance comparison to =Sigma_theta_arr= requires
+manifold alignment via =log=. Documented in Phase 6 docstring.
+
+** CU + Riemannian \(\nabla_\theta V\)
+
+Per §2.9 disposition. CU FOC argument (van der Vaart §5.4) gives
+\((G^\top V^{-1} G)^{-1}\) as the correct asymptotic info matrix
+with =G= the Riemannian Jacobian of moments. The residual closure
+preserves the \(\nabla_\theta V\) dependence for the optimiser
+(CLAUDE.md commitment 4). Derivation in companion note.
+
+** Open follow-ups tracked as separate issues
+
+Per task step 10:
+
+1. /MCAR-on-quotient positive-definiteness companion note./
+2. /Weak-identification-on-quotient diagnostic (Kleibergen
+   K-statistic) for v2.1./
+3. /=Sigma_theta= pull-back along \(Y \mapsto Y Y^\top\) (v2.1
+   candidate)./
 
 ---
 
@@ -815,12 +1484,15 @@ Things this plan does /not/ schedule:
 - /Riemannian trust-region/ (Boumal §6.5). v2 uses
   Gauss--Newton-with-retraction; TR can be added without breaking
   the =RiemannianOptimizer= protocol.
-- /Quotient-metric =PSDFixedRank=/. v2.0 ships the embedded metric
-  per the §2.1 decision; quotient is a v2.1 candidate if gauge
-  marginalisation proves awkward in practice.
+- /Horizontal-basis storage for =PSDFixedRank=./ v2.0 ships ambient
+  storage per §2.1; horizontal-basis is a v2.1 candidate if gauge
+  bookkeeping proves awkward in the \(K \to m\) regime.
 - /=Sigma_theta= pull-back to a parameter-of-interest map/
-  (§2.3 option 3). Requires a general framework for pull-back of
-  covariance along a user-specified map; v3+.
+  (§2.4 option 3). Requires a general framework for pull-back of
+  covariance along a user-specified map; tracked as v2.1 issue.
 - /Geodesic-rather-than-retraction inner loop/. The retraction is a
   first-order approximation to =exp=; for problems where the
   second-order error matters, =exp= is a future improvement.
+- /Weak-identification-on-quotient diagnostic./ Tracked as a v2.1
+  issue.
+- /MCAR-on-quotient PD companion proof./ Tracked as a v2.1 issue.
