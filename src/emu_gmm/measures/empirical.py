@@ -375,6 +375,62 @@ class EmpiricalMeasure:
         denom = jnp.sum(weight_mask, axis=0)  # (M,)
         return _safe_divide(numer, denom[:, None])
 
+    def jacobian_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> Float[Array, "N M K"]:
+        """Per-observation, mask-weighted Jacobian contributions ``D_i(theta)``.
+
+        Returns the ``(N, M, K)`` tensor whose ``(i, j, k)`` entry is
+
+        .. math::
+           D_{ijk}(\\theta) \\;=\\; d_{ij}\\, w_i\\, \\partial_{\\theta_k} \\psi_j(x_i, \\theta),
+
+        i.e. the per-observation contribution to the moment Jacobian
+        before the ``1 / N_j`` normalisation. Combined with
+        :meth:`moment_contributions`, this is the building block the
+        Kleibergen K-statistic uses to estimate
+        :math:`\\Sigma_{G_j, m}`, the cross-covariance between the
+        :math:`j`-th column of the moment Jacobian and the moment vector
+        (Kleibergen 2005 eq. 8). Bootstrap and other resampling routines
+        consume the same primitive.
+
+        The NaN-safe pattern mirrors :meth:`jacobian` and
+        :meth:`moment_contributions`: NaN cells in ``self.x`` are scrubbed
+        before invoking ``psi``, and gradients at masked-out ``(i, j)``
+        cells are zeroed before the weight multiplication so the
+        ``0 * NaN`` algebra cannot poison the result.
+
+        Parameters
+        ----------
+        psi : :data:`StructuralModel`
+            Per-observation residual function.
+        theta : :data:`ParamsLike`
+            User parameter dataclass.
+
+        Returns
+        -------
+        D : (N, M, K) jax array
+            ``D[i, j, k] = d_ij * w_i * (d psi_j / d theta_k)(x_i, theta)``.
+            No ``1 / N_j`` normalisation is applied.
+        """
+        flat_theta, treedef = flatten_params(theta)
+
+        # Pre-sanitise x (see :meth:`expectation` for the rationale).
+        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+
+        def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
+            params = unflatten_params(flat, treedef)
+            return _to_plain(psi(x, params))
+
+        def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
+            return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
+
+        grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
+        mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
+        grad_safe = jnp.where(mask_bool, grad_batch, 0.0)  # (N, M, K)
+        weight_mask = self.mask * self.weights[:, None]  # (N, M)
+        return weight_mask[:, :, None] * grad_safe  # (N, M, K)
+
     @classmethod
     def from_pandas(
         cls,
