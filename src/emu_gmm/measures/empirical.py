@@ -326,8 +326,13 @@ class EmpiricalMeasure:
         # (1) explicit mask argument, (2) NaN-inferred mask when
         # nan_aware is true, (3) all-ones default.
         if mask is not None:
-            # Probe shape of the supplied mask to determine M.
-            if hasattr(mask, "shape"):
+            # Probe shape of the supplied mask to determine M. NamedArray
+            # exposes ``shape`` as a {name: size} dict, so handle it
+            # explicitly before the generic ``hasattr(mask, "shape")``
+            # branch (which assumes a tuple-like).
+            if isinstance(mask, ha.NamedArray):
+                m_shape = tuple(int(s) for s in mask.array.shape)
+            elif hasattr(mask, "shape"):
                 m_shape = tuple(int(s) for s in mask.shape)
             else:
                 m_shape = jnp.asarray(mask).shape
