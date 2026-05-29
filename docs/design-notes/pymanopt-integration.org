@@ -1,0 +1,233 @@
+#+TITLE: Pymanopt JAX-backend integration evaluation for Emu-GMM
+#+AUTHOR: Sue (Claude Opus 4.7, 1M context)
+#+DATE: 2026-05-29
+#+OPTIONS: toc:nil num:nil
+
+Design memo for [[https://github.com/ligon/Emu-GMM/issues/3][issue #3]] (port-blocker,
+from-k-aggregators). The previous workflow's branch (Path A / B / C
+note) is gone; this memo is the canonical starting point.
+
+* Status
+
+What runs today (v1):
+- Parameter space is Euclidean ~R^K~. ~_internal/params.py~ enforces
+  *0-d scalar leaves*: every PyTree leaf is squeezed to a single
+  float and concatenated into a flat ~(K,)~ array.
+- The two ~Optimizer~ implementations are NLLS solvers
+  (~optimistix.LevenbergMarquardt~ and ~scipy.optimize.least_squares~)
+  operating on the residual vector ~y(theta_flat)~ produced by the
+  CU whitening composition. The information matrix is built as
+  ~Z'Z~ where ~Z = L^{-1} G~; ~G~ is assumed flat ~(M, K)~.
+- No Riemannian structure anywhere. K-Aggregators code reaches for
+  ~pymanopt.manifolds.{Euclidean, PSDFixedRank, Product}~ at every
+  estimation entrypoint, but no Emu-GMM surface speaks that vocabulary
+  yet.
+
+POC: [[file:pymanopt_poc.py][docs/design-notes/pymanopt_poc.py]]. 50 lines, low-rank PSD
+recovery on ~PSDFixedRank(n=3, k=2)~ via pymanopt's ~TrustRegions~
+with the JAX backend; the run converges in 11 iterations to
+cost ~2e-22~.
+
+* Pymanopt JAX-backend properties (verified empirically)
+
+| Property                                  | Behaviour                       |
+|-------------------------------------------+---------------------------------|
+| float64                                   | yes; ~_jax.py:19~ does ~config.update("jax_enable_x64", True)~ at import time |
+| User cost is JAX-traceable                | yes; pymanopt calls ~jax.grad~ on it directly |
+| Gradient / Hessian boundary               | ~to_ndarray(...)~ wrapper converts JAX outputs to ~np.ndarray~ before returning to the optimizer (~_jax.py:33-38~) |
+| Manifold ops (~projection~, ~exp~, ~retraction~, ~log~) | pure NumPy + SciPy (~scipy.linalg.solve_continuous_lyapunov~ on ~PSDFixedRank~). Not JAX traceable; not ~jit~/~vmap~-able. |
+| Optimizer (~TrustRegions~, ~SteepestDescent~) | pure NumPy. Solver loop runs in interpreted Python. |
+| Returned point                            | plain ~np.ndarray~ (NOT a JAX array; see POC output) |
+| ~jit~/~vmap~ of the user cost in isolation | works (POC verified) |
+| ~jit~/~vmap~ of the *solve* itself        | impossible: the solver mutates NumPy arrays in a Python loop |
+
+Punchline: pymanopt's JAX backend is *not* JAX-native. It is "JAX
+for the autodiff, NumPy for everything else." The contract is
+"give me a JAX-differentiable scalar cost, and I'll do trust-region
+in NumPy on the manifold." For Emu-GMM, that side-effect alone is a
+fatal architectural mismatch with the rest of v1: the residual
+function is consumed by ~optimistix.least_squares~ inside a JIT;
+swapping in pymanopt means dropping out of JIT at the optimizer
+boundary, abandoning JAX's compositional discipline.
+
+The CLAUDE.md commitment "JAX-native in the hot path" is therefore
+in real tension with "wrap pymanopt".
+
+* Integration cost table
+
+Looking at every place v1 would need to change to host a Riemannian
+~theta~, plus where pymanopt's NumPy convention bleeds through:
+
+| Integration point                            | Path B (wrap pymanopt) cost | Notes                                                                                         |
+|----------------------------------------------+-----------------------------+-----------------------------------------------------------------------------------------------|
+| ~_internal/params.py~ (~flatten_params~)     | large                       | 0-d-scalar invariant has to relax to "ManifoldParam leaves are themselves arrays with shapes". The flat-stack/unstack abstraction breaks. |
+| ~types.ParamsLike~                           | small                       | Documentation only; ~Any~ already.                                                            |
+| ~types.Optimizer~ protocol                   | medium                      | Currently takes ~residual_fn~ returning ~(M,)~. Pymanopt takes ~cost~ returning a scalar plus Manifold. We need a parallel ~RiemannianOptimizer~ protocol that takes ~cost_fn~ and ~manifold~. |
+| ~optimizer.py~                               | medium                      | New ~pymanopt_trust_regions~ adapter; not ~jit~/~vmap~-compatible (see above). Must be advertised as a fallback, not a default. |
+| ~estimator.estimate()~ residual / Jacobian   | large                       | Two issues. (1) The whitening contract is residual-based; switching to a scalar cost forfeits the LM structure. We'd need a Gauss-Newton-on-manifold variant (e.g. ~optimistix~ has no manifold support; nor does pymanopt have a "least-squares-on-manifold" entrypoint). (2) ~G_hat = measure.jacobian(model, theta_hat)~ assumes a flat ~(M, K)~ Jacobian. Under a product manifold ~theta~ is a list of arrays of varying shape; ~G~ becomes a PyTree of Jacobians and ~Sigma_theta = (G' Lambda G)^{-1}~ requires the Riemannian gradient (a tangent vector), not the Euclidean Jacobian, with consistent inner-product machinery. The "Information matrix via G' Lambda G, never via numerical Hessian" commitment now needs Riemannian generalisation. |
+| ~design.org~ §6 named axes                   | medium                      | The PSDFixedRank parameterisation has axes ~(n, k)~ which need haliax-axis names if we want the Sigma_theta DataFrame in ~to_pandas()~ to remain labelled. Pymanopt returns plain ndarrays with no axis metadata. |
+| ~Diagnostics~ (~final_gradient_norm~)        | small                       | Replace Euclidean ~grad~ norm with Riemannian gradient norm using ~manifold.norm(...)~ (or the inner product on the tangent space). |
+| ~tests/~                                     | medium                      | Need a manifold-aware acceptance test (PSDFixedRank recovery), plus tests showing the Euclidean path is unchanged. |
+| ~pyproject.toml~                             | trivial                     | Add ~pymanopt~ as an optional dep behind ~[manifold]~ extra; pymanopt itself only pulls in numpy + scipy. |
+
+Path A (JAX-native PSDFixedRank/Euclidean/Product + a small adapter)
+has the same /shape/ of integration costs --- the framework has to
+grow a Riemannian vocabulary either way --- but trades "fight pymanopt's
+NumPy convention" for "implement ~projection~/~retraction~/~log~ ourselves."
+The latter is well-documented (Boumal's textbook, the manopt source);
+the operators for Euclidean, PSDFixedRank, and Product are short
+(~~50 LOC each~) and are JAX-pure.
+
+Path D (Riemannian-aware ~Optimizer~ implementation hiding pymanopt
+inside) doesn't actually buy what we want: it leaves the flat-param
+contract intact, but then the only way to communicate "theta is a
+point on a PSDFixedRank" is via the optimizer object, which is the
+wrong place architecturally (covariance / inference / labels all
+need to know the parameter geometry).
+
+* Path-by-path assessment
+
+** Path A: JAX-native ~Euclidean~, ~PSDFixedRank~, ~Product~, with optional ~from_pymanopt~ adapter
+
+Pros:
+- Stays inside the JAX hot path. Residual-based LM continues to work
+  when the manifold is Euclidean; for non-Euclidean we ship a
+  ~RiemannianLM~ variant that uses ~G^T Lambda G~ via the Riemannian
+  gradient (Boumal §4.6 / §6.4). All operators remain ~jit~/~vmap~-able.
+- Sigma_theta naturally lives on the tangent space at theta_hat; the
+  haliax axis story extends cleanly (each manifold knows its axes).
+- ~from_pymanopt~ adapter lets users bring exotic manifolds we
+  haven't implemented (Stiefel, Grassmann, Hyperbolic, ...) at a
+  cost of dropping out of JIT for the manifold ops --- explicit and
+  opt-in.
+- K-Aggregators port: rewrite the three call sites' imports from
+  ~from pymanopt.manifolds import ...~ to ~from emu_gmm.manifolds import ...~.
+  Same vocabulary, semantics-preserving. Boumal's notes show the
+  three we need are short.
+
+Cons:
+- We own the manifold code. Bugs in ~projection~/~retraction~ become
+  our problem. Mitigation: pin to Boumal's reference implementation
+  in pymanopt, write equivalence tests against pymanopt's NumPy
+  versions.
+- A real "Riemannian LM" is a research-grade implementation; the
+  simpler "Riemannian Gauss-Newton with retraction" suffices for v2
+  but does need writing.
+
+** Path B: Adopt pymanopt with JAX backend; ~ManifoldParam~ wraps its types
+
+Pros:
+- Cheapest in terms of "code Emu-GMM owns": pymanopt is a stable
+  upstream library (Boumal et al., 2010s).
+- ~from_pymanopt~ becomes the identity adapter.
+
+Cons:
+- The optimizer leaves the JIT region. CU/iterated weighting both
+  iterate on ~estimate()~; if a single ~estimate()~ call cannot live
+  inside ~jit~/~vmap~ then ablation sweeps via ~vmap~ over
+  hyperparameters or bootstrap samples become very slow.
+- The residual-based ~Optimizer~ protocol no longer fits. The
+  estimator surface bifurcates into "Euclidean NLLS" (residual) and
+  "manifold" (scalar cost), with different inference plumbing.
+- "G' Lambda G never via numerical Hessian" commitment requires a
+  Riemannian generalisation that pymanopt doesn't compute for us;
+  we'd still have to write the Riemannian-gradient pull-back of the
+  CU residual ourselves. Most of the work claimed to be "free" via
+  pymanopt isn't actually free.
+- pymanopt returns numpy ndarrays for the optimum; downstream we'd
+  ~jnp.asarray~ at the boundary and lose the named-axis tags on the
+  way through.
+- Two autodiff systems active: JAX inside the user cost, NumPy/SciPy
+  in the manifold ops. Each side has its own dtype/contiguity
+  assumptions and Boumal's manopt history (e.g. issue #209 of pymanopt
+  on the autodiff conversion overhead) suggests boundary friction.
+
+** Path C: Defer past v2.0
+
+Pros:
+- Zero code now. v1 is shipped and working for Euclidean problems
+  (the Euler-equation acceptance tests all pass).
+- Buys time to see whether K-Aggregators is the only consumer that
+  cares; if it is, the port can vendor a pymanopt shim of its own.
+
+Cons:
+- K-Aggregators port is blocked at every estimation entrypoint (see
+  call sites in issue #3 body). "Defer" means K-Aggregators stays on
+  ~ManifoldGMM~ for v2 of Emu-GMM, period.
+- ~K-Aggregators~ is the workspace's biggest exemplar (see
+  CLAUDE.md "Sibling repos worth knowing about"); deferring means
+  the canonical use case of "PSD covariance matrix at the moment
+  level" is unrepresented in tests.
+
+** Path D: Riemannian-aware ~Optimizer~ implementation hiding pymanopt internally
+
+Pros:
+- The contract surface stays flat-parameter. Easiest one-line sell.
+
+Cons:
+- Pretending a manifold parameter is a flat 1-D array breaks the
+  inference layer: ~Sigma_theta~ becomes nonsense (it's a covariance
+  on the ambient space, not on the tangent space). The flat ~K~
+  isn't right either --- for ~PSDFixedRank(n, k)~ the manifold has
+  dimension ~k*n - k(k-1)/2~, not ~n*k~.
+- Doesn't extend to ~Product~: there is no flat embedding that's
+  jointly faithful to the geometry of each factor.
+
+This is a non-starter for any problem where we report standard errors.
+
+* Recommendation
+
+*Path A* (JAX-native manifolds + thin ~from_pymanopt~ adapter), with
+*high confidence* on direction and *medium confidence* on cost.
+
+Reasoning:
+
+1. Pymanopt's "JAX backend" turns out to be a misnomer: only the
+   user's cost is JAX-differentiable; the manifold ops and the
+   solver loop are NumPy. Adopting it forces Emu-GMM to drop out of
+   JIT at the optimizer boundary --- a violation of CLAUDE.md's
+   "JAX-native in the hot path" commitment that we cannot mitigate
+   from outside pymanopt.
+2. The integration work table (above) shows that ~Path B~ doesn't
+   actually let us skip the hard parts. The Riemannian generalisation
+   of ~G' Lambda G~, the ~Product~ axis-naming story, the diagnostics
+   tangent-norm --- those have to be written either way. Path B just
+   adds pymanopt as a dependency we pay for in JIT cost.
+3. The three manifolds K-Aggregators imports are Euclidean,
+   PSDFixedRank, Product. Their JAX-pure operators are short (the
+   pymanopt sources are ~70-160 LOC for each). The reference is
+   public and well-cited; implementation risk is modest.
+4. Path A leaves the door open for users with exotic manifolds via
+   ~from_pymanopt~ (explicitly opt-in, explicitly non-JIT). This
+   matches the v1 pattern of "optimistix is default JIT-pure;
+   scipy is the fallback for diagnostics."
+
+Suggested scoping:
+- v2.0: ~emu_gmm.manifolds.{Euclidean, PSDFixedRank, Product}~ +
+  ~RiemannianLM~ optimizer + ~Sigma_theta~ on the tangent space at
+  ~theta_hat~. Acceptance test: a single-factor PSDFixedRank GMM
+  problem analogous to K-Aggregators.
+- v2.1: ~from_pymanopt(m)~ adapter, advertised non-JIT.
+
+* Open questions for the user
+
+1. Is the priority "K-Aggregators can drop ManifoldGMM" or "JAX-native
+   discipline preserved"? If the former, Path B's ergonomics may be
+   worth the JIT loss; my recommendation assumes the latter.
+2. Do you care about ~vmap~-ing the ~estimate()~ call over bootstrap
+   replicates or hyperparameter sweeps in v2? If yes, Path A is
+   structurally necessary; if no (i.e. you'd always loop in Python),
+   the JIT-loss objection to Path B weakens substantially.
+3. The Riemannian generalisation of ~G' Lambda G~ touches the
+   "Information matrix via G' Lambda G, never via numerical Hessian"
+   commitment from CLAUDE.md. Are you happy for v2 to extend that
+   commitment to "...where G is the Riemannian gradient of the moment
+   vector with respect to theta, evaluated in the tangent inner
+   product of the manifold"? (This is the standard generalisation;
+   it changes the Sigma_theta interpretation slightly.)
+4. Should v2.0 ship a /minimal/ Euclidean ~ManifoldParam~ first
+   (the trivial case --- identity projection/retraction, recovers
+   v1 behaviour) and add PSDFixedRank in v2.1? This would let us
+   land the type-system changes (~ManifoldParam~ leaves, Riemannian
+   ~Sigma_theta~ shape) without simultaneously taking on PSDFixedRank
+   numerical risk.
