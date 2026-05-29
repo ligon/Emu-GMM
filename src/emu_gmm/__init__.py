@@ -52,6 +52,7 @@ from emu_gmm.diagnostics import (
     compute_cond_info,
 )
 from emu_gmm.estimator import estimate
+from emu_gmm.inference import KStatisticResult, k_statistic
 from emu_gmm.measures import (
     AnalyticalMeasure,
     EmpiricalMeasure,
@@ -83,6 +84,9 @@ __all__ = [
     "__version__",
     # Entry point
     "estimate",
+    # Inference
+    "k_statistic",
+    "KStatisticResult",
     # Measures
     "SyntheticMeasure",
     "AnalyticalMeasure",
