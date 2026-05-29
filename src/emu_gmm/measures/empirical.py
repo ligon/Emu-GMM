@@ -201,14 +201,32 @@ class EmpiricalMeasure:
             weighted per-observation moment matrix. No ``1 / N_j``
             normalisation is applied --- the caller decides how to
             aggregate (sum, weighted sum, cluster-sum, bootstrap-resample).
+
+        Notes
+        -----
+        Like :meth:`expectation` and :meth:`jacobian`, this method
+        adopts the "double where" NaN-safe pattern: NaN cells in
+        ``self.x`` are zeroed before invoking ``psi``, and masked-out
+        ``(i, j)`` cells are zeroed in the output before the weight
+        multiplication so that ``0 * NaN = NaN`` cannot poison the
+        returned matrix or any downstream reverse-mode AD that
+        traverses it.
         """
+
+        # Pre-sanitise x (see :meth:`expectation` for the rationale).
+        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
 
         def psi_at(x):
             return _to_plain(psi(x, theta))
 
-        psi_batch = jax.vmap(psi_at)(self.x)  # (N, M)
+        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+        # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
+        # the weight multiplication (mirrors the pattern in
+        # :meth:`expectation` and :meth:`jacobian`).
+        mask_bool = self.mask > 0.0  # (N, M)
+        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
-        return weight_mask * psi_batch
+        return weight_mask * psi_safe
 
     def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
         """Per-coordinate weighted mean of :math:`\\nabla_\\theta \\psi`.
