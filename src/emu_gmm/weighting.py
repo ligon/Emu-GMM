@@ -7,7 +7,7 @@ moment-estimator variance and :math:`m` is the empirical moment.
 A ``WeightingStrategy`` chooses how :math:`L` (and therefore the
 weighting matrix :math:`\\Lambda = V^{-1}`) is constructed.
 
-Three concrete strategies exist in v1:
+Four concrete strategies exist:
 
 - :class:`Identity` --- :math:`\\Lambda \\equiv I`; ``whitening_residual``
   returns ``m`` unchanged.
@@ -17,6 +17,9 @@ Three concrete strategies exist in v1:
   every call; JAX AD threads through the Cholesky and the triangular
   solve so the residual's gradient picks up the dependence of
   :math:`L` on :math:`\\theta` when :math:`V = V(\\theta)`.
+- :class:`IteratedWeighting` --- legacy two-step / iterated GMM. The
+  estimator runs an outer Python loop alternating Fixed-weight solves
+  and variance refreshes until ``theta`` stabilises.
 
 See ``docs/design.org`` Section 5 ("Architectural Core Highlights")
 for the architectural commitment that the CU gradient must not drop
@@ -214,6 +217,105 @@ class ContinuouslyUpdated:
         return forward_solve(L, m)
 
 
+@jdc.pytree_dataclass
+class IteratedWeighting:
+    """Iterated (two-step / k-step) GMM weighting.
+
+    The classic Hansen-style iterated GMM scheme. At each outer step
+    :math:`k` the strategy:
+
+    1. holds :math:`V` fixed at :math:`V(\\theta_k)` and solves
+       :math:`\\theta_{k+1} = \\arg\\min_\\theta \\| L_k^{-1} m(\\theta) \\|^2`
+       using the existing :class:`Fixed`-weight machinery, then
+    2. refreshes :math:`V` to :math:`V(\\theta_{k+1})`.
+
+    The loop stops when
+    :math:`\\| \\theta_{k+1} - \\theta_k \\|_2 < \\texttt{weighting_tol}`
+    or after ``weighting_iterations`` outer steps. The outer loop runs
+    in pure Python in :func:`emu_gmm.estimate`; each inner Fixed-weight
+    solve is JIT-compiled by the underlying optimiser.
+
+    Iterated weighting and :class:`ContinuouslyUpdated` (CU) are
+    asymptotically equivalent (Hansen-Heaton-Yaron 1996) but differ in
+    finite samples. CU is the v1 default; ``IteratedWeighting`` exists
+    for **legacy reproducibility** --- K-Aggregators' published
+    headline pickles, for example, were produced with two-step / iterated
+    weighting and the ManifoldGMM ``weighting_iterations`` /
+    ``weighting_tol`` knobs.
+
+    Convergence caveat
+    ------------------
+    Iterated GMM is **not** guaranteed to be a contraction on
+    misspecified models; K-Aggregators' ``V2_PORT.org`` documents an
+    explicit divergence case. When ``weighting_iterations`` is exhausted
+    without reaching ``weighting_tol``, :func:`emu_gmm.estimate`
+    surfaces a non-convergence flag through
+    :class:`~emu_gmm.types.Diagnostics` and the result's ``converged``
+    field rather than raising; the partially-converged
+    :math:`\\theta_k` is returned. Users debugging non-convergence
+    should compare to a CU run on the same problem.
+
+    Parameters
+    ----------
+    weighting_iterations : int
+        Maximum number of outer (V-refresh) iterations. Must be at
+        least 1.
+    weighting_tol : float
+        Stop when :math:`\\| \\theta_{k+1} - \\theta_k \\|_2` falls below
+        this. Must be strictly positive.
+
+    Notes
+    -----
+    Both fields are :func:`jax_dataclasses.static_field` --- they are
+    hyperparameters of the estimation procedure, not traced quantities,
+    and changing either should retrigger JIT compilation of the inner
+    solves.
+
+    Calling :meth:`whitening_residual` directly (outside the
+    estimator's outer loop) falls back to continuously-updated
+    behaviour: :math:`L(\\theta)` is recomputed per call from the
+    supplied :math:`V`. This makes the instance protocol-conformant and
+    usable for ad-hoc residual evaluation, but the *iterated* algorithm
+    only runs when the strategy is handed to :func:`emu_gmm.estimate`.
+    """
+
+    weighting_iterations: int = jdc.static_field(default=10)  # type: ignore[attr-defined]
+    weighting_tol: float = jdc.static_field(default=1e-6)  # type: ignore[attr-defined]
+
+    def __post_init__(self) -> None:
+        if int(self.weighting_iterations) < 1:
+            raise ValueError(
+                "IteratedWeighting.weighting_iterations must be >= 1, got "
+                f"{self.weighting_iterations}"
+            )
+        if float(self.weighting_tol) <= 0.0:
+            raise ValueError(
+                "IteratedWeighting.weighting_tol must be > 0, got "
+                f"{self.weighting_tol}"
+            )
+
+    def whitening_residual(
+        self,
+        m: Float[Array, " M"],
+        V: Float[Array, "M M"],
+        theta: ParamsLike,
+    ) -> Float[Array, " M"]:
+        """Continuously-updated fallback :math:`y = L(\\theta)^{-1} m`.
+
+        The *iterated* algorithm is driven by :func:`emu_gmm.estimate`,
+        which runs the outer V-refresh loop in pure Python and
+        dispatches each inner solve to a :class:`Fixed`-weight problem.
+        This method exists so that ``IteratedWeighting`` satisfies the
+        :class:`~emu_gmm.types.WeightingStrategy` protocol and remains
+        usable for direct residual evaluation; in that direct-call
+        path the behaviour is identical to
+        :class:`ContinuouslyUpdated`.
+        """
+        del theta
+        L = cholesky(V)
+        return forward_solve(L, m)
+
+
 #: Econometrics-literature alias for :class:`ContinuouslyUpdated`. See
 #: Hansen, Heaton & Yaron (1996), "Finite-Sample Properties of Some
 #: Alternative GMM Estimators", JBES 14(3), 262--280, where the
@@ -222,4 +324,4 @@ class ContinuouslyUpdated:
 CUE = ContinuouslyUpdated
 
 
-__all__ = ["Identity", "Fixed", "ContinuouslyUpdated", "CUE"]
+__all__ = ["Identity", "Fixed", "ContinuouslyUpdated", "CUE", "IteratedWeighting"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
@@ -9,7 +11,13 @@ import numpy as np
 import pytest
 from emu_gmm import types as t
 from emu_gmm._internal.cholesky import cholesky
-from emu_gmm.weighting import CUE, ContinuouslyUpdated, Fixed, Identity
+from emu_gmm.weighting import (
+    CUE,
+    ContinuouslyUpdated,
+    Fixed,
+    Identity,
+    IteratedWeighting,
+)
 
 
 @jdc.pytree_dataclass
@@ -290,3 +298,215 @@ class TestContinuouslyUpdated:
         site.
         """
         assert CUE is ContinuouslyUpdated
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestIteratedWeighting:
+    """Unit tests for the ``IteratedWeighting`` *strategy object*.
+
+    Estimator-level tests (the actual outer Python loop, convergence
+    matching CU, iteration-cap warning) live in
+    :class:`TestIteratedWeightingEstimator` below.
+    """
+
+    def test_satisfies_protocol(self):
+        w = IteratedWeighting(weighting_iterations=5, weighting_tol=1e-6)
+        assert isinstance(w, t.WeightingStrategy)
+
+    def test_fields_round_trip(self):
+        w = IteratedWeighting(weighting_iterations=7, weighting_tol=1e-3)
+        assert w.weighting_iterations == 7
+        assert w.weighting_tol == pytest.approx(1e-3)
+
+    def test_validates_iterations(self):
+        with pytest.raises(ValueError, match="weighting_iterations"):
+            IteratedWeighting(weighting_iterations=0, weighting_tol=1e-6)
+
+    def test_validates_tol(self):
+        with pytest.raises(ValueError, match="weighting_tol"):
+            IteratedWeighting(weighting_iterations=5, weighting_tol=0.0)
+
+    def test_static_fields_in_pytree(self):
+        """``weighting_iterations`` and ``weighting_tol`` are static (no leaves)."""
+        w = IteratedWeighting(weighting_iterations=3, weighting_tol=1e-6)
+        leaves, _ = jax.tree_util.tree_flatten(w)
+        assert leaves == []
+
+    def test_whitening_residual_matches_cu_fallback(self):
+        """Direct ``whitening_residual`` call mirrors :class:`ContinuouslyUpdated`."""
+        V = _make_pd(seed=4)
+        m = jnp.array([0.3, -0.1, 0.4])
+        theta = _Scalar(theta=1.2)
+        iterated = IteratedWeighting(weighting_iterations=5, weighting_tol=1e-6)
+        cu = ContinuouslyUpdated()
+        y_it = iterated.whitening_residual(m, V, theta)
+        y_cu = cu.whitening_residual(m, V, theta)
+        assert jnp.allclose(y_it, y_cu, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+#
+# Estimator-level tests for the iterated-weighting outer loop.
+
+
+@jdc.pytree_dataclass
+class _MeanModelParams:
+    mu: float
+
+
+def _mean_var_psi(x: jnp.ndarray, p: _MeanModelParams) -> jnp.ndarray:
+    """Two moments: (X - mu) and (X^2 - (mu^2 + 1)).
+
+    Truth: mu = ``_MEAN_TRUTH``, X ~ N(mu, 1). Two moments and one
+    parameter give a J_dof = 1 over-identified problem, so the
+    weighting matrix is non-trivial.
+    """
+    return jnp.array([x[0] - p.mu, x[0] ** 2 - (p.mu**2 + 1.0)])
+
+
+_MEAN_TRUTH = 0.5
+_N_SIM = 4000
+
+
+def _make_mean_sampler():
+    """Sampler returning N(_MEAN_TRUTH, 1) draws."""
+
+    def sampler(key, p):
+        del p  # exogenous DGP
+        z = jax.random.normal(key, shape=(_N_SIM, 1))
+        return z + _MEAN_TRUTH
+
+    return sampler
+
+
+def _build_measure():
+    from emu_gmm.measures import SyntheticMeasure
+
+    return SyntheticMeasure(
+        key=jax.random.PRNGKey(0),
+        n_sim=_N_SIM,
+        sampler=_make_mean_sampler(),
+    )
+
+
+class TestIteratedWeightingEstimator:
+    """Drive :func:`emu_gmm.estimate` with :class:`IteratedWeighting`."""
+
+    def test_converges_in_a_few_iters_on_linear_case(self):
+        """Mean-and-variance model: iterated weighting converges quickly.
+
+        With a smooth, well-specified DGP the V-refresh fixed point is
+        reached well inside ``weighting_iterations``. We start the
+        outer loop already near the fixed point so 1-2 outer steps
+        suffice.
+        """
+        from emu_gmm import (
+            IteratedWeighting,
+            SyntheticCovariance,
+            estimate,
+            optimistix_lm,
+        )
+
+        result = estimate(
+            model=_mean_var_psi,
+            measure=_build_measure(),
+            covariance=SyntheticCovariance(),
+            weighting=IteratedWeighting(weighting_iterations=10, weighting_tol=1e-8),
+            optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+            theta_init=_MeanModelParams(mu=_MEAN_TRUTH),
+        )
+        assert result.converged
+        assert result.diagnostics.optimizer_info.status == "converged"
+        # Recovery is sharp at the truth-initialised problem.
+        assert float(result.theta_hat.mu) == pytest.approx(_MEAN_TRUTH, abs=0.05)
+
+    def test_iterated_matches_cu_in_well_specified_case(self):
+        """Iterated and CU agree to high precision on a smooth example.
+
+        Both schemes are asymptotically equivalent; at the same data /
+        same starting point on a smooth, well-specified model the
+        finite-sample point estimates should agree to many digits.
+        """
+        from emu_gmm import (
+            ContinuouslyUpdated,
+            IteratedWeighting,
+            SyntheticCovariance,
+            estimate,
+            optimistix_lm,
+        )
+
+        measure = _build_measure()
+        cov = SyntheticCovariance()
+        opt = optimistix_lm(rtol=1e-10, atol=1e-10)
+        theta0 = _MeanModelParams(mu=0.0)
+
+        r_iter = estimate(
+            model=_mean_var_psi,
+            measure=measure,
+            covariance=cov,
+            weighting=IteratedWeighting(weighting_iterations=20, weighting_tol=1e-10),
+            optimizer=opt,
+            theta_init=theta0,
+        )
+        r_cu = estimate(
+            model=_mean_var_psi,
+            measure=measure,
+            covariance=cov,
+            weighting=ContinuouslyUpdated(),
+            optimizer=opt,
+            theta_init=theta0,
+        )
+        assert r_iter.converged
+        assert r_cu.converged
+        assert float(r_iter.theta_hat.mu) == pytest.approx(
+            float(r_cu.theta_hat.mu), abs=1e-6
+        )
+
+    def test_max_iterations_warns_and_does_not_raise(self):
+        """Capped iterations: surface a warning, return result with
+        ``converged=False``, and *do not* raise."""
+        from emu_gmm import IteratedWeighting, SyntheticCovariance, estimate
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = estimate(
+                model=_mean_var_psi,
+                measure=_build_measure(),
+                covariance=SyntheticCovariance(),
+                # weighting_iterations=1 with an impossibly tight tol
+                # forces a single outer step that cannot satisfy the
+                # exit criterion.
+                weighting=IteratedWeighting(
+                    weighting_iterations=1,
+                    weighting_tol=1e-30,
+                ),
+                theta_init=_MeanModelParams(mu=0.0),
+            )
+
+        # The warning was emitted.
+        iterated_warnings = [
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning)
+            and "IteratedWeighting" in str(w.message)
+        ]
+        assert len(iterated_warnings) == 1
+        # Surfaces non-convergence in the result without raising.
+        assert result.converged is False
+        assert result.diagnostics.optimizer_info.status == "max_iterations"
+
+    def test_outer_steps_counter_advances(self):
+        """``OptimizerInfo.steps`` accumulates the inner solves' step counts."""
+        from emu_gmm import IteratedWeighting, SyntheticCovariance, estimate
+
+        result = estimate(
+            model=_mean_var_psi,
+            measure=_build_measure(),
+            covariance=SyntheticCovariance(),
+            weighting=IteratedWeighting(weighting_iterations=5, weighting_tol=1e-8),
+            theta_init=_MeanModelParams(mu=0.0),
+        )
+        # At least one inner LM step was taken.
+        assert result.iterations >= 1
