@@ -375,14 +375,24 @@ class TestNaNAware:
         )
 
     def test_from_pandas_explicit_mask_overrides_nan_inference(self):
-        """An explicit mask wins over NaN-inference."""
+        """An explicit mask wins over NaN-inference when ``df`` has no NaN.
+
+        The original revision of this test combined an explicit mask
+        with NaN-laden ``df``; that combination is now an error (see
+        :class:`TestFromPandasExplicitMaskNaNConflict`), because a NaN
+        cell silently rewritten to zero biases :math:`N_j` whenever the
+        explicit mask happens to mark that cell observable. The
+        override semantics still apply when ``df`` is NaN-free: the
+        explicit mask wins over the all-ones default that NaN
+        inference would otherwise produce.
+        """
         df = pd.DataFrame(
             {
                 "r0": [1.0, 2.0, 3.0],
-                "r1": [10.0, float("nan"), 30.0],
+                "r1": [10.0, 20.0, 30.0],
             }
         )
-        # Force moment 1 fully off even though only row 1 is NaN.
+        # Force moment 1 fully off via the explicit mask.
         explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
         meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
         np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
@@ -554,3 +564,130 @@ class TestJit:
         G_eager = meas.jacobian(_linear_residual, theta)
         G_jit = compute(meas, theta)
         assert jnp.allclose(G_eager, G_jit)
+
+
+class TestFromPandasExplicitMaskNaNConflict:
+    """An explicit mask combined with NaN in ``df`` is now an error.
+
+    Prior to this guard, ``from_pandas`` would silently rewrite NaN
+    cells in ``x`` to zero whenever ``nan_aware`` was true, regardless
+    of whether the user had supplied an explicit mask. If the user's
+    mask happened to mark a NaN cell *observable*, that 0 cell entered
+    the per-coordinate sum as a real observation, biasing both
+    :math:`N_j` and the moment value. The combination is almost
+    always user error, so the constructor raises with guidance on
+    how to resolve the ambiguity.
+    """
+
+    def test_explicit_mask_plus_nan_in_x_raises(self):
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, float("nan"), 30.0],
+            }
+        )
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [1.0, 1.0, 1.0]})
+        with pytest.raises(ValueError, match=r"explicit mask.*alongside NaN"):
+            EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+
+    def test_explicit_mask_plus_clean_x_succeeds(self):
+        """The explicit-mask override path still works on NaN-free df."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, 20.0, 30.0],
+            }
+        )
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
+        meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+        np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
+
+    def test_explicit_mask_plus_nan_in_x_with_nan_aware_false_succeeds(self):
+        """``nan_aware=False`` opts back into the legacy NaN-passthrough."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, float("nan"), 30.0],
+            }
+        )
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [1.0, 0.0, 1.0]})
+        # No raise: the user has explicitly opted out of NaN-aware semantics.
+        meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask, nan_aware=False)
+        np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
+        # And the NaN is preserved verbatim in x.
+        assert bool(jnp.isnan(meas.x[1, 1]))
+
+    def test_error_message_lists_remediation_paths(self):
+        """The error names the three available remediations."""
+        df = pd.DataFrame({"r0": [1.0, float("nan")]})
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0]})
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+        msg = str(excinfo.value)
+        # Mentions each of the three escape hatches.
+        assert "drop the mask" in msg
+        assert "scrub NaN" in msg
+        assert "nan_aware=False" in msg
+
+
+class TestNonFiniteWeightsRejected:
+    """Reject NaN / inf in the weights vector at construction time.
+
+    The NaN-safe ``double-where`` guard in :meth:`expectation` /
+    :meth:`jacobian` is applied to ``psi``, not to ``weights``: the
+    aggregator forms ``weight_mask = mask * weights[:, None]`` and any
+    NaN weight propagates regardless of the mask
+    (``0.0 * NaN = NaN`` in JAX). Real per-observation weights
+    (frequency, sampling, inverse-probability) are always finite, so
+    reject non-finite values at the input boundary --- the cheapest
+    defence and the loudest signal of an upstream bug.
+    """
+
+    def test_nan_weight_via_from_pandas_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = pd.Series([1.0, float("nan"), 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_pandas(df, weights=weights)
+
+    def test_inf_weight_via_from_pandas_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = np.array([1.0, np.inf, 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_pandas(df, weights=weights)
+
+    def test_negative_inf_weight_via_from_pandas_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = np.array([1.0, -np.inf, 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_pandas(df, weights=weights)
+
+    def test_nan_weight_via_from_nan_aware_raises(self):
+        x = np.array([[1.0], [2.0], [3.0]])
+        weights = np.array([1.0, float("nan"), 1.0])
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_nan_aware(x, weights=weights)
+
+    def test_finite_weights_pass_through(self):
+        """Sanity: a normal weights vector still works after the guard."""
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        weights = np.array([0.5, 1.0, 1.5])
+        meas = EmpiricalMeasure.from_pandas(df, weights=weights)
+        np.testing.assert_allclose(np.asarray(meas.weights), weights)
+
+    def test_default_weights_pass_through(self):
+        """Sanity: the all-ones default raises no spurious error."""
+        df = pd.DataFrame({"r0": [1.0, 2.0, 3.0]})
+        meas = EmpiricalMeasure.from_pandas(df)
+        np.testing.assert_allclose(np.asarray(meas.weights), np.ones(3))
+
+    def test_error_message_names_source_constructor(self):
+        """Error mentions which constructor was called for traceability."""
+        df = pd.DataFrame({"r0": [1.0, 2.0]})
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_pandas(df, weights=[1.0, float("nan")])
+        assert "from_pandas" in str(excinfo.value)
+
+        x = np.array([[1.0], [2.0]])
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_nan_aware(x, weights=[1.0, float("nan")])
+        assert "from_nan_aware" in str(excinfo.value)

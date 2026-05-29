@@ -89,6 +89,43 @@ def _safe_divide(
     return jnp.where(denom == 0.0, jnp.zeros_like(out), out)
 
 
+def _assert_finite_weights(
+    weights: Float[Array, " N"],
+    *,
+    source: str,
+) -> None:
+    """Raise if ``weights`` contains NaN or +/-inf.
+
+    The double-where NaN guard in :meth:`EmpiricalMeasure.expectation`
+    and :meth:`jacobian` protects ``psi`` against NaN at masked-out
+    cells, but it is applied to the residual --- not to the
+    ``weights`` vector. The aggregator builds
+    ``weight_mask = self.mask * self.weights[:, None]`` and a NaN
+    weight propagates into ``weight_mask`` regardless of the mask
+    (``mask * NaN = NaN``), poisoning the per-coordinate sum. The
+    cheapest defence is to reject non-finite weights at the input
+    boundary: real weights (frequency, sampling, inverse-probability)
+    are always finite, and a NaN here is almost certainly an upstream
+    bug worth surfacing.
+
+    Parameters
+    ----------
+    weights : (N,) jax array
+        The normalised weights vector.
+    source : str
+        Name of the calling constructor, used to disambiguate the
+        error message (e.g. ``"from_pandas"`` vs ``"from_nan_aware"``).
+    """
+    if not bool(jnp.all(jnp.isfinite(weights))):
+        raise ValueError(
+            f"EmpiricalMeasure.{source}: weights contain non-finite values "
+            f"(NaN or +/-inf). A non-finite weight propagates through "
+            f"mask * weights and poisons the per-coordinate sum, regardless "
+            f"of any per-cell mask. Drop or impute the offending rows before "
+            f"constructing the measure."
+        )
+
+
 @jdc.pytree_dataclass
 class EmpiricalMeasure:
     """Sample-backed measure with per-coordinate observability mask.
@@ -295,7 +332,9 @@ class EmpiricalMeasure:
             Per-observation weights. Defaults to all-ones.
         mask : :class:`pandas.DataFrame` or array-like of shape ``(N, M)``,
             optional. Per-coordinate observability. When supplied, it
-            takes precedence over NaN-inferred missingness. When omitted
+            takes precedence over NaN-inferred missingness, but it is
+            an error to combine an explicit mask with a data array
+            that still contains NaN (see "Raises" below). When omitted
             and ``nan_aware`` is true, ``~df.isna()`` is used; otherwise
             an all-ones mask is constructed.
         nan_aware : bool, keyword-only, default True
@@ -309,6 +348,17 @@ class EmpiricalMeasure:
         -------
         measure : :class:`EmpiricalMeasure`
 
+        Raises
+        ------
+        ValueError
+            If ``nan_aware`` is true, ``mask`` is supplied, and ``df``
+            still contains NaN cells. The combination is ambiguous: the
+            user's mask might mark a NaN cell observable, in which case
+            silently rewriting it to zero would bias :math:`N_j` and
+            the moment sum. Drop the explicit mask (let NaN-inference
+            run), scrub NaN in ``df`` before calling, or pass
+            ``nan_aware=False`` to opt back into NaN-passthrough.
+
         Notes
         -----
         The NaN-aware path supports the seasonality / non-holder
@@ -321,13 +371,19 @@ class EmpiricalMeasure:
         x_arr, _cols, _obs_name = labels_mod.normalise_x(df)
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
+        _assert_finite_weights(w_arr, source="from_pandas")
 
         # Determine M and resolve the mask. Precedence is:
         # (1) explicit mask argument, (2) NaN-inferred mask when
         # nan_aware is true, (3) all-ones default.
         if mask is not None:
-            # Probe shape of the supplied mask to determine M.
-            if hasattr(mask, "shape"):
+            # Probe shape of the supplied mask to determine M. NamedArray
+            # exposes ``shape`` as a {name: size} dict, so handle it
+            # explicitly before the generic ``hasattr(mask, "shape")``
+            # branch (which assumes a tuple-like).
+            if isinstance(mask, ha.NamedArray):
+                m_shape = tuple(int(s) for s in mask.array.shape)
+            elif hasattr(mask, "shape"):
                 m_shape = tuple(int(s) for s in mask.shape)
             else:
                 m_shape = jnp.asarray(mask).shape
@@ -351,8 +407,27 @@ class EmpiricalMeasure:
         # safe even where the user's psi happens to read masked-out
         # cells. The mask still controls aggregation; this is purely a
         # defensive substitution at the I/O boundary.
-        if nan_aware:
+        #
+        # Gating: scrub x only when ``nan_aware`` is true AND the mask
+        # was inferred from NaN. If the user supplied an explicit mask
+        # alongside NaN-laden x, silently rewriting NaN cells to 0
+        # would turn an unobserved value into a "real" observation at
+        # any (i, j) the user marked observable, biasing N_j and the
+        # moment sum. The conflict is almost always user error, so
+        # raise loudly instead of guessing.
+        if nan_aware and mask is None:
             x_arr = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+        elif nan_aware and mask is not None and bool(jnp.any(jnp.isnan(x_arr))):
+            raise ValueError(
+                "EmpiricalMeasure.from_pandas: an explicit mask was supplied "
+                "alongside NaN values in the data. Silently rewriting NaN to "
+                "zero would bias the per-coordinate sums at cells the mask "
+                "marks observable. Either (a) drop the mask argument so "
+                "nan_aware can infer it from ~df.isna(), or (b) scrub NaN in "
+                "the data before calling from_pandas (e.g. df.fillna(0) or "
+                "df.dropna()), or (c) pass nan_aware=False to keep the legacy "
+                "all-ones-mask / NaN-passthrough behaviour."
+            )
 
         return cls(x=x_arr, mask=mask_arr, weights=w_arr)
 
@@ -391,6 +466,7 @@ class EmpiricalMeasure:
             )
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
+        _assert_finite_weights(w_arr, source="from_nan_aware")
         mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
         x_clean = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
         return cls(x=x_clean, mask=mask_arr, weights=w_arr)
