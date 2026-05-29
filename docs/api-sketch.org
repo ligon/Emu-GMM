@@ -515,7 +515,6 @@ See =tests/test_estimator_analytical.py=.
 #+BEGIN_SRC python
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.covariance import IIDCovariance
-from emu_gmm.optimizer import scipy_lm
 from emu_gmm.examples.euler import euler_data
 import jax.numpy as jnp
 
@@ -531,12 +530,11 @@ result = estimate(
     model=euler_residual,
     measure=measure,
     covariance=IIDCovariance(),
-    optimizer=scipy_lm(),                # see note below
     theta_init=EulerParams(beta=0.9, gamma=1.0),
 )
 #+END_SRC
 
-/Optimiser note./ The Phase 7 acceptance test uses =scipy_lm()= rather than the default =optimistix_lm()= because optimistix's LM has trouble certifying convergence on this particular empirical surface (the answer is found but the certificate isn't issued; the run hits =max_steps= with the right $\hat\theta$). =scipy_lm()= converges cleanly in ~18 iterations to the same $\hat\theta$. The framework's optimiser modularity is the workaround --- one factory swap. See =tests/test_estimator_empirical.py=.
+The framework enables JAX float64 by default (in =src/emu_gmm/__init__.py=) because float32 isn't precise enough for the optimiser's convergence criteria on a typical whitened-residual surface --- optimistix's strict tolerances fall below the float32 noise floor. Users who explicitly want float32 can override after import via =jax.config.update("jax_enable_x64", False)=.
 
 ** What this demonstrates
 The same =StructuralModel= (=euler_residual=) drives all three variants. Only the =Measure= and =CovarianceStrategy= change. This is the framework's central architectural claim made operational: one operator interface ($\mathbb{E}_\mu$), three implementations, one =estimate(...)= call site. The =EulerParams= dataclass round-trips through the optimisation without the user touching a flat parameter vector.

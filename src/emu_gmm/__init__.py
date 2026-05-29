@@ -18,7 +18,26 @@ for the v1 API surface, and docs/mcar-asymptotics.org for the asymptotic
 theory under MCAR.
 """
 
+# ruff: noqa: E402
+# Imports below the float64 config update intentionally come after a
+# non-import statement.
 from importlib.metadata import PackageNotFoundError, version
+
+# Enable float64 in JAX *before* any module-under-this-package import
+# touches jax.numpy. JAX defaults to float32 (a deep-learning convention);
+# for a numerical-statistics framework where Cholesky pivots, condition
+# numbers, and gradient norms cross many orders of magnitude, float32
+# precision is the wrong baseline. Notable symptoms with float32:
+#   - optimistix LM cannot certify convergence at rtol=1e-8 because the
+#     float32 noise floor on a O(0.1)-magnitude whitened residual is
+#     around 2e-8;
+#   - theta_hat itself drifts at the third significant digit relative to
+#     the float64 solution.
+# Users who explicitly want float32 can override after import with:
+#     jax.config.update("jax_enable_x64", False)
+import jax as _jax
+
+_jax.config.update("jax_enable_x64", True)
 
 # Public re-exports.
 from emu_gmm.covariance import (

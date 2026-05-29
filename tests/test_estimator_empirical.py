@@ -25,7 +25,7 @@ from emu_gmm.examples.euler import (
     euler_residual,
 )
 from emu_gmm.measures import EmpiricalMeasure
-from emu_gmm.optimizer import scipy_lm
+from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import EstimationResult
 from emu_gmm.weighting import ContinuouslyUpdated
@@ -46,19 +46,13 @@ class TestEulerEmpiricalAcceptance:
     """Phase 7 milestone: empirical-path recovery on pre-generated data."""
 
     def _run(self) -> EstimationResult:
-        # Uses scipy_lm: optimistix's LM has trouble certifying
-        # convergence on this particular empirical surface even at
-        # loose tolerances (the answer is found but the certificate
-        # isn't issued); scipy's LM converges cleanly in ~18 steps.
-        # This is a deliberate showcase of the framework's optimiser
-        # modularity --- swap one factory call to switch backends.
         return estimate(
             model=euler_residual,
             measure=_make_measure(seed=0),
             covariance=IIDCovariance(),
             weighting=ContinuouslyUpdated(),
             regularization=DiagonalTikhonov(),
-            optimizer=scipy_lm(),
+            optimizer=optimistix_lm(rtol=1e-8, atol=1e-8),
             theta_init=EulerParams(beta=0.9, gamma=1.0),
         )
 
@@ -114,13 +108,10 @@ class TestEmpiricalDefaults:
     measure."""
 
     def test_minimal_call(self):
-        # As above, scipy_lm certifies convergence on this surface where
-        # the default optimistix_lm exhausts max_steps.
         r = estimate(
             model=euler_residual,
             measure=_make_measure(seed=0),
             covariance=IIDCovariance(),
-            optimizer=scipy_lm(),
             theta_init=EulerParams(beta=0.9, gamma=1.0),
         )
         assert isinstance(r, EstimationResult)

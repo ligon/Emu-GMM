@@ -72,6 +72,9 @@ been through four reviewer iterations; the abstractions are deliberate.
 - **haliax pinned to GitHub master** (not PyPI). PyPI haliax 1.3 imports
   `jax._src.tree_util.BuiltInKeyEntry` which current JAX no longer
   exposes; the git version is compatible. Documented in `pyproject.toml`.
+- **Float64 is the default precision.** See "Architectural commitments"
+  point 7. Float32 silently degrades both convergence (optimistix LM
+  can't certify) and accuracy (theta_hat drifts at the third digit).
 
 ## Architectural commitments worth knowing
 
@@ -98,11 +101,19 @@ been through four reviewer iterations; the abstractions are deliberate.
    axis and uses its labels; else `moment_names` kwarg; else positional
    `m_0, m_1, ...`. Don't mutate label state from inside the residual
    closure — it rides as a static closure variable.
-7. **Optimiser modularity matters in practice.** The empirical-path
-   acceptance test uses `scipy_lm()` rather than `optimistix_lm()`: on
-   that surface optimistix finds the right $\hat\theta$ but stalls
-   short of certifying convergence. The `Optimizer` protocol makes the
-   swap trivial. Don't tie estimator logic to a specific backend.
+7. **JAX float64 enabled at package import.** `src/emu_gmm/__init__.py`
+   calls `jax.config.update("jax_enable_x64", True)` before any
+   sub-module import. JAX defaults to float32 (a deep-learning
+   convention); for a statistics framework where Cholesky pivots and
+   gradient norms cross many orders of magnitude, float32 is the wrong
+   baseline. Symptom under float32: optimistix's LM cannot certify
+   convergence at rtol=1e-8 on whitened residuals of magnitude ~0.1
+   because the float32 noise floor is ~2e-8. Users wanting float32
+   override after import.
+8. **Optimiser modularity matters in practice.** Both `optimistix_lm()`
+   and `scipy_lm()` work for v1; the framework's `Optimizer` protocol
+   makes the swap trivial. Don't tie estimator logic to a specific
+   backend.
 
 ## Deferred to v2+
 

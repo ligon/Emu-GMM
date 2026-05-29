@@ -24,7 +24,6 @@ from emu_gmm import (
     SyntheticMeasure,
     estimate,
     optimistix_lm,
-    scipy_lm,
 )
 from emu_gmm.examples.euler import (
     BETA_TRUE,
@@ -46,11 +45,17 @@ def _print_header(title: str) -> None:
     print(f"\n{bar}\n{title}\n{bar}")
 
 
-def _print_result(result, *, recover_atol_beta: float, recover_atol_gamma: float) -> None:
+def _print_result(
+    result, *, recover_atol_beta: float, recover_atol_gamma: float
+) -> None:
     beta = float(result.theta_hat.beta)
     gamma = float(result.theta_hat.gamma)
-    print(f"  beta  = {beta:.6f}   (truth {BETA_TRUE:.2f}, |err| = {abs(beta - BETA_TRUE):.2e})")
-    print(f"  gamma = {gamma:.6f}   (truth {GAMMA_TRUE:.2f}, |err| = {abs(gamma - GAMMA_TRUE):.2e})")
+    print(
+        f"  beta  = {beta:.6f}   (truth {BETA_TRUE:.2f}, |err| = {abs(beta - BETA_TRUE):.2e})"
+    )
+    print(
+        f"  gamma = {gamma:.6f}   (truth {GAMMA_TRUE:.2f}, |err| = {abs(gamma - GAMMA_TRUE):.2e})"
+    )
     print(
         f"  J-stat = {result.J_stat:.4e}   "
         f"(dof = {result.J_dof}, p = {result.J_pvalue:.3f})"
@@ -67,8 +72,12 @@ def _print_result(result, *, recover_atol_beta: float, recover_atol_gamma: float
         )
 
     # Sanity asserts so the script blows up if recovery regresses.
-    assert abs(beta - BETA_TRUE) < recover_atol_beta, f"beta off by {abs(beta - BETA_TRUE)}"
-    assert abs(gamma - GAMMA_TRUE) < recover_atol_gamma, f"gamma off by {abs(gamma - GAMMA_TRUE)}"
+    assert (
+        abs(beta - BETA_TRUE) < recover_atol_beta
+    ), f"beta off by {abs(beta - BETA_TRUE)}"
+    assert (
+        abs(gamma - GAMMA_TRUE) < recover_atol_gamma
+    ), f"gamma off by {abs(gamma - GAMMA_TRUE)}"
 
 
 def run_synthetic() -> None:
@@ -117,7 +126,7 @@ def run_empirical() -> None:
         model=euler_residual,
         measure=measure,
         covariance=IIDCovariance(),
-        optimizer=scipy_lm(),
+        optimizer=optimistix_lm(rtol=1e-8),
         theta_init=THETA_INIT,
     )
     _print_result(result, recover_atol_beta=0.05, recover_atol_gamma=0.5)
