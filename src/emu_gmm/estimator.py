@@ -28,7 +28,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
-import scipy.stats
+import jax.scipy.stats
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import axes as axes_mod
@@ -84,16 +84,20 @@ def _effective_n_per_moment(
     return jnp.ones(m)
 
 
-def _binding_ridge(regularization: RegularizationStrategy, tau: float) -> bool:
+def _binding_ridge(
+    regularization: RegularizationStrategy, tau: Float[Array, ""]
+) -> Float[Array, ""]:
     """Whether the regularisation ridge is "binding" relative to its threshold.
 
-    Only :class:`DiagonalTikhonov` exposes a ``tau_threshold``. Other
+    Returns a traced 0-d boolean JAX array so the result can flow
+    through ``jit`` / ``vmap`` without forcing a concrete-Python boundary.
+    Only :class:`DiagonalTikhonov` exposes a ``tau_threshold``; other
     regularisers default to ``False``.
     """
     threshold = getattr(regularization, "tau_threshold", None)
     if threshold is None:
-        return False
-    return float(tau) > float(threshold)
+        return jnp.asarray(False)
+    return jnp.asarray(tau) > jnp.asarray(threshold)
 
 
 def estimate(
@@ -238,15 +242,19 @@ def estimate(
     # Use jnp.linalg.inv for v1; under-identified problems will yield NaN.
     Sigma_theta_arr = jnp.linalg.inv(info_matrix)
 
-    # J-stat.
+    # J-stat. Keep as a 0-d JAX array so the result flows through
+    # ``jit`` / ``vmap``; users cast at the eager boundary (e.g. inside
+    # ``to_pandas``).
     y_hat = weighting.whitening_residual(m_hat, V_star_hat, theta_hat)
-    J_stat_arr = jnp.sum(y_hat * y_hat)
-    J_stat = float(J_stat_arr)
+    J_stat = jnp.sum(y_hat * y_hat)
     J_dof = max(M - K, 0)
     if J_dof > 0:
-        J_pvalue = float(scipy.stats.chi2.sf(J_stat, J_dof))
+        # ``jax.scipy.stats.chi2.sf`` is traceable; ``scipy.stats.chi2.sf``
+        # is not. The dof is a static Python int (it comes from M and K,
+        # which are static closure variables).
+        J_pvalue = jax.scipy.stats.chi2.sf(J_stat, J_dof)
     else:
-        J_pvalue = float("nan")  # under- or just-identified
+        J_pvalue = jnp.asarray(jnp.nan)  # under- or just-identified
 
     # Labelled outputs.
     Params = axes_mod.params_axis(K)
@@ -257,10 +265,14 @@ def estimate(
     Sigma_theta = labels_mod.label_matrix(Sigma_theta_arr, Params, ParamsDual)
     V_X = labels_mod.label_matrix(V_star_hat, Moments, MomentsDual)
 
-    # Diagnostics.
-    kappa_V = float(jnp.linalg.cond(V_star_hat))
-    binding_ridge = _binding_ridge(regularization, float(tau_hat))
-    cholesky_pivot_min = float(jnp.min(jnp.diag(L)))
+    # Diagnostics. All scalars are kept as 0-d JAX arrays so the
+    # ``estimate`` call traces cleanly under ``jit`` / ``vmap``. The
+    # eager-only ``to_pandas`` / ``__repr__`` boundary casts to Python
+    # floats; user code that does ``float(result.J_stat)`` continues to
+    # work because 0-d JAX arrays are float()-castable outside of trace.
+    kappa_V = jnp.linalg.cond(V_star_hat)
+    binding_ridge = _binding_ridge(regularization, tau_hat)
+    cholesky_pivot_min = jnp.min(jnp.diag(L))
 
     # Gradient of (1/2)||y||^2 at the optimum.
     def half_obj(tf: Float[Array, " K"]) -> Float[Array, ""]:
@@ -268,12 +280,12 @@ def estimate(
         return 0.5 * jnp.sum(y * y)
 
     final_grad = jax.grad(half_obj)(theta_hat_flat)
-    final_gradient_norm = float(jnp.linalg.norm(final_grad))
+    final_gradient_norm = jnp.linalg.norm(final_grad)
 
     N_j_arr = _effective_n_per_moment(measure, theta_hat, M)
 
     diagnostics = build_diagnostics(
-        tau_realised=float(tau_hat),
+        tau_realised=tau_hat,
         kappa_V=kappa_V,
         binding_ridge=binding_ridge,
         cholesky_pivot_min=cholesky_pivot_min,
@@ -285,7 +297,12 @@ def estimate(
         optimizer_info=optimizer_info,
     )
 
+    # ``converged`` and ``iterations`` are derived from the optimiser's
+    # info. Under ``jit`` / ``vmap`` the status is the literal string
+    # ``"traced"`` and steps are a 0-d JAX array; both must avoid
+    # ``int()`` / Python branches that touch traced values.
     converged = optimizer_info.status in ("converged", "traced")
+    iterations = optimizer_info.steps
 
     return EstimationResult(
         theta_hat=theta_hat,
@@ -295,7 +312,7 @@ def estimate(
         J_dof=J_dof,
         J_pvalue=J_pvalue,
         converged=converged,
-        iterations=int(optimizer_info.steps),
+        iterations=iterations,
         theta_init=theta_init,
         measure=measure,
         covariance=covariance,

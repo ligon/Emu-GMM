@@ -25,12 +25,12 @@ from emu_gmm.types import Diagnostics, OptimizerInfo
 
 def build_diagnostics(
     *,
-    tau_realised: float,
-    kappa_V: float,
-    binding_ridge: bool,
-    cholesky_pivot_min: float,
-    final_objective: float,
-    final_gradient_norm: float,
+    tau_realised: Any,
+    kappa_V: Any,
+    binding_ridge: Any,
+    cholesky_pivot_min: Any,
+    final_objective: Any,
+    final_gradient_norm: Any,
     N_j_array: Float[Array, " M"],
     moment_residual_array: Float[Array, " M"],
     moments_axis: ha.Axis,
@@ -40,13 +40,17 @@ def build_diagnostics(
 
     The labelled per-moment fields (``N_j``, ``moment_residual``) are
     wrapped in :class:`haliax.NamedArray` instances on the supplied
-    ``moments_axis``. Scalar fields are passed through unchanged.
+    ``moments_axis``. Scalar fields are converted to 0-d JAX arrays so
+    the result is jit / vmap compatible; users cast to Python floats at
+    the eager boundary (e.g. via :meth:`EstimationResult.to_pandas`).
 
     Parameters
     ----------
     tau_realised, kappa_V, binding_ridge, cholesky_pivot_min,
     final_objective, final_gradient_norm
         Scalar diagnostics produced during the estimation pipeline.
+        May be Python scalars or 0-d JAX arrays; both are normalised to
+        :class:`jax.Array`.
     N_j_array : (M,) array
         Effective sample size per moment coordinate. For synthetic
         measures this is constant (``n_sim``); for empirical measures
@@ -63,12 +67,12 @@ def build_diagnostics(
     :class:`Diagnostics`
     """
     return Diagnostics(
-        tau_realised=float(tau_realised),
-        kappa_V=float(kappa_V),
-        binding_ridge=bool(binding_ridge),
-        cholesky_pivot_min=float(cholesky_pivot_min),
-        final_objective=float(final_objective),
-        final_gradient_norm=float(final_gradient_norm),
+        tau_realised=jnp.asarray(tau_realised),
+        kappa_V=jnp.asarray(kappa_V),
+        binding_ridge=jnp.asarray(binding_ridge),
+        cholesky_pivot_min=jnp.asarray(cholesky_pivot_min),
+        final_objective=jnp.asarray(final_objective),
+        final_gradient_norm=jnp.asarray(final_gradient_norm),
         N_j=labels_mod.label_vector(jnp.asarray(N_j_array), moments_axis),
         moment_residual=labels_mod.label_vector(
             jnp.asarray(moment_residual_array), moments_axis
