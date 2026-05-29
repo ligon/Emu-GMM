@@ -1,0 +1,23 @@
+========================================================================
+Pymanopt-parity verification harness for v2 PSDFixedRank
+========================================================================
+N_SEEDS  = 100
+SHAPES   = [(3, 1), (3, 2), (5, 1), (5, 2), (5, 3), (8, 2), (8, 3), (10, 3)]
+RTOL     = 1e-09
+emu_gmm.manifolds importable: False
+  (deferred-import error: ModuleNotFoundError: No module named 'emu_gmm.manifolds')
+  emu_gmm comparisons will be reported as 'skipped'.
+  This is the expected state pre-Chunk-A.
+
+Summary
+------------------------------------------------------------------------
+operation                  passed   failed  skipped  errored    total
+---------------------------------------------------------------------
+projection                      0        0      800        0      800
+retraction                      0        0      800        0      800
+riemannian_gradient             0        0      800        0      800
+distance                        0        0      800        0      800
+---------------------------------------------------------------------
+TOTAL                           0        0     3200        0     3200
+
+Pymanopt-only run complete.  emu_gmm comparisons skipped; the harness is ready to activate when Chunk A lands.
