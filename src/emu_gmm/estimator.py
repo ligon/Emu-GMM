@@ -44,6 +44,7 @@ from emu_gmm.diagnostics import (
     regularization_adjusted_pvalue,
 )
 from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -284,6 +285,7 @@ def estimate(
     optimizer: Optimizer | None = None,
     theta_init: ParamsLike,
     moment_names: tuple[str, ...] | None = None,
+    penalty: PenaltyStrategy | None = None,
 ) -> EstimationResult:
     """Estimate :math:`\\hat\\theta` by minimising
     :math:`Q_\\mu(\\theta) = \\| L_\\mu(\\theta)^{-1}\\, \\mathbb{E}_\\mu[\\psi(\\cdot,\\theta)] \\|^2`.
@@ -313,6 +315,12 @@ def estimate(
     moment_names : tuple of str, optional
         Override for moment labels. Precedence: model-return NamedArray
         > this kwarg > positional ``("m_0", "m_1", ...)``.
+    penalty : :class:`PenaltyStrategy`, optional
+        In-objective parameter penalty. When supplied, the criterion
+        becomes :math:`Q_{\\mu,\\mathrm{pen}}(\\theta) = Q_\\mu(\\theta) +
+        p(\\theta)` and the NLLS residual gets :math:`\\sqrt{p(\\theta)}`
+        appended so the LM Jacobian picks up the parameter-space ridge
+        via JAX AD. ``penalty=None`` preserves v1 behaviour bitwise.
 
     Returns
     -------
@@ -442,29 +450,66 @@ def estimate(
     # Residual closure: produces the whitened moment vector y. Built as
     # a factory so the iterated path can rebuild it per outer step with
     # a frozen :class:`Fixed`-weight closure over the current ``V_k``.
+    #
+    # When a penalty is supplied, append sqrt(p(theta)) as one extra row
+    # so the LM ||y||^2 surface absorbs the penalty without touching the
+    # solver. ``penalty=None`` keeps the residual shape and values
+    # bitwise identical to v1.
     def _make_residual_fn(
         weighting_for_solve: WeightingStrategy,
     ) -> Any:
-        def residual_fn(theta_flat: Float[Array, " K"]) -> Float[Array, " M"]:
-            theta = params_mod.unflatten_params(theta_flat, treedef)
-            if _cache_method is not None:
-                cached = _cache_method(model, theta)
-                m = cached[0]
-                # The minimal :class:`CovarianceStrategy` protocol does
-                # not advertise ``cached_intermediates``; concrete IID /
-                # Clustered / Synthetic strategies extend the signature
-                # with the kwarg and the signature probe above gates
-                # this call. ``Any`` cast bypasses mypy's protocol-narrow
-                # check.
-                V = cast(Any, covariance).covariance(
-                    model, theta, measure, cached_intermediates=cached
-                )
-            else:
-                m = measure.expectation(model, theta)
-                V = covariance.covariance(model, theta, measure)
-            V_star = _apply_anchored(V)
-            y = weighting_for_solve.whitening_residual(m, V_star, theta)
-            return y
+        if penalty is None:
+
+            def residual_fn(
+                theta_flat: Float[Array, " K"],
+            ) -> Float[Array, " M"]:
+                theta = params_mod.unflatten_params(theta_flat, treedef)
+                if _cache_method is not None:
+                    cached = _cache_method(model, theta)
+                    m = cached[0]
+                    # The minimal :class:`CovarianceStrategy` protocol
+                    # does not advertise ``cached_intermediates``;
+                    # concrete IID / Clustered / Synthetic strategies
+                    # extend the signature with the kwarg and the
+                    # signature probe above gates this call. ``Any``
+                    # cast bypasses mypy's protocol-narrow check.
+                    V = cast(Any, covariance).covariance(
+                        model, theta, measure, cached_intermediates=cached
+                    )
+                else:
+                    m = measure.expectation(model, theta)
+                    V = covariance.covariance(model, theta, measure)
+                V_star = _apply_anchored(V)
+                y = weighting_for_solve.whitening_residual(m, V_star, theta)
+                return y
+
+        else:
+
+            def residual_fn(
+                theta_flat: Float[Array, " K"],
+            ) -> Float[Array, " M"]:
+                theta = params_mod.unflatten_params(theta_flat, treedef)
+                if _cache_method is not None:
+                    cached = _cache_method(model, theta)
+                    m = cached[0]
+                    V = cast(Any, covariance).covariance(
+                        model, theta, measure, cached_intermediates=cached
+                    )
+                else:
+                    m = measure.expectation(model, theta)
+                    V = covariance.covariance(model, theta, measure)
+                V_star = _apply_anchored(V)
+                y = weighting_for_solve.whitening_residual(m, V_star, theta)
+                # The objective is ||y||^2 + p(theta); appending sqrt(p)
+                # as a residual row reproduces it exactly under ||.||^2.
+                # p is C^infty and >= 0, but sqrt(p) has a singular
+                # gradient where p = 0. We lift with a tiny floor so the
+                # LM Jacobian is finite at exact zero. The floor (1e-30)
+                # is far below float64 tolerance and dominated by any
+                # nonzero p.
+                p = penalty.penalty(theta)
+                extra = jnp.sqrt(p + 1e-30)
+                return jnp.concatenate([y, jnp.atleast_1d(extra)])
 
         return residual_fn
 

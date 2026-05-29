@@ -9,6 +9,7 @@ The public API is re-exported here for convenience::
         EmpiricalMeasure, IIDCovariance, ClusteredCovariance,
         Identity, Fixed, ContinuouslyUpdated, IteratedWeighting,
         DiagonalTikhonov,
+        TikhonovPenalty,
         optimistix_lm, scipy_lm,
         EstimationResult, Diagnostics, OptimizerInfo,
     )
@@ -69,6 +70,7 @@ from emu_gmm.measures import (
 )
 from emu_gmm.numerics import ridge_inverse
 from emu_gmm.optimizer import optimistix_lm, scipy_lm
+from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -121,6 +123,8 @@ __all__ = [
     "DiagonalTikhonov",
     # Numerics helpers
     "ridge_inverse",
+    # Penalty (in-objective parameter penalty)
+    "TikhonovPenalty",
     # Optimisers
     "optimistix_lm",
     "scipy_lm",
@@ -147,6 +151,7 @@ __all__ = [
     "CovarianceStrategy",
     "WeightingStrategy",
     "RegularizationStrategy",
+    "PenaltyStrategy",
     "Optimizer",
     "StructuralModel",
 ]
