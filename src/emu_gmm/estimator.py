@@ -35,7 +35,12 @@ from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
-from emu_gmm.diagnostics import build_diagnostics, regularization_adjusted_pvalue
+from emu_gmm.diagnostics import (
+    build_diagnostics,
+    build_optimizer_health,
+    compute_cond_info,
+    regularization_adjusted_pvalue,
+)
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -328,6 +333,22 @@ def estimate(
 
     N_j_arr = _effective_n_per_moment(measure, theta_hat, M)
 
+    # Hessian-condition trio (issue #10). G' Lambda G with
+    # Lambda = (V_star_hat)^{-1} is the v1 information matrix
+    # (CLAUDE.md commitment 5); cond_info reports its condition number
+    # along three views (raw / data_only / exclude_gauge). For v1
+    # data_only and exclude_gauge alias to raw; #7 (penalty hook) and
+    # the v2 manifold epic will distinguish them.
+    cond_info = compute_cond_info(G_hat, V_star_hat)
+
+    # Optimiser-health summary. step_norm / accepted_step_count are
+    # left as None because neither optimistix.LevenbergMarquardt nor
+    # scipy.optimize.least_squares expose them in their result objects.
+    optimizer_health = build_optimizer_health(
+        optimizer_info=optimizer_info,
+        final_gradient_norm=final_gradient_norm,
+    )
+
     diagnostics = build_diagnostics(
         tau_realised=tau_hat,
         kappa_V=kappa_V,
@@ -339,6 +360,8 @@ def estimate(
         moment_residual_array=m_hat,
         moments_axis=Moments,
         optimizer_info=optimizer_info,
+        cond_info=cond_info,
+        optimizer_health=optimizer_health,
     )
 
     # ``converged`` and ``iterations`` are derived from the optimiser's

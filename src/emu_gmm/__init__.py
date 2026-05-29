@@ -46,6 +46,11 @@ from emu_gmm.covariance import (
     IIDCovariance,
     SyntheticCovariance,
 )
+from emu_gmm.diagnostics import (
+    build_diagnostics,
+    build_optimizer_health,
+    compute_cond_info,
+)
 from emu_gmm.estimator import estimate
 from emu_gmm.measures import (
     AnalyticalMeasure,
@@ -102,6 +107,10 @@ __all__ = [
     "OptimizerInfo",
     # Errors
     "Emu_GMM_DimensionError",
+    # Diagnostics builders
+    "build_diagnostics",
+    "build_optimizer_health",
+    "compute_cond_info",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",

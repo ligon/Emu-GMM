@@ -179,6 +179,11 @@ class Diagnostics:
     (``N_j``, ``moment_residual``) carry moment-axis coordinates and are
     usable in pandas-style inspection via
     :meth:`EstimationResult.to_pandas`.
+
+    The ``cond_info`` and ``optimizer_health`` dicts surface the
+    Hessian condition trio and lightweight optimiser-health metrics
+    discussed in issue #10 (parity with ManifoldGMM's
+    ``compute_hessian_cond`` / ``optimizer_health``).
     """
 
     # Regularisation
@@ -199,6 +204,34 @@ class Diagnostics:
 
     # Provenance
     optimizer_info: OptimizerInfo
+
+    # Hessian condition trio at theta_hat. See ``docs/design.org`` and
+    # CLAUDE.md commitment 5: the information matrix is ``G' Lambda G``
+    # (never numerical Hessian); ``cond_info`` reports the condition
+    # number of that matrix.
+    #
+    # Keys:
+    #   - ``'raw'``: cond(G' Lambda G), Lambda = (V*)^{-1} at theta_hat.
+    #   - ``'data_only'``: cond(G' Lambda G) with the penalty
+    #     contribution suppressed. In v1 no ``PenaltyStrategy`` is
+    #     wired, so this equals ``'raw'``; once #7 (penalty hook) lands,
+    #     subtract the penalty Hessian contribution and recompute.
+    #   - ``'exclude_gauge'``: alias to ``'raw'`` for v1. Once the v2
+    #     manifold support lands, this will project out the
+    #     K*(K-1)/2 PSDFixedRank gauge nullspace before computing the
+    #     condition number.
+    cond_info: dict[str, float] = dataclasses.field(default_factory=dict)
+
+    # Lightweight optimiser-health summary at termination. Keys:
+    #   - ``'iters'``: iteration / step count
+    #     (mirrors ``optimizer_info.steps``).
+    #   - ``'grad_norm'``: ``||grad (1/2)||y||^2||`` at theta_hat
+    #     (mirrors ``final_gradient_norm``).
+    #   - ``'step_norm'``: norm of the last accepted step, if the
+    #     backend exposes it; otherwise ``None``.
+    #   - ``'accepted_step_count'``: number of accepted (vs rejected)
+    #     LM steps, if the backend exposes it; otherwise ``None``.
+    optimizer_health: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
