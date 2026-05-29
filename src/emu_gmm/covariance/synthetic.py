@@ -57,6 +57,9 @@ class SyntheticCovariance:
         psi: StructuralModel,
         theta: ParamsLike,
         measure: Any,
+        cached_intermediates: (
+            tuple[Float[Array, " M"], Float[Array, "n_sim M"]] | None
+        ) = None,
     ) -> Float[Array, "M M"]:
         """Construct :math:`V_{\\mathrm{sim}}(\\theta)`.
 
@@ -70,18 +73,31 @@ class SyntheticCovariance:
         measure
             A :class:`SyntheticMeasure` instance whose ``_draws`` method
             this strategy calls.
+        cached_intermediates : optional 2-tuple
+            ``(m, psi_batch)`` produced by a previous call to
+            :meth:`SyntheticMeasure.moments_and_contributions`. When
+            supplied, this routine reuses the cached ``psi_batch`` and
+            skips a redundant ``_draws`` + ``vmap(psi)`` pass --- the
+            SMM-dedup consolidation described in
+            ``docs/reviews/v1x-performance-review.org`` finding #5.
+            Back-compat: when ``None``, falls through to the
+            self-computing path.
 
         Returns
         -------
         V : (M, M) jax array
             Symmetric PSD by construction.
         """
-        x_batch = measure._draws(theta)
+        if cached_intermediates is not None:
+            _m, psi_batch = cached_intermediates
+        else:
+            x_batch = measure._draws(theta)
 
-        def psi_at(x):
-            return _to_plain(psi(x, theta))
+            def psi_at(x):
+                return _to_plain(psi(x, theta))
 
-        psi_batch = jax.vmap(psi_at)(x_batch)  # (n_sim, M)
+            psi_batch = jax.vmap(psi_at)(x_batch)  # (n_sim, M)
+
         n = psi_batch.shape[0]
         m_bar = jnp.mean(psi_batch, axis=0)
         centered = psi_batch - m_bar

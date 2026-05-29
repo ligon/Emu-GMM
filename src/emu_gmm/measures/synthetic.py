@@ -65,6 +65,47 @@ class SyntheticMeasure:
         """Run the sampler once and return the (n_sim, D) draws."""
         return self.sampler(self.key, theta)
 
+    def moments_and_contributions(
+        self, psi: StructuralModel, theta: ParamsLike
+    ) -> tuple[Float[Array, " M"], Float[Array, "n_sim M"]]:
+        """Shared primitive: SMM expectation + per-draw psi in one vmap.
+
+        Returns the per-coordinate sample mean ``m`` together with the
+        ``(n_sim, M)`` per-draw residual matrix that
+        :class:`~emu_gmm.covariance.synthetic.SyntheticCovariance`
+        rebuilds independently when called separately. This is the
+        single source of truth for the SMM hot path: the synthetic
+        covariance strategy accepts ``psi_batch`` as
+        ``cached_intermediates`` and skips its own
+        ``_draws`` + ``vmap(psi)`` pass, eliminating the ~2x sampler /
+        residual overhead per ``residual_fn`` call
+        (``docs/reviews/v1x-performance-review.org`` finding #5).
+
+        Parameters
+        ----------
+        psi : :data:`StructuralModel`
+            Per-observation residual function.
+        theta : :data:`ParamsLike`
+            User parameter dataclass.
+
+        Returns
+        -------
+        m : (M,) jax array
+            ``(1 / n_sim) sum_s psi(x_s, theta)``.
+        psi_batch : (n_sim, M) jax array
+            The vmapped residual matrix from the same sampler draws
+            that produced ``m``. CRN preserves identity across the two
+            outputs: ``m == jnp.mean(psi_batch, axis=0)`` exactly.
+        """
+        x_batch = self._draws(theta)
+
+        def psi_at(x):
+            return _to_plain(psi(x, theta))
+
+        psi_batch = jax.vmap(psi_at)(x_batch)
+        m = jnp.mean(psi_batch, axis=0)
+        return m, psi_batch
+
     def expectation(
         self, psi: StructuralModel, theta: ParamsLike
     ) -> Float[Array, " M"]:
@@ -76,13 +117,8 @@ class SyntheticMeasure:
             ``(1/n_sim) sum_s psi(x_s, theta)``, with ``x_s`` from the
             sampler.
         """
-        x_batch = self._draws(theta)
-
-        def psi_at(x):
-            return _to_plain(psi(x, theta))
-
-        psi_batch = jax.vmap(psi_at)(x_batch)
-        return jnp.mean(psi_batch, axis=0)
+        m, _psi_batch = self.moments_and_contributions(psi, theta)
+        return m
 
     def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
         """Jacobian of ``expectation`` with respect to ``theta``.
