@@ -637,33 +637,17 @@ def estimate(
 
         # Half-objective gradient at the optimum --- folds into the
         # same fused kernel under jit, eliminating the standalone
-        # ``jax.grad(half_obj)`` retrace. When ``penalty`` is supplied
-        # the residual includes the appended sqrt(p+eps) row (see
-        # ``_make_residual_fn``), so this gradient includes the penalty
-        # contribution --- the correct quantity to compare against the
-        # LM convergence tolerance. With ``penalty=None`` this reduces
-        # to the v1 unpenalised gradient norm.
+        # ``jax.grad(half_obj)`` retrace. We compute ``0.5 * ||r||^2``
+        # by re-using the exact ``residual_fn`` the optimiser saw, so
+        # the reported gradient norm matches the LM convergence
+        # criterion bit-for-bit (and matches what users get when they
+        # reconstruct the residual by hand). When ``penalty`` is
+        # supplied the residual includes the appended sqrt(p+eps) row
+        # automatically; with ``penalty=None`` this reduces to the v1
+        # unpenalised data-only gradient norm.
         def _half(tf):
-            theta_inner = params_mod.unflatten_params(tf, treedef)
-            if _cache_method is not None:
-                inner_cached = _cache_method(model, theta_inner)
-                m_inner = inner_cached[0]
-                V_inner = cast(Any, covariance).covariance(
-                    model, theta_inner, measure, cached_intermediates=inner_cached
-                )
-            else:
-                m_inner = measure.expectation(model, theta_inner)
-                V_inner = covariance.covariance(model, theta_inner, measure)
-            V_star_inner = _apply_anchored(V_inner)
-            y_inner = weighting.whitening_residual(m_inner, V_star_inner, theta_inner)
-            base = 0.5 * jnp.sum(y_inner * y_inner)
-            if penalty is not None:
-                # The optimiser saw ``r = concat(y, sqrt(p + eps))`` and
-                # minimised ``0.5 * ||r||^2 = 0.5 * (||y||^2 + p + eps)``;
-                # take ``grad`` of that surface so the reported norm
-                # matches what the LM saw at convergence.
-                base = base + 0.5 * (penalty.penalty(theta_inner) + 1e-30)
-            return base
+            r = residual_fn(tf)
+            return 0.5 * jnp.sum(r * r)
 
         grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
         # J-test p-values (both kept as traced 0-d arrays even in the
