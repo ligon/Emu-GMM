@@ -295,7 +295,9 @@ class EmpiricalMeasure:
             Per-observation weights. Defaults to all-ones.
         mask : :class:`pandas.DataFrame` or array-like of shape ``(N, M)``,
             optional. Per-coordinate observability. When supplied, it
-            takes precedence over NaN-inferred missingness. When omitted
+            takes precedence over NaN-inferred missingness, but it is
+            an error to combine an explicit mask with a data array
+            that still contains NaN (see "Raises" below). When omitted
             and ``nan_aware`` is true, ``~df.isna()`` is used; otherwise
             an all-ones mask is constructed.
         nan_aware : bool, keyword-only, default True
@@ -308,6 +310,17 @@ class EmpiricalMeasure:
         Returns
         -------
         measure : :class:`EmpiricalMeasure`
+
+        Raises
+        ------
+        ValueError
+            If ``nan_aware`` is true, ``mask`` is supplied, and ``df``
+            still contains NaN cells. The combination is ambiguous: the
+            user's mask might mark a NaN cell observable, in which case
+            silently rewriting it to zero would bias :math:`N_j` and
+            the moment sum. Drop the explicit mask (let NaN-inference
+            run), scrub NaN in ``df`` before calling, or pass
+            ``nan_aware=False`` to opt back into NaN-passthrough.
 
         Notes
         -----
@@ -356,8 +369,27 @@ class EmpiricalMeasure:
         # safe even where the user's psi happens to read masked-out
         # cells. The mask still controls aggregation; this is purely a
         # defensive substitution at the I/O boundary.
-        if nan_aware:
+        #
+        # Gating: scrub x only when ``nan_aware`` is true AND the mask
+        # was inferred from NaN. If the user supplied an explicit mask
+        # alongside NaN-laden x, silently rewriting NaN cells to 0
+        # would turn an unobserved value into a "real" observation at
+        # any (i, j) the user marked observable, biasing N_j and the
+        # moment sum. The conflict is almost always user error, so
+        # raise loudly instead of guessing.
+        if nan_aware and mask is None:
             x_arr = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+        elif nan_aware and mask is not None and bool(jnp.any(jnp.isnan(x_arr))):
+            raise ValueError(
+                "EmpiricalMeasure.from_pandas: an explicit mask was supplied "
+                "alongside NaN values in the data. Silently rewriting NaN to "
+                "zero would bias the per-coordinate sums at cells the mask "
+                "marks observable. Either (a) drop the mask argument so "
+                "nan_aware can infer it from ~df.isna(), or (b) scrub NaN in "
+                "the data before calling from_pandas (e.g. df.fillna(0) or "
+                "df.dropna()), or (c) pass nan_aware=False to keep the legacy "
+                "all-ones-mask / NaN-passthrough behaviour."
+            )
 
         return cls(x=x_arr, mask=mask_arr, weights=w_arr)
 

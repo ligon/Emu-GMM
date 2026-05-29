@@ -375,14 +375,24 @@ class TestNaNAware:
         )
 
     def test_from_pandas_explicit_mask_overrides_nan_inference(self):
-        """An explicit mask wins over NaN-inference."""
+        """An explicit mask wins over NaN-inference when ``df`` has no NaN.
+
+        The original revision of this test combined an explicit mask
+        with NaN-laden ``df``; that combination is now an error (see
+        :class:`TestFromPandasExplicitMaskNaNConflict`), because a NaN
+        cell silently rewritten to zero biases :math:`N_j` whenever the
+        explicit mask happens to mark that cell observable. The
+        override semantics still apply when ``df`` is NaN-free: the
+        explicit mask wins over the all-ones default that NaN
+        inference would otherwise produce.
+        """
         df = pd.DataFrame(
             {
                 "r0": [1.0, 2.0, 3.0],
-                "r1": [10.0, float("nan"), 30.0],
+                "r1": [10.0, 20.0, 30.0],
             }
         )
-        # Force moment 1 fully off even though only row 1 is NaN.
+        # Force moment 1 fully off via the explicit mask.
         explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
         meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
         np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
@@ -554,3 +564,67 @@ class TestJit:
         G_eager = meas.jacobian(_linear_residual, theta)
         G_jit = compute(meas, theta)
         assert jnp.allclose(G_eager, G_jit)
+
+
+class TestFromPandasExplicitMaskNaNConflict:
+    """An explicit mask combined with NaN in ``df`` is now an error.
+
+    Prior to this guard, ``from_pandas`` would silently rewrite NaN
+    cells in ``x`` to zero whenever ``nan_aware`` was true, regardless
+    of whether the user had supplied an explicit mask. If the user's
+    mask happened to mark a NaN cell *observable*, that 0 cell entered
+    the per-coordinate sum as a real observation, biasing both
+    :math:`N_j` and the moment value. The combination is almost
+    always user error, so the constructor raises with guidance on
+    how to resolve the ambiguity.
+    """
+
+    def test_explicit_mask_plus_nan_in_x_raises(self):
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, float("nan"), 30.0],
+            }
+        )
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [1.0, 1.0, 1.0]})
+        with pytest.raises(ValueError, match=r"explicit mask.*alongside NaN"):
+            EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+
+    def test_explicit_mask_plus_clean_x_succeeds(self):
+        """The explicit-mask override path still works on NaN-free df."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, 20.0, 30.0],
+            }
+        )
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
+        meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+        np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
+
+    def test_explicit_mask_plus_nan_in_x_with_nan_aware_false_succeeds(self):
+        """``nan_aware=False`` opts back into the legacy NaN-passthrough."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, float("nan"), 30.0],
+            }
+        )
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [1.0, 0.0, 1.0]})
+        # No raise: the user has explicitly opted out of NaN-aware semantics.
+        meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask, nan_aware=False)
+        np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
+        # And the NaN is preserved verbatim in x.
+        assert bool(jnp.isnan(meas.x[1, 1]))
+
+    def test_error_message_lists_remediation_paths(self):
+        """The error names the three available remediations."""
+        df = pd.DataFrame({"r0": [1.0, float("nan")]})
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0]})
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+        msg = str(excinfo.value)
+        # Mentions each of the three escape hatches.
+        assert "drop the mask" in msg
+        assert "scrub NaN" in msg
+        assert "nan_aware=False" in msg
