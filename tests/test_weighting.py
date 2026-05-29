@@ -141,6 +141,75 @@ class TestFixed:
         y_jit = compute(strategy, m, theta)
         assert jnp.allclose(y_eager, y_jit, atol=1e-6)
 
+    # --- Safe-construction guards (Fix 1, v1.x API safety) -----------------
+
+    def test_kwarg_L0_constructs(self):
+        """``Fixed(L0=L0)`` (back-compat keyword path) works."""
+        L0 = cholesky(_make_pd(seed=4))
+        strategy = Fixed(L0=L0)
+        assert jnp.allclose(strategy.L0, L0)
+
+    def test_kwarg_V0_constructs(self):
+        """``Fixed(V0=V0)`` works and matches ``Fixed.from_V0(V0)``."""
+        V0 = _make_pd(seed=5)
+        s_kwarg = Fixed(V0=V0)
+        s_factory = Fixed.from_V0(V0)
+        assert jnp.allclose(s_kwarg.L0, s_factory.L0)
+        # And that L0 satisfies L0 L0^T = V0.
+        assert jnp.allclose(s_kwarg.L0 @ s_kwarg.L0.T, V0, atol=1e-6)
+
+    def test_from_L0_factory(self):
+        """``Fixed.from_L0(L0)`` is equivalent to ``Fixed(L0=L0)``."""
+        L0 = cholesky(_make_pd(seed=6))
+        s_factory = Fixed.from_L0(L0)
+        s_kwarg = Fixed(L0=L0)
+        assert jnp.allclose(s_factory.L0, s_kwarg.L0)
+
+    def test_positional_arg_errors_with_clear_message(self):
+        """The legacy ``Fixed(L0)`` positional pattern now raises a
+        ``TypeError`` mentioning the W-vs-L0 hazard and the safe
+        constructors.
+
+        Rationale: a ManifoldGMM user porting ``Fixed(W_hat)`` by analogy
+        would otherwise silently store ``W`` as the Cholesky factor and
+        get wrong results. The error message must explicitly name both
+        ``L0=`` and ``V0=`` and the porting hint.
+        """
+        L0 = cholesky(_make_pd(seed=7))
+        with pytest.raises(TypeError) as exc:
+            Fixed(L0)
+        msg = str(exc.value)
+        assert "positional" in msg
+        assert "L0=" in msg
+        assert "V0=" in msg
+        # Porting hint should reference W (the ManifoldGMM analogue).
+        assert "W" in msg
+
+    def test_no_kwargs_errors(self):
+        """``Fixed()`` with neither L0 nor V0 raises ``TypeError``."""
+        with pytest.raises(TypeError) as exc:
+            Fixed()
+        msg = str(exc.value)
+        assert "L0" in msg and "V0" in msg
+
+    def test_both_kwargs_errors(self):
+        """``Fixed(L0=L0, V0=V0)`` raises ``TypeError`` (exclusive)."""
+        V0 = _make_pd(seed=8)
+        L0 = cholesky(V0)
+        with pytest.raises(TypeError) as exc:
+            Fixed(L0=L0, V0=V0)
+        msg = str(exc.value)
+        assert "L0" in msg and "V0" in msg
+
+    def test_from_V0_and_V0_kwarg_match(self):
+        """``Fixed.from_V0(V0)`` and ``Fixed(V0=V0)`` produce identical
+        internal state (the L0 field).
+        """
+        V0 = _make_pd(seed=9)
+        s_factory = Fixed.from_V0(V0)
+        s_kwarg = Fixed(V0=V0)
+        assert jnp.allclose(s_factory.L0, s_kwarg.L0)
+
 
 # ---------------------------------------------------------------------------
 

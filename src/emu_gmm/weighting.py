@@ -27,6 +27,8 @@ caching :math:`L`.
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
@@ -64,7 +66,7 @@ class Identity:
         return m
 
 
-@jdc.pytree_dataclass
+@jdc.pytree_dataclass(init=False)
 class Fixed:
     """Pre-cholesky weighting at a frozen anchor :math:`V_0`.
 
@@ -73,20 +75,86 @@ class Fixed:
     The ``V`` argument to :meth:`whitening_residual` is accepted (so
     the protocol signature matches) but ignored.
 
+    Construction is keyword-only and requires exactly one of ``L0`` or
+    ``V0``:
+
+    - ``Fixed(L0=L0)`` --- supply the Cholesky factor directly.
+    - ``Fixed(V0=V0)`` --- supply the anchor variance; the framework
+      computes :math:`L_0 = \\mathrm{chol}(V_0)` for you.
+
+    Equivalent classmethod constructors :meth:`from_L0` and
+    :meth:`from_V0` are also provided.
+
+    Notes
+    -----
+    Positional construction is intentionally disallowed. In other GMM
+    libraries (notably ManifoldGMM) the analogous one-arg constructor
+    accepts the weighting matrix ``W`` directly; in :mod:`emu_gmm` the
+    stored object is the Cholesky factor :math:`L_0` of the *variance*
+    :math:`V_0 = W^{-1}`. Silently storing ``W`` as ``L0`` would yield
+    a wrong-but-runnable estimator, so we require an explicit kwarg.
+
     Parameters
     ----------
-    L0 : (M, M) lower-triangular array
-        Cholesky factor of the anchor variance. Construct via
-        :meth:`from_V0` if you have :math:`V_0` and want the factor
-        computed for you.
+    L0 : (M, M) lower-triangular array, keyword-only
+        Cholesky factor of the anchor variance.
+    V0 : (M, M) symmetric positive-definite array, keyword-only
+        Anchor variance; the Cholesky factor is computed internally.
     """
 
     L0: Float[Array, "M M"]
 
+    def __init__(
+        self,
+        *args: Any,
+        L0: Float[Array, "M M"] | None = None,
+        V0: Float[Array, "M M"] | None = None,
+    ) -> None:
+        if args:
+            raise TypeError(
+                "Fixed(...) does not accept positional arguments. "
+                "Pass either Fixed(L0=L0) (Cholesky factor of the anchor "
+                "variance) or Fixed(V0=V0) (anchor variance; Cholesky "
+                "computed internally). Note: the stored object is the "
+                "Cholesky factor of the variance V_0, not the weighting "
+                "matrix W = V_0^{-1}. If you are porting code that wrote "
+                "Fixed(W), use Fixed.from_V0(jnp.linalg.inv(W)) instead."
+            )
+        if L0 is None and V0 is None:
+            raise TypeError(
+                "Fixed(...) requires exactly one of L0= or V0=; neither "
+                "was supplied. Use Fixed(V0=V0) if you have the anchor "
+                "variance, or Fixed(L0=L0) if you already have its "
+                "Cholesky factor."
+            )
+        if L0 is not None and V0 is not None:
+            raise TypeError(
+                "Fixed(...) requires exactly one of L0= or V0=; both "
+                "were supplied. The two are redundant (L0 is the "
+                "Cholesky factor of V0); pick one."
+            )
+        if V0 is not None:
+            L0 = cholesky(V0)
+        # object.__setattr__ because @jdc.pytree_dataclass is frozen.
+        object.__setattr__(self, "L0", L0)
+
     @classmethod
     def from_V0(cls, V0: Float[Array, "M M"]) -> Fixed:
-        """Construct from an anchor variance ``V0`` (pre-cholesky)."""
-        return cls(L0=cholesky(V0))
+        """Construct from an anchor variance ``V0`` (pre-cholesky).
+
+        Equivalent to ``Fixed(V0=V0)``.
+        """
+        return cls(V0=V0)
+
+    @classmethod
+    def from_L0(cls, L0: Float[Array, "M M"]) -> Fixed:
+        """Construct directly from a Cholesky factor ``L0``.
+
+        Equivalent to ``Fixed(L0=L0)``. Useful if you already hold the
+        lower-triangular factor and want to make the intent explicit at
+        the call site.
+        """
+        return cls(L0=L0)
 
     def whitening_residual(
         self,

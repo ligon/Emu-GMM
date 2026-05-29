@@ -223,7 +223,7 @@ at masked-out positions cannot poison =V_X=.
 | =weighting='two_step'=     | =ContinuouslyUpdated()=        |
 | =weighting='cu'=           | =ContinuouslyUpdated()=        |
 | =weighting='identity'=     | =Identity()=                   |
-| =weighting='fixed', W=...= | =Fixed(V0=...)= (note: pass V0 not W; the framework's whitening uses \(V^{-1/2}\) internally) |
+| =weighting='fixed', W=...= | =Fixed(V0=...)= or =Fixed.from_V0(...)=. *Note: pass V0, not W.* The framework's whitening factor is \(L_0\) with \(L_0 L_0^\top = V_0\), so the analogue of ManifoldGMM's =W= is =jnp.linalg.inv(V0)=. Positional =Fixed(...)= now raises =TypeError= with a porting hint to prevent the silent W-as-L0 misuse. |
 
 CU and two-step are *asymptotically equivalent* but not identical in
 finite samples (=CLAUDE.md=, point 4). Emu-GMM v1 makes CU the
