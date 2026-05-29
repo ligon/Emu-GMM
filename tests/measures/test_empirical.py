@@ -228,6 +228,176 @@ class TestFromPandas:
         np.testing.assert_allclose(np.asarray(meas.mask), mask.to_numpy())
 
 
+class TestNaNAware:
+    """NaN-as-missing semantics at the I/O boundary.
+
+    The hot path is mask-based per ``docs/design.org``; the constructor
+    layer converts NaN cells into 0/1 masks and zeroes the NaN cells in
+    the stored ``x`` so that downstream JAX arithmetic and AD are NaN-free.
+    """
+
+    def test_from_pandas_infers_mask_from_nan(self):
+        """When no mask is supplied, ``~df.isna()`` becomes the mask."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0, 4.0],
+                "r1": [10.0, float("nan"), 30.0, float("nan")],
+            }
+        )
+        meas = EmpiricalMeasure.from_pandas(df)
+        # Mask inferred per-cell from NaN.
+        expected_mask = np.array([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [1.0, 0.0]])
+        np.testing.assert_allclose(np.asarray(meas.mask), expected_mask)
+        # NaN cells in x are replaced with zero.
+        assert not np.any(np.isnan(np.asarray(meas.x)))
+        np.testing.assert_allclose(
+            np.asarray(meas.x),
+            np.array([[1.0, 10.0], [2.0, 0.0], [3.0, 30.0], [4.0, 0.0]]),
+        )
+
+    def test_from_pandas_explicit_mask_overrides_nan_inference(self):
+        """An explicit mask wins over NaN-inference."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, float("nan"), 30.0],
+            }
+        )
+        # Force moment 1 fully off even though only row 1 is NaN.
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
+        meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+        np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
+
+    def test_from_pandas_nan_aware_false_preserves_legacy(self):
+        """``nan_aware=False`` reproduces the legacy all-ones-mask behaviour."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0],
+                "r1": [10.0, float("nan")],
+            }
+        )
+        meas = EmpiricalMeasure.from_pandas(df, nan_aware=False)
+        np.testing.assert_allclose(np.asarray(meas.mask), np.ones((2, 2)))
+        # And NaN is preserved in x.
+        assert bool(jnp.isnan(meas.x[1, 1]))
+
+    def test_from_nan_aware_constructor(self):
+        """``from_nan_aware`` derives mask from NaN in a raw array."""
+        x_np = np.array([[1.0, np.nan], [2.0, 20.0], [np.nan, 30.0]])
+        meas = EmpiricalMeasure.from_nan_aware(x_np)
+        expected_mask = np.array([[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+        np.testing.assert_allclose(np.asarray(meas.mask), expected_mask)
+        # NaN cells in x replaced with zero.
+        assert not np.any(np.isnan(np.asarray(meas.x)))
+        np.testing.assert_allclose(np.asarray(meas.weights), np.ones(3))
+
+    def test_from_nan_aware_with_weights(self):
+        x_np = np.array([[1.0], [np.nan], [3.0]])
+        w = np.array([0.5, 1.0, 1.5])
+        meas = EmpiricalMeasure.from_nan_aware(x_np, weights=w)
+        np.testing.assert_allclose(np.asarray(meas.weights), w)
+        np.testing.assert_allclose(np.asarray(meas.mask), [[1.0], [0.0], [1.0]])
+
+    def test_expectation_nan_safe_with_nan_psi_at_masked_cells(self):
+        """A psi that returns NaN where mask == 0 still yields a finite mean.
+
+        Exemplifies the Seasonality / IMRS non-holder pattern: the
+        residual is only defined for holders; the framework must zero
+        the masked-out contributions before the sum so that the
+        per-coordinate :math:`N_j` reflects the holder count and the
+        moment sum is finite.
+        """
+        # Three observations; moment 0 missing on row 1 (a "non-holder").
+        x = jnp.array([[1.0, np.nan], [np.nan, 5.0], [3.0, np.nan]])
+        # NaN-aware mask: 1 wherever finite.
+        meas = EmpiricalMeasure.from_nan_aware(x)
+
+        def psi(xi, theta):
+            # Returns the row verbatim; NaN cells reach the aggregator.
+            return xi
+
+        # psi as written reads x[1, 0] = 0.0 (cleaned by from_nan_aware),
+        # so no NaN should hit the sum. Exercise the deeper guarantee
+        # by hand-crafting a measure where x has NaN at masked cells.
+        x_with_nan = jnp.array(
+            [
+                [1.0, jnp.nan],
+                [jnp.nan, 5.0],
+                [3.0, jnp.nan],
+            ]
+        )
+        mask = jnp.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+        meas2 = EmpiricalMeasure(x=x_with_nan, mask=mask, weights=jnp.ones(3))
+        m = meas2.expectation(psi, _LinearParams(0.0, 0.0))
+        assert jnp.all(jnp.isfinite(m))
+        # Moment 0 = mean of {1.0, 3.0} = 2.0.
+        assert float(m[0]) == pytest.approx(2.0, rel=1e-6)
+        # Moment 1 = mean of {5.0} = 5.0.
+        assert float(m[1]) == pytest.approx(5.0, rel=1e-6)
+        # And the cleaned-NaN path via from_nan_aware agrees.
+        m_clean = meas.expectation(psi, _LinearParams(0.0, 0.0))
+        np.testing.assert_allclose(np.asarray(m_clean), np.asarray(m), atol=1e-7)
+
+    def test_expectation_gradient_nan_safe(self):
+        """The AD tape is NaN-free even when psi has NaN gradients at
+        masked cells. Without the where-guard, ``0 * NaN`` propagates
+        into the reverse-mode tangent and the gradient is NaN.
+        """
+        x = jnp.array([[1.0, jnp.nan], [3.0, jnp.nan], [2.0, 7.0]])
+        mask = jnp.array([[1.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(3))
+
+        # psi(x, theta) = [theta.a * x[0], theta.b * x[1]]. Gradient
+        # with respect to theta.b at the masked-out rows is NaN
+        # (NaN * 1 = NaN) without the protective where.
+        def psi(xi, theta):
+            return jnp.array([theta.a * xi[0], theta.b * xi[1]])
+
+        def total(t_flat):
+            theta = _LinearParams(a=t_flat[0], b=t_flat[1])
+            return jnp.sum(meas.expectation(psi, theta))
+
+        g = jax.grad(total)(jnp.array([0.5, 2.0]))
+        assert bool(jnp.all(jnp.isfinite(g)))
+
+    def test_jacobian_nan_safe(self):
+        """``jacobian`` also zeroes NaN-grad cells at masked positions."""
+        x = jnp.array([[1.0, jnp.nan], [3.0, jnp.nan], [2.0, 7.0]])
+        mask = jnp.array([[1.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(3))
+
+        def psi(xi, theta):
+            return jnp.array([theta.a * xi[0], theta.b * xi[1]])
+
+        G = meas.jacobian(psi, _LinearParams(a=0.5, b=2.0))
+        assert bool(jnp.all(jnp.isfinite(G)))
+        # G[0, 0] = mean of x[:, 0] over all three rows = (1 + 3 + 2) / 3.
+        assert float(G[0, 0]) == pytest.approx((1.0 + 3.0 + 2.0) / 3.0, rel=1e-6)
+        # G[0, 1] = d/db of moment 0 = 0.
+        assert float(G[0, 1]) == pytest.approx(0.0, abs=1e-6)
+        # G[1, 1] = mean of x[:, 1] over only row 2 = 7.
+        assert float(G[1, 1]) == pytest.approx(7.0, rel=1e-6)
+
+    def test_per_column_n_reflects_holder_count(self):
+        """Seasonality non-holder pattern: per-moment :math:`N_j`
+        reflects the per-asset holder count.
+        """
+        # 5 observations; "asset 0" held by all, "asset 1" only by the
+        # last two rows.
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "r1": [float("nan")] * 3 + [40.0, 50.0],
+            }
+        )
+        meas = EmpiricalMeasure.from_pandas(df)
+        # N_j = sum_i d_ij * w_i. With w_i = 1, this is the per-column
+        # holder count.
+        N_j = jnp.sum(meas.mask * meas.weights[:, None], axis=0)
+        assert float(N_j[0]) == pytest.approx(5.0)
+        assert float(N_j[1]) == pytest.approx(2.0)
+
+
 # ---------------------------------------------------------------------------
 
 

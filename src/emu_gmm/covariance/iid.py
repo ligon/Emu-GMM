@@ -91,12 +91,26 @@ class IIDCovariance:
             Symmetric PSD by construction.
         """
 
+        # Pre-sanitise data so NaN-typed cells (a non-holder's return)
+        # never enter the user's psi or its gradient. See the matching
+        # "double where" guard in
+        # :meth:`EmpiricalMeasure.expectation` for the AD rationale.
+        x_safe = jnp.where(jnp.isnan(measure.x), 0.0, measure.x)
+
         def psi_at(x):
             return _to_plain(psi(x, theta))
 
-        psi_batch = jax.vmap(psi_at)(measure.x)  # (N, M)
+        psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
         mask = measure.mask  # (N, M)
         weights = measure.weights  # (N,)
+
+        # NaN-safe: substitute zero at masked-out cells via where(...) so
+        # that 0 * NaN does not poison the sum. The standard
+        # mask * psi_batch path silently produces NaN at every masked
+        # cell whenever the user's psi returns NaN there, e.g., for the
+        # "non-holder" rows in a seasonality / IMRS specification.
+        mask_bool = mask > 0.0
+        psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
 
         # Per-coordinate effective sample size N_j = sum_i d_ij * w_i.
         N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
@@ -104,7 +118,7 @@ class IIDCovariance:
         # Pairwise overlap numerator: sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k.
         # einsum: i is summed; j, k are kept.
         w2 = weights * weights  # (N,)
-        weighted_psi = mask * psi_batch  # (N, M); zero out masked-out rows
+        weighted_psi = mask * psi_safe  # (N, M); zero masked-out rows
         numer = jnp.einsum("i,ij,ik->jk", w2, weighted_psi, weighted_psi)
 
         return _safe_outer_divide(numer, N_j)

@@ -169,6 +169,35 @@ class TestTwoClusterFormula:
 # ---------------------------------------------------------------------------
 
 
+class TestNaNSafety:
+    """Cluster-totals form guards against NaN at masked-out cells."""
+
+    def test_nan_in_psi_at_masked_cells_does_not_poison(self):
+        """psi returning NaN where mask == 0 still yields a finite V."""
+        # 4 obs, 2 moments, 2 clusters. Moment 1 missing on rows 0, 2.
+        x = jnp.array(
+            [
+                [1.0, jnp.nan],
+                [2.0, 20.0],
+                [3.0, jnp.nan],
+                [4.0, 40.0],
+            ]
+        )
+        mask = jnp.array(
+            [
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+            ]
+        )
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(4))
+        cluster_ids = jnp.array([0.0, 0.0, 1.0, 1.0])
+        cov = ClusteredCovariance(cluster_ids=cluster_ids, n_clusters=2)
+        V = cov.covariance(_identity_psi, _P(0.0, 0.0), meas)
+        assert bool(jnp.all(jnp.isfinite(V)))
+
+
 class TestJit:
     def test_covariance_jits(self):
         key = jax.random.PRNGKey(0)
