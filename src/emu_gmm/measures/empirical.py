@@ -101,6 +101,56 @@ def _safe_divide(
     return jnp.where(denom == 0.0, jnp.zeros_like(out), out)
 
 
+def _check_mask_psi_compatibility(
+    mask_shape: tuple[int, ...],
+    psi_shape: tuple[int, ...],
+) -> None:
+    """Raise a clear error if ``mask`` and ``psi(x_i)`` do not align.
+
+    The aggregator combines a stored ``(N, M_mask)`` mask with a
+    ``(N, M_psi)`` per-observation residual matrix via
+    ``jnp.where(mask, psi_batch, 0.0)`` and ``mask * weights[:, None] *
+    psi_batch``. If ``M_mask != M_psi`` JAX raises a generic broadcast
+    error that does not say which side is wrong. The typical cause is
+    constructing the measure via :meth:`EmpiricalMeasure.from_nan_aware`
+    without passing ``M=`` when the user's :math:`\\psi` returns
+    ``M != D`` moments (e.g. Hansen-Singleton, where ``x`` has three
+    columns but the moment is scalar). This helper fires at JAX
+    trace-time -- shapes are static during tracing -- and points the
+    user at the ``M=`` kwarg.
+
+    Parameters
+    ----------
+    mask_shape : tuple of int
+        Shape of ``self.mask``; expected ``(N, M_mask)``.
+    psi_shape : tuple of int
+        Shape of ``vmap(psi)(x)`` output; expected ``(N, M_psi)``.
+
+    Raises
+    ------
+    ValueError
+        If the moment dimensions disagree.
+    """
+    if len(mask_shape) != 2 or len(psi_shape) != 2:
+        # Defer to JAX's own error for non-2D oddities; the standard
+        # path produces (N, M)-shaped tensors.
+        return
+    n_mask, m_mask = mask_shape
+    n_psi, m_psi = psi_shape
+    if m_mask != m_psi:
+        raise ValueError(
+            f"EmpiricalMeasure: mask has shape (N={n_mask}, M={m_mask}) but "
+            f"psi returns shape (N={n_psi}, M={m_psi}); the moment "
+            f"dimensions disagree. The typical cause is constructing the "
+            f"measure via EmpiricalMeasure.from_nan_aware(x) without "
+            f"passing M=, which defaults to a (N, D)-shaped mask where "
+            f"D is the number of columns in x. When psi returns M != D "
+            f"moments (e.g. a Hansen-Singleton-style scalar moment built "
+            f"from three data columns), pass M= explicitly: "
+            f"EmpiricalMeasure.from_nan_aware(x, M={m_psi})."
+        )
+
+
 def _assert_finite_weights(
     weights: Float[Array, " N"],
     *,
@@ -230,6 +280,17 @@ class EmpiricalMeasure:
             return _to_plain(psi(x, theta))
 
         psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+        # Trace-time shape guard: the mask must broadcast against psi's
+        # output. The typical failure mode is constructing the measure
+        # via ``EmpiricalMeasure.from_nan_aware(x)`` (which infers a
+        # ``(N, D)`` mask from x's NaN pattern) when the user's psi
+        # returns M != D moments -- the Hansen-Singleton case where x
+        # carries ``(c_t, c_{t+1}, r_{t+1})`` and psi is scalar. The
+        # downstream ``jnp.where(mask, psi_batch, 0.0)`` then raises a
+        # generic JAX broadcast error that does not point back to the
+        # mask layout. Catch it here with a helpful pointer to the
+        # ``M=`` kwarg.
+        _check_mask_psi_compatibility(self.mask.shape, psi_batch.shape)
         # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
         # the weight multiplication. Without this guard, NaN at a
         # masked-out cell would propagate (0 * NaN = NaN in JAX).
@@ -331,6 +392,8 @@ class EmpiricalMeasure:
             return _to_plain(psi(x, theta))
 
         psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+        # Same trace-time shape check as :meth:`expectation_and_contributions`.
+        _check_mask_psi_compatibility(self.mask.shape, psi_batch.shape)
         # NaN-safe contraction: substitute zero wherever mask == 0 BEFORE
         # the weight multiplication (mirrors the pattern in
         # :meth:`expectation` and :meth:`jacobian`).
@@ -366,6 +429,9 @@ class EmpiricalMeasure:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
 
         grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
+        # Trace-time shape check; surface the same helpful message as
+        # :meth:`expectation_and_contributions` if mask vs psi disagree.
+        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:2])
         # NaN-safe: zero the gradient at masked-out (i, j) cells before
         # weight multiplication so 0 * NaN cannot poison the (M, K) sum.
         mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
@@ -426,6 +492,8 @@ class EmpiricalMeasure:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
 
         grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
+        # Same trace-time shape check as the other methods.
+        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:2])
         mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
         grad_safe = jnp.where(mask_bool, grad_batch, 0.0)  # (N, M, K)
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
@@ -577,16 +645,31 @@ class EmpiricalMeasure:
         cls,
         x: Any,
         weights: Any | None = None,
+        *,
+        M: int | None = None,
     ) -> "EmpiricalMeasure":
         """Construct an :class:`EmpiricalMeasure` from an array containing NaN.
 
         Convenience wrapper for the NaN-as-missing semantics described
-        in the module docstring. The per-coordinate mask is inferred
-        from ``~jnp.isnan(x)``, and NaN cells in the stored ``x`` are
-        replaced with zero so the hot path is NaN-free. Accepts any
-        2-D array-like that :func:`jax.numpy.asarray` can coerce; for
+        in the module docstring. NaN cells in the stored ``x`` are
+        replaced with the per-column observed mean so the hot path is
+        NaN-free, and a per-coordinate mask is inferred from
+        ``~jnp.isnan(x)``. Accepts any 2-D array-like that
+        :func:`jax.numpy.asarray` can coerce; for
         :class:`pandas.DataFrame` inputs use :meth:`from_pandas`
         instead (which preserves column-label semantics).
+
+        The user's :math:`\\psi(x_i, \\theta)` returns an :math:`M`-vector
+        of moments per observation. The number of moments :math:`M`
+        is in general *not* the number of data columns :math:`D`. The
+        canonical example is a Hansen--Singleton-style Euler equation
+        where ``x`` carries ``(c_t, c_{t+1}, r_{t+1})`` (so :math:`D=3`)
+        but :math:`\\psi` is a scalar (so :math:`M=1`). The internally
+        stored ``mask`` array must have shape :math:`(N, M)`, matching
+        the per-observation residual layout; mismatched broadcast at
+        ``expectation`` time surfaces as an opaque JAX shape error from
+        deep in the hot path. The ``M=`` keyword exists to make the
+        moment count explicit at construction time.
 
         Parameters
         ----------
@@ -594,10 +677,50 @@ class EmpiricalMeasure:
             Observations with NaN as the missing-cell sentinel.
         weights : array-like of length N, optional
             Per-observation weights. Defaults to all-ones.
+        M : int, keyword-only, optional
+            Number of moments returned by the user's :math:`\\psi`. When
+            supplied, the constructed mask has shape ``(N, M)``: row
+            :math:`i` contributes to every moment iff *every* observed
+            column of ``x[i, :]`` is finite (i.e. the row is fully
+            observed; any NaN in ``x[i, :]`` knocks the entire row out of
+            every moment's sum). This matches the typical structural
+            model where each scalar moment is a function of the full
+            row, so a single NaN component makes the row unusable for
+            any moment.
+
+            When ``None`` (the default), the mask has shape ``(N, D)``,
+            i.e. the legacy column-wise behaviour: row :math:`i`
+            contributes to moment :math:`j` iff ``x[i, j]`` is finite.
+            That default is correct only when :math:`M = D` *and* the
+            mapping from column :math:`d` to moment :math:`d` is the
+            identity, which is rarely the case for non-trivial
+            structural models. Prefer to pass ``M=`` explicitly.
 
         Returns
         -------
         measure : :class:`EmpiricalMeasure`
+
+        Raises
+        ------
+        ValueError
+            If ``x`` is not 2-D, or if ``M`` is supplied as a
+            non-positive integer.
+
+        Examples
+        --------
+        Hansen--Singleton Euler equation with a single moment built from
+        three data columns:
+
+        >>> import jax.numpy as jnp
+        >>> import numpy as np
+        >>> from emu_gmm.measures.empirical import EmpiricalMeasure
+        >>> # 100 observations of (c_t, c_{t+1}, r_{t+1}); D = 3.
+        >>> rng = np.random.default_rng(0)
+        >>> x = rng.normal(size=(100, 3))
+        >>> # psi returns one moment, so M = 1.
+        >>> meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+        >>> meas.mask.shape
+        (100, 1)
         """
         x_arr = jnp.asarray(x)
         if x_arr.ndim != 2:
@@ -608,7 +731,32 @@ class EmpiricalMeasure:
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
         _assert_finite_weights(w_arr, source="from_nan_aware")
-        mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
+
+        if M is None:
+            # Legacy behaviour: per-column NaN mask, shape (N, D). This
+            # is correct only when the user's psi returns M == D moments
+            # and the column-to-moment mapping is the identity. The
+            # ``mask`` lookup is silently broadcast against psi at
+            # expectation time, so a (N, D) mask with M != D produces an
+            # opaque shape error from inside the hot path -- pass M=
+            # explicitly to avoid that trap.
+            mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
+        else:
+            if not isinstance(M, int) or M <= 0:
+                raise ValueError(
+                    f"EmpiricalMeasure.from_nan_aware: M must be a positive "
+                    f"integer, got {M!r}"
+                )
+            # Row-wise missingness: a row contributes to every moment iff
+            # every column of x at that row is finite. A single NaN in
+            # the row knocks the entire row out of all M moments, which
+            # is the right semantics whenever psi reads multiple columns
+            # to produce one moment (e.g. Hansen-Singleton's
+            # u'(c_{t+1}) / u'(c_t) * r_{t+1} reads three columns to
+            # build one scalar).
+            row_finite = jnp.all(jnp.isfinite(x_arr), axis=1)  # (N,)
+            mask_arr = jnp.broadcast_to(row_finite[:, None], (n, M)).astype(jnp.float32)
+
         # Substitute the per-column observed-mean sentinel at NaN cells
         # rather than ``0.0`` so that partial residuals like
         # ``log(x[0])`` or ``1.0 / x[1]`` cannot produce a NaN cotangent

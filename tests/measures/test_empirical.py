@@ -446,6 +446,117 @@ class TestNaNAware:
         np.testing.assert_allclose(np.asarray(meas.weights), w)
         np.testing.assert_allclose(np.asarray(meas.mask), [[1.0], [0.0], [1.0]])
 
+    def test_from_nan_aware_explicit_M_hansen_singleton_shape(self):
+        """``M=`` produces a (N, M) mask matching psi's moment count.
+
+        Hansen-Singleton pattern: x carries three data columns
+        (c_t, c_{t+1}, r_{t+1}) but psi returns a single scalar
+        moment. Without M=, the inferred mask has shape (N, 3) which
+        broadcasts incompatibly against the (N, 1) psi batch and the
+        hot path raises a generic JAX broadcast error.
+        """
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(20, 3))
+        meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+        # Mask shape matches psi's output, not D.
+        assert meas.mask.shape == (20, 1)
+        # No NaN -> all rows fully observed -> mask is all-ones.
+        np.testing.assert_allclose(np.asarray(meas.mask), np.ones((20, 1)))
+
+        # And the estimate-time call succeeds (no opaque broadcast error).
+        def psi(xi, theta):
+            return jnp.array([theta.a + theta.b * xi[0]])
+
+        m = meas.expectation(psi, _LinearParams(a=0.0, b=1.0))
+        assert m.shape == (1,)
+        # Verify the numeric value.
+        np.testing.assert_allclose(float(m[0]), float(np.mean(x[:, 0])), rtol=1e-6)
+
+    def test_from_nan_aware_explicit_M_row_missingness_semantics(self):
+        """With M=, any NaN in row x_i knocks the row out of all M moments.
+
+        This is the correct semantics whenever psi reads multiple
+        columns to build each scalar moment: a single NaN component
+        makes the row unusable.
+        """
+        # 4 rows, 3 cols; row 1 has a NaN in col 0, row 3 has a NaN in
+        # col 2. Both rows should be masked out for every moment.
+        x = np.array(
+            [
+                [1.0, 2.0, 3.0],
+                [np.nan, 4.0, 5.0],
+                [6.0, 7.0, 8.0],
+                [9.0, 10.0, np.nan],
+            ]
+        )
+        meas = EmpiricalMeasure.from_nan_aware(x, M=2)
+        assert meas.mask.shape == (4, 2)
+        expected = np.array(
+            [
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+            ]
+        )
+        np.testing.assert_allclose(np.asarray(meas.mask), expected)
+
+    def test_from_nan_aware_M_kwarg_is_keyword_only(self):
+        """``M`` must be passed by keyword (defensive against positional bugs)."""
+        x = np.array([[1.0, 2.0], [3.0, 4.0]])
+        with pytest.raises(TypeError):
+            # Positional M= is rejected; weights eats the third positional.
+            EmpiricalMeasure.from_nan_aware(x, None, 1)
+
+    def test_from_nan_aware_M_nonpositive_raises(self):
+        x = np.array([[1.0], [2.0]])
+        with pytest.raises(ValueError, match=r"M must be a positive integer"):
+            EmpiricalMeasure.from_nan_aware(x, M=0)
+        with pytest.raises(ValueError, match=r"M must be a positive integer"):
+            EmpiricalMeasure.from_nan_aware(x, M=-1)
+
+    def test_mask_psi_shape_mismatch_raises_helpful_error(self):
+        """The default ``from_nan_aware(x)`` with D != M surfaces a clear error.
+
+        Reproduces the bug in issue #51: x has D=3 columns but psi is
+        scalar (M=1). The default ``from_nan_aware(x)`` infers a (N, 3)
+        mask that does not broadcast against (N, 1) psi. The aggregator
+        should raise a clear ValueError pointing the user at the M=
+        kwarg, not the generic JAX broadcast error.
+        """
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=(10, 3))
+        # Default behaviour produces (N, D=3) mask.
+        meas = EmpiricalMeasure.from_nan_aware(x)
+        assert meas.mask.shape == (10, 3)
+
+        def psi(xi, theta):
+            # Scalar moment, so M=1.
+            return jnp.array([theta.a + theta.b * xi[0]])
+
+        with pytest.raises(ValueError) as excinfo:
+            meas.expectation(psi, _LinearParams(a=0.0, b=1.0))
+        msg = str(excinfo.value)
+        assert "mask" in msg
+        assert "psi" in msg
+        # Mention the remediation: M= kwarg with the right value.
+        assert "M=1" in msg
+        assert "from_nan_aware" in msg
+
+    def test_explicit_M_matches_psi_avoids_shape_mismatch(self):
+        """With explicit M=, the hot path runs without surfacing the error."""
+        rng = np.random.default_rng(2)
+        x = rng.normal(size=(10, 3))
+        meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+
+        def psi(xi, theta):
+            return jnp.array([theta.a + theta.b * xi[0]])
+
+        # Should not raise.
+        m = meas.expectation(psi, _LinearParams(a=0.0, b=1.0))
+        assert m.shape == (1,)
+        assert bool(jnp.isfinite(m[0]))
+
     def test_expectation_nan_safe_with_nan_psi_at_masked_cells(self):
         """A psi that returns NaN where mask == 0 still yields a finite mean.
 
