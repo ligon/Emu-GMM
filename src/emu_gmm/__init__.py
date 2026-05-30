@@ -63,14 +63,6 @@ from emu_gmm.inference import (
     k_statistic,
     moment_wild_bootstrap,
 )
-from emu_gmm.manifolds import (
-    Euclidean,
-    LeafSpec,
-    ManifoldParam,
-    ManifoldSpec,
-    Product,
-    PSDFixedRank,
-)
 from emu_gmm.measures import (
     AnalyticalMeasure,
     EmpiricalMeasure,
@@ -157,13 +149,12 @@ __all__ = [
     # Inference
     "moment_wild_bootstrap",
     "WildBootstrapResult",
-    # Manifolds (v2)
-    "ManifoldParam",
-    "ManifoldSpec",
-    "LeafSpec",
-    "Euclidean",
-    "PSDFixedRank",
-    "Product",
+    # NOTE: the v2 manifolds package (Euclidean / PSDFixedRank / Product /
+    # ManifoldParam / ManifoldSpec) is intentionally NOT re-exported here
+    # while it is a preview surface — it can be constructed but not yet
+    # estimated with (manifold-aware flatten + RiemannianLM land in Phase
+    # 4/5). Import it explicitly via `from emu_gmm.manifolds import ...`.
+    # See docs/implementation-plan-v2-manifold.org §0.1.
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",

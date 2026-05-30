@@ -45,6 +45,13 @@ It is shippable and correct *as far as it goes* --- but it is "Phase 1--3
 lite": it consciously defers several items this plan's Phase 1 spec
 (Section 3) calls for. Deviations from the spec as written:
 
+/Merged as a PREVIEW surface (Option C)./ Because the slice can construct
+but not yet estimate with a manifold parameter, the manifold types are
+*not* re-exported from the top-level =emu_gmm= namespace; users reach them
+via =from emu_gmm.manifolds import ...=. The top-level re-export lands once
+Phase 4/5 make manifold estimation real. This keeps the rescued work on
+=main= without advertising an unfinished public API.
+
 | Spec item (Section 3 / §2.x)                       | Landed slice (=feat/v2-manifolds-phase1-3=)                                  |
 |----------------------------------------------------+------------------------------------------------------------------------------|
 | =flatten_params -> (flat, treedef, manifold_spec)= | KEPT v1 2-tuple =(flat, treedef)= bitwise; added separate                    |
