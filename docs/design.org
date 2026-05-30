@@ -156,19 +156,21 @@ Decoupling the measure from physical data files introduces major diagnostic and 
 
 * Worked Example --- Consumption Euler Equation
 
-To demonstrate the abstraction concretely, consider a standard consumption Euler equation under power utility. The model parameters are \(\theta = (\beta, \gamma) \in \Theta \subset \mathbb{R}^2\) where \(\beta\) is the discount factor and \(\gamma\) is the coefficient of relative risk aversion. The observation vector is \(x_t = (c_t, c_{t+1}, r_{t+1}) \in \mathbb{R}^3\): current consumption, realised next-period consumption, and the realised asset return.
+To demonstrate the abstraction concretely, consider a Hansen--Singleton-style multi-asset consumption Euler equation under power utility. The structural parameters are \(\theta = (\beta, \gamma) \in \Theta \subset \mathbb{R}^2\) (so \(K = 2\)) where \(\beta\) is the discount factor and \(\gamma\) is the coefficient of relative risk aversion. With \(J\) risky assets, the observation vector is \(x_t = (c_t,\, c_{t+1},\, r_{1,t+1},\, \dots,\, r_{J,t+1}) \in \mathbb{R}^{2+J}\): current consumption, realised next-period consumption, and the realised gross returns on the \(J\) assets. The bundled example in =src/emu_gmm/examples/euler.py= uses \(J = 3\), giving \(M = 3\) and \(M - K = 1\) overidentifying restriction --- the smallest \(J\) for which the system admits a proper J-test.
 
 ** The StructuralModel
-The elementary Euler-equation residual is:
-\[ \psi(x_t, \theta) = \beta \left( \frac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{t+1}) - 1 \]
+There is one Euler-equation residual per asset:
+\[ \psi_j(x_t, \theta) = \beta \left( \frac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{j,t+1}) - 1, \qquad j = 1, \dots, J \]
+so \(\psi(x_t, \theta) \in \mathbb{R}^M\) with \(M = J\). Each component shares the same stochastic discount factor \(\beta\,(c_{t+1}/c_t)^{-\gamma}\); the assets differ only through their gross returns.
 
-With \(M = 1\) and \(K = 2\), the analytical \(M \times K\) Jacobian is the \(1 \times 2\) row:
-\[ \nabla_\theta \psi(x_t, \theta) = \begin{bmatrix} \left( \tfrac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{t+1}) & -\beta \left( \tfrac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{t+1}) \ln\!\left( \tfrac{c_{t+1}}{c_t} \right) \end{bmatrix} \]
+The analytical \(M \times K\) Jacobian, evaluated at a single observation, has rows
+\[ \nabla_\theta \psi_j(x_t, \theta) = \begin{bmatrix} \left( \tfrac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{j,t+1}) & -\beta \left( \tfrac{c_{t+1}}{c_t} \right)^{-\gamma} (1 + r_{j,t+1}) \ln\!\left( \tfrac{c_{t+1}}{c_t} \right) \end{bmatrix}, \]
+so for \(J = 3\) the per-observation Jacobian is a \(3 \times 2\) matrix. The =StructuralModel= holds the residual function and its (autodiffed) Jacobian and nothing else --- no data, no quadrature grids, no simulation seeds.
 
-The =StructuralModel= holds these two functions and nothing else --- no data, no quadrature grids, no simulation seeds.
+A note on the simulator side: the =SyntheticMeasure= sampler used by the bundled example is intentionally \(\theta\)-independent --- the DGP is fixed at the truth \((\beta_0, \gamma_0)\) and \(\theta\) is what we are trying to recover from those draws. This is the standard identification round-trip shortcut: the sampler's =theta= argument is accepted for protocol conformance and discarded (=del theta=). The reparameterisation gradient story of Section 4 still applies whenever a real \(\theta\)-dependent simulator is supplied; this is the same accommodation called out in =api-sketch.org= Section 5.
 
-** Three Contexts, One Model
-The same =StructuralModel= instance is evaluated across three orthogonal contexts without altering its code path:
+** Three Measure / Strategy Pairs, One Model
+The same =StructuralModel= instance is evaluated against three orthogonal /(measure, strategy)/ pairs without altering its code path. Per Section 2, =Context= is sugar rather than a third primitive; v1 implements only the unbundled call signature =estimate(model, measure, *, covariance, weighting, optimizer, theta_init)=, so the diagram below shows the (Measure, CovarianceStrategy) pair that an estimation call site actually supplies:
 
 #+BEGIN_SRC text
                             +------------------------------+
@@ -179,10 +181,10 @@ The same =StructuralModel= instance is evaluated across three orthogonal context
              +-----------------------------+-----------------------------+
              v                             v                             v
  +-----------------------+     +-----------------------+     +-----------------------+
- |   EmpiricalContext    |     |   AnalyticalContext   |     |   SyntheticContext    |
+ |   EmpiricalMeasure    |     |  AnalyticalMeasure    |     |  SyntheticMeasure     |
  +-----------------------+     +-----------------------+     +-----------------------+
  | CEX panel:            |     | Joint log-normal      |     | Log-normal preference |
- | (c_t, c_{t+1}, r_{t+1})|    | consumption /return   |     | shock simulator;      |
+ | (c_t, c_{t+1}, r_j)   |     | consumption /return   |     | shock simulator;      |
  | weights, cluster IDs. |     | population density.   |     | frozen z_s batch.     |
  +-----------------------+     +-----------------------+     +-----------------------+
  | ClusteredCovariance:  |     | AnalyticalCovariance: |     | SyntheticCovariance:  |
@@ -191,15 +193,21 @@ The same =StructuralModel= instance is evaluated across three orthogonal context
  |                       |     | population means.     |     | combined w/ V_X for   |
  |                       |     |                       |     | (1+1/S) SMM inflation.|
  +-----------------------+     +-----------------------+     +-----------------------+
+            \                            |                            /
+             \                           |                           /
+              \                          v                          /
+               +--------------> estimate(model, measure, <----------+
+                                covariance=..., weighting=...,
+                                optimizer=..., theta_init=...)
 #+END_SRC
 
 Three estimation paths, one =StructuralModel=:
 
-- /Empirical/: \(\hat\theta = \arg\min_\theta Q_X(\theta)\) on CEX household data with cluster-robust variance.
+- /Empirical/: \(\hat\theta = \arg\min_\theta Q_X(\theta)\) on CEX household data with cluster-robust variance; =estimate(model, EmpiricalMeasure(...), covariance=ClusteredCovariance(...), ...)=.
 - /Analytical/: the theoretical \(\arg\min_\theta Q_\text{analytical}(\theta)\) is \(\theta_0\) with \(Q = 0\) exactly; numerically, deviations beyond quadrature tolerance diagnose identification or conditioning failures, not sample noise.
-- /Synthetic/: simulate \(\{(c_t, c_{t+1}, r_{t+1})\}_{t=1}^{N_\text{sim}}\) from a generative model parameterised at \(\theta\), hand to the same estimator paired with the empirical context. SMM falls out.
+- /Synthetic/: simulate \(\{(c_t, c_{t+1}, r_{1,t+1}, \dots, r_{J,t+1})\}_{t=1}^{N_\text{sim}}\) from a generative model parameterised at \(\theta\), hand to the same estimator. SMM matching (combining the synthetic measure with an empirical measure on a shared moment vector) is deferred to v2; see =CLAUDE.md=.
 
-The same =psi=, the same gradient, the same objective: only the =Context= changes.
+The same =psi=, the same gradient, the same objective: only the (measure, covariance) pair changes.
 
 * Differentiation Architecture and Gradient Propagation
 
@@ -284,6 +292,10 @@ Alternative regularisers are available as opt-in:
 
 To avoid introducing non-smoothness into the objective surface, \(\tau\) is selected once at an anchor point (first-stage \(\hat\theta_1\) for =Fixed= / =Iterated=; a pilot evaluation for =ContinuouslyUpdated=) and held fixed thereafter. The chosen \(\tau\), the achieved \(\kappa(V_\mu^\star)\), and \(\lambda_{\min}(V_\mu)/\lambda_{\max}(V_\mu)\) are logged at every \(V\) refresh; a binding ridge is surfaced as a diagnostic flag rather than silently absorbed.
 
+*Implementation note --- diagonal-V dispatch.* The canonical form \(V + \tau\,\operatorname{diag}(V)\) is degenerate when \(V\) is itself diagonal: it collapses to \((1+\tau)\,V\), which leaves \(\kappa(V^\star) = \kappa(V)\) regardless of \(\tau\), so the bisection over \(\tau\) silently saturates at \(\tau_{\max}\) without ever achieving the target. v1's =DiagonalTikhonov= therefore dispatches: it detects near-diagonal \(V\) with relative tolerance \(10^{-12}\) on the off-diagonal entries and switches to the additive eigenvalue shift
+\[ V^\star = V + \tau\,\frac{\operatorname{tr}(V)}{M}\,I, \]
+which actually moves the spectrum. The two branches agree on the isotropic limit \(V = c\,I\), so the dispatch introduces no discontinuity there. The trade-off is real: the canonical (non-diagonal) branch is per-moment scale-equivariant (rescaling moment \(j\) by \(s_j\) rescales \(V^\star_{jj}\) by \(s_j^2\) identically to \(V_{jj}\)); the diagonal branch is only uniformly scale-equivariant (rescaling all moments by the same \(s\) preserves the ridge shape, but heterogeneous per-moment rescaling does not). The diagonal branch is the price of a working bisection on structurally diagonal \(V\); in practice the dispatch triggers in =AnalyticalCovariance= setups where the user supplies a diagonal \(V\) directly, not in the empirical hot path. See =src/emu_gmm/regularization.py= for the implementation.
+
 Regularization alters the limit law of \(Q_\mu(\hat\theta)\): the \(\chi^2_{M-K}\) distribution becomes a weighted-\(\chi^2\) whose weights depend on \(\tau\). For non-binding \(\tau\) the deviation is negligible; the inference engine reports both the nominal \(\chi^2\) critical value and a regularization-adjusted critical value when \(\tau\) exceeds a configurable threshold (default \(\tau > 0.01\)).
 
 ** Identification Diagnostics
@@ -298,7 +310,9 @@ Each diagnostic surfaces a structured report (failure category, offending dimens
 ** The Overidentification Statistic
 Under the null hypothesis that the parametric model is correctly specified, and with \(V_\mu(\theta)\) used unregularized, the minimized sample criterion function converges cleanly to a chi-squared distribution:
 \[ Q_X(\hat{\theta}) \xrightarrow{d} \chi^2_{M - K}. \]
-When the variance has been regularized, the limit is a weighted sum of chi-squared variates; the inference engine reports both the nominal and regularization-adjusted critical values as described in the regularization section above.
+When the variance has been regularized to \(V^\star = V + \tau\,R(V)\), the limit is a generalised chi-squared: \(Q_X(\hat\theta) \xrightarrow{d} \sum_i w_i Z_i^2\) where the \(w_i\) are the (at most \(M - K\)) non-zero eigenvalues of \(P\,\tilde V\,P\) in the whitened coordinates \(\tilde y = L_\star^{-1} m\), with \(P\) the orthogonal projector onto the orthogonal complement of \(\operatorname{col}(L_\star^{-1} G)\). At \(\tau = 0\) all surviving weights collapse to 1, recovering \(\chi^2_{M-K}\); the derivation is =mcar-asymptotics.org= Theorem 6.
+
+v1 reports the generalised-chi-squared survival as =EstimationResult.J_pvalue_adjusted=, computed by the Welch--Satterthwaite moment-matching approximation [cite:@satterthwaite1946]: match the first two moments of \(\sum_i w_i Z_i^2\) (mean \(\sum w_i\), variance \(2 \sum w_i^2\)) to a scaled chi-squared \(c \cdot \chi^2_v\) with \(c = \sum w_i^2 / \sum w_i\) and \(v = (\sum w_i)^2 / \sum w_i^2\). The implementation is =regularization_adjusted_pvalue= in =src/emu_gmm/diagnostics.py= and is jit/vmap-traceable end-to-end. Davies' / Imhof's exact CDF would be more accurate but requires non-trivial machinery deferred to v2. Both =J_pvalue= (the nominal \(\chi^2_{M-K}\) value) and =J_pvalue_adjusted= are surfaced on every result so the user can compare them and judge whether the regularisation is materially distorting inference.
 
 ** Architectural Core Highlights
 
@@ -351,11 +365,15 @@ producing a =NamedArray[Params, ParamsDual]= naturally, without further renaming
 Changing \(K\), \(M\), or \(N\) between runs triggers JIT recompilation; JAX's shape-signature cache amortises the cost across repeated estimations at the same dimensions, so the recompile bites only at the start of a parameter / moment sweep.
 
 ** Labeled Missingness Masks as Tensor Fields
-Rather than relying on floating-point =NaN= sentinels that contaminate the automatic differentiation tape, the missingness layout is captured as a dedicated boolean structure mapped directly over the named axes:
-\[ \text{mask} \in \text{ha.NamedArray}[\text{Obs}, \text{Moments}, \text{bool}] \]
+Rather than relying on floating-point =NaN= sentinels that contaminate the automatic differentiation tape, the missingness layout is captured as a dedicated boolean structure. At the I/O boundary the spec is
+\[ \text{mask} \in \text{ha.NamedArray}[\text{Obs}, \text{Moments}, \text{bool}], \]
+i.e. =EmpiricalMeasure.from_pandas= / =from_nan_aware= / =from_numpy= constructors accept named-array boolean masks (and derive one from =~isna()= when handed a NaN-aware =DataFrame=). /Internal storage/ inside the =EmpiricalMeasure= dataclass is the plain =Float[Array, "N M"]= 0/1 form (=mask: Float[Array, "N M"]= in =src/emu_gmm/measures/empirical.py=); this is the form that goes through =jit= and =vmap=, multiplied directly into per-observation \(\psi\) values inside =expectation=, =jacobian=, =IIDCovariance=, and =ClusteredCovariance=. The conversion is a one-shot boundary translation; the named-array carrier survives only in metadata.
+
 The =EmpiricalCovarianceStrategy= leverages this mask to execute coordinate-wise element selection entirely within compiled tensor primitives, enabling JAX to perform highly parallelized data filtering across SIMD lanes or hardware accelerators without dropping out of the execution graph.
 
 NaN remains the natural sentinel at the /I/O boundary/: many real-data workflows (asset returns for non-holders, seasonal residuals for households outside a contemporaneous holding) arrive as NaN-typed cells in a =pandas.DataFrame=. The =EmpiricalMeasure.from_pandas= and =from_nan_aware= constructors translate between the two conventions in a single pass: the mask is inferred from =~isna()=, NaN cells in the stored =x= are replaced with zero, and the hot path remains the boolean / 0--1 form above. Inside =expectation=, =jacobian=, =IIDCovariance=, and =ClusteredCovariance=, every contraction guards against residual NaNs via =jnp.where(mask > 0, psi, 0.0)= prior to multiplication --- this is essential because in JAX =0 * NaN == NaN= and a user-supplied =psi= that returns NaN at masked-out rows would otherwise poison both the moment sum and reverse-mode autodiff.
 
 ** Structured Egress and Metadata Binding
 Because =haliax.NamedArray= instances and custom dataclasses decorated with =@jdc.pytree_dataclass= are fully compliant JAX PyTrees, the final outputs of the estimation loop require zero reconstruction or mapping steps. The =InferenceEngine= returns parameter arrays, covariance matrices, and overidentification statistics that inherently carry their coordinate strings, producing self-documenting diagnostic footprints.
+
+One deliberate exception: =EstimationResult.coef_table= returns a =pandas.DataFrame= indexed by parameter name directly (columns =estimate=, =std_error=, =t_stat=, =p_value=), with the index hand-rolled from =LabelContext.param_names= rather than routed through a =haliax.NamedArray= carrier. The egress payload is a heterogeneous (=float64=, p-values from =scipy.stats=) table consumed at the human / pandas boundary, so the NamedArray detour earns nothing; the implementation in =src/emu_gmm/types.py= treats =coef_table= as a cached property that materialises the DataFrame directly. The general "NamedArray inside, pandas at the I/O boundary" framing still applies to =Sigma_theta=, =V_X=, and per-moment diagnostics --- only the coefficient summary skips the carrier.
