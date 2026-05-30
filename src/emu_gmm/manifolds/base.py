@@ -43,10 +43,38 @@ class ManifoldParam(Protocol):
     retraction(point, tangent_vector) -> point
         First-order retraction of a tangent vector at ``point`` back to
         the manifold.
+    retraction_differential(point) -> scalar
+        The per-coordinate retraction differential ``dR_x(v)/dv|_{v=0}``
+        --- the factor mapping a tangent perturbation to its ambient
+        image. ``1`` for :class:`Euclidean` (additive retraction);
+        ``point`` for :class:`emu_gmm.manifolds.positive.Positive`
+        (exponential retraction). This is the scaling the estimator
+        applies to the Jacobian columns when building ``Sigma_theta`` in
+        tangent coordinates (delta-method push-through), and the same
+        ``step_scale`` the Riemannian LM solver uses for its
+        metric-correct Gauss--Newton step. Distinct from
+        ``euclidean_to_riemannian_gradient`` (the inverse-metric gradient
+        conversion); the two must not be conflated for inference.
     riemannian_gradient(point, euclidean_gradient) -> tangent_vector
         Convert an ambient-space Euclidean gradient to a Riemannian
         gradient (tangent vector). For embedded-metric manifolds this is
         the projection of the Euclidean gradient.
+    euclidean_to_riemannian_gradient(point, euclidean_gradient) -> tangent
+        Phase-4 canonical name for the same conversion (matches plan §498
+        and the ``v2-chunk-a-types-ops`` operator surface). For the v1
+        :class:`Euclidean` reference it is the identity; for
+        :class:`emu_gmm.manifolds.positive.Positive` it scales by
+        ``x**2``. The estimator's information-matrix block calls this
+        name explicitly; ``riemannian_gradient`` is retained as a
+        backward-compatible alias on the concrete manifolds.
+    inner_product(point, u, v) -> scalar
+        Riemannian inner product of two tangent vectors at ``point``.
+        Phase-4 addition (additive, non-breaking): required by
+        :class:`emu_gmm.manifolds.riemannian_lm.RiemannianLM` for its
+        metric-correct convergence test.
+    norm(point, tangent_vector) -> scalar
+        Riemannian norm of a tangent vector; defaults to
+        ``sqrt(inner_product(point, v, v))``. Phase-4 addition.
     distance(point_a, point_b) -> scalar
         Geodesic (or chord) distance between two manifold points.
     random_point(key) -> point
@@ -67,7 +95,17 @@ class ManifoldParam(Protocol):
 
     def retraction(self, point: Any, tangent_vector: Any) -> Any: ...
 
+    def retraction_differential(self, point: Any) -> Any: ...
+
     def riemannian_gradient(self, point: Any, euclidean_gradient: Any) -> Any: ...
+
+    def euclidean_to_riemannian_gradient(
+        self, point: Any, euclidean_gradient: Any
+    ) -> Any: ...
+
+    def inner_product(self, point: Any, u: Any, v: Any) -> Any: ...
+
+    def norm(self, point: Any, tangent_vector: Any) -> Any: ...
 
     def distance(self, point_a: Any, point_b: Any) -> Any: ...
 

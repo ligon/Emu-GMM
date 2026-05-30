@@ -122,11 +122,36 @@ class PSDFixedRank:
         """
         return jnp.asarray(point) + jnp.asarray(tangent_vector)
 
+    def retraction_differential(self, point: Any) -> Any:  # noqa: ARG002
+        r"""Retraction differential ``1`` (additive retraction ``Y + V``)."""
+        del point
+        return jnp.asarray(1.0)
+
     def riemannian_gradient(
         self, point: Any, euclidean_gradient: Any
     ) -> Any:  # noqa: ARG002
         r"""Identity (per :file:`pymanopt/manifolds/psd.py:38-40`)."""
         return euclidean_gradient
+
+    def euclidean_to_riemannian_gradient(
+        self, point: Any, euclidean_gradient: Any
+    ) -> Any:  # noqa: ARG002
+        r"""Phase-4 canonical name; identity under the embedded metric.
+
+        (The horizontal projection is applied on the tangent vector
+        during :meth:`projection` / retraction, not on the gradient.)
+        """
+        del point
+        return euclidean_gradient
+
+    def inner_product(self, point: Any, u: Any, v: Any) -> Any:  # noqa: ARG002
+        r"""Embedded Frobenius inner product :math:`\langle U, V\rangle_F`."""
+        del point
+        return jnp.sum(jnp.asarray(u) * jnp.asarray(v))
+
+    def norm(self, point: Any, tangent_vector: Any) -> Any:
+        r"""Frobenius norm ``sqrt(inner_product(V, V))``."""
+        return jnp.sqrt(self.inner_product(point, tangent_vector, tangent_vector))
 
     def distance(self, point_a: Any, point_b: Any) -> Any:
         r"""Geodesic distance via the manifold logarithm.

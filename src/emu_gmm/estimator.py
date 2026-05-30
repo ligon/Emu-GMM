@@ -65,6 +65,9 @@ from emu_gmm.diagnostics import (
     compute_cond_info,
     regularization_adjusted_pvalue,
 )
+from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.riemannian_lm import riemannian_lm
+from emu_gmm.manifolds.spec import ManifoldSpec
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
@@ -131,6 +134,61 @@ def _binding_ridge(
     return jnp.asarray(tau) > jnp.asarray(threshold)
 
 
+def _all_euclidean(manifold_spec: ManifoldSpec) -> bool:
+    """True when every leaf is Euclidean and there is no gauge structure."""
+    if manifold_spec.total_gauge_dim != 0:
+        return False
+    return all(isinstance(ls.manifold, Euclidean) for ls in manifold_spec.leaf_specs)
+
+
+def _is_riemannian_optimizer(optimizer: Any) -> bool:
+    """Detect a :class:`RiemannianOptimizer` by its ``manifold_spec`` param.
+
+    A v1 :class:`~emu_gmm.types.Optimizer` has ``__call__(residual_fn,
+    theta_init)``; a v2 :class:`~emu_gmm.manifolds.optimizer.RiemannianOptimizer`
+    adds a third ``manifold_spec`` parameter. The signature is the
+    distinguishing surface (plan §2.6 / §7).
+    """
+    try:
+        sig = inspect.signature(optimizer.__call__)
+    except (TypeError, ValueError):
+        return False
+    return "manifold_spec" in sig.parameters
+
+
+def _resolve_optimizer(
+    manifold_spec: ManifoldSpec,
+    user_optimizer: Optimizer | None,
+) -> tuple[Any, str]:
+    """Resolve the optimiser and the dispatch mode (``"v1"`` / ``"v2"``).
+
+    Rules (plan §2.6 / §7):
+
+    1. ``None`` + all-Euclidean -> ``optimistix_lm()``, ``"v1"``.
+    2. ``None`` + any non-Euclidean leaf -> ``riemannian_lm()``, ``"v2"``.
+    3. v1 optimiser + all-Euclidean -> ``"v1"`` (no adapter).
+    4. v1 optimiser + any non-Euclidean leaf -> :class:`TypeError`.
+    5. :class:`RiemannianOptimizer` -> ``"v2"``.
+    """
+    all_euc = _all_euclidean(manifold_spec)
+    if user_optimizer is None:
+        if all_euc:
+            return optimistix_lm(), "v1"
+        return riemannian_lm(), "v2"
+    if _is_riemannian_optimizer(user_optimizer):
+        return user_optimizer, "v2"
+    # User supplied a v1-style Optimizer.
+    if all_euc:
+        return user_optimizer, "v1"
+    raise TypeError(
+        "estimate(): the supplied optimizer satisfies the v1 Optimizer "
+        "protocol (residual_fn, theta_init) but theta_init has a "
+        "non-Euclidean manifold leaf (e.g. Positive). Use "
+        "emu_gmm.manifolds.riemannian_lm.riemannian_lm() (or pass "
+        "optimizer=None to auto-dispatch) for manifold parameters."
+    )
+
+
 def build_estimator(
     model: StructuralModel,
     *,
@@ -191,8 +249,13 @@ def build_estimator(
         weighting = ContinuouslyUpdated()
     if regularization is None:
         regularization = DiagonalTikhonov()
-    if optimizer is None:
-        optimizer = optimistix_lm()
+
+    # Manifold spec + optimiser dispatch (plan §2.6 / §7). For v1-style
+    # all-Euclidean trees this resolves to optimistix_lm() and mode
+    # "v1"; a non-Euclidean leaf (e.g. Positive) routes to RiemannianLM
+    # with mode "v2".
+    manifold_spec = params_mod.manifold_spec_from_params(theta_init)
+    optimizer, dispatch_mode = _resolve_optimizer(manifold_spec, optimizer)
 
     # Capture the template measure so subsequent calls can detect
     # identity reuse and short-circuit residual-closure rebuilding.
@@ -366,8 +429,13 @@ def build_estimator(
     # different measure object correctly rebuild the inference closure
     # (preserving correctness), but the *same* measure path reuses the
     # cached jit entry.
-    half_M_minus_K_overidentified = (M - K) > 0
-    J_dof = max(M - K, 0)
+    # Identified-parameter count: ambient total_dimension minus the
+    # gauge nullspace. For the v1 all-Euclidean path total_gauge_dim==0
+    # and total_dimension==K, so this recovers J_dof = M - K. For a
+    # Positive(1,1) leaf gauge_dim==0 too, so J_dof = M - 1.
+    dim_info = manifold_spec.total_dimension - manifold_spec.total_gauge_dim
+    half_M_minus_K_overidentified = (M - dim_info) > 0
+    J_dof = max(M - dim_info, 0)
 
     def _make_compute_inference_jit(
         measure_local: Measure,
@@ -419,7 +487,30 @@ def build_estimator(
             if hasattr(G_local_raw, "array"):
                 G_local_raw = G_local_raw.array
             G_local = jnp.asarray(G_local_raw)
-            Z_local = jax.scipy.linalg.solve_triangular(L_local, G_local, lower=True)
+            # Per-column retraction-differential scaling (plan §2.4):
+            # replace column j of G with dx/dv|_0 * G[:, j], the Jacobian
+            # in the retraction chart. Every first-order retraction has
+            # UNIT differential at v=0 (DR_x(0)=Id) -- Euclidean (x+v) and
+            # Positive (x e^{v/x}) alike -- so this scaling is the identity
+            # and G_riem is the ambient Jacobian. The reported Sigma_theta
+            # is therefore the ambient natural-scale sandwich
+            # (G'LambdaG)^{-1} = Var(theta_hat), matching ../ManifoldGMM's
+            # convention (NOT a metric-rescaled / log-scale variance; the
+            # affine-invariant euclidean_to_riemannian_gradient=x^2 is for
+            # the geometry, not the covariance). Kept as an explicit
+            # per-leaf call so a future non-identity chart would compose.
+            # All leaves are scalar so flat index == leaf.
+            G_riem = jnp.stack(
+                [
+                    manifold_spec.leaf_specs[j].manifold.retraction_differential(
+                        theta_flat[j]
+                    )
+                    * G_local[:, j]
+                    for j in range(K)
+                ],
+                axis=1,
+            )
+            Z_local = jax.scipy.linalg.solve_triangular(L_local, G_riem, lower=True)
             info_local = Z_local.T @ Z_local
             Sigma_local = jnp.linalg.inv(info_local)
             kappa_local = jnp.linalg.cond(V_star_local)
@@ -513,6 +604,15 @@ def build_estimator(
                 apply_ridge=_apply_anchored,
                 optimizer=optimizer,
             )
+        elif dispatch_mode == "v2":
+            # RiemannianOptimizer owns the flat<->pytree round-trip; it
+            # takes the ORIGINAL pytree plus the manifold_spec. The
+            # residual closure is the same flat-vector closure (scalar
+            # leaves keep flat coords).
+            theta_hat_pytree, optimizer_info = cast(Any, optimizer)(
+                residual_fn, theta_init_call, manifold_spec
+            )
+            theta_hat_flat, _ = params_mod.flatten_params(theta_hat_pytree)
         else:
             theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)
 

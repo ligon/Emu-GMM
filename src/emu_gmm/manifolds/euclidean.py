@@ -74,6 +74,31 @@ class Euclidean:
         """Identity: the embedded gradient equals the ambient gradient."""
         return euclidean_gradient
 
+    def euclidean_to_riemannian_gradient(
+        self, point: Any, euclidean_gradient: Any
+    ) -> Any:  # noqa: ARG002
+        """Phase-4 canonical name; identity for :class:`Euclidean`."""
+        return euclidean_gradient
+
+    def inner_product(self, point: Any, u: Any, v: Any) -> Any:  # noqa: ARG002
+        """Standard Euclidean inner product :math:`\\sum_i u_i v_i`."""
+        return jnp.sum(jnp.asarray(u) * jnp.asarray(v))
+
+    def norm(self, point: Any, tangent_vector: Any) -> Any:
+        """Riemannian norm; ``sqrt(inner_product(v, v))``."""
+        return jnp.sqrt(self.inner_product(point, tangent_vector, tangent_vector))
+
+    def retraction_differential(self, point: Any) -> Any:  # noqa: ARG002
+        """Retraction differential ``dR_x(v)/dv|_0 = 1`` (identity).
+
+        The additive retraction ``R_x(v) = x + v`` has unit differential,
+        so the inference G-column scaling is the identity and
+        ``Sigma_theta`` is the raw ambient GMM variance --- the v1
+        behaviour. Mirrors the solver's ``step_scale == 1`` for Euclidean
+        leaves.
+        """
+        return jnp.asarray(1.0)
+
     def distance(self, point_a: Any, point_b: Any) -> Any:
         """Frobenius distance :math:`\\lVert a - b\\rVert_F`."""
         return jnp.linalg.norm(jnp.asarray(point_a) - jnp.asarray(point_b))

@@ -274,6 +274,30 @@ first-class field; add =result.Sigma_theta_ambient()= accessor;
 add a spectral-gap diagnostic; defer the pull-back along
 \(Y \mapsto YY^\top\) to v2.1 (tracked as a separate issue).
 
+*Which tangent basis (settled in the Phase-4 =Positive= slice,
+=feat/v2-positive-slice=).* "Tangent-space coordinates" means the
+*retraction-chart coordinate* basis --- the natural coordinate ``v``
+of \(R_{\hat\theta}(v)\) --- /not/ a metric-orthonormal frame. Every
+first-order retraction has unit differential at the optimum
+(\(DR_{\hat\theta}(0)=\mathrm{Id}\)), so the Jacobian in this chart is
+the ambient Jacobian and the reported covariance is the *ambient
+natural-scale sandwich* \((G'\Lambda G)^{-1}\). For a =Positive= leaf
+that is \(\operatorname{Var}(\hat\sigma)\), /not/ the log-scale
+\(\operatorname{Var}(\log\hat\sigma)\): a =Positive= leaf reports the
+same asymptotic variance an unconstrained =Euclidean= leaf would, its
+only value-add being the positivity-preserving retraction. This
+matches =../ManifoldGMM= exactly --- verified against its =gmm.py=
+=tangent_covariance= (raw \(D'WD\) sandwich, no metric weighting) and
+its Euclidean-normalised tangent basis in =moment_restriction.py=.
+*Do not* rescale \(G\) by the metric or by
+=euclidean_to_riemannian_gradient= (\(=x^2\) for =Positive=); the
+affine-invariant metric is for the geometry (retraction, convergence
+norm), not the reported covariance. Recorded as a caution because the
+Phase-4 build twice landed on a wrong metric rescaling (\(x^2\), then
+\(x\)) before the =ManifoldGMM= cross-check settled it on the ambient
+form --- a convention question that internal review alone did not
+resolve.
+
 ** §2.5 v2.0 minimum acceptance --- DECIDED: full =PSDFixedRank=
 
 The §2-probe Probe B for §2.4 confirmed the previous plan's call:
