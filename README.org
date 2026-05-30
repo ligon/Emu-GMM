@@ -52,6 +52,10 @@ The same =euler_residual= drives the analytical and empirical variants of the de
 
 * Documents
 
+- =docs/howto.org= --- *start here.* Integration HOWTO: the architecture
+  at the level you need to wire an application to =estimate()= --- what
+  code you write (the moment function, the parameter container, the
+  measure/covariance choice) and what the framework hands back.
 - =docs/design.org= --- architecture specification (four review rounds; stable).
 - =docs/api-sketch.org= --- v1 API surface; module layout, types, worked example.
 - =docs/implementation-plan.org= --- phased task list (Phases 1-7 complete).
