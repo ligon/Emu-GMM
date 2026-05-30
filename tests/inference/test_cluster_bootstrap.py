@@ -571,3 +571,124 @@ class TestInnerFailureSurfacing:
         assert not np.any(result.convergence)
         assert np.all(np.isnan(np.asarray(result.theta_boot.array)))
         assert np.all(np.isnan(np.asarray(result.J_boot)))
+
+
+# ---------------------------------------------------------------------------
+# Pytree-dataclass invariant (#55)
+# ---------------------------------------------------------------------------
+
+
+class TestPytreeRoundTrip:
+    """``ClusterBootstrapResult`` is a ``@jdc.pytree_dataclass``.
+
+    The other three inference-result types
+    (:class:`JTestResult`, :class:`KStatisticResult`,
+    :class:`WildBootstrapResult`) are already pytree-dataclasses;
+    ``ClusterBootstrapResult`` joins them so the whole inference
+    surface honours the same ``vmap`` / ``jit`` contract. This test
+    pins the invariant.
+    """
+
+    def test_tree_flatten_unflatten_round_trip(self):
+        """The result is a JAX pytree: flatten then unflatten reproduces it."""
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=5, obs_per_cluster=8, seed=0
+        )
+        result = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+            measure=measure,
+            covariance=covariance,
+            n_boot=3,
+            key=jax.random.PRNGKey(0),
+        )
+        leaves, treedef = jax.tree_util.tree_flatten(result)
+        # Non-empty leaf list confirms registration as a pytree.
+        assert len(leaves) > 0
+        rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+        assert isinstance(rebuilt, ClusterBootstrapResult)
+        # Static field (param_names) rides on the treedef; traced leaves
+        # are identical objects after the no-op round trip.
+        assert rebuilt.param_names == result.param_names
+        np.testing.assert_array_equal(
+            np.asarray(rebuilt.theta_boot.array),
+            np.asarray(result.theta_boot.array),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(rebuilt.J_boot), np.asarray(result.J_boot)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(rebuilt.convergence), np.asarray(result.convergence)
+        )
+
+    def test_tree_map_doubles_traced_leaves(self):
+        """``jax.tree_util.tree_map`` reaches the traced fields.
+
+        A scalar multiply applied via ``tree_map`` doubles the numeric
+        leaves (``theta_boot``, ``J_boot``, ``convergence`` cast,
+        ``key``); static fields ride along on the treedef untouched.
+        """
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=4, obs_per_cluster=6, seed=1
+        )
+        result = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+            measure=measure,
+            covariance=covariance,
+            n_boot=2,
+            key=jax.random.PRNGKey(1),
+        )
+        # nan_to_num because diverged replicates produce NaNs in
+        # theta_boot / J_boot and 2 * NaN is still NaN; we want a
+        # numeric comparison.
+        doubled = jax.tree_util.tree_map(lambda a: jnp.nan_to_num(a) * 2, result)
+        assert isinstance(doubled, ClusterBootstrapResult)
+        # Static fields are preserved.
+        assert doubled.param_names == result.param_names
+        np.testing.assert_allclose(
+            np.asarray(doubled.theta_boot.array),
+            2.0 * np.nan_to_num(np.asarray(result.theta_boot.array)),
+        )
+        np.testing.assert_allclose(
+            np.asarray(doubled.J_boot),
+            2.0 * np.nan_to_num(np.asarray(result.J_boot)),
+        )
+
+    def test_vmap_over_seeds_stacks_results(self):
+        """Multiple bootstrap calls stack into a single batched pytree.
+
+        ``cluster_bootstrap`` itself uses a host-side Python loop over
+        replicates and cannot be traced under ``vmap`` directly. But
+        the *output* is a pytree, so several independent calls can be
+        stacked along a leading "seed" axis via
+        ``jax.tree_util.tree_map(jnp.stack, *results)`` --- the
+        regression check for #55, where the previous plain
+        ``@dataclass(frozen=True)`` form raised at the stacking step
+        because the parent treedef wasn't registered.
+        """
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=5, obs_per_cluster=6, seed=2
+        )
+        seeds = [10, 11, 12]
+        results = [
+            cluster_bootstrap(
+                model=euler_residual,
+                theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+                measure=measure,
+                covariance=covariance,
+                n_boot=2,
+                key=jax.random.PRNGKey(s),
+            )
+            for s in seeds
+        ]
+        stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *results)
+        assert isinstance(stacked, ClusterBootstrapResult)
+        # Leading axis = number of seeds; per-replicate axes preserved.
+        assert stacked.theta_boot.array.shape == (len(seeds), 2, 2)
+        assert stacked.J_boot.shape == (len(seeds), 2)
+        assert stacked.convergence.shape == (len(seeds), 2)
+        # Static field rebuilt from the first call's treedef and shared
+        # across all stacked results (same parameter names; checked
+        # via tree-equality on the static fields).
+        assert stacked.param_names == results[0].param_names

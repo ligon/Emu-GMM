@@ -95,13 +95,13 @@ the estimator on each replicate.
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
 import haliax as ha
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import numpy as np
 
 from emu_gmm._internal import axes as axes_mod
@@ -128,9 +128,17 @@ from emu_gmm.weighting import ContinuouslyUpdated
 _OptimizerLike = Callable
 
 
-@dataclasses.dataclass(frozen=True)
+@jdc.pytree_dataclass
 class ClusterBootstrapResult:
     """Output of :func:`cluster_bootstrap`.
+
+    A :func:`jax_dataclasses.pytree_dataclass` so the record flows
+    through ``jit`` and ``vmap`` boundaries unchanged --- matching its
+    inference-result siblings :class:`JTestResult`,
+    :class:`KStatisticResult`, and :class:`WildBootstrapResult`. The
+    array fields are traced leaves; ``param_names`` is a
+    :func:`jax_dataclasses.static_field` (hashable, used only for
+    re-tracing on configuration change).
 
     Parameters
     ----------
@@ -142,32 +150,40 @@ class ClusterBootstrapResult:
         :attr:`coords` (haliax's :class:`Axis` itself only stores a
         single name + size, not per-coordinate labels, so the
         coordinate strings live on this result object).
-    J_boot : :class:`jax.numpy.ndarray`
+    J_boot : :class:`jax.Array`
         Per-replicate J statistic, shape ``(n_boot,)``. ``NaN`` for
         replicates whose solver diverged.
-    convergence : :class:`numpy.ndarray` of bool
+    convergence : :class:`jax.Array` of bool
         Per-replicate boolean convergence flag, shape ``(n_boot,)``.
-        Carried as a NumPy bool array because the underlying
-        optimiser status is resolved on the host.
+        Carried as a JAX bool array (rather than NumPy) so the
+        whole result is a single pytree --- the underlying optimiser
+        status is resolved on the host but lifted into a JAX array
+        when packaged into the result, so that ``jax.vmap`` over
+        seed batches stacks the convergence flags along with the
+        rest of the fields.
     key : :class:`jax.Array`
         The PRNG key as consumed by the bootstrap. Returning the
         already-consumed key prevents accidental reuse upstream;
         callers who want to continue the random stream should derive
         a fresh key from their original seed.
-    param_names : tuple[str, ...]
+    param_names : tuple[str, ...] (static)
         Parameter names matching ``theta_boot``'s ``parameters`` axis,
         in PyTree-flatten order. Lifted from the user's parameter
         dataclass via :func:`emu_gmm._internal.params.param_names`
         and carried through so downstream tabular gestures
         (``pd.Series(boot_se, index=result.param_names)``) work
-        without the caller re-reading the dataclass.
+        without the caller re-reading the dataclass. Marked as a
+        :func:`jax_dataclasses.static_field` because the names ride
+        on the pytree treedef rather than as a traced leaf (strings
+        are not JAX values; they trigger re-tracing on configuration
+        change rather than re-tracing per-replicate).
     """
 
     theta_boot: ha.NamedArray
     J_boot: jnp.ndarray
-    convergence: np.ndarray
+    convergence: jnp.ndarray
     key: jax.Array
-    param_names: tuple[str, ...]
+    param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
 
     @property
     def coords(self) -> Mapping[str, tuple[str | int, ...]]:
@@ -439,7 +455,7 @@ def cluster_bootstrap(
     return ClusterBootstrapResult(
         theta_boot=theta_boot_named,
         J_boot=jnp.asarray(J_boot),
-        convergence=convergence,
+        convergence=jnp.asarray(convergence),
         key=key,
         param_names=param_names,
     )
