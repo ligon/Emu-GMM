@@ -28,6 +28,9 @@ and the J-statistic for each.
   worked Euler-equation example in three variants.
 - `docs/implementation-plan.org` — phased task list; Phases 1-7 complete,
   Phase 8 (polish) underway.
+- `docs/migration/` — user-facing migration guides (e.g.,
+  `manifoldgmm-to-emu-gmm.org`). `docs/design.org` and `docs/api-sketch.org`
+  are implementer-facing specs; this CLAUDE.md is the agent-facing index.
 
 Read these before making non-trivial architectural changes. The design has
 been through four reviewer iterations; the abstractions are deliberate.
@@ -121,7 +124,6 @@ been through four reviewer iterations; the abstractions are deliberate.
   in one moment vector with the $(1+1/S)$ asymptotic-variance inflation.
 - **`StratifiedCovariance`, `ReplicateWeightCovariance`**: rest of the
   design-awareness ladder (`docs/design.org` Section 2).
-- **`Iterated` weighting**: subsumed by CU for v1; would be ~50 lines.
 - **`EigenvalueFloor`, `NearestPSD` (Higham 1988) regularisers**:
   alternatives to `DiagonalTikhonov`.
 - **Structured identification-failure taxonomy**: `design.org` Section 5.4
