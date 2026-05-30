@@ -585,27 +585,33 @@ def build_estimator(
             )
 
         iterated_status: str | None = None
-        if isinstance(weighting, IteratedWeighting):
-            # The CU-fallback residual is the user-facing whitened residual
-            # of ``IteratedWeighting`` itself (its ``whitening_residual``
-            # falls back to the CU form). The iterated driver uses it to
-            # report ``final_objective`` consistent with that fallback.
+        # Dispatch by the WeightingStrategy protocol's optional
+        # ``requires_outer_loop`` flag rather than by isinstance against
+        # IteratedWeighting. Third-party strategies that need their own
+        # Python-level outer loop can opt in by setting
+        # ``requires_outer_loop = True`` and implementing
+        # ``outer_loop_driver`` with the documented signature.
+        if getattr(weighting, "requires_outer_loop", False):
+            # The CU-fallback residual is the user-facing whitened
+            # residual of the strategy (its ``whitening_residual`` is
+            # the CU form for IteratedWeighting and equivalent for any
+            # other outer-loop strategy). The driver uses it to report
+            # ``final_objective`` consistent with that fallback.
             cu_residual_fn = residual_fn
             (
                 theta_hat_flat,
                 optimizer_info,
                 iterated_status,
-            ) = _run_iterated_weighting(
-                weighting=weighting,
+            ) = cast(Any, weighting).outer_loop_driver(
+                model,
+                measure_call,
+                covariance,
+                theta_init_flat,
+                treedef,
                 make_residual_fn=lambda w: _make_residual_fn(w, measure_call),
                 cu_residual_fn=cu_residual_fn,
-                model=model,
-                measure=measure_call,
-                covariance=covariance,
                 apply_ridge=_apply_anchored,
                 optimizer=optimizer,
-                theta_init_flat=theta_init_flat,
-                treedef=treedef,
             )
         else:
             theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)

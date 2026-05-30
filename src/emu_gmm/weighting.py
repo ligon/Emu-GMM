@@ -26,17 +26,36 @@ for the architectural commitment that the CU gradient must not drop
 the :math:`\\nabla_\\theta V` term; that property is delivered here
 by computing the Cholesky inside ``whitening_residual`` rather than
 caching :math:`L`.
+
+Outer-loop hook
+---------------
+The optional :attr:`requires_outer_loop` / :meth:`outer_loop_driver`
+extension on :class:`~emu_gmm.types.WeightingStrategy` lets a strategy
+opt out of the standard residual-path dispatch and provide its own
+Python-level driver. :class:`IteratedWeighting` is the only built-in
+strategy that uses this; third-party strategies that need their own
+outer loop should follow the same pattern.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
+import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
+from emu_gmm._internal import params as params_mod
 from emu_gmm._internal.cholesky import cholesky, forward_solve
-from emu_gmm.types import ParamsLike
+from emu_gmm.types import (
+    CovarianceStrategy,
+    Measure,
+    Optimizer,
+    OptimizerInfo,
+    ParamsLike,
+    StructuralModel,
+)
 
 
 @jdc.pytree_dataclass
@@ -47,6 +66,9 @@ class Identity:
     The supplied ``V`` is ignored. Useful as a sanity-check weighting
     or when the user wants an unweighted sum of squares.
     """
+
+    #: Standard residual-path strategy --- no outer driver needed.
+    requires_outer_loop: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     def whitening_residual(
         self,
@@ -106,12 +128,15 @@ class Fixed:
     """
 
     L0: Float[Array, "M M"]
+    #: Standard residual-path strategy --- no outer driver needed.
+    requires_outer_loop: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     def __init__(
         self,
         *args: Any,
         L0: Float[Array, "M M"] | None = None,
         V0: Float[Array, "M M"] | None = None,
+        requires_outer_loop: bool = False,
     ) -> None:
         if args:
             raise TypeError(
@@ -140,6 +165,12 @@ class Fixed:
             L0 = cholesky(V0)
         # object.__setattr__ because @jdc.pytree_dataclass is frozen.
         object.__setattr__(self, "L0", L0)
+        # ``requires_outer_loop`` is a static (treedef) field; default
+        # ``False`` --- ``Fixed`` rides the standard residual-path
+        # dispatch in :func:`emu_gmm.estimate`. The kwarg here exists so
+        # the jax_dataclasses pytree-unflatten path can round-trip the
+        # static field after a ``jit`` boundary.
+        object.__setattr__(self, "requires_outer_loop", requires_outer_loop)
 
     @classmethod
     def from_V0(cls, V0: Float[Array, "M M"]) -> Fixed:
@@ -187,8 +218,12 @@ class ContinuouslyUpdated:
     following Hansen, Heaton & Yaron (1996, "Finite-Sample Properties
     of Some Alternative GMM Estimators", JBES 14(3), 262--280).
 
-    Has no traced or static state.
+    Has no traced or static state aside from the protocol's
+    ``requires_outer_loop`` flag.
     """
+
+    #: Standard residual-path strategy --- no outer driver needed.
+    requires_outer_loop: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     def whitening_residual(
         self,
@@ -281,6 +316,9 @@ class IteratedWeighting:
 
     weighting_iterations: int = jdc.static_field(default=10)  # type: ignore[attr-defined]
     weighting_tol: float = jdc.static_field(default=1e-6)  # type: ignore[attr-defined]
+    #: Iterated GMM needs the estimator to drive an outer Python loop;
+    #: see :meth:`outer_loop_driver`.
+    requires_outer_loop: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
 
     def __post_init__(self) -> None:
         if int(self.weighting_iterations) < 1:
@@ -314,6 +352,189 @@ class IteratedWeighting:
         del theta
         L = cholesky(V)
         return forward_solve(L, m)
+
+    def outer_loop_driver(
+        self,
+        model: StructuralModel,
+        measure: Measure,
+        covariance: CovarianceStrategy,
+        theta_init_flat: Float[Array, " K"],
+        treedef: Any,
+        *,
+        make_residual_fn: Any,
+        cu_residual_fn: Any,
+        apply_ridge: Any,
+        optimizer: Optimizer,
+    ) -> tuple[Float[Array, " K"], OptimizerInfo, str]:
+        """Drive the outer iterated-GMM loop in pure Python.
+
+        Called by :func:`emu_gmm.estimate` (or
+        :func:`emu_gmm.build_estimator`) when ``requires_outer_loop`` is
+        ``True``. Returns ``(theta_hat_flat, final_info,
+        outer_status)``. The returned ``OptimizerInfo.final_objective``
+        is the *CU-fallback* objective at the returned ``theta_hat``,
+        not the inner Fixed-weight objective at the penultimate
+        :math:`V_k`. The two coincide at the V-refresh fixed point but
+        differ when the outer loop is capped early; the CU-fallback
+        value is the one consistent with :meth:`whitening_residual`.
+
+        Parameters
+        ----------
+        model, measure, covariance, theta_init_flat, treedef
+            Standard estimator state; passed through from the caller.
+        make_residual_fn
+            Factory ``make_residual_fn(weighting) -> residual_fn`` so the
+            driver can spawn a :class:`Fixed`-weight residual at each
+            outer step. The factory must already close over the model,
+            measure, anchored ridge, optional penalty, and any cached
+            intermediates path so the driver itself remains free of
+            estimator internals.
+        cu_residual_fn
+            Pre-built CU-fallback residual function; used only to
+            report the user-facing ``final_objective`` at termination.
+        apply_ridge
+            Closure that applies the anchored ridge to a freshly-built
+            ``V_k``. The driver doesn't introspect the regularisation
+            strategy; this closure carries the anchored ``tau``.
+        optimizer
+            The user's :class:`~emu_gmm.types.Optimizer`. Each inner
+            Fixed-weight solve is delegated to it.
+
+        Termination
+        -----------
+        The loop terminates on either:
+
+        - :math:`\\| \\theta_{k+1} - \\theta_k \\|_2 < \\texttt{weighting_tol}
+          \\cdot \\max(\\| \\theta_k \\|_2, \\texttt{eps})` (status
+          ``"converged"``) --- the tolerance is rescaled by the current
+          parameter norm so that ``weighting_tol`` carries meaning across
+          problems whose parameters differ by orders of magnitude, or
+        - having performed ``weighting_iterations`` outer steps without
+          meeting the rescaled tolerance (status ``"max_iterations"``).
+
+        Inner-solve divergence handling
+        -------------------------------
+        Each inner :class:`Fixed`-weight solve returns its own
+        :class:`~emu_gmm.types.OptimizerInfo`. If any inner ``info_k.status``
+        is neither ``"converged"`` nor ``"traced"`` (i.e. the inner LM /
+        least-squares run hit ``max_iterations`` or otherwise failed to
+        certify convergence), the iterated driver emits a
+        :class:`UserWarning` and returns outer status
+        ``"inner_non_convergence"`` so the caller can flip
+        ``EstimationResult.converged`` to ``False``.
+
+        On ``"max_iterations"`` a :class:`UserWarning` is emitted so the
+        caller is told the V-refresh fixed point was not reached; the
+        partially-iterated ``theta_k`` is returned regardless.
+        """
+        theta_k_flat = jnp.asarray(theta_init_flat)
+        last_info: OptimizerInfo | None = None
+        total_inner_steps = 0
+        outer_status = "max_iterations"
+        # ``inner_non_convergence`` overrides ``max_iterations`` once seen,
+        # because it indicates a deeper failure (the inner LM gave up).
+        saw_inner_non_convergence = False
+        inner_non_convergence_statuses: list[str] = []
+
+        # eps for the rescaled-tolerance test; chosen at the float64 noise
+        # floor so the absolute test still triggers when |theta_k| -> 0.
+        rescale_eps = 1e-12
+
+        for _k in range(int(self.weighting_iterations)):
+            theta_k = params_mod.unflatten_params(theta_k_flat, treedef)
+            # Refresh V at the current theta_k and apply the *anchored* ridge
+            # so the inner Fixed-weight surface uses the same tau the rest of
+            # the framework does. Then freeze a Fixed-weight closure at the
+            # resulting Cholesky anchor for the inner solve.
+            V_k = covariance.covariance(model, theta_k, measure)
+            V_star_k = apply_ridge(V_k)
+            fixed_k = Fixed.from_V0(V_star_k)
+            inner_residual = make_residual_fn(fixed_k)
+
+            theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
+            last_info = info_k
+            # Inspect inner-solve status. ``"traced"`` is the placeholder
+            # returned under jit (concrete status is not available); we
+            # treat it as success because the iterated path is documented
+            # as eager and any traced-status appearance there means the
+            # user built a custom optimiser that doesn't surface a status.
+            inner_status = str(getattr(info_k, "status", ""))
+            if inner_status not in ("converged", "traced"):
+                saw_inner_non_convergence = True
+                inner_non_convergence_statuses.append(inner_status)
+            try:
+                total_inner_steps += int(info_k.steps)
+            except (TypeError, ValueError):
+                # ``steps`` may still be a traced scalar under jit; in
+                # eager use (the contract for the iterated path) it is
+                # concrete.
+                pass
+
+            delta = jnp.linalg.norm(theta_next_flat - theta_k_flat)
+            # Rescale the tolerance by the current parameter norm so the
+            # test is meaningful when parameters differ by orders of
+            # magnitude (e.g. one component O(1), another O(1e6)). The
+            # ``rescale_eps`` floor protects the limit |theta_k| -> 0,
+            # where an absolute test on ``weighting_tol`` is still right.
+            theta_scale = float(
+                jnp.maximum(jnp.linalg.norm(theta_next_flat), rescale_eps)
+            )
+            theta_k_flat = theta_next_flat
+            if float(delta) < float(self.weighting_tol) * theta_scale:
+                outer_status = "converged"
+                break
+
+        if saw_inner_non_convergence:
+            # Inner divergence dominates the outer status: a non-converged
+            # inner solve invalidates the V-refresh step that follows it.
+            outer_status = "inner_non_convergence"
+            warnings.warn(
+                "IteratedWeighting saw at least one inner Fixed-weight solve "
+                "that did not certify convergence (inner statuses: "
+                f"{inner_non_convergence_statuses!r}). The outer V-refresh "
+                "is built on top of the inner LM step, so a non-converged "
+                "inner solve invalidates the resulting V_{k+1}. The "
+                "returned theta is the last accepted iterate but should "
+                "not be trusted as a GMM estimate; rerun with a larger "
+                "inner iteration budget or switch to ContinuouslyUpdated "
+                "weighting.",
+                UserWarning,
+                stacklevel=3,
+            )
+        elif outer_status == "max_iterations":
+            warnings.warn(
+                "IteratedWeighting exhausted "
+                f"{self.weighting_iterations} outer iterations without "
+                f"reaching weighting_tol={self.weighting_tol:g} "
+                "(rescaled by max(||theta||, eps)). The V-refresh fixed "
+                "point was not reached; iterated GMM is not guaranteed "
+                "to be a contraction on misspecified models. Consider "
+                "switching to ContinuouslyUpdated weighting.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        assert last_info is not None  # weighting_iterations >= 1 enforced
+
+        # The user-facing ``final_objective`` is the CU-fallback
+        # objective at the final theta_hat, *not* the inner Fixed-weight
+        # objective at the penultimate V_k. The two coincide when
+        # iterated GMM converges (V == V_k at the fixed point) but
+        # differ when it does not, and the CU-fallback value is the one
+        # consistent with how the rest of the framework reports the
+        # IteratedWeighting objective downstream. Match the
+        # optimiser-side convention of reporting 0.5 * ||y||^2 so this
+        # field is comparable across weighting strategies and backends.
+        y_final = cu_residual_fn(theta_k_flat)
+        final_objective_cu = 0.5 * jnp.sum(y_final * y_final)
+
+        final_info = OptimizerInfo(
+            steps=total_inner_steps,
+            status=outer_status,
+            final_objective=final_objective_cu,
+            backend=last_info.backend,
+        )
+        return theta_k_flat, final_info, outer_status
 
 
 #: Econometrics-literature alias for :class:`ContinuouslyUpdated`. See

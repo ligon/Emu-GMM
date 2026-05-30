@@ -121,6 +121,25 @@ class WeightingStrategy(Protocol):
     Returns ``y = L^{-1} m`` where ``V = L L^T``, with the strategy
     deciding whether ``L`` is recomputed per call (CU) or held fixed
     (Identity, Fixed). Implementations live in :mod:`emu_gmm.weighting`.
+
+    Outer-loop hook
+    ---------------
+    Most weightings (Identity / Fixed / CU) feed straight into the
+    residual function and ride the standard
+    :class:`Optimizer` path inside :func:`emu_gmm.estimate`. The
+    :class:`~emu_gmm.weighting.IteratedWeighting` strategy, by contrast,
+    requires an *outer* Python-level loop alternating Fixed-weight inner
+    solves with variance refreshes; the estimator dispatches to that
+    custom driver when ``requires_outer_loop`` is ``True``.
+
+    The :attr:`requires_outer_loop` flag and the
+    :meth:`outer_loop_driver` method are *optional* extensions to the
+    protocol. Any strategy that omits them is treated as a standard
+    residual-path strategy (``requires_outer_loop = False``). Third-party
+    authors of custom outer-loop weightings should set
+    ``requires_outer_loop = True`` and implement
+    :meth:`outer_loop_driver` with the signature documented on
+    :class:`~emu_gmm.weighting.IteratedWeighting.outer_loop_driver`.
     """
 
     def whitening_residual(
