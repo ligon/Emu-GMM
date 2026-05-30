@@ -114,7 +114,7 @@ class Positive:
         perturbation at first order.
 
         Covariance convention (matches ``../ManifoldGMM``; see
-        ``docs/design.org`` manifold-inference note): the reported
+        ``docs/implementation-plan-v2-manifold.org`` §2.4): the reported
         ``Sigma_theta`` is the ambient / natural-scale sandwich
         ``(G' Lambda G)^{-1}`` --- i.e. ``Var(sigma_hat)``, NOT the
         log-scale ``Var(log sigma_hat)``. Scaling column ``j`` of ``G`` by
