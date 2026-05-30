@@ -77,6 +77,7 @@ from emu_gmm.types import (
     Diagnostics,
     Emu_GMM_DimensionError,
     EstimationResult,
+    LabelContext,
     Measure,
     Optimizer,
     OptimizerInfo,
@@ -137,6 +138,7 @@ __all__ = [
     "EstimationResult",
     "Diagnostics",
     "OptimizerInfo",
+    "LabelContext",
     # Errors
     "Emu_GMM_DimensionError",
     # Diagnostics builders

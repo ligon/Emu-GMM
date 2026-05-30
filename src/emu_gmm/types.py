@@ -44,7 +44,8 @@ import scipy.stats
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import axes as axes_mod
-from emu_gmm._internal.labels import LabelContext, label_vector
+from emu_gmm._internal.labels import LabelContext as LabelContext  # re-export
+from emu_gmm._internal.labels import label_vector
 from emu_gmm._internal.params import flatten_params
 
 # A user's parameter PyTree: typically a @jdc.pytree_dataclass. We use
@@ -517,4 +518,7 @@ __all__ = [
     "Diagnostics",
     "EstimationResult",
     "Emu_GMM_DimensionError",
+    # Re-exported from emu_gmm._internal.labels so the type that
+    # annotates ``EstimationResult.labels`` has a public home (#56).
+    "LabelContext",
 ]
