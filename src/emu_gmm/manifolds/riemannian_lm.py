@@ -11,18 +11,20 @@ native, so the whole step is ``jax``-traceable. The LM iteration uses
 :func:`jax.lax.while_loop` with a ``jnp.where`` / :func:`jax.lax.cond`
 accept--reject so no Python-side control flow leaks into the trace.
 
-Metric vs Jacobian-scaling (load-bearing; see the module spec):
+Covariance / Jacobian convention (matches ``../ManifoldGMM``, Convention B):
 
-* The Gauss--Newton *step* uses the retraction differential
-  :math:`dx/dv|_{v=0}`. For :class:`Positive`, :math:`R_x(v) = x e^{v/x}`
-  gives :math:`dx/dv|_0 = x`; for :class:`Euclidean`, :math:`1`. So the
-  scaled Jacobian column is ``J_amb[:, j] * x_j`` (resp. unchanged). For
-  the 1-D affine-invariant metric this scaled-Jacobian GN step is exactly
-  the metric-correct natural step --- no separate Gram matrix needed.
-* The *inference* information matrix (in the estimator) uses
-  ``euclidean_to_riemannian_gradient = x**2 * egrad``. These two scalings
-  are deliberately distinct; conflating them yields a wrong step or a
-  wrong ``Sigma_theta``.
+* Every first-order retraction has unit differential at ``v=0``
+  (:math:`DR_x(0) = \\mathrm{Id}`): Positive's :math:`R_x(v) = x e^{v/x}`
+  gives :math:`dx/dv|_0 = 1`, same as Euclidean's :math:`x+v`. So the
+  Gauss--Newton Jacobian in tangent coordinates is the *ambient* Jacobian
+  (``step_scale == 1``), and the estimator's reported ``Sigma_theta`` is
+  the ambient natural-scale sandwich ``(G' Lambda G)^{-1}`` --- i.e.
+  ``Var(sigma_hat)``, not a metric-rescaled / log-scale variance. This is
+  ``ManifoldGMM``'s retraction-chart-Jacobian convention.
+* Positivity is delivered by the retraction (``x e^{v/x}`` never crosses
+  zero), NOT by rescaling the Jacobian or the covariance. The
+  affine-invariant metric (``1/x^2``) is used only as a scale-invariant
+  convergence norm here; it does not enter the reported covariance.
 """
 
 from __future__ import annotations
@@ -86,8 +88,17 @@ class _RiemannianLM:
             is_pos = jnp.zeros((K,), dtype=bool)
 
         def step_scale(x: Float[Array, " K"]) -> Float[Array, " K"]:
-            """``dx/dv|_0`` per coordinate: x for Positive, 1 for Euclidean."""
-            return jnp.where(is_pos, x, jnp.ones_like(x))
+            """``dx/dv|_0`` per coordinate: ``1`` for every first-order retraction.
+
+            Both Positive (``R_x(v)=x e^{v/x}``) and Euclidean
+            (``R_x(v)=x+v``) have unit differential at ``v=0``, so the GN
+            Jacobian in tangent coordinates is the ambient Jacobian. This
+            matches ``../ManifoldGMM``'s retraction-chart Jacobian
+            (Convention B) and keeps the solver consistent with the
+            ambient ``Sigma_theta`` the estimator reports. Positivity is
+            enforced by ``retract``, not by rescaling the Jacobian.
+            """
+            return jnp.ones_like(x)
 
         def retract(x: Float[Array, " K"], d: Float[Array, " K"]) -> Float[Array, " K"]:
             """Per-leaf retraction of the tangent step ``d`` at ``x``."""

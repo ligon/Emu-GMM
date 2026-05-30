@@ -488,17 +488,18 @@ def build_estimator(
                 G_local_raw = G_local_raw.array
             G_local = jnp.asarray(G_local_raw)
             # Per-column retraction-differential scaling (plan §2.4):
-            # replace column j of G with dx/dv|_0 * G[:, j], the
-            # delta-method push-through of the ambient GMM Jacobian into
-            # the tangent (v) coordinate. For Euclidean this differential
-            # is 1 (identity); for Positive it is x_j (R_x(v)=x e^{v/x},
-            # dsigma/dv|_0 = x). This makes info = (dx/dv)^2 G'LambdaG and
-            # Sigma_theta = (dx/dv)^{-2} Sigma_eucl, exactly matching the
-            # solver's Jr'Jr = x^2 G'LambdaG. NOTE: this is the retraction
-            # differential, NOT euclidean_to_riemannian_gradient (=x^2,
-            # the inverse-metric gradient conversion); conflating them
-            # gives an x^{-4} variance that is statistically wrong. All
-            # leaves are scalar so flat index == leaf.
+            # replace column j of G with dx/dv|_0 * G[:, j], the Jacobian
+            # in the retraction chart. Every first-order retraction has
+            # UNIT differential at v=0 (DR_x(0)=Id) -- Euclidean (x+v) and
+            # Positive (x e^{v/x}) alike -- so this scaling is the identity
+            # and G_riem is the ambient Jacobian. The reported Sigma_theta
+            # is therefore the ambient natural-scale sandwich
+            # (G'LambdaG)^{-1} = Var(theta_hat), matching ../ManifoldGMM's
+            # convention (NOT a metric-rescaled / log-scale variance; the
+            # affine-invariant euclidean_to_riemannian_gradient=x^2 is for
+            # the geometry, not the covariance). Kept as an explicit
+            # per-leaf call so a future non-identity chart would compose.
+            # All leaves are scalar so flat index == leaf.
             G_riem = jnp.stack(
                 [
                     manifold_spec.leaf_specs[j].manifold.retraction_differential(

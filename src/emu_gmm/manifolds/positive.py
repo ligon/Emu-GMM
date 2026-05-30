@@ -104,31 +104,30 @@ class Positive:
         return point**2 * euclidean_gradient
 
     def retraction_differential(self, point: Any) -> Any:
-        """Retraction differential :math:`dR_x(v)/dv|_{v=0} = x`.
+        """Retraction differential :math:`dR_x(v)/dv|_{v=0} = 1`.
 
-        From :math:`R_x(v) = x \\exp(v / x)`,
-        :math:`R_x'(v) = \\exp(v/x)` so :math:`R_x'(0) = 1` in the
-        ambient :math:`v`-derivative-per-unit-``x`` sense; expressed as
-        the ambient-coordinate sensitivity ``d(sigma)/dv|_0`` it equals
-        ``point``. This is the factor that maps a tangent (``v``-coord)
-        perturbation to its ambient (``sigma``) image, and is exactly the
-        ``step_scale`` the solver uses for its metric-correct GN step
-        (see :mod:`emu_gmm.manifolds.riemannian_lm`).
+        For :math:`R_x(v) = x\\,e^{v/x}`, :math:`dR_x/dv = e^{v/x}`, so the
+        differential at :math:`v = 0` is :math:`1` --- as it must be for
+        any first-order retraction (:math:`DR_x(0) = \\mathrm{Id}`). The
+        tangent coordinate ``v`` is therefore the *natural* (ambient)
+        coordinate: a unit ``v`` perturbation maps to a unit ``sigma``
+        perturbation at first order.
 
-        Inference scaling (load-bearing; see the estimator's
-        ``_compute_inference``): the ambient GMM variance
-        ``Sigma_eucl = (G' Lambda G)^{-1}`` is pushed into the
-        ``v``-coordinate by the delta method,
-        ``Var(v) = (d sigma / dv)^{-2} Sigma_eucl = point^{-2}
-        Sigma_eucl``. Scaling column ``j`` of ``G`` by this differential
-        (``point``) yields ``info = point^2 G' Lambda G`` and hence
-        ``Sigma_theta = point^{-2} Sigma_eucl`` --- consistent with the
-        solver's ``Jr' Jr = point^2 (G' Lambda G)``. This is *distinct*
-        from :meth:`euclidean_to_riemannian_gradient` (``point**2``),
-        which is the inverse-metric gradient conversion and must not be
-        used for inference.
+        Covariance convention (matches ``../ManifoldGMM``; see
+        ``docs/design.org`` manifold-inference note): the reported
+        ``Sigma_theta`` is the ambient / natural-scale sandwich
+        ``(G' Lambda G)^{-1}`` --- i.e. ``Var(sigma_hat)``, NOT the
+        log-scale ``Var(log sigma_hat)``. Scaling column ``j`` of ``G`` by
+        this differential (``1``) leaves the information matrix at its
+        ambient value. The affine-invariant :meth:`inner_product` /
+        :meth:`norm` / :meth:`euclidean_to_riemannian_gradient` (``x^2``)
+        remain on the manifold for protocol completeness and to derive the
+        retraction, but are deliberately NOT used to rescale the reported
+        covariance. The manifold's value-add is the positivity-preserving
+        retraction, not a different asymptotic variance: first-order
+        asymptotics are parameterisation-invariant at an interior optimum.
         """
-        return point
+        return jnp.ones_like(jnp.asarray(point))
 
     def distance(self, point_a: Any, point_b: Any) -> Any:
         """Geodesic distance :math:`|\\log b - \\log a|`."""

@@ -107,32 +107,28 @@ class TestPositiveAcceptance:
         assert bool(jnp.all(jnp.isfinite(arr)))
         assert float(arr[0, 0]) > 0.0
 
-    def test_Sigma_theta_in_tangent_coords(self):
-        """The Riemannian (tangent-coord) variance confirms the
-        retraction-differential scaling fired in inference.
+    def test_Sigma_theta_is_ambient_natural_scale(self):
+        """Sigma_theta is the ambient natural-scale variance Var(sigma_hat),
+        matching ../ManifoldGMM (Convention B) -- NOT a metric-rescaled /
+        log-scale variance.
 
-        Sigma_theta is the delta-method push-through of the ambient GMM
-        variance Sigma_eucl = (G' Lambda G)^{-1} into the tangent (v)
-        coordinate where sigma = R_x(v) = x exp(v/x), so dsigma/dv|_0 = x
-        and Var(v) = (dsigma/dv)^{-2} Sigma_eucl = x^{-2} Sigma_eucl for
-        the scalar K=1 case. Equivalently, scaling column G by the
-        retraction differential x gives info_riem = x^2 info_eucl, so
-        Sigma_riem = inv(info_riem) = x^{-2} Sigma_eucl --- matching the
-        solver's Jr'Jr = x^2 (G' Lambda G). (Scaling by
-        euclidean_to_riemannian_gradient = x^2 would give a wrong x^{-4}
-        variance; see the blocking review finding.)
+        Every first-order retraction has unit differential at v=0, so the
+        Jacobian in the retraction chart equals the ambient Jacobian and
+        Sigma_theta = (G' Lambda G)^{-1} = Sigma_eucl. The Positive
+        manifold therefore reports the *same* asymptotic variance a plain
+        Euclidean leaf would (first-order asymptotics are
+        parameterisation-invariant at an interior optimum); its value-add
+        is the positivity-preserving retraction during optimisation, not a
+        different covariance. A wrong x-scaling (log-scale, x^{-2}) or x^2
+        (inverse-metric, x^{-4}) would make these two disagree.
         """
         r = self._run()
         sigma_hat = float(r.theta_hat.sigma)
-
-        # Recompute the raw Euclidean info matrix at theta_hat from the
-        # reported building blocks: Sigma_eucl = inv(Z_eucl' Z_eucl),
-        # Z_eucl = L^{-1} G_eucl. We reconstruct via the diagnostics
-        # pathway by running a Euclidean-leaf twin of the same problem.
         sigma_riem = float(r.Sigma_theta.array[0, 0])
 
-        # Euclidean twin: identical residual but sigma treated as a plain
-        # Euclidean leaf. Its Sigma is the raw delta-method variance.
+        # Euclidean twin: identical residual, sigma as a plain Euclidean
+        # leaf, evaluated at the same sigma_hat. Its Sigma is the ambient
+        # delta-method variance.
         @jdc.pytree_dataclass
         class EucScaleParams:
             sigma: jnp.ndarray
@@ -150,9 +146,8 @@ class TestPositiveAcceptance:
         )
         sigma_eucl = float(r_euc.Sigma_theta.array[0, 0])
 
-        assert sigma_riem == pytest.approx(sigma_hat**-2 * sigma_eucl, rel=1e-6)
-        # And the scaling is non-trivial (the two genuinely differ).
-        assert abs(sigma_riem - sigma_eucl) > 1e-8
+        # The manifold path reports the ambient variance: the two agree.
+        assert sigma_riem == pytest.approx(sigma_eucl, rel=1e-6)
 
     def test_labels(self):
         r = self._run()
