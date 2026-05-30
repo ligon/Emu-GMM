@@ -200,3 +200,24 @@ bootstrap helpers — is **owned by the package** and read off
   good model here — it files issues `#2/#5/#8/#11/...` rather than
   hand-rolling; the lapse was documentation algebra that assumed equal
   `N_j`, not the code itself.)
+
+## Running on this box — the 64-core JIT-mmap hazard
+
+This host has 64 logical CPUs. JAX/XLA sizes its JIT thread pool to the CPU
+count and `mmap`s executable pages per worker; running several JAX processes
+at once (multiple `make quick-check` invocations, or a multi-agent workflow
+where each agent runs pytest) oversubscribes the cores and stalls or kills
+the runs. This is the most likely cause of the mid-session segfault this
+project has hit, and of `pytest` runs dying partway with no summary line.
+
+- Run **one** `make quick-check` / pytest at a time. A backgrounded run
+  whose shell wrapper exits can leave the `pytest` child alive — check `ps`
+  before relaunching; "completed" on a piped background command does not
+  mean the child died.
+- For heavy or concurrent JAX work, cap the thread pools and force a single
+  host device:
+  `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 XLA_FLAGS=--xla_force_host_platform_device_count=1`
+  (slower per-test, but completes reliably; the `../Seasonality` MC harness
+  documents the same workaround).
+- Multi-agent workflows must instruct every agent to use these caps and to
+  serialise pytest (never two suites at once).
