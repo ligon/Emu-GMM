@@ -196,6 +196,80 @@ class SyntheticMeasure:
 
 In v1 the =SyntheticMeasure= is the natural self-contained demo path: no external data file is required, the moment estimator is deterministic in \(\theta\) (CRN), and the same operator interface (=expectation=, =jacobian=) drives the estimator. Combining a =SyntheticMeasure= with an =EmpiricalMeasure= for SMM matching --- with the \((1+1/S)\) inflation factor in the inference engine --- is v2.
 
+** Extended Protocol Methods (per-observation contributions)
+
+The =Measure= protocol in =src/emu_gmm/types.py= only advertises =expectation= and =jacobian=. Those two methods are sufficient for point estimation and the closed-form asymptotic variance via \(G' \Lambda G\). But several downstream inference helpers --- the Kleibergen K-statistic, moment wild bootstrap, and raw-data cluster bootstrap --- require access to per-observation contributions to the moment vector and its Jacobian. Two of the three concrete measures expose this surface as an opt-in extension; =AnalyticalMeasure= deliberately does not.
+
+*** The optional methods
+=EmpiricalMeasure= and =SyntheticMeasure= both implement:
+
+#+BEGIN_SRC python
+def moment_contributions(
+    self, psi: StructuralModel, theta: ParamsLike
+) -> Float[Array, "N M"]:
+    """Per-row contributions g_i(theta) = d_ij * w_i * psi_j(x_i, theta).
+
+    Summed-then-normalised these reproduce ``expectation(...)``; resampling
+    routines need the unnormalised matrix so they can re-weight or
+    re-aggregate at the per-row level."""
+
+def jacobian_contributions(
+    self, psi: StructuralModel, theta: ParamsLike
+) -> Float[Array, "N M K"]:
+    """Per-row Jacobian contributions D_ijk(theta)
+    = d_ij * w_i * d/d theta_k psi_j(x_i, theta).
+
+    Sum-then-normalise to recover ``jacobian(...)``; used by the K-statistic
+    to estimate Sigma_{G_j, m} (Kleibergen 2005 eq. 8)."""
+#+END_SRC
+
+For =EmpiricalMeasure= the "row" axis is the empirical sample (=N= observations); for =SyntheticMeasure= it is the simulated batch (=n_sim= draws under the frozen PRNG key). The contributions matrix is mask-/weight-aware on the empirical side and unit-weighted on the synthetic side; in both cases the row sum divided by the per-coordinate effective sample size reproduces =expectation=.
+
+=AnalyticalMeasure= deliberately does *not* implement these methods: a closed-form expectation has no per-observation decomposition to expose. Bootstrap and K-statistic routines that need contributions cannot operate against an analytical population in v1.
+
+*** The cached-intermediate primitive
+=EmpiricalMeasure= additionally exposes a fused primitive used by the empirical hot path:
+
+#+BEGIN_SRC python
+def expectation_and_contributions(
+    self, psi: StructuralModel, theta: ParamsLike
+) -> tuple[
+    Float[Array, " M"],     # m
+    Float[Array, "N M"],    # psi_safe
+    Float[Array, "N M"],    # weight_mask
+    Float[Array, " M"],     # N_j
+]:
+    """Single ``vmap(psi)`` pass returning the moment vector and the
+    intermediates IIDCovariance and ClusteredCovariance need."""
+#+END_SRC
+
+=SyntheticMeasure= exposes the same fused pattern under the name =moments_and_contributions=.
+
+*** Duck-typing in inference helpers
+The inference helpers in =src/emu_gmm/inference/= probe for these methods via =hasattr= and fall back as follows:
+
+- =k_statistic= --- if =score_cov_fn= is supplied, uses it directly; else if =moment_contributions= and =jacobian_contributions= both exist, computes \(\widetilde D\) per Kleibergen 2005; else falls back to \(\widetilde D \equiv G\) (the strong-identification limit; *not* weak-identification-robust).
+- =moment_wild_bootstrap= --- *requires* =moment_contributions=. No fallback; calling against an =AnalyticalMeasure= raises.
+- =cluster_bootstrap= --- operates on raw data and re-solves the estimator per replicate, so it requires only the standard =Measure= surface. It is gated separately by needing observation-level access to =x=, =mask=, =weights= --- the =EmpiricalMeasure= surface.
+
+Implementations adding a new =Measure= subtype that participates in resampling-based inference should mirror =EmpiricalMeasure='s pattern: implement =moment_contributions= and =jacobian_contributions= with consistent =(N, M)= / =(N, M, K)= shapes and the same mask/weight semantics. Implementations that cannot expose per-row decompositions (population-style measures) should follow =AnalyticalMeasure= and omit them entirely; downstream helpers will detect the absence and either fall back or raise with a clear message.
+
+*** The ~cached_intermediates~ contract (v1-stable)
+=IIDCovariance.covariance(...)= and =ClusteredCovariance.covariance(...)= both accept an optional =cached_intermediates= keyword whose layout is fixed in v1 as the 4-tuple returned by =EmpiricalMeasure.expectation_and_contributions=:
+
+#+BEGIN_SRC text
+cached_intermediates = (m, psi_safe, weight_mask, N_j)
+
+  m           : Float[Array, "M"]      per-coordinate mean
+  psi_safe    : Float[Array, "N M"]    NaN-/mask-safe per-row residuals
+  weight_mask : Float[Array, "N M"]    mask * weights[:, None]
+  N_j         : Float[Array, "M"]      sum_i d_ij * w_i
+#+END_SRC
+
+When the estimator's =residual_fn= calls =measure.expectation_and_contributions(...)= once per outer iteration and threads the tuple into the matching covariance call, the covariance strategy *skips* its own =vmap(psi)= pass. At the canonical empirical size (N=60k, M=50, float64) this eliminates a ~72 MB transient rebuild and a doubled =psi= evaluation per residual call. Strategies that ignore =cached_intermediates= (=AnalyticalCovariance=, =SyntheticCovariance=) just discard the kwarg.
+
+The 4-tuple shape is a *v1-stable contract* between =EmpiricalMeasure= and the empirical covariance strategies. The architectural commitment that =Measure= and =CovarianceStrategy= are orthogonal is preserved: the cache is not a coupling --- the strategies still work correctly when called without it; the cache only short-circuits a redundant pass. The tuple may be lifted to a typed intermediate dataclass (e.g., =EmpiricalIntermediates(m, psi_safe, weight_mask, N_j)=) when a third strategy adopts the pattern, on the principle that two callers is a coincidence and three is a contract. The named-field upgrade is non-breaking: existing strategies will tuple-unpack the dataclass via =__iter__=.
+
 ** CovarianceStrategy (Protocol)
 #+BEGIN_SRC python
 class CovarianceStrategy(Protocol):
@@ -372,6 +446,17 @@ class Diagnostics:
 #+END_SRC
 
 The structured identification-failure taxonomy (=design.org= Section 5.4) is deferred to v2; v1 surfaces the same information through =diagnostics= but does not classify failures.
+
+** Result-type pytree invariant
+
+The framework distinguishes two kinds of return value:
+
+- *Pytrees (estimation, inference).* =EstimationResult= and the inference-helper return types (e.g., the K-statistic result, =MomentWildBootstrapResult=) are =@jdc.pytree_dataclass= instances. They round-trip through =jit=, =vmap=, =jax.tree_util=, and AD; consumers can do =jax.vmap(estimate, ...)= over a grid and the resulting =EstimationResult= comes back stacked along the leading axis automatically.
+- *Leaves (diagnostics).* Sub-fields of =EstimationResult.diagnostics= are JAX-array leaves wrapped in =haliax.NamedArray= where labelled. They participate in the parent pytree but are not themselves pytree containers.
+
+The architectural rule: *inference results are pytrees; estimation/diagnostics are leaves*. Following this rule, =vmap= over =estimate= or any inference helper yields a stacked result without the caller needing to thread =in_axes= / =out_axes= manually through nested dataclasses.
+
+The current outlier is =ClusterBootstrapResult= (=src/emu_gmm/inference/cluster_bootstrap.py=), which is a plain ~@dataclasses.dataclass(frozen=True)~ rather than a =jdc.pytree_dataclass=. The fields it carries (a =haliax.NamedArray=, a JAX array, a NumPy bool array, a JAX PRNG key, and a Python tuple of strings) are not all pytree leaves; in particular the NumPy =convergence= array and the =tuple[str, ...]= =param_names= would need to be marked static under a pytree registration. Lifting it to the invariant is tracked as a follow-up (audit issue 3); the documented contract is "frozen leaf, not pytree" so consumers know not to =vmap= over it directly.
 
 * Section 4: The =estimate()= Entry Point
 
