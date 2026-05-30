@@ -28,6 +28,7 @@ architectural context.
 from __future__ import annotations
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -38,6 +39,48 @@ import scipy.optimize as so
 from jaxtyping import Array, Float
 
 from emu_gmm.types import OptimizerInfo
+
+# Module-level cache mapping a user ``residual_fn`` (by ``id``) to its
+# optimistix ``fn(y, args)`` wrapper. Caching the wrapper is what gives
+# :func:`build_estimator` its second-call no-retrace property:
+# optimistix's internal pjit cache keys on the wrapper's identity, so
+# rebuilding ``fn`` on each call would miss the cache every time even
+# when ``residual_fn`` itself is unchanged.
+#
+# We hold the wrapper *strongly* (so it survives between optimiser
+# invocations) and register a :class:`weakref.finalize` on the
+# user-supplied ``residual_fn`` to evict the cache entry when the
+# residual closure is garbage-collected. This avoids unbounded growth
+# in long-running processes that build many factories.
+_OPTIMISTIX_FN_CACHE: dict[int, Any] = {}
+
+
+def _optimistix_wrap(
+    residual_fn: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+) -> Callable[[Float[Array, " K"], Any], Float[Array, " M"]]:
+    """Return a memoised optimistix ``fn(y, args)`` wrapper for ``residual_fn``.
+
+    Optimistix expects two-argument ``fn(y, args)``. We supply a thin
+    wrapper that ignores ``args`` and forwards to the user's
+    one-argument residual. Building the wrapper afresh on every solver
+    invocation defeats optimistix's pjit cache (the cache keys on
+    closure identity); memoising on ``id(residual_fn)`` keeps the
+    wrapper identity stable so the second call hits the cache.
+    """
+    key = id(residual_fn)
+    cached = _OPTIMISTIX_FN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    def fn(y: Float[Array, " K"], args: Any) -> Float[Array, " M"]:
+        return residual_fn(y)
+
+    _OPTIMISTIX_FN_CACHE[key] = fn
+    # Evict when ``residual_fn`` is GC'd. ``id()`` is captured by value
+    # so the finalize closure does not keep ``residual_fn`` alive.
+    weakref.finalize(residual_fn, _OPTIMISTIX_FN_CACHE.pop, key, None)
+    return fn
+
 
 # ---------------------------------------------------------------------------
 # Optimistix adapter
@@ -85,9 +128,11 @@ class _OptimistixLM:
             rtol=self.rtol, atol=self.atol
         )
 
-        # optimistix expects fn(y, args); we ignore args.
-        def fn(y: Float[Array, " K"], args: Any) -> Float[Array, " M"]:
-            return residual_fn(y)
+        # ``fn`` is a memoised wrapper around ``residual_fn``: see
+        # :func:`_optimistix_wrap`. Optimistix's internal pjit cache
+        # keys on the wrapper's identity; memoising keeps the cache
+        # warm across calls with the same residual.
+        fn = _optimistix_wrap(residual_fn)
 
         sol: optx.Solution = optx.least_squares(
             fn,

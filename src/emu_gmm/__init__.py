@@ -52,7 +52,7 @@ from emu_gmm.diagnostics import (
     build_optimizer_health,
     compute_cond_info,
 )
-from emu_gmm.estimator import estimate
+from emu_gmm.estimator import build_estimator, estimate
 from emu_gmm.inference import (
     ClusterBootstrapResult,
     JTestResult,
@@ -102,6 +102,7 @@ __all__ = [
     "__version__",
     # Entry point
     "estimate",
+    "build_estimator",
     # Inference
     "k_statistic",
     "KStatisticResult",
