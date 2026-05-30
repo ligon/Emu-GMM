@@ -1,0 +1,21 @@
+#+TITLE: Recovered content from segfault-interrupted workflow worktrees
+#+DATE: 2026-05-30
+
+Salvage from the multi-agent workflow worktrees left under
+=.claude/worktrees/= after a segfault. The primary recovered work ---
+v2 manifolds Phase 1-3 --- landed on branch =feat/v2-manifolds-phase1-3=
+(commit 331fcdd) and is NOT duplicated here.
+
+These files capture *unique uncommitted* content from two other dirty
+worktrees before those worktrees were removed:
+
+- =v2-chunk-a-types-ops_uncommitted.patch= --- uncommitted Product-manifold
+  WIP from the OLDER v2 attempt (branch =v2-chunk-a-types-ops=, kept).
+  Superseded by =feat/v2-manifolds-phase1-3=; saved for comparison only.
+- =v2-chunk-a-types-ops_commits.txt= / =_committed-diffstat.txt= --- the
+  two committed v2 commits on that branch (Phase 1 + Phase 2). The branch
+  ref is preserved, so these are pointers, not the only copy.
+- =docs-design-sweep_migration_uncommitted.patch= --- uncommitted edits to
+  the migration guide from branch =docs/design-sweep= (kept).
+
+Apply with: =git apply docs/recovered/<file>.patch= from repo root.

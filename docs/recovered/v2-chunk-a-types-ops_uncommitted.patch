@@ -1,0 +1,265 @@
+diff --git a/src/emu_gmm/__init__.py b/src/emu_gmm/__init__.py
+index 6934e6f..6537307 100644
+--- a/src/emu_gmm/__init__.py
++++ b/src/emu_gmm/__init__.py
+@@ -47,6 +47,12 @@ from emu_gmm.covariance import (
+     SyntheticCovariance,
+ )
+ from emu_gmm.estimator import estimate
++from emu_gmm.manifolds import (
++    Euclidean,
++    ManifoldParam,
++    Product,
++    PSDFixedRank,
++)
+ from emu_gmm.measures import (
+     AnalyticalMeasure,
+     EmpiricalMeasure,
+@@ -105,4 +111,9 @@ __all__ = [
+     "RegularizationStrategy",
+     "Optimizer",
+     "StructuralModel",
++    # v2 manifolds
++    "ManifoldParam",
++    "Euclidean",
++    "PSDFixedRank",
++    "Product",
+ ]
+diff --git a/src/emu_gmm/manifolds/product.py b/src/emu_gmm/manifolds/product.py
+index 23c4e1c..88d81bb 100644
+--- a/src/emu_gmm/manifolds/product.py
++++ b/src/emu_gmm/manifolds/product.py
+@@ -1,14 +1,227 @@
+-"""Phase 3 stub. Filled in below before any non-trivial composition
+-depends on it."""
++""":class:`Product` --- Cartesian product of :class:`ManifoldParam` factors.
++
++JAX-native port of ``.venv/.../pymanopt/manifolds/product.py:10-131``.
++Two adaptations:
++
++1. Pymanopt's ``_ProductTangentVector`` (a list-with-arithmetic class)
++   becomes a plain Python tuple of per-factor arrays. ``jax.tree_map``
++   handles per-factor arithmetic transparently.
++2. ``_dispatch`` becomes a comprehension over ``zip(self.manifolds,
++   *args)``; JAX's PyTree machinery already gives us per-factor
++   alignment.
++
++Points and tangent vectors are tuples (one entry per factor); each
++entry has the ambient shape declared by that factor's
++:attr:`ManifoldParam.ambient_shape`. Nested products are rejected at
++construction time (mirrors ``product.py:24-25``).
++"""
+ 
+ from __future__ import annotations
+ 
++import dataclasses
++from typing import Any
++
++import jax
++import jax.numpy as jnp
++
++
++@dataclasses.dataclass(frozen=True)
++class Product:
++    """Cartesian product of :class:`ManifoldParam` factors.
++
++    Parameters
++    ----------
++    manifolds
++        Tuple of factor manifolds. Each factor must satisfy the
++        :class:`ManifoldParam` protocol. Nested :class:`Product` factors
++        are rejected --- users compose by flattening at construction.
++
++    Examples
++    --------
++    The K-Aggregators v2 acceptance target::
++
++        Product((PSDFixedRank(m=4, K=3), Euclidean(2), Euclidean(2)))
++
++    Points are tuples ``(Y, mu, sigma)`` matching the factor shapes;
++    tangent vectors have the same tuple shape.
++
++    Notes
++    -----
++    Tangent-space inner product is the sum across factors; norm is the
++    Frobenius-style root-sum-of-squares. The :attr:`dimension` and
++    :attr:`gauge_dim` properties accumulate from the factors so Phase 5
++    / 6 diagnostics work unchanged.
++    """
++
++    manifolds: tuple[Any, ...]
++
++    def __init__(self, *args: Any) -> None:
++        # Accept either Product(M1, M2, ...) or Product((M1, M2, ...))
++        # to match pymanopt's ``Product(manifolds)`` surface while still
++        # being natural to spell positionally.
++        if len(args) == 1 and isinstance(args[0], tuple | list):
++            factors = tuple(args[0])
++        else:
++            factors = tuple(args)
++        for m in factors:
++            if isinstance(m, Product):
++                raise ValueError(
++                    "Product: nested product manifolds are not supported; "
++                    "compose by flattening factors at construction"
++                )
++        object.__setattr__(self, "manifolds", factors)
++
++    # ------------------------------------------------------------------
++    # Static manifold properties.
++    # ------------------------------------------------------------------
++
++    @property
++    def dimension(self) -> int:
++        """Sum of factor dimensions (``product.py:30``)."""
++        return int(sum(int(m.dimension) for m in self.manifolds))
++
++    @property
++    def ambient_shape(self) -> tuple[tuple[int, ...], ...]:
++        """Per-factor ambient shapes as a tuple-of-tuples.
++
++        Distinct from a single-factor manifold's ``(int, ...)`` shape:
++        the product's points are tuples, so its ambient shape is a
++        tuple of shapes.
++        """
++        return tuple(tuple(m.ambient_shape) for m in self.manifolds)
++
++    @property
++    def gauge_dim(self) -> int:
++        """Sum of factor gauge dimensions.
++
++        Factor manifolds that don't define ``gauge_dim`` contribute 0
++        (via ``getattr(M, 'gauge_dim', 0)``), matching the Phase 6
++        diagnostics consumer.
++        """
++        return int(sum(int(getattr(m, "gauge_dim", 0)) for m in self.manifolds))
++
++    # ------------------------------------------------------------------
++    # ManifoldParam protocol (factor-wise delegation).
++    # ------------------------------------------------------------------
++
++    def projection(
++        self,
++        point: tuple[Any, ...],
++        vector: tuple[Any, ...],
++    ) -> tuple[Any, ...]:
++        """Factor-wise projection."""
++        self._check_lengths(point, vector)
++        return tuple(
++            m.projection(p, v)
++            for m, p, v in zip(self.manifolds, point, vector, strict=True)
++        )
++
++    def retraction(
++        self,
++        point: tuple[Any, ...],
++        tangent_vector: tuple[Any, ...],
++    ) -> tuple[Any, ...]:
++        """Factor-wise retraction."""
++        self._check_lengths(point, tangent_vector)
++        return tuple(
++            m.retraction(p, t)
++            for m, p, t in zip(self.manifolds, point, tangent_vector, strict=True)
++        )
++
++    def inner_product(
++        self,
++        point: tuple[Any, ...],
++        u: tuple[Any, ...],
++        v: tuple[Any, ...],
++    ) -> Any:
++        """Sum of per-factor inner products (``product.py:64-67``)."""
++        self._check_lengths(point, u, v)
++        terms = [
++            m.inner_product(p, ui, vi)
++            for m, p, ui, vi in zip(self.manifolds, point, u, v, strict=True)
++        ]
++        return jnp.sum(jnp.stack([jnp.asarray(t) for t in terms]))
++
++    def norm(
++        self,
++        point: tuple[Any, ...],
++        tangent_vector: tuple[Any, ...],
++    ) -> Any:
++        """``sqrt(sum_factor_squared_norms)`` (``product.py:59-62``)."""
++        return jnp.sqrt(self.inner_product(point, tangent_vector, tangent_vector))
++
++    def euclidean_to_riemannian_gradient(
++        self,
++        point: tuple[Any, ...],
++        euclidean_gradient: tuple[Any, ...],
++    ) -> tuple[Any, ...]:
++        """Factor-wise."""
++        self._check_lengths(point, euclidean_gradient)
++        return tuple(
++            m.euclidean_to_riemannian_gradient(p, g)
++            for m, p, g in zip(self.manifolds, point, euclidean_gradient, strict=True)
++        )
++
++    def distance(
++        self,
++        point_a: tuple[Any, ...],
++        point_b: tuple[Any, ...],
++    ) -> Any:
++        """``sqrt(sum_factor_squared_distances)``."""
++        self._check_lengths(point_a, point_b)
++        sq_dists = [
++            m.distance(a, b) ** 2
++            for m, a, b in zip(self.manifolds, point_a, point_b, strict=True)
++        ]
++        return jnp.sqrt(jnp.sum(jnp.stack([jnp.asarray(d) for d in sq_dists])))
++
++    def random_point(self, key: Any) -> tuple[Any, ...]:
++        """Split the PRNG key per factor and delegate."""
++        keys = jax.random.split(key, len(self.manifolds))
++        return tuple(
++            m.random_point(k) for m, k in zip(self.manifolds, keys, strict=True)
++        )
++
++    def random_tangent_vector(
++        self, key: Any, point: tuple[Any, ...]
++    ) -> tuple[Any, ...]:
++        """Per-factor random tangents, rescaled so the joint
++        :math:`L^2` norm is 1.
++
++        Pymanopt's ``Product.random_tangent_vector`` scales each per-
++        factor sample by :math:`1/\\sqrt{F}` where :math:`F` is the
++        number of factors; this preserves unit Frobenius norm because
++        the per-factor outputs are themselves unit-norm. We follow the
++        same convention.
++        """
++        self._check_lengths(point)
++        keys = jax.random.split(key, len(self.manifolds))
++        n_factors = len(self.manifolds)
++        scale = 1.0 / jnp.sqrt(jnp.asarray(n_factors, dtype=jnp.float64))
++        return tuple(
++            scale * m.random_tangent_vector(k, p)
++            for m, k, p in zip(self.manifolds, keys, point, strict=True)
++        )
++
++    def zero_vector(self, point: tuple[Any, ...]) -> tuple[Any, ...]:
++        """Per-factor zero tangent."""
++        self._check_lengths(point)
++        return tuple(
++            m.zero_vector(p) for m, p in zip(self.manifolds, point, strict=True)
++        )
+ 
+-class Product:  # pragma: no cover - replaced in Phase 3
+-    """Stub --- see Phase 3 (Section 5 of the v2 plan)."""
++    # ------------------------------------------------------------------
++    # Helpers.
++    # ------------------------------------------------------------------
+ 
+-    def __init__(self, *args: object, **kwargs: object) -> None:
+-        raise NotImplementedError("Product is implemented in v2 Chunk A Phase 3.")
++    def _check_lengths(self, *args: tuple[Any, ...]) -> None:
++        """Each tuple-shaped argument must have one entry per factor."""
++        for arg in args:
++            if len(arg) != len(self.manifolds):
++                raise ValueError(
++                    f"Product: expected per-factor tuple of length "
++                    f"{len(self.manifolds)}, got length {len(arg)}"
++                )
+ 
+ 
+ __all__ = ["Product"]
