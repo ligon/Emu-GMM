@@ -88,6 +88,17 @@ class Euclidean:
         """Riemannian norm; ``sqrt(inner_product(v, v))``."""
         return jnp.sqrt(self.inner_product(point, tangent_vector, tangent_vector))
 
+    def retraction_differential(self, point: Any) -> Any:  # noqa: ARG002
+        """Retraction differential ``dR_x(v)/dv|_0 = 1`` (identity).
+
+        The additive retraction ``R_x(v) = x + v`` has unit differential,
+        so the inference G-column scaling is the identity and
+        ``Sigma_theta`` is the raw ambient GMM variance --- the v1
+        behaviour. Mirrors the solver's ``step_scale == 1`` for Euclidean
+        leaves.
+        """
+        return jnp.asarray(1.0)
+
     def distance(self, point_a: Any, point_b: Any) -> Any:
         """Frobenius distance :math:`\\lVert a - b\\rVert_F`."""
         return jnp.linalg.norm(jnp.asarray(point_a) - jnp.asarray(point_b))

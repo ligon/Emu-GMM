@@ -43,6 +43,18 @@ class ManifoldParam(Protocol):
     retraction(point, tangent_vector) -> point
         First-order retraction of a tangent vector at ``point`` back to
         the manifold.
+    retraction_differential(point) -> scalar
+        The per-coordinate retraction differential ``dR_x(v)/dv|_{v=0}``
+        --- the factor mapping a tangent perturbation to its ambient
+        image. ``1`` for :class:`Euclidean` (additive retraction);
+        ``point`` for :class:`emu_gmm.manifolds.positive.Positive`
+        (exponential retraction). This is the scaling the estimator
+        applies to the Jacobian columns when building ``Sigma_theta`` in
+        tangent coordinates (delta-method push-through), and the same
+        ``step_scale`` the Riemannian LM solver uses for its
+        metric-correct Gauss--Newton step. Distinct from
+        ``euclidean_to_riemannian_gradient`` (the inverse-metric gradient
+        conversion); the two must not be conflated for inference.
     riemannian_gradient(point, euclidean_gradient) -> tangent_vector
         Convert an ambient-space Euclidean gradient to a Riemannian
         gradient (tangent vector). For embedded-metric manifolds this is
@@ -82,6 +94,8 @@ class ManifoldParam(Protocol):
     def projection(self, point: Any, ambient_vector: Any) -> Any: ...
 
     def retraction(self, point: Any, tangent_vector: Any) -> Any: ...
+
+    def retraction_differential(self, point: Any) -> Any: ...
 
     def riemannian_gradient(self, point: Any, euclidean_gradient: Any) -> Any: ...
 

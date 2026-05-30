@@ -122,6 +122,11 @@ class PSDFixedRank:
         """
         return jnp.asarray(point) + jnp.asarray(tangent_vector)
 
+    def retraction_differential(self, point: Any) -> Any:  # noqa: ARG002
+        r"""Retraction differential ``1`` (additive retraction ``Y + V``)."""
+        del point
+        return jnp.asarray(1.0)
+
     def riemannian_gradient(
         self, point: Any, euclidean_gradient: Any
     ) -> Any:  # noqa: ARG002

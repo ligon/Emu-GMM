@@ -96,6 +96,13 @@ class Product:
             for f, p, t in zip(self.factors, point, tangent_vector, strict=True)
         )
 
+    def retraction_differential(self, point: Any) -> tuple[Any, ...]:
+        """Factor-wise retraction differential ``dR_x(v)/dv|_0``."""
+        return tuple(
+            f.retraction_differential(p)
+            for f, p in zip(self.factors, point, strict=True)
+        )
+
     def riemannian_gradient(
         self, point: Any, euclidean_gradient: Any
     ) -> tuple[Any, ...]:

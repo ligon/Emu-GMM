@@ -103,6 +103,33 @@ class Positive:
         """
         return point**2 * euclidean_gradient
 
+    def retraction_differential(self, point: Any) -> Any:
+        """Retraction differential :math:`dR_x(v)/dv|_{v=0} = x`.
+
+        From :math:`R_x(v) = x \\exp(v / x)`,
+        :math:`R_x'(v) = \\exp(v/x)` so :math:`R_x'(0) = 1` in the
+        ambient :math:`v`-derivative-per-unit-``x`` sense; expressed as
+        the ambient-coordinate sensitivity ``d(sigma)/dv|_0`` it equals
+        ``point``. This is the factor that maps a tangent (``v``-coord)
+        perturbation to its ambient (``sigma``) image, and is exactly the
+        ``step_scale`` the solver uses for its metric-correct GN step
+        (see :mod:`emu_gmm.manifolds.riemannian_lm`).
+
+        Inference scaling (load-bearing; see the estimator's
+        ``_compute_inference``): the ambient GMM variance
+        ``Sigma_eucl = (G' Lambda G)^{-1}`` is pushed into the
+        ``v``-coordinate by the delta method,
+        ``Var(v) = (d sigma / dv)^{-2} Sigma_eucl = point^{-2}
+        Sigma_eucl``. Scaling column ``j`` of ``G`` by this differential
+        (``point``) yields ``info = point^2 G' Lambda G`` and hence
+        ``Sigma_theta = point^{-2} Sigma_eucl`` --- consistent with the
+        solver's ``Jr' Jr = point^2 (G' Lambda G)``. This is *distinct*
+        from :meth:`euclidean_to_riemannian_gradient` (``point**2``),
+        which is the inverse-metric gradient conversion and must not be
+        used for inference.
+        """
+        return point
+
     def distance(self, point_a: Any, point_b: Any) -> Any:
         """Geodesic distance :math:`|\\log b - \\log a|`."""
         return jnp.abs(jnp.log(point_b) - jnp.log(point_a))

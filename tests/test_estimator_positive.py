@@ -109,13 +109,18 @@ class TestPositiveAcceptance:
 
     def test_Sigma_theta_in_tangent_coords(self):
         """The Riemannian (tangent-coord) variance confirms the
-        euclidean_to_riemannian_gradient scaling fired in inference.
+        retraction-differential scaling fired in inference.
 
-        With G_riem = x^2 G_eucl, the information matrix is
-        info_riem = G_riem' Lambda G_riem = x^4 info_eucl, so
-        Sigma_riem = inv(info_riem) = x^{-4} Sigma_eucl for the scalar
-        K=1 case. (Sigma_theta is in tangent / log-scale coordinates; an
-        ambient var(sigma_hat) would multiply back by x^2 on each side.)
+        Sigma_theta is the delta-method push-through of the ambient GMM
+        variance Sigma_eucl = (G' Lambda G)^{-1} into the tangent (v)
+        coordinate where sigma = R_x(v) = x exp(v/x), so dsigma/dv|_0 = x
+        and Var(v) = (dsigma/dv)^{-2} Sigma_eucl = x^{-2} Sigma_eucl for
+        the scalar K=1 case. Equivalently, scaling column G by the
+        retraction differential x gives info_riem = x^2 info_eucl, so
+        Sigma_riem = inv(info_riem) = x^{-2} Sigma_eucl --- matching the
+        solver's Jr'Jr = x^2 (G' Lambda G). (Scaling by
+        euclidean_to_riemannian_gradient = x^2 would give a wrong x^{-4}
+        variance; see the blocking review finding.)
         """
         r = self._run()
         sigma_hat = float(r.theta_hat.sigma)
@@ -145,7 +150,7 @@ class TestPositiveAcceptance:
         )
         sigma_eucl = float(r_euc.Sigma_theta.array[0, 0])
 
-        assert sigma_riem == pytest.approx(sigma_hat**-4 * sigma_eucl, rel=1e-6)
+        assert sigma_riem == pytest.approx(sigma_hat**-2 * sigma_eucl, rel=1e-6)
         # And the scaling is non-trivial (the two genuinely differ).
         assert abs(sigma_riem - sigma_eucl) > 1e-8
 
