@@ -337,3 +337,63 @@ class TestStandardErrorsAndCoefTable:
         assert coeffs.notna().all().all()
         # Same object as the cached_property (round-trip identity).
         assert coeffs is r.coef_table
+
+
+# ---------------------------------------------------------------------------
+# LabelContext public re-export (#56)
+# ---------------------------------------------------------------------------
+
+
+class TestLabelContextPublicReexport:
+    """``LabelContext`` annotates ``EstimationResult.labels`` (line 359 of
+    ``types.py``) but its definition lived only in
+    ``emu_gmm._internal.labels``, which the project conventions treat as
+    off-limits. Re-export it through ``emu_gmm.types`` and the top-level
+    package so users can write the import the result-object's signature
+    suggests.
+    """
+
+    def test_import_from_top_level_package(self):
+        """``from emu_gmm import LabelContext`` works."""
+        from emu_gmm import LabelContext as _Top
+        from emu_gmm._internal.labels import LabelContext as _Internal
+
+        # Re-export is the *same* class, not a copy: ``isinstance``
+        # against either name resolves to the same type, and the
+        # internal definition is the source of truth.
+        assert _Top is _Internal
+
+    def test_import_from_types_module(self):
+        """``from emu_gmm.types import LabelContext`` works."""
+        from emu_gmm._internal.labels import LabelContext as _Internal
+        from emu_gmm.types import LabelContext as _Types
+
+        assert _Types is _Internal
+
+    def test_label_context_in_types_all(self):
+        """``LabelContext`` appears in ``emu_gmm.types.__all__``."""
+        assert "LabelContext" in t.__all__
+
+    def test_label_context_in_package_all(self):
+        """``LabelContext`` appears in the top-level ``__all__``."""
+        import emu_gmm
+
+        assert "LabelContext" in emu_gmm.__all__
+
+    def test_result_labels_type_resolves_to_public_path(self):
+        """``type(result.labels)`` is the re-exported class.
+
+        The re-exported name is an alias for the internal class, so
+        ``type(result.labels)`` still reports the original
+        ``__qualname__`` (Python attaches qualnames at class-definition
+        time, not at re-export). The contract for users is the
+        identity check above --- ``emu_gmm.LabelContext is
+        type(result.labels)`` --- which lets ``help(result.labels)``
+        and ``isinstance(result.labels, emu_gmm.LabelContext)`` work
+        from the public path without spelunking through
+        ``emu_gmm._internal``.
+        """
+        import emu_gmm
+
+        r = _make_result()
+        assert type(r.labels) is emu_gmm.LabelContext
