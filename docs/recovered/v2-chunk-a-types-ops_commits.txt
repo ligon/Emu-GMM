@@ -1,0 +1,2 @@
+1e6fc80 v2 Phase 2: PSDFixedRank with embedded metric
+e1cf3cd v2 Phase 1: ManifoldParam protocol, Euclidean, manifold-aware params

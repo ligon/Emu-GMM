@@ -1,0 +1,12 @@
+ pyproject.toml                          |  10 +-
+ src/emu_gmm/_internal/params.py         | 318 ++++++++++++++++++++++++++++----
+ src/emu_gmm/manifolds/__init__.py       |  48 +++++
+ src/emu_gmm/manifolds/base.py           | 145 +++++++++++++++
+ src/emu_gmm/manifolds/euclidean.py      | 164 ++++++++++++++++
+ src/emu_gmm/manifolds/product.py        |  14 ++
+ src/emu_gmm/manifolds/psd_fixed_rank.py | 242 ++++++++++++++++++++++++
+ tests/_internal/test_params_v2.py       | 258 ++++++++++++++++++++++++++
+ tests/manifolds/__init__.py             |   0
+ tests/manifolds/test_euclidean.py       | 175 ++++++++++++++++++
+ tests/manifolds/test_psd_fixed_rank.py  | 307 ++++++++++++++++++++++++++++++
+ 11 files changed, 1644 insertions(+), 37 deletions(-)

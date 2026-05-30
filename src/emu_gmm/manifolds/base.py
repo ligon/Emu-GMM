@@ -1,0 +1,79 @@
+"""Runtime-checkable :class:`ManifoldParam` protocol.
+
+Every concrete manifold under :mod:`emu_gmm.manifolds` satisfies this
+protocol. See plan §2.7 for the rationale and the full surface; §2.9
+for why ``gauge_dim`` is a required attribute (not a ``getattr``-with-
+default lookup).
+
+Storage convention (plan §2.1): tangent vectors and points share the
+``ambient_shape`` array shape. The protocol does *not* require any
+horizontal-basis transformation at the boundary; gauge bookkeeping is
+the manifold's responsibility, surfaced via ``gauge_dim``.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class ManifoldParam(Protocol):
+    """Protocol for a Riemannian manifold of parameters.
+
+    Attributes
+    ----------
+    dimension
+        The ambient (storage) dimension. For native manifolds this is
+        ``int(prod(ambient_shape))``; for :class:`PSDFixedRank(n, k)`
+        this is ``n * k`` (the ambient :math:`nk`, *not* the quotient
+        :math:`nk - k(k-1)/2`; see plan §2.1).
+    gauge_dim
+        Dimension of the gauge nullspace. ``0`` for non-quotient
+        manifolds (:class:`Euclidean`, full-rank SPD); ``k*(k-1)/2`` for
+        :class:`PSDFixedRank(n, k)`; sum-of-factors for :class:`Product`.
+    ambient_shape
+        Shape of one ambient-storage array; used by the flatten/unflatten
+        path to compute per-leaf offsets and reshape blocks back.
+
+    Methods
+    -------
+    projection(point, ambient_vector) -> tangent_vector
+        Project an ambient-shape vector onto the tangent space at
+        ``point``. Idempotent.
+    retraction(point, tangent_vector) -> point
+        First-order retraction of a tangent vector at ``point`` back to
+        the manifold.
+    riemannian_gradient(point, euclidean_gradient) -> tangent_vector
+        Convert an ambient-space Euclidean gradient to a Riemannian
+        gradient (tangent vector). For embedded-metric manifolds this is
+        the projection of the Euclidean gradient.
+    distance(point_a, point_b) -> scalar
+        Geodesic (or chord) distance between two manifold points.
+    random_point(key) -> point
+        Sample a random manifold point given a ``jax.random.PRNGKey``.
+    tangent_basis_names(field_name) -> list[str]
+        Return ``dimension`` labels naming each ambient coordinate of a
+        tangent vector. For :class:`Euclidean` with an empty
+        ``ambient_shape`` (scalar v1 leaf) this is ``[field_name]``;
+        otherwise the names embed the leaf field name plus a
+        ``_t_<i><j>...`` suffix per ambient index.
+    """
+
+    dimension: int
+    gauge_dim: int
+    ambient_shape: tuple[int, ...]
+
+    def projection(self, point: Any, ambient_vector: Any) -> Any: ...
+
+    def retraction(self, point: Any, tangent_vector: Any) -> Any: ...
+
+    def riemannian_gradient(self, point: Any, euclidean_gradient: Any) -> Any: ...
+
+    def distance(self, point_a: Any, point_b: Any) -> Any: ...
+
+    def random_point(self, key: Any) -> Any: ...
+
+    def tangent_basis_names(self, field_name: str) -> list[str]: ...
+
+
+__all__ = ["ManifoldParam"]

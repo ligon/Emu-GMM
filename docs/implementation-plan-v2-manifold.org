@@ -29,6 +29,77 @@ The v2.0 acceptance target is unchanged: a K-Aggregators-style
 parameter shape estimated via =RiemannianLM= with a labelled
 tangent-space =Sigma_theta= and a reported =gauge_nullspace_dim=.
 
+** §0.1 Implementation status (2026-05-30): Phase 1--3 landed as a "lite" slice; a design fork was recorded
+
+A multi-agent workflow implemented Phase 1--3 *twice*, along two
+different design philosophies. The build session was interrupted by a
+segfault; recovery committed the more recent of the two attempts. Both
+are preserved. This note records what landed, what was deferred, and
+where the alternative lives, so Phase 4 does not silently lose work.
+
+*What landed (the primary):* branch =feat/v2-manifolds-phase1-3=
+(commit =331fcdd=). A clean, fully-tested, back-compat-preserving slice:
+=manifolds/{base,spec,euclidean,psd_fixed_rank,product}.py= + tests; 60
+new tests green; ruff + black + mypy clean; the full v1 suite unaffected.
+It is shippable and correct *as far as it goes* --- but it is "Phase 1--3
+lite": it consciously defers several items this plan's Phase 1 spec
+(Section 3) calls for. Deviations from the spec as written:
+
+/Merged as a PREVIEW surface (Option C)./ Because the slice can construct
+but not yet estimate with a manifold parameter, the manifold types are
+*not* re-exported from the top-level =emu_gmm= namespace; users reach them
+via =from emu_gmm.manifolds import ...=. The top-level re-export lands once
+Phase 4/5 make manifold estimation real. This keeps the rescued work on
+=main= without advertising an unfinished public API.
+
+| Spec item (Section 3 / §2.x)                       | Landed slice (=feat/v2-manifolds-phase1-3=)                                  |
+|----------------------------------------------------+------------------------------------------------------------------------------|
+| =flatten_params -> (flat, treedef, manifold_spec)= | KEPT v1 2-tuple =(flat, treedef)= bitwise; added separate                    |
+| (§508, the central XL type-system change)          | =manifold_spec_from_params(params)= helper (NOT in plan; raises             |
+|                                                    | =NotImplementedError= on any non-scalar leaf)                                |
+| =ManifoldLeaf= PyTree wrapper (§2.8, §508)         | NOT implemented --- non-scalar leaves cannot yet flow through the estimator  |
+| =manifold.inner_product= (§2.3, euclidean §495)    | NOT in the protocol or any manifold                                          |
+| =manifold.norm= (euclidean §497; 27 plan refs)     | NOT in the protocol or any manifold                                          |
+| =euclidean_to_riemannian_gradient= (§498)          | renamed to =riemannian_gradient=                                             |
+| =random_tangent_vector=, =zero_vector= (§499)      | NOT implemented                                                              |
+| =tangent_basis_names= as a pure function in        | implemented instead as a per-manifold *method*                              |
+| =_internal/labels.py(spec, names)= (§2.10, §551)   | =manifold.tangent_basis_names(field_name)=                                   |
+
+*The alternative (the fork):* branch =v2-chunk-a-types-ops= (tip
+=1e6fc80=; an earlier attempt, ~17h before the landed one). It is in
+several respects *more* plan-faithful: it builds the =ManifoldLeaf=
+PyTree node and a genuinely manifold-aware =flatten_params= /
+=unflatten_params=, and its =ManifoldParam= protocol carries
+=inner_product=, =norm=, =euclidean_to_riemannian_gradient=,
+=random_tangent_vector=, and =zero_vector= (with jaxtyping
+=Float[Array, "..."]= annotations). Its richer =params.py= is 389 lines
+vs the landed 234. *But* it left =Product= as a 14-line stub (with
+225 lines of uncommitted WIP), shipped no =spec.py=, no =test_product=,
+and lacks =tangent_basis_names= --- and it was never reconciled with the
+current =main=.
+
+Neither attempt is a superset of the other. The landed slice has the
+finished =Product=, the §2.10 labels, and a green test suite; the fork
+has the geometric protocol surface (=norm= / =inner_product=) and the
+=ManifoldLeaf= flatten machinery that *Phase 4 (=RiemannianLM=,
+Section 6) and Phase 5 (manifold-aware residual, Section 7) require*.
+
+*Action for Phase 4 (do NOT lose this):* before/with =RiemannianLM=,
+re-introduce onto =feat/v2-manifolds-phase1-3=:
+1. =manifold.norm= and =manifold.inner_product= (=RiemannianLM= needs
+   them for step-length and convergence; see Section 6).
+2. The =ManifoldLeaf= wrapper + manifold-aware =flatten_params= 3-tuple
+   (§508) --- without it a =PSDFixedRank= leaf cannot reach the
+   estimator, so the v2.0 acceptance target above is unreachable.
+3. =random_tangent_vector= / =zero_vector= as needed by the optimiser.
+Cherry-pick from =v2-chunk-a-types-ops= rather than rewriting; it
+already passes its own (larger) Phase 1--2 test set.
+
+*Preserved artifacts:* both branch refs survive; =v2-chunk-a-types-ops='s
+uncommitted =Product= WIP and the =docs/design-sweep= migration edits are
+saved under =docs/recovered/= (see its =README.org=). The ~45 workflow
+worktrees under =.claude/worktrees/= were removed (branch refs kept).
+
 * Section 1: Scope and Sequencing
 
 This plan operationalises *Path A* of the pymanopt-integration memo
@@ -465,6 +536,12 @@ New package. Re-exports =ManifoldParam=, =Euclidean=, =PSDFixedRank=,
 
 ** TODO src/emu_gmm/manifolds/base.py                                  :M:
 
+/Partially landed (=feat/v2-manifolds-phase1-3=); see §0.1. The landed
+protocol DROPS =inner_product=, =norm=, =random_tangent_vector=,
+=zero_vector= and renames =euclidean_to_riemannian_gradient= ->
+=riemannian_gradient=. The geometric methods must be restored in
+Phase 4 (cherry-pick from =v2-chunk-a-types-ops=)./
+
 =ManifoldParam= protocol (=@runtime_checkable=, no inheritance from
 ABC) per §2.7 surface above. Per §2.9, =gauge_dim= is /part of the
 protocol/ (not a =getattr=-with-default lookup): =Euclidean=
@@ -482,6 +559,11 @@ manifolds); this matches §2.1's "ambient \(n k\)" definition for
 =dimension= attributes exist on every concrete subclass.
 
 ** TODO src/emu_gmm/manifolds/euclidean.py                             :M:
+
+/Partially landed (=feat/v2-manifolds-phase1-3=); see §0.1. The landed
+=Euclidean= has =projection=/=retraction=/=riemannian_gradient=/
+=distance=/=random_point=/=tangent_basis_names= but NOT the
+=inner_product=/=norm=/=random_tangent_vector= bullets below./
 
 Port from =.venv/.../pymanopt/manifolds/euclidean.py:7-65=. JAX-pure.
 Trivial reference implementation; documents the contract.
@@ -506,6 +588,13 @@ shape) behaves correctly for the v1 scalar case --- v2 unflatten of
 a single-element flat array reconstructs a 0-d JAX scalar.
 
 ** TODO src/emu_gmm/_internal/params.py manifold-aware update          :XL:
+
+/NOT landed --- still open; see §0.1. The landed slice
+(=feat/v2-manifolds-phase1-3=) kept v1 =flatten_params -> (flat,
+treedef)= bitwise and added only =manifold_spec_from_params(params)=
+(which raises =NotImplementedError= on non-scalar leaves). The
+=ManifoldLeaf= wrapper and the 3-tuple =flatten_params= below remain
+TODO; =v2-chunk-a-types-ops= has a working implementation to cherry-pick./
 
 /This is the central type-system change./ Re-estimated XL (from L)
 per the plan-fidelity review's MEDIUM finding on this task. Today
@@ -550,6 +639,13 @@ ambient vector of length =m*K + 2*d= and unflattens back; (c)
 
 ** TODO src/emu_gmm/_internal/labels.py: =tangent_basis_names=         :M:
 
+/Landed in a different shape (=feat/v2-manifolds-phase1-3=); see §0.1.
+Implemented as a per-manifold method =manifold.tangent_basis_names(
+field_name)= rather than the pure =_internal/labels.py= function spec'd
+below. Reconcile when wiring Phase 6 label propagation: either keep the
+method and add a thin =labels.py= aggregator over =manifold_spec=, or
+move logic into =labels.py= per the original spec./
+
 Per §2.10 (moved from Phase 6). Pure function:
 =tangent_basis_names(manifold_spec: ManifoldSpec,
 param_names: tuple[str, ...]) -> tuple[str, ...]=. Returns one
@@ -581,6 +677,13 @@ no harm" gate before Phase 2.
 ---
 
 * Section 4: Phase 2 --- =PSDFixedRank=
+
+/Largely landed (=feat/v2-manifolds-phase1-3=, =psd_fixed_rank.py=,
+201 lines, tests green); see §0.1. Pure-JAX Kronecker Lyapunov
+projection is in place. Caveat: =inner_product=/=norm= are absent
+(deferred with the rest of the geometric surface, §0.1), and the
+pymanopt-parity acceptance grid below should be re-run against the
+landed implementation./
 
 /Dependencies: Phase 1./
 /Acceptance: =PSDFixedRank(n, k)= operators produce results that
@@ -666,6 +769,12 @@ small case.
 ---
 
 * Section 5: Phase 3 --- =Product= Manifold
+
+/Landed (=feat/v2-manifolds-phase1-3=, =product.py=, 137 lines + 121
+lines of tests, green); see §0.1. Factor-wise delegation,
+gauge/dimension summation, nested-=Product= rejection all in place.
+(The =v2-chunk-a-types-ops= fork left this a 14-line stub --- this is
+the one place the landed slice is strictly ahead of the fork.)/
 
 /Dependencies: Phases 1, 2./
 /Acceptance: =Product(PSDFixedRank(m, K), Euclidean(d1),
