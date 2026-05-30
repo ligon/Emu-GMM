@@ -63,6 +63,14 @@ from emu_gmm.inference import (
     k_statistic,
     moment_wild_bootstrap,
 )
+from emu_gmm.manifolds import (
+    Euclidean,
+    LeafSpec,
+    ManifoldParam,
+    ManifoldSpec,
+    Product,
+    PSDFixedRank,
+)
 from emu_gmm.measures import (
     AnalyticalMeasure,
     EmpiricalMeasure,
@@ -149,6 +157,13 @@ __all__ = [
     # Inference
     "moment_wild_bootstrap",
     "WildBootstrapResult",
+    # Manifolds (v2)
+    "ManifoldParam",
+    "ManifoldSpec",
+    "LeafSpec",
+    "Euclidean",
+    "PSDFixedRank",
+    "Product",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",

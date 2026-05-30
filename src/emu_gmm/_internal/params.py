@@ -5,9 +5,14 @@ The framework's user-facing API takes parameters as a
 optimiser, AD, and linear-algebra layers want a 1-D ``jax.numpy.ndarray``
 of length ``K``. These helpers bridge the two representations.
 
-For v1, nested dataclasses are not supported: every leaf of the
-parameter tree must be a 0-d (scalar) value. A clear error is raised if
-this is violated.
+For v1, every leaf of the parameter tree was a 0-d (scalar) value.
+v2 adds :func:`manifold_spec_from_params`, a helper that walks a
+parameter PyTree and reports per-leaf manifold metadata. v1-style
+trees produce a :class:`ManifoldSpec` consisting entirely of
+:class:`Euclidean` (scalar) leaves --- the same flat-array layout, just
+annotated. The v1 ``(flat, treedef)`` return signature of
+:func:`flatten_params` is preserved bitwise; downstream code that wants
+the manifold spec calls :func:`manifold_spec_from_params` alongside.
 """
 
 from __future__ import annotations
@@ -18,6 +23,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
+
+from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
 
 
 def flatten_params(
@@ -140,4 +148,87 @@ def param_names(params: Any) -> list[str]:
     return names
 
 
-__all__ = ["flatten_params", "unflatten_params", "param_names"]
+def manifold_spec_from_params(params: Any) -> ManifoldSpec:
+    """Build a :class:`ManifoldSpec` describing the leaves of ``params``.
+
+    For v1-style parameter trees (every leaf is a 0-d scalar), this
+    returns a :class:`ManifoldSpec` whose ``leaf_specs`` are all
+    :class:`Euclidean` (scalar) entries (per plan §2.8: scalar leaves
+    map to ``Euclidean()`` --- the 0-d-shape Euclidean --- not to
+    ``Euclidean(1)``). The resulting ``total_ambient_dim`` and
+    ``total_dimension`` equal the v1 flat length ``K``, and
+    ``total_gauge_dim == 0``.
+
+    v2-style parameter trees may carry larger ambient shapes per leaf;
+    that path activates once v2's :class:`ManifoldLeaf` wrapper lands
+    in a later phase. For now this helper handles the v1 contract and
+    leaves a clear seam for v2 leaves.
+
+    Parameters
+    ----------
+    params
+        A parameter PyTree. Dataclass field names are used for
+        ``LeafSpec.field_name`` when the PyTree root is a dataclass.
+
+    Returns
+    -------
+    spec
+        A frozen, jit-hashable :class:`ManifoldSpec`.
+
+    Notes
+    -----
+    The returned spec is consumed downstream by Phase 5 dispatch
+    (see plan §2.6) and Phase 6 label generation (plan §2.10).
+    """
+    if dataclasses.is_dataclass(params):
+        field_names: list[str | None] = [f.name for f in dataclasses.fields(params)]
+    else:
+        leaves_only, _ = jax.tree_util.tree_flatten(params)
+        field_names = [None] * len(leaves_only)
+
+    leaves, _ = jax.tree_util.tree_flatten(params)
+    if len(leaves) != len(field_names):
+        # Dataclass with non-scalar field structure --- fall back to
+        # positional None names. (v2 may handle nested dataclasses
+        # explicitly; for v1 contracts, leaves and field names match.)
+        field_names = [None] * len(leaves)
+
+    leaf_specs: list[LeafSpec] = []
+    offset = 0
+    total_dim = 0
+    total_gauge = 0
+    for leaf, name in zip(leaves, field_names, strict=True):
+        arr = jnp.asarray(leaf)
+        if arr.ndim != 0:
+            raise NotImplementedError(
+                f"manifold_spec_from_params: leaf {name!r} has shape "
+                f"{arr.shape}; v2 ManifoldLeaf wrapping is required for "
+                "non-scalar leaves (lands in a later phase)."
+            )
+        manifold = Euclidean()  # plan §2.8: scalar -> Euclidean()
+        leaf_specs.append(
+            LeafSpec(
+                offset=offset,
+                ambient_shape=(),
+                manifold=manifold,
+                field_name=name,
+            )
+        )
+        offset += manifold.dimension
+        total_dim += manifold.dimension
+        total_gauge += manifold.gauge_dim
+
+    return ManifoldSpec(
+        leaf_specs=tuple(leaf_specs),
+        total_ambient_dim=offset,
+        total_dimension=total_dim,
+        total_gauge_dim=total_gauge,
+    )
+
+
+__all__ = [
+    "flatten_params",
+    "unflatten_params",
+    "param_names",
+    "manifold_spec_from_params",
+]
