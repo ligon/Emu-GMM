@@ -1,0 +1,219 @@
+#+TITLE: Pedagogical examples for Emu-GMM
+#+AUTHOR: Emu-GMM
+#+OPTIONS: toc:2 num:nil
+
+Pedagogical examples for Emu-GMM.
+
+This directory collects small, self-contained worked examples that exercise the
+public API end-to-end. Each script can be run directly:
+
+#+begin_src bash
+poetry run python examples/<name>.py
+#+end_src
+
+Each script has a companion smoke test under =tests/examples/test_<name>.py=
+that verifies the example recovers its data-generating parameter within
+Monte-Carlo tolerance, so the examples don't bit-rot as the library evolves.
+
+The original Hansen-Singleton-style multi-asset Euler demo lives at
+=examples/run_euler.py= and is the example threaded through the design docs;
+the examples below are intentionally simpler, each isolating one architectural
+feature of the library.
+
+* Recommended reading order
+
+The examples are ordered from the smallest interesting case to a fully
+worked bootstrap-inference bridge. Each one introduces one new piece of
+the framework.
+
+1. =fair_coin.py= --- the smallest interesting example
+   (Bernoulli, $M=K=1$, identity weighting).
+2. =coin_plus_noise.py= --- two moments, two parameters, just-identified;
+   shows DGP composition under =SyntheticMeasure=.
+3. =hierarchical.py= --- clustered data, =ClusteredCovariance=, and the
+   =cluster_bootstrap= refit-based inference path.
+4. =twfe.py= --- panel data, within-transformation, and
+   =IteratedWeighting= for over-identified GMM with cluster-robust SEs.
+5. =empirical_bootstrap.py= --- bridge to bootstrap inference: refit-free
+   wild bootstrap of the J-statistic vs refit-based cluster bootstrap of
+   $\hat\theta$, side by side.
+
+* The examples
+
+** 1. ~fair_coin.py~
+
+   The smallest interesting GMM: a Bernoulli trial with one parameter
+   ($p$) identified by one moment ($E[X] = p$). Just-identified, so the
+   weighting choice is irrelevant and the J-statistic is exactly zero;
+   the example uses =Identity= weighting to make this explicit.
+
+   Useful as the first encounter with the =estimate(...)= entry point
+   and the =EstimationResult= return type.
+
+   - PR: [[https://github.com/ligon/Emu-GMM/pull/63][#63]]
+   - Expected runtime: < 1 sec.
+
+   | Emu-GMM surface                              |
+   |----------------------------------------------|
+   | =emu_gmm.estimate=                           |
+   | =emu_gmm.EmpiricalMeasure=                   |
+   | =emu_gmm.IIDCovariance=                      |
+   | =emu_gmm.Identity=                           |
+   | =emu_gmm.EstimationResult=                   |
+   | =EstimationResult.coef_table=                |
+   | =EstimationResult.theta_hat=                 |
+   | =EstimationResult.J_stat=                    |
+   | =EstimationResult.J_dof=                     |
+   | =EstimationResult.converged=                 |
+   | =jax_dataclasses.pytree_dataclass=           |
+   | =optimistix_lm= (default optimizer)          |
+
+** 2. ~coin_plus_noise.py~
+
+   Two-parameter, two-moment, just-identified estimator: a Bernoulli
+   $p$ plus an independent Gaussian-noise scale $\sigma$, identified
+   from $E[X]$ and $E[(Y-\mu_Y)^2]$. Shows DGP composition: the same
+   model is exercised under =SyntheticMeasure= (sampling closure) and
+   =EmpiricalMeasure= (pre-generated arrays) so the user sees the two
+   measure paths side by side.
+
+   Also the first example to use the =moment_names= kwarg and exercise
+   =EstimationResult.labels=, so labelled outputs become concrete.
+
+   - PR: [[https://github.com/ligon/Emu-GMM/pull/65][#65]]
+   - Expected runtime: ~1--2 sec.
+
+   | Emu-GMM surface                                       |
+   |-------------------------------------------------------|
+   | =emu_gmm.estimate=                                    |
+   | =emu_gmm.SyntheticMeasure=                            |
+   | =emu_gmm.SyntheticCovariance=                         |
+   | =emu_gmm.EmpiricalMeasure=                            |
+   | =emu_gmm.IIDCovariance=                               |
+   | =emu_gmm.optimistix_lm=                               |
+   | =emu_gmm.ContinuouslyUpdated= (default)               |
+   | =emu_gmm.DiagonalTikhonov= (default)                  |
+   | =EstimationResult.coef_table=                         |
+   | =EstimationResult.theta_hat=                          |
+   | =EstimationResult.J_stat=, =J_dof=, =J_pvalue=        |
+   | =EstimationResult.labels.param_names / moment_names=  |
+   | =moment_names== kwarg on =estimate()=                 |
+   | =@jdc.pytree_dataclass= scalar-field parameter container |
+
+** 3. ~hierarchical.py~
+
+   Cluster-correlated data: a two-stage hierarchical DGP where
+   observations within a cluster share a latent shock. Demonstrates why
+   the i.i.d. variance estimator under-states uncertainty under
+   intra-cluster correlation, and how =ClusteredCovariance= recovers
+   the right standard errors. The =cluster_bootstrap= helper provides
+   a refit-based check on the asymptotic SEs.
+
+   First example where the choice of covariance strategy materially
+   changes inference, so good for internalising the "measure and
+   covariance are orthogonal" commitment.
+
+   - PR: [[https://github.com/ligon/Emu-GMM/pull/66][#66]]
+   - Expected runtime: ~5--15 sec (marked =@pytest.mark.slow= if it
+     crosses 10 sec).
+
+   | Emu-GMM surface                                  |
+   |--------------------------------------------------|
+   | =emu_gmm.EmpiricalMeasure=                       |
+   | =emu_gmm.ClusteredCovariance=                    |
+   | =emu_gmm.ContinuouslyUpdated= (default)          |
+   | =emu_gmm.optimistix_lm=                          |
+   | =emu_gmm.estimate=                               |
+   | =emu_gmm.cluster_bootstrap=                      |
+   | =EstimationResult.coef_table=                    |
+   | =EstimationResult.J_stat=                        |
+   | =EstimationResult.J_pvalue_adjusted=             |
+   | =EstimationResult.labels.param_names=            |
+   | =jdc.pytree_dataclass= for =HierarchicalParams=  |
+
+** 4. ~twfe.py~
+
+   Two-way fixed-effects panel regression cast as GMM. The
+   within-transformation eliminates unit and time effects; the
+   remaining moments are over-identified, so this is the first example
+   where =IteratedWeighting= (two-step GMM with an efficient second
+   stage) does something the just-identified examples can't show.
+   Cluster-robust standard errors via =ClusteredCovariance= (clustering
+   at the unit level) complete the picture.
+
+   - PR: [[https://github.com/ligon/Emu-GMM/pull/64][#64]]
+   - Expected runtime: ~5--15 sec.
+
+   | Emu-GMM surface                                       |
+   |-------------------------------------------------------|
+   | =emu_gmm.estimate=                                    |
+   | =emu_gmm.EmpiricalMeasure=                            |
+   | =emu_gmm.ClusteredCovariance=                         |
+   | =emu_gmm.IteratedWeighting=                           |
+   | =emu_gmm.optimistix_lm=                               |
+   | =emu_gmm.types.EstimationResult=                      |
+   | =EstimationResult.coef_table=                         |
+   | =EstimationResult.theta_hat=                          |
+   | =EstimationResult.J_stat=, =J_pvalue=, =J_pvalue_adjusted= |
+   | =EstimationResult.converged=, =iterations=            |
+   | =EstimationResult.diagnostics.final_gradient_norm=    |
+   | =jax_dataclasses.pytree_dataclass=                    |
+
+** 5. ~empirical_bootstrap.py~
+
+   The bridge from asymptotic inference to bootstrap inference. The
+   same clustered DGP is fit once with =estimate(...)= to produce
+   $\hat\theta$ and its asymptotic-SE coef-table, then two bootstraps
+   are run side by side:
+
+   - =moment_wild_bootstrap= (refit-free): rescales the empirical
+     moments by cluster-level Rademacher draws and recomputes the
+     J-statistic under each draw, yielding a finite-sample p-value
+     for the over-identification test without re-solving the GMM.
+   - =cluster_bootstrap= (refit-based): resamples clusters with
+     replacement and refits $\hat\theta$ from scratch on each draw,
+     yielding a non-parametric sampling distribution of the parameter.
+
+   Good as the last example because it reuses every prior piece
+   (empirical measure, clustered covariance, optimistix LM) and adds
+   only the inferential layer.
+
+   - PR: [[https://github.com/ligon/Emu-GMM/pull/67][#67]]
+   - Expected runtime: ~30--90 sec (marked =@pytest.mark.slow=).
+
+   | Emu-GMM surface                                         |
+   |---------------------------------------------------------|
+   | =emu_gmm.EmpiricalMeasure=                              |
+   | =emu_gmm.ClusteredCovariance=                           |
+   | =emu_gmm.estimate=                                      |
+   | =emu_gmm.optimistix_lm=                                 |
+   | =emu_gmm.moment_wild_bootstrap=                         |
+   | =emu_gmm.cluster_bootstrap=                             |
+   | =EstimationResult.standard_errors=                      |
+   | =EstimationResult.coef_table=                           |
+   | =EstimationResult.V_X=                                  |
+   | =EstimationResult.J_stat=                               |
+   | =WildBootstrapResult.J_boot=, =J_observed=, =p_value=   |
+   | =ClusterBootstrapResult.theta_boot=, =convergence=, =param_names= |
+
+* Where to go next
+
+- =docs/api-sketch.org= --- the v1 API surface in full, with type
+  signatures and the worked multi-asset Euler example in three
+  variants (synthetic / analytical / empirical). The natural next
+  read once the basic examples are familiar.
+- =docs/migration/manifoldgmm-to-emu-gmm.org= --- migration guide for
+  users coming from the sibling =ManifoldGMM= library; useful as a
+  Rosetta stone between the two frameworks.
+- =docs/design.org= --- the architecture specification (four reviewer
+  iterations). Worth reading before making non-trivial structural
+  changes; explains why the measure / covariance / weighting axes are
+  kept orthogonal.
+- =examples/run_euler.py= --- the canonical Hansen-Singleton
+  multi-asset Euler-equation demo that exercises all three measure
+  paths in one script; the "advanced" worked example after the five
+  pedagogical ones above.
+- The =K-Aggregators= port branch in the sibling repo
+  (=../K-Aggregators/=) --- a real-world use of Emu-GMM as a fitting
+  backend in a separate library; useful as an example of how to embed
+  Emu-GMM into a larger application.
