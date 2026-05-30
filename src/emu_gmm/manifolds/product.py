@@ -104,6 +104,27 @@ class Product:
             for f, p, g in zip(self.factors, point, euclidean_gradient, strict=True)
         )
 
+    def euclidean_to_riemannian_gradient(
+        self, point: Any, euclidean_gradient: Any
+    ) -> tuple[Any, ...]:
+        """Factor-wise Phase-4 gradient conversion."""
+        return tuple(
+            f.euclidean_to_riemannian_gradient(p, g)
+            for f, p, g in zip(self.factors, point, euclidean_gradient, strict=True)
+        )
+
+    def inner_product(self, point: Any, u: Any, v: Any) -> Any:
+        """Sum of factor-wise Riemannian inner products."""
+        per_factor = [
+            f.inner_product(p, uu, vv)
+            for f, p, uu, vv in zip(self.factors, point, u, v, strict=True)
+        ]
+        return jnp.sum(jnp.stack(per_factor))
+
+    def norm(self, point: Any, tangent_vector: Any) -> Any:
+        """Riemannian norm ``sqrt(inner_product(v, v))`` across factors."""
+        return jnp.sqrt(self.inner_product(point, tangent_vector, tangent_vector))
+
     def distance(self, point_a: Any, point_b: Any) -> Any:
         per_factor = jnp.stack(
             [

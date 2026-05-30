@@ -28,15 +28,21 @@ from __future__ import annotations
 
 from emu_gmm.manifolds.base import ManifoldParam
 from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.optimizer import RiemannianOptimizer
+from emu_gmm.manifolds.positive import Positive
 from emu_gmm.manifolds.product import Product
 from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
+from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
 
 __all__ = [
     "ManifoldParam",
     "Euclidean",
+    "Positive",
     "PSDFixedRank",
     "Product",
     "ManifoldSpec",
     "LeafSpec",
+    "RiemannianOptimizer",
+    "riemannian_lm",
 ]

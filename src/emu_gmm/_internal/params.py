@@ -193,6 +193,17 @@ def manifold_spec_from_params(params: Any) -> ManifoldSpec:
         # explicitly; for v1 contracts, leaves and field names match.)
         field_names = [None] * len(leaves)
 
+    # Per-field manifold annotations (v2 lite slice, plan §2.8): a
+    # parameter dataclass may carry an ``__emu_manifolds__`` class
+    # attribute mapping field-name -> :class:`ManifoldParam` (e.g.
+    # ``{"sigma": Positive()}``). Scalar Positive leaves keep the same
+    # 0-d flatten layout, so this annotation is the *only* change needed
+    # to route a field onto a non-Euclidean manifold; the
+    # flatten/unflatten 2-tuple contract is preserved bitwise.
+    field_manifolds: dict[str, Any] = {}
+    if dataclasses.is_dataclass(params):
+        field_manifolds = dict(getattr(type(params), "__emu_manifolds__", {}) or {})
+
     leaf_specs: list[LeafSpec] = []
     offset = 0
     total_dim = 0
@@ -205,7 +216,8 @@ def manifold_spec_from_params(params: Any) -> ManifoldSpec:
                 f"{arr.shape}; v2 ManifoldLeaf wrapping is required for "
                 "non-scalar leaves (lands in a later phase)."
             )
-        manifold = Euclidean()  # plan §2.8: scalar -> Euclidean()
+        annotated = field_manifolds.get(name) if name is not None else None
+        manifold = annotated if annotated is not None else Euclidean()
         leaf_specs.append(
             LeafSpec(
                 offset=offset,

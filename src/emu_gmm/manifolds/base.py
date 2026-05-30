@@ -47,6 +47,22 @@ class ManifoldParam(Protocol):
         Convert an ambient-space Euclidean gradient to a Riemannian
         gradient (tangent vector). For embedded-metric manifolds this is
         the projection of the Euclidean gradient.
+    euclidean_to_riemannian_gradient(point, euclidean_gradient) -> tangent
+        Phase-4 canonical name for the same conversion (matches plan §498
+        and the ``v2-chunk-a-types-ops`` operator surface). For the v1
+        :class:`Euclidean` reference it is the identity; for
+        :class:`emu_gmm.manifolds.positive.Positive` it scales by
+        ``x**2``. The estimator's information-matrix block calls this
+        name explicitly; ``riemannian_gradient`` is retained as a
+        backward-compatible alias on the concrete manifolds.
+    inner_product(point, u, v) -> scalar
+        Riemannian inner product of two tangent vectors at ``point``.
+        Phase-4 addition (additive, non-breaking): required by
+        :class:`emu_gmm.manifolds.riemannian_lm.RiemannianLM` for its
+        metric-correct convergence test.
+    norm(point, tangent_vector) -> scalar
+        Riemannian norm of a tangent vector; defaults to
+        ``sqrt(inner_product(point, v, v))``. Phase-4 addition.
     distance(point_a, point_b) -> scalar
         Geodesic (or chord) distance between two manifold points.
     random_point(key) -> point
@@ -68,6 +84,14 @@ class ManifoldParam(Protocol):
     def retraction(self, point: Any, tangent_vector: Any) -> Any: ...
 
     def riemannian_gradient(self, point: Any, euclidean_gradient: Any) -> Any: ...
+
+    def euclidean_to_riemannian_gradient(
+        self, point: Any, euclidean_gradient: Any
+    ) -> Any: ...
+
+    def inner_product(self, point: Any, u: Any, v: Any) -> Any: ...
+
+    def norm(self, point: Any, tangent_vector: Any) -> Any: ...
 
     def distance(self, point_a: Any, point_b: Any) -> Any: ...
 

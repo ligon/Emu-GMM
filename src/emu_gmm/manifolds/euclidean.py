@@ -74,6 +74,20 @@ class Euclidean:
         """Identity: the embedded gradient equals the ambient gradient."""
         return euclidean_gradient
 
+    def euclidean_to_riemannian_gradient(
+        self, point: Any, euclidean_gradient: Any
+    ) -> Any:  # noqa: ARG002
+        """Phase-4 canonical name; identity for :class:`Euclidean`."""
+        return euclidean_gradient
+
+    def inner_product(self, point: Any, u: Any, v: Any) -> Any:  # noqa: ARG002
+        """Standard Euclidean inner product :math:`\\sum_i u_i v_i`."""
+        return jnp.sum(jnp.asarray(u) * jnp.asarray(v))
+
+    def norm(self, point: Any, tangent_vector: Any) -> Any:
+        """Riemannian norm; ``sqrt(inner_product(v, v))``."""
+        return jnp.sqrt(self.inner_product(point, tangent_vector, tangent_vector))
+
     def distance(self, point_a: Any, point_b: Any) -> Any:
         """Frobenius distance :math:`\\lVert a - b\\rVert_F`."""
         return jnp.linalg.norm(jnp.asarray(point_a) - jnp.asarray(point_b))
