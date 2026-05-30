@@ -1,0 +1,262 @@
+#+TITLE: emu-gmm HOWTO --- wiring your application to the estimator
+#+OPTIONS: toc:2 num:nil
+#+SUBTITLE: What code you write, what the framework owns, and how they meet at estimate()
+
+This is the integration guide. It explains the architecture at the level
+you need to answer one question: *what do I have to hand to =emu-gmm=,
+and what does it give back?* For the mathematical specification see
+=docs/design.org=; for the asymptotic theory see
+=docs/mcar-asymptotics.org=; for the full typed API see
+=docs/api-sketch.org=. Runnable, copy-pasteable examples live in
+=examples/= (see the table at the end).
+
+* The one-sentence mental model
+
+=emu-gmm= estimates a parameter \(\theta\) by driving a vector of
+*moment conditions* to (approximately) zero:
+
+#+begin_src text
+  theta_hat  =  argmin_theta   E_mu[ psi(x, theta) ]'  V_mu(theta)^{-1}  E_mu[ psi(x, theta) ]
+                               \__________________/    \______________/
+                                  the moments you           the variance
+                                  define (a vector)         the framework builds
+#+end_src
+
+You supply the *residual function* =psi= and *where the expectation is
+taken* (a =Measure=). The framework owns everything statistical: the
+criterion, the optimiser loop, the weighting matrix, the standard
+errors, the over-identification (J) test, and the diagnostics. You read
+those off the result object; *you never recompute them by hand* (see
+"Contracts that bite", below).
+
+* What you supply vs. what the framework owns
+
+| You write / choose                                   | The framework owns                          |
+|------------------------------------------------------+---------------------------------------------|
+| =psi(x, theta) -> (M,)= --- the per-observation moment | The criterion \(Q_\mu(\theta)\) and its minimisation |
+| A parameter container (a small dataclass)            | The weighting matrix \(\Lambda = V^{-1}\) and its AD |
+| A =Measure= (empirical / analytical / synthetic)     | \(\hat\theta\), =Sigma_theta=, standard errors       |
+| A =CovarianceStrategy= (iid / clustered)             | The J-statistic, =J_dof=, p-values                   |
+| /(optional)/ weighting, regularisation, optimiser    | Per-moment diagnostics (=N_j=, condition numbers)    |
+
+Everything in the right column comes back on a single
+=EstimationResult=.
+
+* The five pieces, and the code each one needs
+
+** 1. The moment function =psi(x, theta) -> (M,)=
+
+This is the heart of your application. It is a *pure, per-observation*
+function: given one observation =x= (a length-=D= JAX vector) and the
+parameters =theta=, it returns a length-=M= JAX vector of moment
+residuals whose population expectation is zero at the truth.
+
+#+begin_src python
+import jax.numpy as jnp
+
+def psi(x, theta):
+    # x:     one observation, shape (D,)
+    # theta: your parameter container (see piece 2)
+    # return: shape (M,), the M moment residuals for THIS observation
+    ...
+    return jnp.stack([m0, m1, ...])   # length M
+#+end_src
+
+Contract:
+- *Per-observation, not aggregated.* Return the residual for a single
+  =x=; the framework =vmap=s it over the sample and forms the mean
+  itself. Do **not** compute a sample mean inside =psi=.
+- *Pure JAX, differentiable.* =theta= flows through =jax.jacfwd= /
+  =grad=; use =jnp=, avoid Python branching on traced values, avoid
+  pandas.
+- =M= (length of the output) is the number of moments; =K= (number of
+  scalar parameters) must satisfy =M >= K=. =M == K= is just-identified
+  (J is identically 0); =M > K= is over-identified (J tests the extra
+  restrictions).
+- *Labelled moments (optional).* If you return a =haliax.NamedArray=
+  with a =Moments= axis, its labels propagate to the outputs; else pass
+  =moment_names=("...", ...)= to =estimate=; else moments are named
+  =m_0, m_1, ...=.
+
+** 2. The parameter container
+
+A small =@jdc.pytree_dataclass= whose leaves are the scalar parameters.
+This is what =theta_init= is and what =result.theta_hat= comes back as.
+
+#+begin_src python
+import jax_dataclasses as jdc
+
+@jdc.pytree_dataclass
+class MyParams:
+    beta: float
+    gamma: float
+#+end_src
+
+Contract: leaves are 0-d scalars (v1). The leaf *names* become the
+parameter labels on =Sigma_theta= / standard errors. (Constrained
+parameters such as =sigma > 0= are a v2 "manifolds" preview; v1 keeps
+parameters in flat \(\mathbb{R}^K\).)
+
+** 3. A Measure --- where \(E_\mu[\psi]\) is taken
+
+The =Measure= says *what you are averaging over*. Pick one:
+
+| Measure              | Use when                                              | You supply                                                        |
+|----------------------+-------------------------------------------------------+-------------------------------------------------------------------|
+| =EmpiricalMeasure=   | You have a dataset (the common case)                  | =x=(N,D)= data, =mask=(N,M)= observability, =weights=(N,)=         |
+| =AnalyticalMeasure=  | The moment expectation has a closed form              | =expectation_fn(psi, theta) -> (M,)=                              |
+| =SyntheticMeasure=   | Moments come from simulating a model (SMM-style)      | =n_sim=, =sampler(key, theta) -> (n_sim, D)=, a PRNG =key=         |
+
+#+begin_src python
+from emu_gmm import EmpiricalMeasure
+
+measure = EmpiricalMeasure(
+    x=x,                          # (N, D) jax array of observations
+    mask=jnp.ones((N, M)),        # (N, M): 1 if moment j observable for row i, else 0
+    weights=jnp.ones(N),          # (N,) sampling weights (1/inclusion prob); ones if none
+)
+# Convenience: EmpiricalMeasure.from_nan_aware(x) infers a mask from
+# non-NaN cells (use only when the moment count M equals the data
+# width D; otherwise build the (N, M) mask explicitly).
+#+end_src
+
+The =mask= is the *only* place per-moment observability lives. Different
+moments may be observed for different numbers of rows; the framework
+tracks the per-moment effective sample size \(N_j = \sum_i d_{ij} w_i\)
+and weights everything correctly (see "Contracts that bite").
+
+** 4. A CovarianceStrategy --- how \(V_\mu(\theta)\) is built
+
+Orthogonal to the Measure: the same =EmpiricalMeasure= pairs with any of
+these without changing your =psi= or data.
+
+| Strategy                              | Use when                                                       |
+|---------------------------------------+----------------------------------------------------------------|
+| =IIDCovariance()=                     | i.i.d. sampling (the default workhorse)                        |
+| =ClusteredCovariance(cluster_ids, n_clusters)= | Within-cluster correlation (households in villages, etc.) |
+| =AnalyticalCovariance= / =SyntheticCovariance= | Pair with the matching analytical / synthetic measure |
+| /(v2 planned)/ stratified, replicate-weight | Survey designs (BRR / jackknife)                          |
+
+#+begin_src python
+from emu_gmm import IIDCovariance, ClusteredCovariance
+
+cov = IIDCovariance()
+# or, clustered:
+cov = ClusteredCovariance(cluster_ids=cluster_ids, n_clusters=50)  # cluster_ids: (N,)
+#+end_src
+
+** 5. (Optional) weighting, regularisation, optimiser --- sensible defaults
+
+You can omit all three; the defaults are good. Override only when you
+know you need to.
+
+| Knob             | Default                  | Alternatives                                          |
+|------------------+--------------------------+-------------------------------------------------------|
+| =weighting=      | =ContinuouslyUpdated()=  | =Identity()=, =Fixed(V0)=, =IteratedWeighting()=      |
+| =regularization= | =DiagonalTikhonov()=     | (tune =kappa_target=)                                 |
+| =optimizer=      | =optimistix_lm()=        | =scipy_lm()=                                          |
+
+* Putting it together: the smallest complete program
+
+#+begin_src python
+import jax, jax.numpy as jnp, jax_dataclasses as jdc
+from emu_gmm import EmpiricalMeasure, IIDCovariance, estimate
+
+@jdc.pytree_dataclass
+class Params:
+    p: float
+
+def psi(x, theta):                       # one Bernoulli draw x (shape (1,))
+    return jnp.array([x[0] - theta.p])    # M = 1 moment: E[X] - p == 0 at truth
+
+x = jax.random.bernoulli(jax.random.PRNGKey(0), 0.5, (1000, 1)).astype(float)
+
+result = estimate(
+    model=psi,
+    measure=EmpiricalMeasure(x=x, mask=jnp.ones((1000, 1)), weights=jnp.ones(1000)),
+    covariance=IIDCovariance(),
+    theta_init=Params(p=0.1),
+)
+
+print(float(result.theta_hat.p))   # ~ 0.5
+print(result.coef_table)           # estimate / std_error / t_stat / p_value (pandas)
+print(float(result.J_stat), result.J_dof)
+#+end_src
+
+That is the entire integration surface: define =psi=, define =Params=,
+build a measure, pick a covariance, call =estimate=.
+
+* What you get back: =EstimationResult=
+
+These fields are *authoritative* --- read them, do not recompute them:
+
+- =theta_hat= --- your =Params= type, filled with the estimates.
+- =standard_errors=, =coef_table= --- SEs / t / p, ready to report
+  (both are properties; access without parentheses).
+- =Sigma_theta= --- the \(K \times K\) parameter covariance (labelled).
+- =J_stat=, =J_dof=, =J_pvalue= --- the over-identification test.
+- =V_X= --- the \(M \times M\) moment covariance (labelled).
+- =diagnostics= --- per-moment =N_j=, condition numbers, gradient norms.
+- =converged=, =iterations=, optimiser info.
+- =to_pandas()= (method) / =coef_table= (property) --- materialise for reporting.
+
+* Contracts that bite (read before you debug)
+
+1. *=psi= is per-observation and returns =(M,)=.* Returning an
+   already-averaged scalar, or an =(N, M)= batch, is the most common
+   wiring error. The framework does the averaging.
+2. *Per-moment observability goes in the =(N, M)= mask --- nowhere else.*
+   If different moments are observed for different numbers of units, set
+   the mask accordingly; do **not** pre-aggregate or pad with a common
+   \(N\). =emu-gmm= uses each moment's own \(N_j\) and folds it into the
+   variance (\(1/(N_j N_k)\) normalisation), so the criterion is
+   correctly scaled and \(J \to \chi^2_{M-K}\). (A balanced =mask=ones=
+   hides this; if you ever see "my SEs look off under missingness",
+   check the mask first.)
+3. *Never recompute the criterion, J, or SEs yourself.* They are owned
+   by the package and already carry the per-moment \(N_j\) scaling.
+   Hand-rolling =J = (sqrt(N) * mean)' V^{-1} (sqrt(N) * mean)= or any
+   "textbook" rescaling silently breaks under unequal \(N_j\). Read the
+   result object. (See =design.org= "Scaling convention".)
+4. *If an interface is missing something, file an issue --- don't fork
+   the statistic.* =emu-gmm= is meant to be the single correct
+   implementation; a local reimplementation forfeits that for everyone
+   downstream. Add the knob upstream.
+5. *Float64 is on by default* (set at import). Don't disable it for a
+   statistics workload.
+6. *Shapes, at a glance:* =x= is =(N, D)=; =mask= is =(N, M)=; =weights=
+   is =(N,)=; =psi= maps =(D,) -> (M,)=; =M= = number of moments, =K= =
+   number of scalar parameters, =D= = observation width. =M= and =D= are
+   independent (you can have more/fewer moments than data columns).
+
+* Performance: estimating many times
+
+=estimate(...)= JIT-compiles on first call. If you estimate the *same*
+model over many =(theta_init, measure)= pairs (Monte Carlo, bootstrap),
+build the callable once with =build_estimator(...)= and reuse it, or
+=jax.vmap= over the varying argument, so the compile cost is paid once.
+
+* Worked examples (in =examples/=, runnable)
+
+| File                      | Shows                                                              |
+|---------------------------+-------------------------------------------------------------------|
+| =fair_coin.py=            | The minimum: 1 moment, 1 parameter, empirical + iid               |
+| =coin_plus_noise.py=      | Two moments, composing a DGP                                      |
+| =run_euler.py=            | One model, three measures (synthetic / analytical / empirical)    |
+| =twfe.py=                 | Two-way fixed effects: clustered covariance + iterated weighting  |
+| =hierarchical.py=         | Variance components + clustered covariance + bootstrap            |
+| =empirical_bootstrap.py=  | Wild + cluster bootstrap inference side-by-side                   |
+
+Start from =fair_coin.py= (smallest), then =run_euler.py= (shows the
+Measure/Covariance orthogonality on one =psi=).
+
+* Going deeper
+
+- =docs/design.org= --- architecture spec; the "Scaling convention" and
+  the Measure \(\times\) CovarianceStrategy orthogonality.
+- =docs/mcar-asymptotics.org= --- consistency, normality, the J-limit,
+  and why the \(1/(N_j N_k)\) variance is right under MCAR missingness.
+- =docs/api-sketch.org= --- the full typed surface (protocols, result
+  types, the =EstimationResult= invariant).
+- =docs/migration/manifoldgmm-to-emu-gmm.org= --- if you are porting
+  from ManifoldGMM.
