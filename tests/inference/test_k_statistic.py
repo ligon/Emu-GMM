@@ -34,9 +34,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 import pytest
 import scipy.stats
-from emu_gmm.covariance import AnalyticalCovariance
+from emu_gmm.covariance import AnalyticalCovariance, ClusteredCovariance, IIDCovariance
 from emu_gmm.examples.euler import (
     BETA_TRUE,
     GAMMA_TRUE,
@@ -47,7 +48,7 @@ from emu_gmm.examples.euler import (
     euler_sampler_factory,
 )
 from emu_gmm.inference import KStatisticResult, k_statistic
-from emu_gmm.measures import AnalyticalMeasure, SyntheticMeasure
+from emu_gmm.measures import AnalyticalMeasure, EmpiricalMeasure, SyntheticMeasure
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -525,4 +526,223 @@ class TestUnderIdentifiedRaises:
                 measure,
                 cov,
                 model=_noop_model,
+            )
+
+
+# ---------------------------------------------------------------------------
+# (h) Issue #52 regression: K-stat must be chi^2-calibrated under clustered
+# dependence when the empirical Sigma_jm estimator is used.
+# ---------------------------------------------------------------------------
+
+
+@jdc.pytree_dataclass
+class _OneParam:
+    theta: float
+
+
+def _linear_psi(x, params):
+    """Three moments of a linear-in-x regression residual.
+
+    ``x = (y, x_val, 1.0)``; the residual is ``r = y - x_val * theta``; the
+    moment vector is ``(r * x_val, r * x_val^2, r)``. Over-identified
+    (M=3, p=1) so the K/S decomposition has a non-trivial chi^2_1 K-stat
+    and chi^2_2 S-stat at the true ``theta``.
+    """
+    y, xval, _one = x[0], x[1], x[2]
+    resid = y - xval * params.theta
+    return jnp.array([resid * xval, resid * xval * xval, resid])
+
+
+def _simulate_clustered_dataset(
+    seed: int,
+    n_clusters: int,
+    cluster_size: int,
+    rho: float,
+    theta_true: float = 1.0,
+):
+    """Generate a clustered linear regression dataset.
+
+    Returns ``(measure, cov, theta_true)`` ready for :func:`k_statistic`.
+    The residual ``e_i = sqrt(rho) u_{c(i)} + sqrt(1 - rho) eps_i`` carries
+    intracluster correlation ``rho``; ``rho = 0`` reduces to IID.
+    """
+    rng = np.random.default_rng(seed)
+    N = n_clusters * cluster_size
+    u_cluster = rng.standard_normal(n_clusters)
+    u_within = rng.standard_normal(N)
+    cluster_ids = np.repeat(np.arange(n_clusters), cluster_size).astype(np.float64)
+    e = np.sqrt(rho) * u_cluster[cluster_ids.astype(int)] + np.sqrt(1 - rho) * u_within
+    x = rng.standard_normal(N)
+    y = x * theta_true + e
+    x_data = jnp.asarray(np.column_stack([y, x, np.ones(N)]))
+    mask = jnp.ones((N, 3))
+    weights = jnp.ones(N)
+    measure = EmpiricalMeasure(x=x_data, mask=mask, weights=weights)
+    cov = ClusteredCovariance(
+        cluster_ids=jnp.asarray(cluster_ids), n_clusters=n_clusters
+    )
+    return measure, cov, theta_true
+
+
+class TestClusteredKStatNullCalibration:
+    """Regression test for issue #52.
+
+    Under H0 (theta = theta_true) with intracluster-correlated data and a
+    correctly specified :class:`ClusteredCovariance`, the K-statistic must
+    be chi^2_p in distribution, i.e. ``p_K`` must be ~Uniform(0, 1).
+
+    The pre-fix ``_sigma_jm_from_contributions`` used a ``1/N``-scaled
+    cross-covariance that did not match the ``1/(N_m N_k)`` scale of the
+    cluster-totals :math:`V`. The result was a systematically conservative
+    K-statistic (too few rejections / too high mean ``p_K``). The wf7 MC
+    at n_clusters=50 measured mean p_K=0.315 with KS p<1e-4 vs Uniform.
+
+    This test runs a moderate MC sweep (200 reps; ~60 s on CPU). Under
+    Uniform(0, 1) the SE on the mean of N=200 i.i.d. samples is
+    ``sqrt(1/(12 * 200)) ~= 0.020``. Pre-fix the mean sits ~0.42 (~4 SE
+    below 0.5); post-fix the mean sits within +/- 2 SE of 0.5. The
+    KS-against-uniform check is the complementary distributional test;
+    pre-fix KS p-value is consistently below 0.005, post-fix it is
+    comfortably above the ``0.01`` threshold the test uses.
+    """
+
+    N_MC = 200
+    N_CLUSTERS = 50
+    CLUSTER_SIZE = 10
+    RHO = 0.6
+
+    def _draw_p_K(self) -> np.ndarray:
+        p_K = np.empty(self.N_MC)
+        for i in range(self.N_MC):
+            measure, cov, theta_true = _simulate_clustered_dataset(
+                seed=1000 + i,
+                n_clusters=self.N_CLUSTERS,
+                cluster_size=self.CLUSTER_SIZE,
+                rho=self.RHO,
+            )
+            res = k_statistic(
+                _OneParam(theta=theta_true), measure, cov, model=_linear_psi
+            )
+            p_K[i] = float(res.p_K)
+        return p_K
+
+    def test_p_K_mean_in_uniform_window(self):
+        """E[U(0, 1)] = 0.5; with N_MC=200 the SE on the mean is ~0.020.
+
+        Pre-fix this test produces mean p_K ~ 0.42 (~4 SE below 0.5);
+        post-fix it falls in [0.45, 0.55] reliably.
+        """
+        p_K = self._draw_p_K()
+        assert np.mean(p_K) == pytest.approx(0.5, abs=0.05)
+
+    def test_p_K_uniform_via_KS(self):
+        """KS-test of p_K against Uniform(0, 1).
+
+        Under H0 the KS p-value is itself Uniform(0, 1). The pre-fix code
+        produces KS p-values < 0.005 (the p_K distribution is shifted
+        toward zero); post-fix the KS p-value is comfortably above the
+        ``0.01`` threshold. The threshold is intentionally conservative
+        so that nominal Type-I error on the regression test stays well
+        below 1%.
+        """
+        p_K = self._draw_p_K()
+        _ks_stat, ks_p = scipy.stats.kstest(p_K, "uniform")
+        assert ks_p > 0.01
+
+
+class TestIIDKStatNullCalibration:
+    """The same null-calibration check for the IID path.
+
+    The cluster-totals form collapses to the pairwise-overlap IID form
+    when every cluster is a singleton, so :class:`IIDCovariance` users
+    benefit from the same scale fix. Pre-fix the IID path was also
+    miscalibrated (mean p_K ~ 0.39 in 100-rep MC, ~5 SE below 0.5);
+    post-fix it tracks Uniform(0, 1) within ordinary MC noise.
+    """
+
+    N_MC = 100
+    N_OBS = 300
+
+    def _simulate(self, seed: int):
+        rng = np.random.default_rng(seed)
+        e = rng.standard_normal(self.N_OBS)
+        x = rng.standard_normal(self.N_OBS)
+        theta_true = 1.0
+        y = x * theta_true + e
+        x_data = jnp.asarray(np.column_stack([y, x, np.ones(self.N_OBS)]))
+        mask = jnp.ones((self.N_OBS, 3))
+        weights = jnp.ones(self.N_OBS)
+        measure = EmpiricalMeasure(x=x_data, mask=mask, weights=weights)
+        cov = IIDCovariance()
+        return measure, cov, theta_true
+
+    def _draw_p_K(self) -> np.ndarray:
+        p_K = np.empty(self.N_MC)
+        for i in range(self.N_MC):
+            measure, cov, theta_true = self._simulate(seed=2000 + i)
+            res = k_statistic(
+                _OneParam(theta=theta_true), measure, cov, model=_linear_psi
+            )
+            p_K[i] = float(res.p_K)
+        return p_K
+
+    def test_p_K_mean_in_uniform_window(self):
+        p_K = self._draw_p_K()
+        assert np.mean(p_K) == pytest.approx(0.5, abs=0.05)
+
+    def test_p_K_uniform_via_KS(self):
+        """KS-test of p_K against Uniform(0, 1) on the IID path.
+
+        Pre-fix KS p-value < 0.001; post-fix KS p-value > 0.01.
+        """
+        p_K = self._draw_p_K()
+        _ks_stat, ks_p = scipy.stats.kstest(p_K, "uniform")
+        assert ks_p > 0.01
+
+
+class TestSingletonClustersMatchIID:
+    """Cluster-totals with one observation per cluster reduces to IID.
+
+    Algebraic identity: with ``cluster_ids = [0, 1, ..., N-1]`` and
+    ``n_clusters = N``, the cluster-totals cross-covariance equals the
+    pairwise-overlap IID form. Both routes must produce numerically
+    identical K, S, J statistics in this limit. This is the canonical
+    sanity check that the new ClusteredCovariance dispatch does not
+    perturb the IID numerics it was designed to generalise.
+    """
+
+    def _build_dataset(self):
+        rng = np.random.default_rng(42)
+        N = 200
+        e = rng.standard_normal(N)
+        x = rng.standard_normal(N)
+        theta_true = 1.0
+        y = x * theta_true + e
+        x_data = jnp.asarray(np.column_stack([y, x, np.ones(N)]))
+        mask = jnp.ones((N, 3))
+        weights = jnp.ones(N)
+        measure = EmpiricalMeasure(x=x_data, mask=mask, weights=weights)
+        return measure, theta_true, N
+
+    def test_singleton_clusters_match_iid(self):
+        measure, theta_true, N = self._build_dataset()
+        iid_cov = IIDCovariance()
+        # Every observation is its own cluster.
+        cluster_ids = jnp.arange(N, dtype=jnp.float64)
+        clu_cov = ClusteredCovariance(cluster_ids=cluster_ids, n_clusters=N)
+        theta_0 = _OneParam(theta=theta_true)
+        # Evaluate at a deliberately offset theta_0 so m != 0 and the
+        # Sigma_jm correction is non-trivial; tests are vacuous when m = 0.
+        theta_offset = _OneParam(theta=theta_true + 0.2)
+        for theta in (theta_0, theta_offset):
+            res_iid = k_statistic(theta, measure, iid_cov, model=_linear_psi)
+            res_clu = k_statistic(theta, measure, clu_cov, model=_linear_psi)
+            assert float(res_clu.K) == pytest.approx(
+                float(res_iid.K), rel=1e-9, abs=1e-12
+            )
+            assert float(res_clu.S) == pytest.approx(
+                float(res_iid.S), rel=1e-9, abs=1e-12
+            )
+            assert float(res_clu.J) == pytest.approx(
+                float(res_iid.J), rel=1e-9, abs=1e-12
             )
