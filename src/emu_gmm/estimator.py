@@ -269,7 +269,7 @@ def _run_iterated_weighting(
     final_info = OptimizerInfo(
         steps=total_inner_steps,
         status=outer_status,
-        final_objective=final_objective_cu,  # type: ignore[arg-type]
+        final_objective=final_objective_cu,
         backend=last_info.backend,
     )
     return theta_k_flat, final_info, outer_status
