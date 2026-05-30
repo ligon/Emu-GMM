@@ -375,6 +375,18 @@ def scipy_lm(**kw) -> Optimizer:
 #+END_SRC
 
 ** EstimationResult
+
+These fields are the /authoritative/ values of the criterion and its
+inference quantities --- =J_stat=, =J_dof=, =J_pvalue=, =Sigma_theta=,
+=standard_errors=. Downstream code reads them; it does not recompute
+them. In particular =J_stat= already embeds the per-coordinate \(N_j\)
+scaling convention (=design.org= "Scaling convention"): it is
+\(\mathbb{E}_\mu[\psi]'\,V_X^{-1}\,\mathbb{E}_\mu[\psi]\) with no explicit
+\(N\). Re-deriving \(J\) by hand --- e.g. scaling moments by \(\sqrt{N}\)
+and weighting by =V_X= --- reintroduces a bug that is invisible under
+balanced data (equal \(N_j\)) and wrong under missingness. If a needed
+quantity is absent, file an issue rather than reconstructing it.
+
 #+BEGIN_SRC python
 @jdc.pytree_dataclass
 class EstimationResult:

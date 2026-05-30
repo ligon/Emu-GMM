@@ -133,6 +133,36 @@ from emu_gmm import (
 )
 #+end_src
 
+* Using emu-gmm correctly (and reporting problems)
+
+=emu-gmm= is intended as a /spare set of correct interfaces/. Your only
+modelling input is a per-observation residual =psi(x_i, theta) -> R^M=;
+the package owns the moment expectation, the design-aware covariance
+=V_X=, the criterion, the \(J\)-statistic, standard errors, and
+\(p\)-values. Two rules keep estimation correct:
+
+1. *Read results off the package, never recompute them by hand.* Take the
+   criterion, =J_stat=, =standard_errors=, and \(p\)-values from
+   =EstimationResult= / =k_statistic= / the inference helpers. A
+   hand-rolled criterion is how subtle scaling bugs get reintroduced ---
+   notably the textbook habit of scaling moments by \(\sqrt{N}\) and
+   weighting by \(V_X\), which is correct only when every moment has the
+   /same/ number of observations. =emu-gmm= keeps moments as
+   per-coordinate means and folds all the per-moment \(N_j\) bookkeeping
+   into \(V_X\) (the \(1/(N_j N_k)\) normalisation); see =docs/design.org=
+   "Scaling convention" and =docs/mcar-asymptotics.org=.
+
+2. *Express per-moment observability only through the =mask=.* Different
+   moments may be observed for different numbers of units; the \((N, M)\)
+   =mask= on =EmpiricalMeasure= is the single place that lives. Do not
+   work around it by pre-aggregating or by assuming a common \(N\).
+
+If an interface is missing a knob, or you believe it gives a wrong
+answer: *file an issue against =emu-gmm=, do not reimplement the
+statistic in your own project.* A local reimplementation forfeits the
+"single correct implementation" guarantee for everyone downstream. The
+fix belongs in the shared package.
+
 * License
 
 [[file:LICENSE.org][CC-BY-NC-SA-4.0]].

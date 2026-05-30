@@ -117,6 +117,21 @@ been through four reviewer iterations; the abstractions are deliberate.
    and `scipy_lm()` work for v1; the framework's `Optimizer` protocol
    makes the swap trivial. Don't tie estimator logic to a specific
    backend.
+9. **Per-coordinate $N_j$ scaling — not textbook common-$N$.** Moments are
+   per-coordinate means $\bar m_j = \frac1{N_j}\sum_i d_{ij}w_i\psi_j$ and
+   $V_X$ carries the matching $\frac1{N_jN_k}$ normalisation, so
+   $Q=\bar m'V_X^{-1}\bar m\to\chi^2_{M-K}$ with **no explicit $N$** — all
+   the sample-size and per-moment-overlap bookkeeping lives in $V_X$. This
+   is algebraically identical to the textbook habit of scaling moment $j$
+   by $\sqrt{N_j}$ and weighting by an $O(1)$ covariance, *provided the
+   weight is rescaled to match* ($W=\sqrt{N_jN_k}\,V_X$). Scaling moments
+   by $\sqrt{N}$ while weighting by $V_X$ equals $N\cdot Q$ **only when all
+   $N_j$ are equal** and is otherwise simply wrong. A balanced
+   `mask=ones` Monte Carlo cannot catch this (it forces $N_j\equiv N$);
+   `tests/test_estimator_unequal_nj.py` is the guard. See `design.org`
+   "Scaling convention" and `mcar-asymptotics.org` Thm 3/6. **Never add an
+   explicit $N$ (or $\sqrt N$) multiply to the criterion to "match a
+   textbook."**
 
 ## Deferred to v2+
 
@@ -159,3 +174,29 @@ been through four reviewer iterations; the abstractions are deliberate.
   acceptance tests and a runnable script all depend on it.
 - Don't silently change tolerances on acceptance tests; recovery
   guarantees in the tests are the contract.
+
+## Downstream contract (this applies to consumers like `../Seasonality`)
+
+`emu-gmm` is meant to be a **spare set of correct interfaces**. The
+division of labour is deliberate (`design.org` §2): the consumer supplies
+a per-observation residual `psi(x_i, theta) -> R^M` and expresses
+per-moment observability through the `(N, M)` `mask`; everything
+statistical — moment expectation, design-aware `V_X`, the criterion,
+`J_stat`, `Sigma_theta`, standard errors, p-values, the K-statistic and
+bootstrap helpers — is **owned by the package** and read off
+`EstimationResult` / the inference helpers.
+
+- **Don't reinvent package internals downstream.** A consumer must not
+  recompute the criterion, `J`, or SEs inline. This is not stylistic: the
+  real bug that motivated this section was a downstream repo computing
+  `J = (sqrt(N_j)*mean)' V_X^{-1} (sqrt(N_j)*mean)` by hand — correct only
+  under equal `N_j`, wrong under missingness (see commitment 9). Delegating
+  to the package makes that class of error impossible.
+- **Found a problem with an interface? File an `emu-gmm` issue — don't
+  patch around it locally.** If a knob is missing or an interface looks
+  wrong, the fix belongs in the shared package so every consumer gets it.
+  A local reimplementation forfeits the single-correct-implementation
+  guarantee and silently forks behaviour. (The `../Seasonality` port is a
+  good model here — it files issues `#2/#5/#8/#11/...` rather than
+  hand-rolling; the lapse was documentation algebra that assumed equal
+  `N_j`, not the code itself.)
