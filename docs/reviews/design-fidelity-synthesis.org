@@ -1,0 +1,498 @@
+#+TITLE: Design-Fidelity Synthesis (post-wf6)
+#+DATE: 2026-05-29
+#+AUTHOR: Synthesis subagent
+
+* Executive summary
+
+Four lenses (A: orthogonality, B: commitments, C: coherence, D: design-drift)
+audited the post-wf6 codebase against ~docs/design.org~, ~docs/api-sketch.org~,
+~docs/mcar-asymptotics.org~, and ~CLAUDE.md~. After 16 PRs (wf4 #43-#46 plus
+wf5 #30-#38, #46-#49) the architectural core is *intact*: all eight CLAUDE.md
+commitments were probed at runtime and held; the orthogonal-interface algebra
+of ~design.org~ §2 is preserved; the Cholesky pipeline and G'ΛG information
+construction are honored; float64 is enabled before any sub-module import; no
+silent math errors were found.
+
+The drift is *documentation-side and surface-side*, not algorithmic:
+
+1. =docs/design.org= sections §3 (Euler walkthrough still single-asset), §5
+   (no mention of #47 diagonal-V dispatch, #45 Welch-Satterthwaite scheme),
+   §6 (NamedArray-bool mask aspirational; ~coef_table~'s pandas-direct egress
+   undocumented) have not been refreshed to match six substantive landings
+   (#31, #34, #35, #45, #47, #49) plus the multi-asset Euler example.
+2. =docs/migration/manifoldgmm-to-emu-gmm.org= lists four features (MomentWildBootstrap,
+   KStatisticResult, ridge_inverse, true iterated weighting) as deferred-to-v2+
+   when PRs #32, #33, #34, #36 all landed before wf6. The ~two_step~ weighting
+   row also still maps to ~ContinuouslyUpdated()~.
+3. The public-surface result-type regime is split three ways
+   (mutable / frozen-leaf / frozen-pytree) with no documented invariant.
+   ~ClusterBootstrapResult~ is a frozen leaf while its three sibling
+   inference results (~JTestResult~, ~KStatisticResult~, ~WildBootstrapResult~)
+   are pytrees. vmap over the four inference helpers succeeds for three of
+   them and fails for the fourth.
+4. ~IteratedWeighting~ (#34) satisfies the ~WeightingStrategy~ protocol
+   on the surface but the iterated outer loop is implemented as an
+   ~isinstance(weighting, IteratedWeighting)~ branch in ~estimator.py~ —
+   the one place the orthogonal algebra is type-tag-dispatched rather than
+   protocol-dispatched.
+5. ~LabelContext~ is the declared type of ~EstimationResult.labels~ but
+   lives in ~_internal/~ and is not re-exported.
+
+Overall verdict: *minor-cleanups*. No redesign required; the implementation
+is correct and the architectural commitments are preserved. The fixes are a
+documentation sweep, a small set of surface cleanups, and one polymorphism
+lift (~IteratedWeighting~ → ~requires_outer_loop~ hook on ~WeightingStrategy~).
+
+| Lens                  | Verdict           |
+|-----------------------+-------------------|
+| A: orthogonality      | minor-drift       |
+| B: commitments        | preserved         |
+| C: coherence          | concerning-drift  |
+| D: design-drift       | minor-drift       |
+|-----------------------+-------------------|
+| Synthesised           | minor-cleanups    |
+
+* Cross-lens convergent findings (high confidence)
+
+A finding that surfaces in two or more lenses has higher confidence — it is
+not lens-specific blind-spotting. Five clusters of convergence emerged.
+
+** XL-1. ~IteratedWeighting~ is an isinstance branch, not a protocol method
+
+   *Lens convergence*: A (probe 4), D (§4 narrative caveat that the iterated
+   /algorithm/ lives in ~estimator.py:113-275~, not in ~weighting.py~).
+
+   *Severity*: medium.
+
+   ~estimator.py~ line 520 has ~isinstance(weighting, IteratedWeighting)~ which
+   dispatches into a Python-level outer-loop driver (~_run_iterated_weighting~,
+   lines 113-275) instead of routing through the
+   ~WeightingStrategy.whitening_residual~ protocol. The strategy nominally
+   satisfies the protocol via a CU-fallback ~whitening_residual~ (~weighting.py~
+   lines 297-316), but the actual iterated control flow is type-tagged in the
+   estimator.
+
+   Lens D notes that this is architecturally clean in one sense — the inner
+   Fixed-weight residual correctly does not see ∇θV_k, so the per-iteration
+   gradient is what design.org §4 wants — but Lens A is right that the lift
+   from "this is the way iterated weighting works" to "this is a hook in the
+   ~WeightingStrategy~ protocol" was not done. The current state is the only
+   place a strategy /instance/ rather than protocol /method/ drives estimator
+   control flow.
+
+   *Recommended action*: lift ~_run_iterated_weighting~ behaviour into a
+   protocol method (e.g. ~requires_outer_loop: bool~ + ~outer_loop_driver()~
+   hook). Estimator dispatches polymorphically. File as issue, fix as ~v1.1~.
+
+** XL-2. Migration guide is stale on four landed features
+
+   *Lens convergence*: C (F-C1, high severity), D ("the implementation outpaces
+   the docs").
+
+   *Severity*: high.
+
+   ~docs/migration/manifoldgmm-to-emu-gmm.org~ lines 221-261 still tell the
+   user that ~MomentWildBootstrap~, ~KStatisticResult~, ~ridge_inverse~,
+   and "true iterated weighting" are deferred to v2+. PRs #32 (wild bootstrap),
+   #33 (ridge_inverse), #34 (IteratedWeighting), #36 (K-statistic) all merged
+   before wf6. The weighting-policy table also still maps ~weighting='two_step'~
+   to ~ContinuouslyUpdated()~ which is no longer the correct port now that
+   ~IteratedWeighting~ exists.
+
+   A user reading the guide before reaching for the package will not realise
+   the inference machinery they need is already in the box. This is the
+   highest-leverage doc fix.
+
+   *Recommended action*: doc-only PR (no code changes); update the four
+   bullets in "What this port does NOT cover" and the ~two_step~ row in the
+   weighting table.
+
+** XL-3. design.org §3-§6 trails the implementation on six landings
+
+   *Lens convergence*: D (primary; six itemised drifts), C (notes that "the
+   API surface holds together but design.org has not been refreshed"),
+   indirectly B (no commitment violation but each drift is the documented
+   half of a commitment).
+
+   *Severity*: medium (collective).
+
+   Six places in ~design.org~ are stale:
+
+   1. §3 specifies single-asset M=1 Hansen-Singleton; implementation
+      (~examples/euler.py~) is multi-asset M=3, J_dof=1.
+   2. §3 says "log-normal preference shock simulator parameterised at theta";
+      implementation's ~euler_sampler_factory.sampler~ ignores theta (common
+      random numbers path).
+   3. §5 specifies V* = V + τ·diag(V); implementation (#47) adds a diagonal-V
+      dispatch V* = V + τ·(tr V / M)·I to restore κ-control on diagonal V.
+   4. §5 specifies "regularization-adjusted critical values"; implementation
+      (#45) reports ~J_pvalue_adjusted~ via Welch-Satterthwaite moment-matching
+      (not Davies / Imhof). Named in mcar-asymptotics.org Theorem 6 but not
+      in design.org.
+   5. §6 specifies ~mask ∈ NamedArray[Obs, Moments, bool]~; implementation
+      stores ~mask~ as plain ~Float[Array, "N M"]~ (float 0/1) for jit.
+   6. §6's "labelled outputs route via NamedArray" claim is weakened by
+      ~coef_table~ (added by #44) which goes flat-params → pandas directly,
+      bypassing the intermediate NamedArray step.
+
+   The implementation is correct; design.org has been outpaced. Each
+   instance is one paragraph of doc update.
+
+   *Recommended action*: single doc-only PR sweeping design.org §§3-6 with
+   the six clarifications above.
+
+** XL-4. Result-type regime is split three ways
+
+   *Lens convergence*: C (F-C2, high severity), A (probe 6 notes
+   ~OptimizerInfo~ is now a pytree but says nothing about siblings).
+
+   *Severity*: high.
+
+   Eight result-like dataclasses across the surface:
+
+   | Type                     | Decorator                       | Pytree? | Mutable? |
+   |--------------------------+---------------------------------+---------+----------|
+   | ~EstimationResult~       | ~@dataclass~                    | leaf    | yes      |
+   | ~Diagnostics~            | ~@dataclass(frozen=True)~       | leaf    | no       |
+   | ~OptimizerInfo~          | ~@jdc.pytree_dataclass~         | pytree  | no       |
+   | ~JTestResult~            | ~@jdc.pytree_dataclass~         | pytree  | no       |
+   | ~KStatisticResult~       | ~@jdc.pytree_dataclass~         | pytree  | no       |
+   | ~WildBootstrapResult~    | ~@jdc.pytree_dataclass~         | pytree  | no       |
+   | ~ClusterBootstrapResult~ | ~@dataclass(frozen=True)~       | leaf    | no       |
+   | ~LabelContext~           | ~@dataclass(frozen=True)~       | leaf    | no       |
+
+   Two practical consequences:
+
+   1. ~vmap(j_test)~ over a panel of nulls works; the equivalent for
+      ~vmap(cluster_bootstrap)~ over a panel of seeds fails at the output
+      (frozen leaf, not pytree). ~ClusterBootstrapResult~ is the outlier
+      among the four inference results.
+   2. ~Diagnostics~ contains ~OptimizerInfo~ and is itself a leaf, so PR #46's
+      promotion of ~OptimizerInfo~ to a pytree only buys pytree behaviour in
+      isolation — wrapped in ~Diagnostics~ it is immediately re-buried.
+
+   *Recommended action*: decide invariant ("inference results are pytrees;
+   estimation results are leaves") and lift ~ClusterBootstrapResult~ to
+   ~@jdc.pytree_dataclass~. Document the invariant in a one-paragraph note
+   in api-sketch.org. Filed as ~v1.1~ fix.
+
+** XL-5. ~LabelContext~ is private but typed on a public field
+
+   *Lens convergence*: C (F-C3, medium severity), B notes the LabelContext
+   route is preserved but does not flag the leakage.
+
+   *Severity*: medium.
+
+   ~EstimationResult.labels~ has declared type ~LabelContext~ (types.py:359);
+   ~LabelContext~ lives in ~src/emu_gmm/_internal/labels.py~ and is not in
+   ~__all__~. A user typing ~help(result.labels)~ or ~result.labels.__class__~
+   lands in ~emu_gmm._internal.labels~, which CLAUDE.md treats as off-limits.
+
+   *Recommended action*: re-export ~LabelContext~ from ~emu_gmm.types~ (or top
+   level) and add to ~__all__~. One-line fix.
+
+* Lens-specific concerns (blind-spot indicators)
+
+Findings that surfaced in only one lens — these are either lens-specific
+nits or blind-spots that the other three lenses missed.
+
+** A-only
+
+*** A-1. Cached intermediates tuple is undocumented contract
+
+    PR #49's cached tuple ~(m, psi_safe, weight_mask, N_j)~ between
+    ~EmpiricalMeasure.expectation_and_contributions~ and
+    ~IID/ClusteredCovariance~ is undocumented at the protocol level. Lens A
+    rates this low (no break today, only ~AnalyticalCovariance~ does not
+    consume it, third-party measure works via fallback). Worth noting: this
+    is the seed of a contract that will calcify as more strategies adopt
+    the pattern. Lens A's recommendation (lift to a typed intermediate
+    dataclass when the population exceeds 2 covariance types) is sound.
+
+*** A-2. ~apply_fixed_tau~ algebraic fallback assumes canonical Tikhonov form
+
+    Anchor-tau hoist (#45) falls back to ~V + tau_anchor * diag(V)~ for
+    third-party regularisers lacking ~apply_fixed_tau~. This assumes the
+    canonical form; third-party regularisers using different ridge bases
+    (e.g. ~EigenvalueFloor~, ~NearestPSD~ — listed in CLAUDE.md "Deferred to
+    v2+") would diverge from their own ~apply()~. Not a bug today (no such
+    regularisers exist), but a contract trap that will be hit when the
+    regulariser zoo expands.
+
+** B-only
+
+    No findings. Lens B's contribution is positive verification: each of
+    the eight CLAUDE.md commitments was probed with a concrete runtime
+    experiment whose expected outcome would diverge if the commitment were
+    violated; all eight passed. Notably:
+
+    - Commitment 3 (anchor-once-then-freeze) was forced into a regime where
+      re-anchoring would give τ=1000 while the anchored τ=0; the framework
+      correctly used the frozen 0.
+    - Commitment 4 (CU's gradient retains V-dependence) was measured: the
+      jax.grad of CU half-objective differs from a frozen-V naive variant
+      by (-0.08, -0.25) on a test problem — V-trace preserved through
+      Cholesky + forward_solve.
+    - Commitment 7 (float64 before sub-module imports) was confirmed via
+      instrumented load: zero ~emu_gmm.*~ submodules import before
+      ~jax.config.update("jax_enable_x64", True)~.
+
+** C-only
+
+*** C-1. Naming inconsistencies (F-C5, F-C6, F-C7, F-C8)
+
+    Several public-surface nits that no other lens probed:
+
+    - ~EmpiricalMeasure~ has ~from_pandas~ and ~from_nan_aware~ but no
+      ~from_array~; clean-data raw-array path is awkward.
+    - ~EmpiricalMeasure.expectation_and_contributions~ vs
+      ~SyntheticMeasure.moments_and_contributions~ — same role, two names.
+    - ~-Strategy~ suffix uneven: 4 of 6 protocols carry it; ~Measure~ and
+      ~Optimizer~ do not. The distinction does encode intent (singular
+      operator vs swappable choice) but is undocumented.
+    - ~dir(emu_gmm)~ still surfaces 13 non-API names (version,
+      PackageNotFoundError, 11 submodules) — tab-completion noise.
+    - ~k_statistic~ is in the standalone "Inference" group at the top of
+      ~__all__~; ~j_test~, ~moment_wild_bootstrap~, ~cluster_bootstrap~ live
+      in a second "Inference helpers" group lower down. No distinction.
+
+*** C-2. Three diagnostics builders leak from internal
+
+    ~build_diagnostics~, ~build_optimizer_health~, ~compute_cond_info~ sit at
+    the top level despite being construction helpers used only by
+    ~estimator.py~ and two unit tests (the tests import from the submodule
+    directly). Putting them on ~__all__~ adds three kwargs-heavy functions to
+    the user surface that nobody needs. Lens C rates F-C4 medium.
+
+** D-only
+
+*** D-1. design.org §3 references unimplemented Context classes
+
+    ~EmpiricalContext~ / ~AnalyticalContext~ / ~SyntheticContext~ are
+    referenced in §3's ASCII diagram (lines 174-194) but are intentionally
+    unimplemented — design.org §2 line 83 explicitly says Context is "sugar,
+    not a third primitive". Internal consistency issue in design.org rather
+    than an implementation gap. Low priority; subsumed by the broader
+    design.org §3 rewrite for multi-asset Euler.
+
+* Documentation updates needed
+
+Three documents need updates. None require code changes.
+
+** 1. docs/design.org (single PR, sections §§3-6)
+
+   - §3: Rewrite for multi-asset Euler (M=3, J_dof=1) matching
+     ~examples/euler.py~ and api-sketch.org §5. Note the
+     theta-independent sampler / common-random-numbers shortcut.
+     Note the unbundled (measure, covariance) call vs. the Context sugar
+     in §2.
+   - §5 regularisation: Add a one-paragraph note documenting the diagonal-V
+     dispatch in #47 (V* = V + τ·(tr V / M)·I on near-diagonal V; the
+     ~_DIAG_RTOL = 1e-12~ detector).
+   - §5 overidentification: Name the Welch-Satterthwaite scheme for
+     ~J_pvalue_adjusted~ added in #45; point to mcar-asymptotics.org
+     Theorem 6.
+   - §4 / §5 weighting: Mention #34 IteratedWeighting; note CU remains
+     the default and iterated converges to the same fixed point.
+   - §6 named tensors: Note ~coef_table~'s pandas-direct egress as a
+     deliberate exception; qualify the mask spec as
+     "NamedArray-accepting boundary; plain JAX storage for jit."
+
+** 2. docs/migration/manifoldgmm-to-emu-gmm.org (single PR)
+
+   - Remove "MomentWildBootstrap", "KStatisticResult", "ridge_inverse",
+     "true iterated weighting" from the "What this port does NOT cover"
+     section (lines 250-261). All four have landed.
+   - Update the weighting-policy table (lines 221-226): ~weighting='two_step'~
+     maps to ~IteratedWeighting()~ now, not ~ContinuouslyUpdated()~.
+   - Add brief sections demonstrating the four inference helpers
+     (j_test, k_statistic, moment_wild_bootstrap, cluster_bootstrap)
+     as one-liners post-estimation.
+
+** 3. docs/api-sketch.org (lighter touch)
+
+   - Document the extended-Measure interface (~moment_contributions~,
+     ~jacobian_contributions~, ~expectation_and_contributions~) used by
+     ~k_statistic~, ~wild_bootstrap~, and the covariance fast path.
+     Either as an "Extended Protocol Methods" appendix or as optional
+     methods on the protocol with documented sentinels for measures
+     (e.g. ~AnalyticalMeasure~) that intentionally don't implement them.
+   - Document the cached-intermediates tuple shape between
+     ~EmpiricalMeasure~ and ~IID/ClusteredCovariance~ once it stabilises
+     (or lift to a typed intermediate dataclass — see A-1).
+   - Document the result-type pytree invariant ("inference results are
+     pytrees; estimation/diagnostics results are leaves") once the
+     ~ClusterBootstrapResult~ lift lands.
+
+** 4. CLAUDE.md (small targeted edits)
+
+   - "Deferred to v2+" section: remove the "Iterated weighting: subsumed
+     by CU for v1" line. PR #34 reversed that decision.
+   - Optional: add a brief note that ~docs/migration/...~ is the user-facing
+     migration guide; design.org / api-sketch.org are the implementer-facing
+     spec; CLAUDE.md is the agent-facing index.
+
+* Issue drafts (do not file; leave for user review)
+
+** Issue: Lift IteratedWeighting outer loop into WeightingStrategy protocol
+
+   *Severity*: medium. *Lens*: A (probe 4), D (§4 caveat).
+
+   #+BEGIN_QUOTE
+   The post-#34 ~IteratedWeighting~ strategy satisfies the ~WeightingStrategy~
+   protocol via a CU-fallback ~whitening_residual~, but the actual iterated
+   algorithm is implemented as ~_run_iterated_weighting~ in
+   ~src/emu_gmm/estimator.py:113-275~ and dispatched via
+   ~isinstance(weighting, IteratedWeighting)~ at estimator.py:520. This is
+   the one place a strategy /instance/ rather than protocol /method/ drives
+   estimator control flow.
+
+   This is *correct* in the sense that the inner Fixed-weight residual's
+   gradient correctly does not see ∇θV_k (which design.org §4 requires for
+   iterated), but the orthogonal-interface algebra in design.org §2 is
+   leaked — three other strategies (Identity, Fixed, ContinuouslyUpdated)
+   dispatch through the standard residual_fn → optimizer path, only
+   IteratedWeighting through a special one.
+
+   *Proposal*: lift the outer-loop behaviour into a protocol hook. Options:
+
+   1. Add ~requires_outer_loop: bool~ + ~outer_loop_driver(model, measure,
+      ...) → (theta, info)~ optional methods to ~WeightingStrategy~. Estimator
+      dispatches polymorphically: ~if weighting.requires_outer_loop:
+      theta, info = weighting.outer_loop_driver(...)~.
+   2. Move the iterated driver into ~IteratedWeighting.estimate(...)~ as a
+      bound method and let the estimator delegate.
+
+   Acceptance criteria:
+   - No isinstance branches in ~estimator.py~ against weighting strategies.
+   - All existing IteratedWeighting tests pass unchanged.
+   - A third-party weighting strategy needing an outer loop can plug in
+     without touching estimator.py.
+   #+END_QUOTE
+
+** Issue: Update migration guide to reflect landed v1 features
+
+   *Severity*: high. *Lens*: C (F-C1).
+
+   #+BEGIN_QUOTE
+   ~docs/migration/manifoldgmm-to-emu-gmm.org~ section "What this port does
+   NOT cover" (lines 250-261) lists four features as deferred to v2+:
+
+   - ~MomentWildBootstrap~ — landed in PR #32.
+   - ~KStatisticResult~ — landed in PR #36.
+   - ~ridge_inverse~ — landed in PR #33.
+   - "True iterated weighting" — landed in PR #34.
+
+   The weighting-policy table (lines 221-226) also still maps
+   ~weighting='two_step'~ to ~ContinuouslyUpdated()~ which is no longer the
+   correct port now that ~IteratedWeighting~ exists.
+
+   This is the first document a user porting from ManifoldGMM reads. The
+   stale claims make them think they need to write bootstrap loops by hand
+   when the helpers are already exported.
+
+   *Proposal*: doc-only PR removing the four bullets, updating the
+   ~two_step~ row to ~IteratedWeighting()~, and adding short sections
+   demonstrating each landed helper post-estimation.
+   #+END_QUOTE
+
+** Issue: Unify result-type pytree regime
+
+   *Severity*: high. *Lens*: C (F-C2).
+
+   #+BEGIN_QUOTE
+   Eight result-like dataclasses across the public surface split three ways:
+
+   - mutable leaf: ~EstimationResult~
+   - frozen leaf: ~Diagnostics~, ~ClusterBootstrapResult~, ~LabelContext~
+   - frozen pytree: ~OptimizerInfo~, ~JTestResult~, ~KStatisticResult~,
+     ~WildBootstrapResult~
+
+   Two consequences:
+
+   1. ~vmap(j_test)~ / ~vmap(k_statistic)~ / ~vmap(moment_wild_bootstrap)~
+      work; ~vmap(cluster_bootstrap)~ fails at the output. The outlier is
+      ~ClusterBootstrapResult~.
+   2. ~OptimizerInfo~ was promoted to a pytree in PR #46 specifically so the
+      ~(theta_opt, info)~ tuple returned by ~Optimizer~ survives jit. But
+      ~Diagnostics~ contains ~OptimizerInfo~ and is itself a leaf, so the
+      user-visible path through ~result.diagnostics.optimizer_info~ re-buries
+      the pytree inside a leaf.
+
+   *Proposal*: declare and document the invariant. Recommended:
+   inference results are pytrees (already the case for three of four);
+   estimation / diagnostics are leaves (already the case). Lift
+   ~ClusterBootstrapResult~ to ~@jdc.pytree_dataclass~. Document the
+   invariant in api-sketch.org and add to a "Public-surface conventions"
+   subsection of CLAUDE.md or design.org §6.
+   #+END_QUOTE
+
+** Issue: Re-export LabelContext from public surface
+
+   *Severity*: medium. *Lens*: C (F-C3).
+
+   #+BEGIN_QUOTE
+   ~EstimationResult.labels~ has declared type ~LabelContext~
+   (~src/emu_gmm/types.py:359~). ~LabelContext~ lives in
+   ~src/emu_gmm/_internal/labels.py~ and is not in ~__all__~. A user
+   inspecting ~result.labels~ via ~help()~ or ~type()~ lands in
+   ~emu_gmm._internal.labels~, which CLAUDE.md treats as off-limits.
+
+   *Proposal*: re-export ~LabelContext~ from ~emu_gmm.types~ (and from the
+   top level), add to ~__all__~. One-line fix.
+   #+END_QUOTE
+
+** Issue: Sweep docs/design.org §§3-6 to match v1 implementation
+
+   *Severity*: medium (collective). *Lens*: D.
+
+   #+BEGIN_QUOTE
+   ~docs/design.org~ has fallen out of sync with six v1 landings (#31, #34,
+   #35, #45, #47, #49) and the multi-asset Euler example that landed
+   before wf4. None of the drifts are silent math errors; the
+   implementation honors design.org's architectural commitments. But a
+   reader relying on design.org alone would mispredict what v1.x offers.
+
+   Six specific updates needed (see ~design-fidelity-synthesis.org~ §
+   "Documentation updates needed" for full text):
+
+   1. §3 single-asset → multi-asset Euler (M=3, J_dof=1).
+   2. §3 theta-independent sampler caveat (common-random-numbers).
+   3. §5 diagonal-V regularisation dispatch (#47).
+   4. §5 Welch-Satterthwaite ~J_pvalue_adjusted~ scheme (#45).
+   5. §6 ~coef_table~ pandas-direct egress as deliberate exception (#44).
+   6. §6 mask: ~NamedArray~-accepting boundary; plain JAX storage for jit.
+
+   Single doc-only PR.
+   #+END_QUOTE
+
+* Per-lens detail link
+
+- Lens A (orthogonality): ~docs/reviews/lens-a-orthogonality.org~ — six
+  probes, one CONCERNING-DRIFT (probe 4: ~IteratedWeighting~), five
+  PRESERVED with minor doc-side notes.
+- Lens B (commitments): ~docs/reviews/lens-b-commitments.org~ — eight
+  commitments, all PRESERVED via concrete runtime probes. No findings.
+- Lens C (coherence): ~docs/reviews/lens-c-coherence.org~ — six probe
+  groups; eight findings (2 high, 3 medium, 3 low); verdict
+  concerning-drift.
+- Lens D (design-drift): ~docs/reviews/lens-d-design-drift.org~ — nine
+  probe groups; six doc-side drifts in design.org §§3-6; verdict
+  minor-drift; recommendation is a single doc sweep.
+
+* Priority order for action (combined severity × confidence × impact)
+
+| # | Action                                                        | Severity | Confidence | Type   |
+|---+---------------------------------------------------------------+----------+------------+--------|
+| 1 | Update migration guide (XL-2, F-C1)                          | high     | high       | docs   |
+| 2 | Unify result-type pytree regime (XL-4, F-C2)                 | high     | high       | code   |
+| 3 | Sweep design.org §§3-6 (XL-3)                                | medium   | high       | docs   |
+| 4 | Re-export LabelContext (XL-5, F-C3)                          | medium   | high       | code   |
+| 5 | Lift IteratedWeighting into protocol method (XL-1)           | medium   | medium     | code   |
+| 6 | Document extended-Measure interface in api-sketch (A-2 family) | low      | high       | docs   |
+| 7 | Add EmpiricalMeasure.from_array; rename moments_and_contributions (C-1) | low | high | code |
+| 8 | Privatise diagnostics builders / submodules (C-2, F-C7)      | low      | high       | code   |
+| 9 | Remove "iterated weighting deferred" line from CLAUDE.md      | low      | high       | docs   |
+
+Items 1, 3, 6, 9 are doc-only. Items 2, 4, 5, 7, 8 are small code changes
+none of which break public APIs. None require architectural redesign.

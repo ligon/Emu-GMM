@@ -1,0 +1,547 @@
+#+TITLE: Plan-Fidelity Adversarial Review --- v2 Manifold Implementation Plan
+#+AUTHOR: Plan-Fidelity Reviewer
+#+DATE: 2026-05-29
+
+* Lens
+
+Adversarial review of =docs/implementation-plan-v2-manifold.org=
+against the existing v1 surface in =src/emu_gmm/=. Focus:
+inconsistencies between sections, hand-waved implementation work,
+missing dependencies, vague acceptance criteria, implausible effort
+estimates, and unacknowledged conflicts with the v1 surface.
+
+* Summary verdict
+
+=spec-revision-needed=. Multiple high-severity inconsistencies: the
+plan promises a new optimiser protocol (Section 6, line ~388) but
+keeps =types.Optimizer= unchanged (Phase 5 still passes
+=residual_fn(theta_flat)= through =estimate=); =flatten_params= grows a
+third return value in Phase 1 (line ~230) but the downstream
+=Optimizer= protocol still has a flat-vector signature; the entire
+=manifold_spec= type is implicit; and several phases contain
+non-trivial numerical kernels labelled S (Lyapunov solve adjoints,
+Riemannian GN with manifold metric, gauge-aware =pinv= threshold,
+tangent-basis name flattening for general =Product= shapes).
+
+* High-severity findings
+
+** [HIGH] =Optimizer= protocol surface conflict between Phase 4 and Phase 5
+
+- Phase 4 introduces a new =RiemannianOptimizer= protocol whose
+  signature is =(residual_fn, theta_init: ParamsPyTree, manifold)=
+  (plan §6, lines 387--394).
+- Phase 4 also adds =OptimistixManifoldAdapter= that "wraps
+  =optimistix_lm=" to "conform to =RiemannianOptimizer=" (plan §6,
+  lines 450--467).
+- BUT Phase 5 keeps =estimator.py:193= unchanged in spirit:
+  =theta_hat_flat, optimizer_info = optimizer(residual_fn,
+  theta_init_flat)=. The plan says "Dispatch: if every leaf is
+  =Euclidean=, route to =OptimistixManifoldAdapter=" (line 488), but
+  the existing =Optimizer= protocol in =types.py:118-130= takes a
+  =Float[Array, " K"]= for =theta_init=, while =RiemannianOptimizer=
+  in the plan takes a =ParamsPyTree=.
+- /Question not answered/: Does =estimate= now hold /two/ user-facing
+  optimiser protocols? Does =types.Optimizer= get a v2 generalisation,
+  or is it deprecated? The plan never says.
+- /Implication for v1 users/: existing v1 users pass =optimizer=
+  =optimistix_lm()= which today is an =_OptimistixLM= dataclass
+  satisfying the v1 =Optimizer= protocol (=optimizer.py:47-117=). It
+  takes flat arrays. Under Phase 4--5, =estimate= must somehow detect
+  the protocol version --- but the plan never describes that detection.
+
+References:
+- =src/emu_gmm/types.py:118-130= (current =Optimizer= signature)
+- =src/emu_gmm/optimizer.py:60-64,189-193= (=_OptimistixLM= /
+  =_ScipyLM= take flat arrays)
+- =src/emu_gmm/estimator.py:193= (call site)
+- Plan §6 lines 387--394, 450--467
+
+** [HIGH] =manifold_spec= is referenced but never defined
+
+The plan mentions =manifold_spec= as the third return value of
+=flatten_params= in Phase 1 (line 230) and threads it through Phase 5
+(line 482, =unflatten_params(theta_flat, treedef, manifold_spec)=),
+Phase 6 (=tangent_basis_names(manifold_spec, param_names)=, line 567),
+and the §11.3 type-check task (line 696, "the relaxed
+=flatten_params= signature ... returns a triple, not a pair").
+
+But the plan never specifies:
+- The /type/ of =manifold_spec= (dataclass? namedtuple? PyTree?
+  hashable? JDC static field?). Crucial because Phase 1 says =the
+  manifold is a JDC static field= for =ManifoldLeaf= (line 232), but
+  if =manifold_spec= itself must be hashable to act as a closure /
+  static argument to =jit= (cf. the v1 pattern of =LabelContext= being
+  a frozen hashable dataclass at =labels.py:44-60=), that constraint
+  is unstated.
+- How =manifold_spec= interacts with =treedef=. The v1 invariant is
+  that =treedef= alone carries the full reconstruction info; v2 splits
+  that into =(treedef, manifold_spec)=. Are the two redundant? Can
+  =treedef= just hold the manifold tags? The plan punts.
+- The dependency on =jax.tree_util.PyTreeDef= for =ManifoldLeaf=
+  --- if =ManifoldLeaf= is a custom PyTree node, its treedef already
+  knows the manifold (via the static auxdata). Why then a separate
+  =manifold_spec=? Plausible but unaddressed.
+
+This blocks Phase 1 implementation: the implementer must invent the
+type. Downstream phases (5, 6) consume it.
+
+References:
+- =src/emu_gmm/_internal/params.py:23-58,61-99= (current 2-tuple
+  return)
+- Plan §3 lines 230--236
+- Plan §7 lines 482, 484
+- Plan §8 line 567 (=tangent_basis_names(manifold_spec, param_names)=)
+- Plan §11 line 696--700
+
+** [HIGH] CU weighting + Riemannian Jacobian: =∇_θ V= term ignored
+
+CLAUDE.md commitment 4 explicitly says: "Don't silently drop the
+∇_θ V term from the CU gradient; write the residual function so JAX
+AD captures the dependence."
+
+In Phase 5 (plan §7 lines 492--519), the plan computes
+=G_hat = measure.jacobian(model, theta_hat)=, then applies
+=euclidean_to_riemannian_gradient= per leaf, then builds the
+info matrix as =G_riem.T @ Lambda @ G_riem=. This is the Jacobian of
+=m=, not the Jacobian of the residual =y(θ)=. Under CU weighting,
+=y(θ) = L_μ(θ)^{-1} m_μ(θ)= and =∂y/∂θ= picks up the =∂L^{-1}/∂θ=
+term.
+
+In v1 this is handled implicitly inside =residual_fn= (see
+=estimator.py:184--190=), so the optimiser's =jacfwd= captures it.
+But the plan's Phase 5 info-matrix construction at the optimum uses
+=measure.jacobian= directly on the moments, not on the residual,
+which is wrong under CU --- unless the implicit understanding is that
+the CU correction is captured asymptotically by the standard formula
+=(G' V^{-1} G)^{-1}=. The plan doesn't acknowledge the tension.
+
+The same critique applies to v1 today (=estimator.py:202=), but at
+least there the gauge is absent. Under Phase 5's manifold geometry,
+the plan also adds an =euclidean_to_riemannian_gradient= step that
+needs to commute with this implicit treatment, which the plan does
+not analyse.
+
+References:
+- =src/emu_gmm/estimator.py:202-214= (current G_hat / info matrix)
+- =CLAUDE.md= commitment 4
+- Plan §7 lines 492--519
+
+** [HIGH] Acceptance criterion for Phase 4 RiemannianLM is vague
+
+Phase 4 acceptance reads (lines 379--381): "=RiemannianLM= recovers a
+known PSD matrix from synthetic moments in a stand-alone test
+(Boumal §6.4-style problem), and falls back to optimistix LM
+bitwise-equivalently when every leaf of the parameter PyTree is
+=Euclidean=."
+
+Problems:
+1. "Bitwise-equivalently" is implausibly strict. =RiemannianLM='s
+   inner loop uses a custom LM damping schedule (lines 437--439,
+   =λ ← 0.5λ= on accept, =λ ← 2λ= on reject), which is different from
+   optimistix's damping. The =OptimistixManifoldAdapter= just calls
+   =optimistix_lm= so the path "if all Euclidean, use
+   OptimistixManifoldAdapter" /is/ bitwise-equivalent --- but only
+   because =RiemannianLM= is never invoked in that branch. The
+   acceptance text conflates two paths.
+2. "Boumal §6.4-style problem" is a hand-wave. The reader needs the
+   actual problem spec (dimension, residual, tolerance) to write the
+   test.
+3. "Recovers a known PSD matrix" --- modulo gauge? In ambient norm?
+   Tangent-distance? The acceptance doesn't say which.
+
+Reference: Plan §6 lines 374--381
+
+** [HIGH] Phase 1 =ManifoldLeaf= breaks the documented 0-d-leaf invariant for v1 backward compat
+
+Plan §3 line 220--243 redefines the leaf semantics of
+=flatten_params=. v1's =params.py:23-58= explicitly /enforces/ "any
+leaf is a 0-d value" with a =ValueError= if violated (line 52--56).
+
+The plan's "Backward compatibility: when no leaf is wrapped in a
+=ManifoldLeaf= (i.e. every leaf is a 0-d scalar), =flatten_params=
+must produce exactly the v1 output" (line 237--240) is fine, but two
+edge cases are unaddressed:
+
+1. /Existing 0-d-leaf code that does not wrap leaves/. v1 users pass
+   in =@jdc.pytree_dataclass= with scalar fields like =beta: float=,
+   =gamma: float= (per =api-sketch.org=). Under v2, the leaves are
+   /not/ =ManifoldLeaf= instances. The plan says "bare scalars" become
+   "implicit =Euclidean(1)=" --- but is the dimension 1 or 0? In v1
+   the leaf is a 0-d array (=arr.ndim != 0= raises). =Euclidean(1)=
+   would mean a 1-D ambient shape of size 1, which is a different
+   shape. The plan doesn't reconcile.
+2. /What does =manifold_spec= contain for a v1 dataclass?/ A list of
+   =Euclidean(1)= per leaf? Or one entry that says "v1-compat scalar
+   tree"? The bitwise-output guarantee (line 239--240) does not
+   constrain the spec.
+
+This is critical because Phase 1's acceptance criterion (line 253--256)
+is "v1 estimator round-trip unchanged" --- and the test suite will
+exercise this path.
+
+References:
+- =src/emu_gmm/_internal/params.py:52-56= (0-d invariant enforcement)
+- =src/emu_gmm/_internal/params.py:87-90= (1-D flat-array invariant)
+- Plan §3 lines 220--243, 253--256
+
+* Medium-severity findings
+
+** [MEDIUM] =EstimationResult.components()= relies on dataclass-field reflection that v1 doesn't provide for nested types
+
+Plan §8 line 546--554 says =components()= "Returns a dict mapping
+leaf-field-name to (ambient_array, manifold) pairs" and "Wire through
+=labels.param_names= so the dict keys are the user's dataclass field
+names".
+
+But the existing v1 =param_names= at =_internal/params.py:102-140=
+explicitly raises =NotImplementedError= if any field is a dataclass
+(line 134--138): "Nested dataclass parameter field {field.name!r}
+is not supported in v1; use a flat dataclass with scalar fields".
+
+Under v2 with =KAggParams(L=Y, mu=mu, sigma=sigma)=, =L=, =mu=,
+=sigma= are arrays, not nested dataclasses. So the existing
+=param_names= shouldn't actually raise --- unless the user wants
+nested =Product= structure to map to nested dataclasses (which the
+plan never discusses).
+
+But the plan doesn't say what =param_names= now returns for v2:
+- Three names =["L", "mu", "sigma"]= (top-level field names)?
+- A flat list per-tangent-coord =["L_t_00", ..., "sigma_t_1"]= (the
+  =tangent_basis_names= shape from line 567)?
+
+These two use cases need different functions, but the plan reuses the
+same =labels.param_names= for both =components()= keys (top-level)
+and =Sigma_theta= row/column labels (tangent-basis flat). At minimum,
+the plan should commit to either a two-function split or a single
+function that takes a flag.
+
+References:
+- =src/emu_gmm/_internal/params.py:102-140=
+- Plan §8 lines 546--554, 555--568
+
+** [MEDIUM] Phase 1 effort estimate for =params.py= update is L; the listed work is closer to XL
+
+The plan estimates the =params.py= manifold-aware update at L (line
+220, full day). Work items listed:
+- Design =ManifoldLeaf= as a custom PyTree leaf (this is non-trivial:
+  PyTree registration, JDC interop, auxdata convention).
+- Define =manifold_spec=, ensure it composes with =jax.tree_util= and
+  jit static-arg semantics.
+- Walk PyTree, build flat-vector concatenation with arbitrary
+  ambient shapes.
+- Implement the inverse: split by spec offsets, reshape, reconstruct.
+- Preserve v1 bitwise output for scalar trees.
+- Tests at three levels: v1 round-trip, v2 round-trip with
+  =Product= shape, =tree_flatten/tree_unflatten= on tangent-vector
+  PyTrees (line 247--252).
+
+The v1 equivalent (=params.py= lines 1--143) is ~140 lines of
+straightforward code. The v2 version adds at least: a custom PyTree
+leaf, a =manifold_spec= dataclass, recursive walks over heterogeneous
+shapes, dispatch logic, and a backward-compat shim. Realistically XL
+(multi-day), not L. The "Phase 1 is the bottleneck" remark in §12
+(line 736) implicitly acknowledges this, but the estimate doesn't.
+
+** [MEDIUM] Lyapunov-solve effort estimate (Phase 2) under-counts the AD adjoint work
+
+Plan §4 line 271--309 says =PSDFixedRank= is L (full day). The hard
+piece is =projection= via Lyapunov solve (line 277--282), with two
+options: Bartels--Stewart (Schur-based) or Kronecker form
+(=O(k^6)=).
+
+Neither option is trivial in JAX. JAX has no
+=solve_continuous_lyapunov=, and the Kronecker form requires =vec= /
+=unvec= plus a =solve= --- workable but the AD adjoint of the
+Kronecker linear system needs care so that =jacfwd= /
+=euclidean_to_riemannian_gradient= composes correctly. The plan
+doesn't sketch the adjoint at all, despite the entire purpose of
+Phase 1/2 being that the manifold projection participates in the
+Riemannian gradient computation (Phase 4 line 414--417).
+
+If the projection's AD adjoint is wrong, the Riemannian GN step is
+wrong, and the Phase 4 acceptance test will silently produce
+non-tangent steps. This is a much bigger risk than the plan
+acknowledges. Realistically XL.
+
+References: Plan §4 lines 271--309, §6 lines 410--422
+
+** [MEDIUM] Phase 5 =J_dof= change is documented in §13 but not in Phase 5 itself
+
+§13.1 (lines 757--764) correctly notes "the =J_dof= in
+=estimator.py:219= becomes =M - manifold.dimension=, /not/
+=M - K_ambient=". This is a substantive change to the J-test
+interpretation.
+
+But Phase 5's task list (§7 lines 478--519) doesn't mention modifying
+=J_dof=. The change appears only in §13 ("Open Theoretical
+Questions") as if it's an open question, but in fact it's a required
+implementation change. Either §7 needs a task for it, or §13's claim
+needs to be downgraded to "consider".
+
+References: =estimator.py:219=; Plan §13 lines 757--764; §7 missing
+
+** [MEDIUM] Acceptance criterion for Phase 5: "rank = dimension - gauge_dim within tolerance" is operationally vague
+
+Phase 5 acceptance: "=Sigma_theta= ... has rank
+=manifold.dimension - manifold.gauge_dim= within tolerance" (line
+476). Two issues:
+1. "Rank" of a finite-sample inverse: under what tolerance?
+   =numpy.linalg.matrix_rank= uses an rcond depending on machine
+   eps; the plan in §7 line 514--516 hints at "=Sigma_theta_arr =
+   pinv(info_matrix, rcond=...)= with a documented threshold" but
+   doesn't say what the threshold is. The acceptance can't be
+   automated without one.
+2. =vmap= compatibility (§13.4 line 800--804) flagged
+   "data-dependent =rcond=" as a concern but never resolved.
+
+The implementer needs both decisions before writing the test.
+
+References: Plan §7 lines 473--476, 514--516; §13 lines 798--804
+
+** [MEDIUM] Phase 6 =tangent_basis_names= is under-specified for non-trivial =Product= shapes
+
+Plan §8 line 565--568: "the labels look like
+=['L_t_00', 'L_t_01', ..., 'mu_t_0', 'sigma_t_0', 'sigma_t_1']=
+(=_t_= = 'tangent')". This works for the K-Agg example but the
+shape of the tangent space at =PSDFixedRank(n, k)= is =(n, k)= /modulo
+the gauge/. With the embedded metric (§2.1) the basis is the ambient
+=n*k= entries; with the quotient it's =n*k - k(k-1)/2= entries.
+
+If the embedded-metric choice is taken (per §2.1 recommendation), the
+=L_t_ij= labels number =n*k= entries but rank is =n*k - k(k-1)/2= ---
+the user's labels mislead them about identification. Either:
+- The labels should distinguish "ambient" vs "quotient" coordinates,
+  or
+- Only =dimension - gauge_dim= labels are emitted (with the gauge
+  directions filtered out by a basis change inside
+  =build_diagnostics=).
+
+The plan doesn't pick. This propagates: =to_pandas()=
+(=types.py:236-278=) uses =labels.param_names= to index
+=Sigma_theta= --- if the names are length =n*k= but =Sigma_theta=
+has rank =n*k - k(k-1)/2=, the user sees a rank-deficient
+DataFrame with all =n*k= labelled rows/columns and no indication
+of which entries are gauge.
+
+References: Plan §8 lines 555--568; =src/emu_gmm/types.py:236-278=
+
+** [MEDIUM] =vector_transport= choice "projection at new point" doesn't match pymanopt's exact spec
+
+Plan §3 line 187--189: "For v2.0 we ship 'projection at the new
+point' (matches =psd.py:63-64=)". A quick read of
+pymanopt's =psd.py= shows the actual transport returns
+=self.projection(point_b, tangent_vector_a)=, which is what the plan
+describes. So this is fine /for the Euclidean and PSDFixedRank
+cases/.
+
+But for =Product= manifold (Phase 3), this needs to delegate per
+factor (plan §5 line 358), which only works if each factor's
+=vector_transport= obeys the same convention. For
+=from_pymanopt(M)= (Phase 7), the wrapped manifold's transport is
+whatever pymanopt provides --- and the plan doesn't assert it
+matches the "projection at new point" convention. If it doesn't,
+=RiemannianLM= step semantics differ between native and adapted
+manifolds.
+
+Minor but should be flagged.
+
+** [MEDIUM] =from_pymanopt= adapter's "non-JIT" stance conflicts with =RiemannianLM='s pure-JAX claim
+
+Plan §6 line 444: =RiemannianLM= is "pure JAX and =jit=/=vmap=-friendly
+by construction" (also asserted in §13 line 800--801).
+
+Plan §9 line 624--625: "Cannot be used inside =jit=: ...
+=RiemannianLM= will fall back to a non-jit branch when any factor of
+the parameter PyTree comes from =from_pymanopt=".
+
+These two statements are jointly inconsistent. If =RiemannianLM= can
+detect non-JIT manifolds and switch branches, that means the
+optimiser is not a single pure-JAX function but rather a Python
+dispatcher. That's fine, but contradicts the "JIT-pure" framing in
+Phase 4. The plan needs to commit to one of:
+- Two separately-named optimisers (=RiemannianLM= JIT-only, and
+  =RiemannianLM_PyMan= for adapted manifolds), or
+- A single optimiser whose JIT-ness is conditional on the manifold
+  spec --- and an explicit documentation note that it may or may not
+  JIT.
+
+The bootstrap/vmap claim in §13.4 only holds for the all-native
+path; this should be made explicit.
+
+References: Plan §6 line 444; §9 line 624--625; §13 line 800--801
+
+* Low-severity findings
+
+** [LOW] Phase 1 acceptance criterion "all v1 acceptance tests continue to pass" is appropriate but doesn't list the tests
+
+The plan says "all v1 acceptance tests" but the v1 acceptance tests
+aren't enumerated. The implementer will have to discover them.
+Trivial fix: list the test files.
+
+** [LOW] Effort estimate for §11.1 (test infrastructure) at S is plausible but the cross-library helper has implicit cost
+
+A =compare_to_pymanopt(jax_op, pymanopt_op, n_cases)= helper has to
+handle the JAX <-> NumPy round-trip carefully (pymanopt accepts NumPy
+arrays; the results must be compared with appropriate tolerance per
+op). The plan's §11.2 tolerance table (lines 687--694) doesn't
+mention the =distance= operator using SVD (potential numerical
+sensitivity in the log map). Worth a sentence.
+
+** [LOW] Phase 7 acceptance test (line 627--631) presupposes pymanopt as a dev dependency
+
+The acceptance test for =from_pymanopt(Stiefel)= requires pymanopt
+to be importable in CI. The plan adds pymanopt as an /optional/
+extra (line 602--606). The CI matrix probably needs to install the
+extra for this test --- the plan should note "tests under
+=tests/manifolds/test_pymanopt_adapter.py= are skipped unless
+=manifold= extra is installed". Missing acceptance-test-environment
+detail.
+
+** [LOW] Effort estimate for §10.4 "Update v2 deferrals list" at S is fine
+
+But this deferrals list is reasonably long (4+ items). The
+deferrals refresh is an editorial task; the listed items already
+exist in the plan. No real concern.
+
+** [LOW] =gauge_dim= as class attribute (Phase 2 line 311) is reasonable but the corresponding =Product= aggregation uses =getattr(..., "gauge_dim", 0)=
+
+Plan §5 line 363: "=gauge_dim= --- =sum(getattr(M, 'gauge_dim', 0)
+for M in self.manifolds)=". The =getattr=-with-default pattern means
+=Euclidean= doesn't need to expose =gauge_dim=. Fine, but the
+=ManifoldParam= protocol in Phase 1 (lines 165--198) doesn't include
+=gauge_dim=. Decision: is =gauge_dim= part of the protocol (in which
+case =Euclidean= must declare =gauge_dim = 0=), or is it ad-hoc
+(=getattr= with default everywhere)? The plan should commit.
+
+* Phase-dependency issues
+
+** [HIGH] Phase 6 depends on Phase 5 which depends on... a label-flattening function not specified until Phase 6
+
+Phase 5 builds =Sigma_theta_arr= as a =(manifold.dimension,
+manifold.dimension)= matrix and labels it (plan line 510--513). The
+existing v1 =Sigma_theta= is labelled by =Params= /
+=ParamsDual= axes of size =K_ambient= (=types.py:189=,
+=estimator.py:226-231=).
+
+In v2 Phase 5 alone, =Sigma_theta='s axes change size to
+=manifold.dimension=. But the /labels/ on those axes
+(=tangent_basis_names=) are only specified in Phase 6 (line 567).
+So Phase 5's tests for "=Sigma_theta= is finite and has the
+expected rank" can't be written without Phase 6's label scheme ---
+unless Phase 5 produces unlabelled output, which violates the v1
+convention.
+
+Fix: surface =tangent_basis_names= in Phase 5, not Phase 6.
+
+** [MEDIUM] Phase 4 introduces =OptimistixManifoldAdapter= but Phase 5 estimator changes still call =optimizer(residual_fn, theta_init_flat)=-style
+
+The dispatch from Phase 5 ("if every leaf is =Euclidean=, route to
+=OptimistixManifoldAdapter=") presupposes the v2 =Optimizer= surface
+takes the PyTree. But the existing =optimistix_lm()= return
+=_OptimistixLM= satisfying the v1 =Optimizer= protocol that takes a
+flat array. The plan doesn't say:
+- Whether =estimate= rewraps =optimistix_lm()= into the adapter
+  /transparently/ (i.e., user code unchanged), or
+- Whether users must pass =OptimistixManifoldAdapter()= explicitly.
+
+The "v1 estimator round-trip unchanged" acceptance criterion (Phase
+1, line 253--256) strongly implies the former. If so, =estimate=
+needs a "detect protocol version" branch, which is a separate
+implementation chunk that no phase claims.
+
+** [MEDIUM] Phase 4 =RiemannianLM= tangent-space LS depends on Phase 1's =ManifoldParam.inner_product=, but Phase 1's protocol leaves the LS implementation hand-waved
+
+Plan §6 line 418--419: "Solve the Gauss-Newton normal equation on
+the tangent space: =min_d ||J_riem_k * d - r_k||^2 + lambda *
+||d||^2=". The d here is a tangent vector PyTree. The norm
+=||...||^2= is the manifold inner product.
+
+For =Euclidean=, this collapses to the standard normal equation.
+For =PSDFixedRank=, the plan claims (§6 line 433--436): "it remains
+a least-squares solve in ambient =Y=-space because the embedded
+metric coincides with the ambient Frobenius (per §2.1 decision)".
+
+But the embedded-metric =PSDFixedRank='s gauge means
+=J_riem_k * d= has =gauge_dim= directions with zero norm: those
+directions correspond to motions along the orbit. Without a
+regulariser the normal equation is rank-deficient. The plan's
+=lambda= LM damping might mask this (=λ > 0= makes the system
+non-singular), but only if =λ= is bounded /below/. The plan's
+"=λ_k= initialise to =1e-3 ||J^T J||_F=" (line 439) leaves =λ_k=
+free to shrink toward 0 on accept steps, at which point the system
+becomes singular.
+
+This is a real numerical risk that the plan should address with
+either a floor on =λ= or explicit gauge filtering before the
+solve.
+
+* Effort-estimate plausibility issues
+
+| Task | Plan estimate | Realistic |
+|------+----------------+-----------|
+| params.py v2 update | L | XL |
+| PSDFixedRank operators | L | L--XL |
+| RiemannianLM | L | L--XL |
+| Phase 5 estimator updates | L | L (correct) |
+| =tangent_basis_names= | (in S "labels" line ~567) | M |
+| OptimistixManifoldAdapter | M | M (correct) |
+| pymanopt parity test infra | S | M |
+
+Aggregate concern: the plan totals roughly =2S + 7M + 5L + 0XL=. A
+realistic re-estimation pushes at least three items into XL.
+
+* Acceptance-criterion strength check
+
+| Phase | Criterion text | Verdict |
+|-------+-----------------+---------|
+| Phase 1 | "all v1 acceptance tests continue to pass" | Concrete (modulo "list the tests") |
+| Phase 2 | "agree with pymanopt's =PSDFixedRank(n, k)= on 5-10 random cases at rtol=1e-10/1e-6" | Concrete (good) |
+| Phase 3 | "pymanopt parity ... 5-case grid" | Concrete (good) |
+| Phase 4 | "recovers ... Boumal §6.4-style" + "bitwise-equivalently to optimistix" | Vague (problem unspecified) + Implausible (bitwise) |
+| Phase 5 | "runs end-to-end ... Sigma_theta is finite and has the expected rank" | Vague (rank tolerance unspecified) |
+| Phase 6 | "round-trips through ... =.components()=; ... is labelled in tangent-space coordinates; =gauge_nullspace_dim= reported" | Surface-level (no numerical criterion) |
+| Phase 7 | "calls into pymanopt, drops out of JIT, and returns a JAX array" | Concrete but minimal |
+| Phase 8 | "the README v2 quickstart runs end-to-end" | Concrete |
+
+* Recommendations
+
+1. /Add a "Phase 0.5" decision/: which =Optimizer= protocol survives,
+   how does =estimate= detect it, and what's the user-visible API
+   path. Without this, Phases 4 and 5 are blocked.
+2. /Define =manifold_spec=/: type, hashability, jit-static
+   semantics, interaction with =treedef=. Either fold the manifold
+   info into =treedef= via a custom =ManifoldLeaf= PyTree node, or
+   commit to a separate hashable dataclass.
+3. /Move =tangent_basis_names= to Phase 5/, since Phase 5's labelled
+   output depends on it.
+4. /Add a J_dof modification task to Phase 5/, not §13.
+5. /Tighten Phase 4 acceptance/: cite the specific Boumal §6.4
+   problem and tolerances; replace "bitwise-equivalently" with a
+   tolerance statement for the Euclidean-leaf fallback path.
+6. /Address the CU + Riemannian =∇_θ V= question/: either justify
+   why the standard info-matrix formula remains correct under the
+   manifold metric and CU weighting, or add a corrective term.
+7. /Reconcile JIT vs non-JIT/: explicitly partition optimisers
+   into "JIT-pure" and "pymanopt-adapted" classes; document the
+   bootstrap/vmap caveat.
+8. /Define the gauge-filtering policy/ for =Sigma_theta=
+   labelling: either embed the basis change in =build_diagnostics=
+   so the labelled matrix is rank-full, or annotate the gauge
+   columns in the labels.
+9. /Re-estimate effort/ for: =params.py= update (XL), PSDFixedRank
+   (L--XL with AD adjoint), RiemannianLM (L--XL with
+   tangent-LS solve), tangent_basis_names (M not implicit).
+10. /Document the Lyapunov-solve adjoint strategy/ in Phase 2 so
+    that =jacfwd= through the projection produces correct
+    Riemannian gradients in Phase 4.
+
+* Tangential observations
+
+- =CLAUDE.md= "Don't restructure the =docs/= layout without
+  discussion" --- the plan adds =docs/mcar-asymptotics-riemannian.org=
+  (§13.3 line 793) without prior discussion. Minor; flag and confirm
+  before adding.
+- =CLAUDE.md= "Don't add dependencies without flagging them" --- the
+  plan adds =pymanopt= as an optional extra. The =pyproject.toml=
+  change is correctly scoped under =[manifold]=, so this is properly
+  flagged. No concern.

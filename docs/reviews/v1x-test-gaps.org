@@ -1,0 +1,264 @@
+#+TITLE: Test-coverage gaps after merged v1.x
+#+AUTHOR: adversarial review (test-coverage lens)
+#+DATE: 2026-05-29
+
+Each finding pairs an edge case I expected the suite to cover with the
+observed behaviour from a temporary probe script
+(=tmp/probe_edge_cases.py=). Sketch is *not* the full test; just
+1-3 lines pointing at the case and the expectation that should hold.
+Severity reflects user-visible blast radius if the case is hit silently.
+
+* High
+
+** [HIGH] =estimate()= with M = 0 (degenerate, no moments)
+   - Confirmed gap. ~jnp.linalg.cond~ inside =DiagonalTikhonov.apply=
+     raises =ValueError: input array must not be empty=. The error is
+     internal and confusing; the caller never sees a friendly message.
+   - Sketch:
+     #+begin_src python
+     # tests/test_estimator.py
+     def test_M_zero_raises_cleanly():
+         # AnalyticalMeasure returning shape (0,); should raise a
+         # framework-level ValueError naming the (M=0) condition.
+         with pytest.raises(ValueError, match="M"):
+             estimate(model=..., measure=..., covariance=...,
+                      theta_init=P1(a=jnp.asarray(0.0)))
+     #+end_src
+
+** [HIGH] =estimate()= with K = 0 (empty parameter dataclass; issue #29)
+   - Confirmed gap. =flatten_params= calls =jnp.stack([])= which raises
+     =ValueError: Need at least one array to stack.= The helper
+     mentioned in the prompt does not exist; nothing in
+     =_internal/params.py= guards against an empty dataclass.
+   - Sketch:
+     #+begin_src python
+     # tests/_internal/test_params.py
+     def test_flatten_empty_dataclass_raises_clearly():
+         @jdc.pytree_dataclass
+         class P0: pass
+         with pytest.raises(ValueError, match="(empty|K=0|no fields)"):
+             flatten_params(P0())
+     #+end_src
+
+** [HIGH] =estimate()= with K > M (under-identified)
+   - Confirmed gap. Probe runs to completion. =info_matrix= is rank-
+     deficient so =jnp.linalg.inv= produces a matrix of ~inf~/~nan~
+     (per the inline comment "under-identified problems will yield
+     NaN"). Caller has to inspect ~Sigma_theta~ themselves; no error,
+     no diagnostic flag. Per design.org the framework should refuse to
+     produce a meaningless result.
+   - Sketch:
+     #+begin_src python
+     # tests/test_estimator.py
+     def test_under_identified_K_gt_M_raises_or_flags():
+         # K=3 params, M=1 moment. Expect ValueError before optimisation,
+         # or at minimum a diagnostic flag and a finite-NaN Sigma_theta
+         # that the caller can detect.
+         with pytest.raises(ValueError, match="under-identified"):
+             estimate(model=..., measure=..., covariance=...,
+                      theta_init=P3(...))
+     #+end_src
+
+** [HIGH] Binding ridge: =J_pvalue= uses the nominal chi^2, not the regularization-adjusted critical value
+   - Confirmed gap. Probe runs a problem where ~binding_ridge=True~
+     and ~tau_realised ~ 0.002~ but =J_pvalue= is computed via
+     ~scipy.stats.chi2.sf(J_stat, J_dof)~ unconditionally. Per
+     =docs/design.org= Section 5: "the inference engine reports both
+     the nominal chi^2 critical value and a regularization-adjusted
+     critical value when tau exceeds a configurable threshold". The
+     adjusted weighted-chi^2 distribution (see
+     =docs/mcar-asymptotics.org= line 142) is not computed anywhere.
+   - Sketch:
+     #+begin_src python
+     # tests/test_estimator.py
+     def test_J_pvalue_adjusted_when_ridge_binding():
+         r = estimate(..., regularization=DiagonalTikhonov(
+                              kappa_target=1e3, tau_threshold=1e-6))
+         assert r.diagnostics.binding_ridge is True
+         # Either a separate adjusted field, or J_pvalue must reflect
+         # the weighted-chi^2 mixture, not chi^2_{M-K}.
+         assert hasattr(r, "J_pvalue_adjusted") or \
+                r.J_pvalue != scipy.stats.chi2.sf(r.J_stat, r.J_dof)
+     #+end_src
+
+* Medium
+
+** [MED] =ClusteredCovariance= with =n_clusters = 1=
+   - Confirmed gap. Probe runs but the resulting =V= has
+     ~kappa ~ 1e17~ (numerically singular: rank one by construction
+     because the only "cluster" is the entire sample). The estimator
+     then leans entirely on =DiagonalTikhonov= to recover PD-ness. No
+     test exercises this; design.org documents the case implicitly as
+     a degenerate fallback, but the practical impact is that a user
+     who mis-codes ~cluster_ids=jnp.zeros(N)~ silently gets a
+     pathologically conditioned weight matrix and tiny standard
+     errors.
+   - Sketch:
+     #+begin_src python
+     # tests/covariance/test_clustered.py
+     def test_single_cluster_is_rank_one_and_warned_or_errored():
+         # n_clusters=1 reduces V to a single outer product; either
+         # raise a clear error or document the rank-one nature.
+         cov = ClusteredCovariance(cluster_ids=jnp.zeros(N), n_clusters=1)
+         V = cov.covariance(psi, theta, measure)
+         assert jnp.linalg.matrix_rank(V) == 1
+     #+end_src
+
+** [MED] =ClusteredCovariance= with wildly unbalanced sizes (n_c = 1 vs n_c = N-1)
+   - Confirmed gap. Probe runs and produces a finite ~V~, but no test
+     verifies behaviour relative to a reference (e.g. balanced
+     two-cluster case from =TestTwoClusterFormula=). Cluster-robust
+     inference is known to be biased downward when one cluster
+     dominates; the framework should at least surface a "max cluster
+     fraction" diagnostic or test that the variance does not collapse
+     when one cluster is the singleton.
+   - Sketch:
+     #+begin_src python
+     # tests/covariance/test_clustered.py
+     def test_unbalanced_clusters_does_not_collapse_to_iid():
+         # cluster sizes [1, N-1]; V should differ noticeably from the
+         # IID variance unless the within-cluster correlation is zero.
+         cov = ClusteredCovariance(cluster_ids=cluster_ids_1_vs_Nm1,
+                                   n_clusters=2)
+         V_cl = cov.covariance(psi, theta, measure)
+         V_iid = IIDCovariance().covariance(psi, theta, measure)
+         assert not jnp.allclose(V_cl, V_iid)
+     #+end_src
+
+** [MED] Rank-deficient G (a moment is constant in some theta coordinate)
+   - Confirmed gap. Probe runs to completion. =theta_hat.b= stays at
+     the initial value (b is unidentified) and =Sigma_theta= contains
+     ~inf~ on the diagonal for ~b~ and ~nan~ on the off-diagonal. No
+     diagnostic flag, no detection. The information matrix
+     ~G' V^{-1} G~ is silently rank-deficient and =jnp.linalg.inv= is
+     called anyway. Per CLAUDE.md commitment §5 ("Information matrix
+     via G' Lambda G, never via numerical Hessian") this matrix is the
+     framework's identification gate; it should be rank-checked.
+   - Sketch:
+     #+begin_src python
+     # tests/test_estimator.py
+     def test_rank_deficient_G_surfaces_warning_or_diagnostic():
+         # Both moments depend on a only; b is unidentified -> G[:, 1] = 0.
+         r = estimate(model=psi_b_unidentified, ...)
+         # Either: cond(info_matrix) is reported in diagnostics, or
+         # raise/flag at the rank-check level.
+         assert not jnp.all(jnp.isfinite(r.Sigma_theta.array))  # current behaviour
+         # ... preferred: an explicit diagnostic like
+         # r.diagnostics.identification_rank == K - 1
+     #+end_src
+
+** [MED] =from_pandas= with a column that is *all* NaN
+   - Confirmed gap. Probe shows ~N_j = [3., 0.]~ for moment 1, and
+     =expectation= falls through =_safe_divide= to ~0.0~ for that
+     coordinate. The user gets a *silently zero* moment instead of an
+     error or warning. Downstream =V[1, 1]~0~ (from
+     =_safe_outer_divide=) means =DiagonalTikhonov= must bail the
+     coordinate out via the ridge, but at no point does the framework
+     say "you handed me an empty column".
+   - Sketch:
+     #+begin_src python
+     # tests/measures/test_empirical.py
+     def test_from_pandas_all_nan_column_warns_or_errors():
+         df = pd.DataFrame({"a": [1.0, 2.0], "b": [float("nan"), float("nan")]})
+         # Currently passes silently with N_j=0; should at minimum warn.
+         with pytest.warns(UserWarning, match="all.*missing"):
+             meas = EmpiricalMeasure.from_pandas(df)
+         assert jnp.sum(meas.mask[:, 1]) == 0.0  # the documented behaviour
+     #+end_src
+
+** [MED] =moment_contributions= with mask all zeros
+   - Confirmed gap (silent zero). Probe shows ~g = 0~ everywhere and
+     no error. Downstream resampling / bootstrap callers will produce
+     a zero ~Omega_hat~ that =DiagonalTikhonov= turns into the
+     identity by ridge alone --- a meaningless inference. No test
+     exercises =moment_contributions= against an empty mask.
+   - Sketch:
+     #+begin_src python
+     # tests/measures/test_empirical.py
+     def test_moment_contributions_all_zero_mask_is_zero():
+         meas = EmpiricalMeasure(x=x, mask=jnp.zeros((N, M)), weights=jnp.ones(N))
+         g = meas.moment_contributions(psi, theta)
+         assert jnp.all(g == 0.0)
+         # Optional: raise instead.
+     #+end_src
+
+** [MED] =optimistix_lm= with rtol below float64 noise floor
+   - Confirmed: probe with =rtol=atol=1e-30= reports
+     ~status="converged"~ in 11 iterations for a quadratic. Optimistix
+     does not gate on whether the tolerance is achievable; the
+     framework accepts any positive float without warning. For a
+     numerical-statistics framework that documents "the float32 noise
+     floor on a O(0.1)-magnitude whitened residual is around 2e-8"
+     in =emu_gmm/__init__.py=, the dual case (rtol below float64
+     epsilon) should at least be documented in a test as a known
+     edge.
+   - Sketch:
+     #+begin_src python
+     # tests/test_optimizer.py
+     def test_optimistix_lm_tolerance_below_float64_eps_converges_or_warns():
+         opt = optimistix_lm(rtol=1e-30, atol=1e-30)
+         x_opt, info = opt(_quadratic_residual, _X_INIT)
+         # Either converged with a documented caveat, or status
+         # signals that the tolerance was infeasible.
+         assert info.status in ("converged", "max_iterations")
+     #+end_src
+
+* Low
+
+** [LOW] =from_pandas= with =weights = 0= for some rows
+   - Probe shows the expected behaviour (zero-weight rows simply do
+     not contribute), but there is no test that documents this. Worth
+     a one-line assertion so future refactors do not regress.
+   - Sketch:
+     #+begin_src python
+     # tests/measures/test_empirical.py
+     def test_from_pandas_with_zero_weights_drops_rows():
+         df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+         meas = EmpiricalMeasure.from_pandas(df, weights=pd.Series([0., 0., 1.]))
+         m = meas.expectation(lambda x, t: jnp.array([x[0]]), Theta())
+         assert jnp.allclose(m, jnp.array([3.0]))
+     #+end_src
+
+** [LOW] =from_pandas= with the *entire* weights vector zero
+   - Not directly probed (catches in =_safe_divide=) but the framework
+     has no explicit defence; a tiny test pinning the behaviour
+     (=N_j=0= for every coordinate -> expectation all zero, no
+     division by zero) would close the loop.
+   - Sketch:
+     #+begin_src python
+     # tests/measures/test_empirical.py
+     def test_from_pandas_all_zero_weights_no_division_by_zero():
+         meas = EmpiricalMeasure.from_pandas(df, weights=pd.Series([0., 0., 0.]))
+         m = meas.expectation(psi, theta)
+         assert jnp.all(jnp.isfinite(m)) and jnp.all(m == 0.0)
+     #+end_src
+
+** [LOW] =SyntheticMeasure= with =n_sim = 0= (or =n_sim = 1=)
+   - Not exercised by any test. =jnp.mean(empty, axis=0)= behaviour
+     under JAX is implementation-defined; even =n_sim=1= would expose
+     =SyntheticCovariance= as a zero matrix (sample variance with one
+     draw). The acceptance suite uses N_SIM=5000 throughout.
+   - Sketch:
+     #+begin_src python
+     # tests/measures/test_synthetic.py
+     def test_n_sim_one_yields_zero_variance_and_does_not_crash():
+         meas = SyntheticMeasure(key=jax.random.PRNGKey(0), n_sim=1, sampler=...)
+         V = SyntheticCovariance().covariance(psi, theta, meas)
+         assert jnp.allclose(V, 0.0)
+     #+end_src
+
+** [LOW] =scipy_lm= status pass-through under non-trivial divergence codes
+   - =tests/test_optimizer.py= covers =max_iterations= and
+     =converged= but not negative status codes (e.g.
+     "improper input parameters" -> status = -1). The
+     =_scipy_status= helper would translate any negative code to
+     "diverged" but no test exercises that path.
+   - Sketch:
+     #+begin_src python
+     # tests/test_optimizer.py
+     def test_scipy_lm_returns_diverged_on_negative_status():
+         # Construct a residual function with NaN gradient; SciPy returns -1.
+         opt = scipy_lm()
+         _, info = opt(_nan_grad_residual, _X_INIT)
+         assert info.status == "diverged"
+     #+end_src

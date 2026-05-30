@@ -1,0 +1,306 @@
+#+TITLE: Adversarial correctness review — v1.x merged state
+#+DATE: 2026-05-29
+#+AUTHOR: code-reviewer (correctness lens)
+
+* Scope
+
+State of ~main~ after:
+- PR #24 (~moment_contributions~ primitive, commit b0b30eb)
+- PR #26 (NaN-aware empirical, commit 14888c6)
+Test baseline: 251 passing (verified ~pytest tests/ -q~).
+
+Lens: correctness — hunting for bugs the formal review missed.
+Default to refuted=true if a concern doesn't reproduce.
+
+* Findings
+
+** [MED-1] NamedArray mask dispatch to ~from_pandas~ raises ValueError
+
+*** Location
+~src/emu_gmm/measures/empirical.py:328-340~ — the explicit-mask probe
+in ~from_pandas~.
+
+*** Reproducer
+#+begin_src python
+import pandas as pd, haliax as ha, jax.numpy as jnp
+from emu_gmm.measures.empirical import EmpiricalMeasure
+df = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+mask = ha.named(jnp.array([[1.0], [0.0], [1.0]]), ("obs", "m"))
+EmpiricalMeasure.from_pandas(df, mask=mask)
+# ValueError: invalid literal for int() with base 10: 'obs'
+#+end_src
+
+*** Why
+~haliax.NamedArray.shape~ returns a /dict/ (axis-name -> size), not a
+tuple. The probe at ~from_pandas~ line 331 does
+~tuple(int(s) for s in mask.shape)~ which iterates over /keys/ of the
+dict ("obs", "m") and tries ~int("obs")~. The explicit-mask shape probe
+exists because ~normalise_mask~ requires a known ~m~ before it can
+validate; the probe must handle ~NamedArray~ inputs the same way the
+downstream ~normalise_mask~ does (via ~mask_in.array.shape~).
+
+*** Severity rationale
+Medium. The CLAUDE.md / design.org architecture explicitly advertises
+"Polymorphic-input adapter" supporting pandas / NamedArray / plain
+arrays. NamedArray as the mask input dispatches cleanly through
+~normalise_mask~ but not through ~from_pandas~. This means a user
+following the documented polymorphism breaks at the constructor.
+
+*** Suggested fix
+Replace lines 329-339 with a dispatch that handles NamedArray first:
+#+begin_src python
+if isinstance(mask, ha.NamedArray):
+    m_shape = tuple(int(s) for s in mask.array.shape)
+elif hasattr(mask, "shape"):
+    m_shape = tuple(int(s) for s in mask.shape)
+else:
+    m_shape = jnp.asarray(mask).shape
+#+end_src
+
+** [MED-2] Silent NaN→0 substitution in ~x~ even when explicit mask overrides
+
+*** Location
+~src/emu_gmm/measures/empirical.py:354-355~ in ~from_pandas~.
+
+*** Reproducer
+#+begin_src python
+import pandas as pd, numpy as np
+from emu_gmm.measures.empirical import EmpiricalMeasure
+df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
+mask = pd.DataFrame({"m": [1.0, 1.0, 1.0]})   # row 1 EXPLICITLY observable
+meas = EmpiricalMeasure.from_pandas(df, mask=mask)
+# meas.x = [[1.], [0.], [3.]]  ← row 1 silently rewritten from NaN to 0
+# meas.mask = [[1.], [1.], [1.]]  ← user said row 1 is observable
+#+end_src
+
+*** Why
+When ~nan_aware=True~ (default) AND the user supplies an explicit
+mask, the explicit mask correctly wins for the observability decision
+(lines 328-340), but ~x~ is still scrubbed of NaN at lines 354-355
+unconditionally. The result is that a cell the user has marked
+"observable" silently has its value rewritten to 0. The framework's
+estimator and covariance code then treat 0 as a real observation,
+biasing N_j and the moment sum.
+
+This is a /silent/ data-mangling: no error, no warning, no
+diagnostics flag. The behaviour disagrees with the docstring at lines
+296-303 which describes the explicit-mask path as a precedence
+override over NaN inference; the NaN substitution in x is part of the
+NaN-inference branch and shouldn't fire when that branch is overridden.
+
+*** Severity rationale
+Medium. Real-world scenarios where it bites:
+1. A user has a pre-computed mask from upstream (e.g., a survey
+   indicator) and the dataframe happens to encode missing values as
+   NaN. They expect the explicit mask to be authoritative; their psi
+   sees 0 instead of NaN and computes a finite-but-wrong moment.
+2. Debugging — a user passes an all-ones mask to "see what happens
+   with no missingness", and finds their NaN signal mysteriously gone.
+
+*** Suggested fix
+Gate the x-scrubbing on the same condition as the mask-inference
+branch:
+#+begin_src python
+if nan_aware and mask is None:
+    x_arr = jnp.where(jnp.isnan(x_arr), 0.0, x_arr)
+#+end_src
+Or raise a warning when explicit mask + NaN-in-x co-occur, so the
+caller knows they are getting non-trivial x-rewrite.
+
+** [MED-3] NaN weights at masked-out rows poison the result
+
+*** Location
+~src/emu_gmm/measures/empirical.py:160-162~ (and the parallel
+constructions in ~moment_contributions~ line 228, ~jacobian~ line
+261, ~covariance/iid.py~ line 116, ~covariance/clustered.py~ line
+128).
+
+*** Reproducer
+#+begin_src python
+import jax.numpy as jnp, jax_dataclasses as jdc
+from emu_gmm.measures.empirical import EmpiricalMeasure
+
+@jdc.pytree_dataclass
+class P: a: float
+def psi(xi, t): return xi
+
+x = jnp.array([[1.0], [2.0], [3.0]])
+mask = jnp.array([[1.0], [0.0], [1.0]])      # row 1 masked OUT
+weights = jnp.array([1.0, jnp.nan, 2.0])     # row 1 weight NaN
+meas = EmpiricalMeasure(x=x, mask=mask, weights=weights)
+meas.expectation(psi, P(0.0))    # → [nan]
+#+end_src
+
+*** Why
+The "double where" guard against ~0 * NaN = NaN~ is applied only to
+~psi~, not to ~weights~. The code does:
+#+begin_src python
+weight_mask = self.mask * self.weights[:, None]   # NaN-in-weight poisons row
+#+end_src
+A masked-out row with NaN weight has ~mask[i] = 0~, ~weights[i] =
+NaN~, and the product is NaN. NaN then propagates through both
+numerator and denominator sums.
+
+The same asymmetry exists in /every/ aggregation site:
+- ~expectation~ line 160
+- ~moment_contributions~ line 228
+- ~jacobian~ line 261
+- ~IIDCovariance.covariance~ line 116
+- ~ClusteredCovariance.covariance~ line 128
+
+*** Severity rationale
+Medium. The user's CLAUDE.md commitment is "rather than relying on
+floating-point NaN sentinels that contaminate the AD tape, the
+missingness layout is captured as a dedicated boolean structure".
+That commitment is half-honoured: NaN in ~psi~ is sanitised, but NaN
+in /weights/ is not, even though weights are similarly "data" that
+flows alongside the mask. A user providing pweights from an upstream
+source (e.g., a survey design where a non-respondent gets NaN
+weight) gets silent NaN propagation.
+
+The alternative argument: weights are user responsibility and NaN
+weights are user error, so failing loudly with NaN is fine. The
+counter is that the framework /silently/ swallows the NaN — there
+is no error message pinpointing the bad row, just NaN in the moment
+vector. A loud guard or an isfinite assert would help.
+
+*** Suggested fix
+Either (a) apply a double-where guard against NaN weights at masked
+cells (parallel to the psi guard), (b) add an isfinite check in
+~from_pandas~ / ~from_nan_aware~ that raises on NaN weights, or (c)
+document that weights must be finite (and weakly enforce in the
+estimator entry point).
+
+Of the three, (b) is cheapest and most user-friendly: input-boundary
+validation costs nothing per-call once compiled.
+
+** [LOW-1] ~float32~ mask dtype mismatches the framework's ~float64~ default
+
+*** Location
+~src/emu_gmm/_internal/labels.py:209~ (~normalise_mask~);
+~src/emu_gmm/measures/empirical.py:344, 394~ (~from_pandas~ and
+~from_nan_aware~).
+
+*** Why
+~src/emu_gmm/__init__.py~ explicitly enables ~jax_enable_x64~ for the
+documented reason that "float32 precision is the wrong baseline" for
+this framework. But the inferred / normalised mask is stored as
+~float32~ via ~.astype(jnp.float32)~. The downstream multiplications
+~mask * weights[:, None]~ promote to ~float64~ via JAX type rules, so
+the working precision is preserved, but:
+
+1. The stored ~mask~ on the dataclass is at lower precision than the
+   stored ~x~ and ~weights~ — surprising to users who inspect the
+   measure directly, and a small but real precision loss for any
+   non-{0, 1} mask values (which the design forbids in the docstring
+   but doesn't enforce).
+2. Mixed-precision arithmetic adds an implicit cast at every site
+   that touches the mask — small JIT overhead and a thin precision
+   bandwidth for the corner case of fractional masks.
+
+The fix is mechanical: cast to ~jnp.float64~ (or, better, to the
+default float dtype via ~jnp.zeros((n, m)).dtype~ so it tracks the
+~enable_x64~ flag).
+
+*** Severity rationale
+Low. The end-to-end output precision is unchanged for binary masks
+because type promotion rescues the products. The concern is
+consistency with the framework-wide ~float64~ commitment and the
+mild risk of confusion when a user prints ~meas.mask.dtype~ and sees
+float32 in an "all-float64" world.
+
+** [LOW-2] Test ~test_omega_hat_iid_matches_hand_rolled_from_contributions~ comment misstates the math
+
+*** Location
+~tests/test_moment_restriction_primitives.py:145-147~.
+
+*** Why
+Test comment: "contributions g already include weights w_i once; the
+iid formula in IIDCovariance multiplies psi by w_i twice (w_i^2)
+inside the einsum. So for unit weights the two coincide."
+
+In fact, hand-rolling ~(g.T @ g) / (N_j outer N_k)~ from
+~moment_contributions~ /always/ matches ~IIDCovariance.covariance~
+(modulo NaN-safety branches), not just for unit weights. Reason:
+~g_ij g_ik = (w_i psi_j)(w_i psi_k) = w_i^2 psi_j psi_k~ — the
+"second" ~w_i~ comes from the outer product, not from the formula.
+Verified empirically with non-unit weights:
+#+begin_src
+hand-rolled: [[ 0.04977084 -0.02296264]
+              [-0.02296264  0.10075945]]
+framework:   [[ 0.04977084 -0.02296264]
+              [-0.02296264  0.10075945]]
+#+end_src
+
+*** Severity rationale
+Low — the test passes; only the comment is misleading. But the
+comment is the only place documenting how callers should compose the
+two primitives, so leaving it wrong propagates the wrong mental
+model to anyone porting code from ~ManifoldGMM~ into ~emu-gmm~.
+
+*** Suggested fix
+Replace the parenthetical comment with: "contributions g include w_i
+once per row; their outer product gives w_i^2 automatically, so the
+hand-rolled and framework forms agree for any weight vector under
+the full-mask, pairwise-overlap rule." Also worth promoting this
+identity to a brief Note in ~moment_contributions~' docstring — the
+"do callers need to supply a second w_i" question is a real one.
+
+** [REFUTED] All-zero mask column produces graceful zero
+
+*** Verification
+Tested ~mask = [[1, 0], [1, 0]]~ for a 2-moment model. Result:
+- ~expectation~ = ~[expected_value, 0.0]~
+- ~jacobian[1, :]~ = ~[0.0, 0.0]~
+- All finite.
+
+The ~_safe_divide~ helpers in both ~empirical.py~ and ~iid.py~ /
+~clustered.py~ correctly catch ~N_j = 0~ via the ~jnp.where(denom ==
+0.0, 1.0, denom)~ pattern, then re-zero the quotient.
+
+** [REFUTED] Empty cluster after resampling produces graceful zero
+
+*** Verification
+~jax.ops.segment_sum~ returns zero for segments with no contributors.
+A zero cluster total has a zero outer product, contributing zero to
+the numerator. ~N_j~ is computed over all observations independently
+of cluster membership, so the denominator is unaffected. Result is
+zero, finite.
+
+** [REFUTED] ~moment_contributions~ docstring on w_i exponent
+
+*** Verification
+Docstring at ~src/emu_gmm/measures/empirical.py:165-214~ correctly
+documents ~g_ij = d_ij w_i psi_j~ with explicit "No 1/N_j
+normalisation". Callers do not need to supply a second w_i for
+variance reductions — the outer product ~g g'~ automatically supplies
+the w_i^2 (see LOW-2). The docstring could /add/ this observation
+explicitly but is not incorrect as written.
+
+** [REFUTED] Mixed pandas + NamedArray + ndarray input via from_pandas
+
+*** Verification
+~from_pandas(df=DataFrame, weights=NamedArray, mask=ndarray)~ — works
+correctly (~normalise_x~ from DataFrame, ~normalise_weights~ from
+NamedArray, ~normalise_mask~ from ndarray; the explicit-mask shape
+probe via ~hasattr(mask, "shape")~ handles ~numpy.ndarray~ correctly).
+Only the ~NamedArray~ mask path is broken (MED-1).
+
+** [REFUTED] Pweights with values > 1 produce well-defined variance
+
+*** Verification
+With ~weights = [10, 20, 30]~, all-ones mask, identity psi:
+~V[0, 0] = 14/36 = 0.389~ (verified). The mathematical form is the
+textbook pweight-iid expression. Whether this matches a specific
+software package's "robust SE" formula (Stata, R, etc.) is a
+documentation question, not a correctness one — design.org line 92
+states the pweight convention explicitly.
+
+* Verdict
+
+~fix-first~ — none of the findings are show-stoppers, but MED-1
+(NamedArray dispatch) and MED-2 (silent x-rewrite) are user-facing
+correctness regressions that the test suite doesn't cover. MED-3
+(NaN weights) is a smaller item but worth addressing in the same
+patch since it's the same pattern of "guard against poisoning at the
+input boundary". LOW-1 and LOW-2 can ride along or be deferred.

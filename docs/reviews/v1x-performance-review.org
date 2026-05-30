@@ -1,0 +1,478 @@
+#+TITLE: emu-gmm v1.x adversarial performance review
+#+AUTHOR: Code review (performance lens)
+#+DATE: 2026-05-29
+
+* Scope
+
+Adversarial review of the merged v1.x state on ~main~. Performance lens
+only: time complexity, memory, recompilation triggers, redundant work,
+missed vectorisation. Default to /refuted = true/ on uncertain claims;
+each finding below is backed by an executed probe or a direct read of
+the source.
+
+Repo: ~/global/home/users/ligon/mirrors/Emu-GMM~ at ~main~.
+
+* Headline timings
+
+A small Euler problem (N=1000, M=3, K=2) gives the following wall-clock
+per call to ~estimate()~ (each call calls ~estimate()~ from scratch in
+the same process):
+
+| Call # | Time (s) |
+|--------+----------|
+|      1 |    10.5  |  (cold; XLA compile of optimistix LM scan etc.)
+|      2 |     1.5  |
+|      3 |     1.5  |
+|      4 |     1.5  |
+|      5 |     1.7  |
+|      6 |     1.5  |
+
+The ~1.5 s/call floor /post-warmup/ exceeds the 1 s budget mentioned in
+the review prompt. Scaling N from 1k → 5k → 20k changes wall-clock by
+less than 15 % — the floor is /not/ FLOPs, it is compilation /
+host-overhead.
+
+Probe under ~JAX_LOG_COMPILES=1~ confirms the cause: on every call to
+~estimate()~ JAX re-compiles four pjit programs:
+- ~jit(least_squares)~ (the optimistix LM driver — the whole optimisation
+  pipeline including the residual function),
+- ~jit(scan)~ × 3 (the LM inner loop and the LM convergence-check scans).
+
+XLA cache misses because the closures ~residual_fn~ and ~half_obj~ are
+rebuilt on every call to ~estimate()~; JAX's cache key is closure
+identity, not closure /content/. Persistent on-disk cache
+(~JAX_COMPILATION_CACHE_DIR~) does not help.
+
+* Findings
+
+** [HIGH] estimate() retraces optimistix LM on every call
+
+*File:* ~src/emu_gmm/estimator.py:184-193~
+
+*Probe result:* ~JAX_LOG_COMPILES=1~ shows 4 fresh ~Compiling jit(...)~
+events on calls 2 and 3, including ~Compiling jit(least_squares)~ — the
+full LM solver. Wall-clock is dominated by this ~1.0-1.2 s/call.
+
+*Cause:* The closure objects ~residual_fn~ and ~half_obj~ are built
+inside ~estimate()~. JAX's pjit cache keys on the Python ~id~ of the
+wrapped function (via ~equinox._jit~ in optimistix); the cache misses
+every time the closure is rebuilt.
+
+*Cost in K-Aggregator style settings:* irrelevant for the LM itself
+(the inner solve is large and compile time amortises). But every
+sensitivity analysis, every bootstrap loop, every grid-search over
+hyperparameters pays the full ~1 s/call retrace.
+
+*Fix sketch:*
+1. Factor the inside-of-~estimate~ pipeline into a module-level
+   ~_estimate_compiled(residual_fn_id, theta_init_flat, ...)~ that does
+   accept the closure but caches by, e.g., a content-derived key
+   (~jax.tree_util.tree_structure~ of measure + ~id~ of the static
+   functions). The straightforward path is to attach an explicit
+   ~functools.lru_cache~-wrapped pure JIT'd inner function keyed on
+   static parameters and reuse it across calls.
+2. Or expose a ~build_estimator(model, measure, ...)~ factory that
+   returns a JIT'd ~theta_init → EstimationResult~ callable; users who
+   want batch / repeated runs pay the compile once.
+
+** [HIGH] Adaptive-tau bisection runs at every residual_fn call
+
+*File:* ~src/emu_gmm/estimator.py:184-190~,
+~src/emu_gmm/regularization.py:71-126~
+
+*Issue:* The estimator's residual function executes
+~regularization.apply(V)~ /inside/ ~residual_fn~. ~DiagonalTikhonov.apply~
+runs a 30-iteration ~jax.lax.fori_loop~ where each iteration calls
+~jnp.linalg.cond(V_star)~. ~linalg.cond~ defaults to the 2-norm, which
+is computed via an SVD — O(M^3) per call.
+
+The CLAUDE.md commitment §3 explicitly says "anchor-once-then-freeze"
+keeps the objective smooth. The current code does the opposite: every
+LM iteration re-bisects and the realised τ wobbles with V(θ).
+
+*Cost:* 30 SVDs of an M×M matrix per residual evaluation. For M=3 this
+is invisible; for M=50 (the K-Agg case the prompt flags) each SVD is
+~1.7 × 10⁵ FLOPs and the bisection adds ~5 × 10⁶ FLOPs per LM step plus
+non-trivial XLA dispatch overhead. More importantly, the τ that LM sees
+is θ-dependent, so:
+- LM's Jacobian must trace through the bisection (a 30-iteration
+  conditional with non-smooth ~where~ transitions), inflating both
+  trace time and trace size, and
+- the objective surface acquires kinks at the τ transitions.
+
+*Fix sketch:* Implement the architectural commitment. In ~estimate~:
+1. Compute ~V_init = covariance.covariance(model, theta_init, measure)~
+   once.
+2. Compute ~V_init_star, tau_anchor = regularization.apply(V_init)~
+   once.
+3. Inside ~residual_fn~, apply a /frozen-tau/ regulariser:
+   ~V_star = V + tau_anchor * jnp.diag(jnp.diag(V))~ (cheap, smooth, AD-friendly).
+4. After the optimum, re-bisect once at θ̂ for the diagnostic
+   ~tau_realised~.
+
+This is also the only way to satisfy "kinks the objective smooth" and
+the "single Cholesky per estimator step" goal in §architectural
+commitments.
+
+** [HIGH] jnp.linalg.cond uses SVD when Cholesky would suffice
+
+*File:* ~src/emu_gmm/regularization.py:41-43~
+
+*Issue:* ~_kappa(V) = jnp.linalg.cond(V)~ uses an SVD even though the
+caller already requires PD and would Cholesky-factor V_star anyway.
+Inside the 30-iteration bisection this is /30 SVDs/ of an M×M matrix
+per residual_fn call.
+
+*Alternative:* For symmetric PD V, ~kappa_2(V) = lambda_max / lambda_min~,
+both computable from a single eigvalsh in O(M^3 / 3) (vs O(M^3) for
+full SVD), or from a Cholesky-of-V_star plus an extra triangular
+forward-solve to bound λ_min via the smallest pivot. The bisection
+endpoint is then a /single/ Cholesky we would compute anyway in
+~ContinuouslyUpdated.whitening_residual~.
+
+*Coupled fix:* Combined with the anchor-once finding above, the right
+shape is:
+- ~regularization.apply(V_init)~ uses eigvalsh once (cheap, M ≤ 50);
+- ~residual_fn~ never invokes ~apply~, only the cheap diagonal-add.
+
+** [HIGH] Double sampler invocation in SyntheticMeasure pipeline
+
+*File:* ~src/emu_gmm/measures/synthetic.py:79-85~,
+~src/emu_gmm/covariance/synthetic.py:79-89~
+
+*Issue:* Each residual_fn call runs the chain
+~expectation(model, θ) → covariance(model, θ, measure)~. Both
+~SyntheticMeasure.expectation~ and ~SyntheticCovariance.covariance~
+independently call ~measure._draws(θ)~ and ~jax.vmap(psi_at)(x_batch)~.
+
+So per LM step:
+- sampler runs twice (PRNG + matrix arithmetic on (n_sim, D));
+- vmap(psi) runs twice on (n_sim, D) → (n_sim, M);
+- the resulting (n_sim, M) is then either averaged (expectation) or
+  centered+einsumed (covariance).
+
+XLA /may/ deduplicate identical pjit'd sub-graphs by CSE, but
+~_draws(theta)~ depends on a Python-level captured ~self.key~ /and/
+parameters, and the two calls happen in disjoint user-facing pjit
+programs (~least_squares~ wraps them via Equinox). CSE across pjit
+boundaries is unreliable.
+
+*Cost:* Roughly /2×/ the per-step sampler + psi cost. For a CRN
+sampler that is itself cheap this is negligible; for an SMM sampler
+with a structural simulation it doubles the dominant cost of the whole
+estimation.
+
+*Fix sketch:* Introduce a ~Measure~-side helper that returns both
+~m~ and ~psi_batch~, and have the covariance strategies consume the
+shared ~psi_batch~. The cleanest API is to extend the protocol with
+~moments_and_contributions(psi, θ) → (m, psi_batch)~ and have
+~SyntheticCovariance.covariance~ call it once. This also matches
+~EmpiricalMeasure.moment_contributions~ in spirit.
+
+** [HIGH] EmpiricalMeasure: double vmap(psi) and triple weight_mask construction per residual
+
+*File:* ~src/emu_gmm/measures/empirical.py:140-163~,
+~src/emu_gmm/covariance/iid.py:103-122~,
+~src/emu_gmm/covariance/clustered.py:115-132~
+
+*Issue:* Same double-evaluation pattern as SyntheticMeasure but for
+empirical / clustered. Per residual_fn call:
+1. ~EmpiricalMeasure.expectation~ does ~vmap(psi)(x_safe) → (N, M)~, then
+   builds ~weight_mask = mask * weights[:, None]~ (N×M scratch).
+2. ~IIDCovariance.covariance~ /re/-does ~vmap(psi)(x_safe) → (N, M)~,
+   /re/-builds ~weight_mask~, and computes ~N_j~ a /second/ time.
+
+*Cost:* Two full ~vmap(psi)~ passes over the N×D data, three
+N×M-shaped allocations of the weight_mask, two N×M-shaped allocations
+of ~psi_safe~. For N=60k, M=50, double-precision this is:
+- ~vmap(psi)~: doubled. For a structural psi this can dominate.
+- weight_mask: 24 MB × 3 = 72 MB of transient memory (vs the
+  optimal 24 MB once).
+
+*Fix sketch:*
+- Add ~EmpiricalMeasure.expectation_and_contributions(psi, θ) →
+  (m, psi_safe, weight_mask, N_j)~ as the shared primitive.
+- Rewrite ~IIDCovariance.covariance~ and ~ClusteredCovariance.covariance~
+  to accept these and skip the second psi pass.
+- Or: short of the API change, jit the residual_fn pipeline at the
+  ~estimate~ level so XLA fusion + CSE can collapse the duplicate
+  ~vmap(psi)~ inside a single compiled module — the optimistix LM
+  already JITs the outer loop, so this would mostly mean either marking
+  Measure/Covariance methods as ~@jit~ or ensuring CSE sees the same
+  intermediate. Today the pipeline is not a single jit'd function from
+  the framework's side.
+
+** [HIGH] Post-optimum work duplicates the residual pipeline three times
+
+*File:* ~src/emu_gmm/estimator.py:196-245~
+
+*Issue:* After the optimiser returns, the estimator computes (in eager
+Python, none of it under a top-level ~jit~):
+1. ~m_hat = jnp.asarray(measure.expectation(model, theta_hat))~
+2. ~V_hat = covariance.covariance(model, theta_hat, measure)~
+3. ~V_star_hat, tau_hat = regularization.apply(V_hat)~ (30-step bisection)
+4. ~G_hat = measure.jacobian(model, theta_hat)~ — yet another
+   vmap(jacfwd(psi)) over the data
+5. ~L = cho.cholesky(V_star_hat)~
+6. ~Z = solve_triangular(L, G_hat, lower=True)~ → (M, K)
+7. ~info_matrix = Z.T @ Z~; ~Sigma_theta_arr = jnp.linalg.inv(info_matrix)~
+8. ~y_hat = weighting.whitening_residual(m_hat, V_star_hat, theta_hat)~
+   — re-Cholesky's V_star_hat /again/
+9. ~half_obj(theta_hat_flat)~ via ~jax.grad~ — re-runs ~residual_fn~ to
+   get the final gradient norm, which re-runs expectation + covariance +
+   regularization + Cholesky + triangular solve a /third/ time.
+
+So at the optimum the framework re-computes:
+- ~expectation~ three times (steps 1, 8 via residual_fn, 9 via half_obj),
+- ~covariance~ three times (2, 8, 9),
+- ~regularization.apply~ three times (3, 8, 9) — each a 30-step
+  bisection,
+- Cholesky three times (5, 8 via whitening_residual, 9 via half_obj),
+- and the Jacobian once via vmap(jacfwd(psi)).
+
+*Cost:* For a large-N empirical study with M=50, this is ~3× the
+dominant cost of one residual evaluation. For SMM with an expensive
+sampler it triples sampler invocations at the optimum. The Jacobian and
+the Cholesky also recur (the same V_star_hat appears in steps 5, 8, 9).
+
+*Fix sketch:* Build a single ~_inference_quantities(theta_hat)~ that
+returns the (m, V, V_star, L, G, y) tuple once, JIT it, and consume the
+tuple in the rest of ~estimate~. The CLAUDE.md commitment §5 — "info
+matrix via G' Λ G, never via numerical Hessian; ... cheaper and more
+stable" — is fine; the issue is that the surrounding plumbing executes
+the same pipeline three times.
+
+** [MEDIUM] Final residual_fn call inside _OptimistixLM is unjitted
+
+*File:* ~src/emu_gmm/optimizer.py:108-109~
+
+*Issue:* After ~optx.least_squares~ returns, the adapter computes
+~r = residual_fn(theta_opt); final_objective = 0.5 * jnp.sum(r * r)~ in
+eager Python. ~residual_fn~ is the user's full closure — for an
+empirical N=60k, M=50 study this is one extra pipeline pass that adds
+to the per-call wall-clock and is /not/ benefiting from the LM solver's
+own JIT cache (different pjit context).
+
+*Cost:* Same as one residual eval — for K-Agg estimates this is real.
+
+*Fix sketch:* Use ~sol.state.fn_eval~ if optimistix exposes it; or
+recover the final residual norm from ~sol.stats~ when available. If
+neither, route the call through the same JIT'd residual_fn used by the
+solver — but the easiest fix is to skip the recompute and read
+~sol.value~ plus a JIT'd post-eval helper that runs /once per
+estimate-call/ (not in the LM hot path).
+
+** [MEDIUM] linalg.inv used to form Sigma_theta from info_matrix
+
+*File:* ~src/emu_gmm/estimator.py:213~
+
+*Issue:* ~Sigma_theta_arr = jnp.linalg.inv(info_matrix)~. The
+~info_matrix = Z.T @ Z~ where ~Z = L^{-1} G~ — this is PSD by
+construction. An explicit inverse is O(K^3) and numerically less stable
+than ~jax.scipy.linalg.cho_solve((L_I, lower), I)~ where L_I is the
+Cholesky of info_matrix.
+
+*Cost:* K is small in v1 (the example has K=2), so the dollar cost is
+trivial. The numerical-stability argument is what matters for
+under-identified or near-singular problems — and the comment in the
+file even acknowledges "under-identified problems will yield NaN".
+
+*Fix sketch:* ~Sigma_theta_arr = jax.scipy.linalg.cho_solve(
+jax.scipy.linalg.cho_factor(info_matrix, lower=True), jnp.eye(K))~.
+Same FLOPs, half the operator count, better conditioning.
+
+** [MEDIUM] params.unflatten_params allocates K small slices
+
+*File:* ~src/emu_gmm/_internal/params.py:87-99~
+
+*Issue:* ~leaves = [flat_arr[i] for i in range(n)]~. Inside the
+residual_fn this fires K traced ~__getitem__~ ops; each materialises a
+0-d array. For K small (v1) it's noise; for K~20 (K-Agg-scale) it adds
+20× single-element dispatch overhead per LM step.
+
+*Fix sketch:* Replace with ~tuple(flat_arr)~ which is a single JAX op
+producing K scalars, or use ~jnp.split(flat_arr, K)~ — XLA fuses these.
+Cleanest:
+#+begin_src python
+leaves = list(jnp.unstack(flat_arr))
+return jax.tree_util.tree_unflatten(treedef, leaves)
+#+end_src
+
+** [MEDIUM] IIDCovariance: 3-term einsum could be a single gemm
+
+*File:* ~src/emu_gmm/covariance/iid.py:122~
+
+*Issue:* ~jnp.einsum("i,ij,ik->jk", w2, weighted_psi, weighted_psi)~ is
+a 3-tensor contraction. XLA usually fuses this but the einsum
+optimizer's path choice is not guaranteed; in practice it expands
+to ~temp = w2[:, None] * weighted_psi~ → ~temp.T @ weighted_psi~,
+which materialises an N×M temporary.
+
+*Fix sketch:* Be explicit about the gemm:
+#+begin_src python
+sqrt_w2 = jnp.sqrt(weights * weights)        # (N,)
+scaled = weighted_psi * sqrt_w2[:, None]      # (N, M) — one materialisation
+numer = scaled.T @ scaled                     # standard gemm
+#+end_src
+This guarantees an N×M temporary (vs whichever path the einsum picks)
+and lets XLA pick a tuned gemm kernel for the M×M output.
+
+** [MEDIUM] moment_contributions returns (N, M) with no memory documentation
+
+*File:* ~src/emu_gmm/measures/empirical.py:165-229~
+
+*Issue:* The docstring describes the matrix structure but does not
+warn that materialising a per-row matrix for downstream bootstrap may
+be the dominant memory cost. For the prompt's K-Agg scenario (N=60k,
+M=50, float64) that's 24 MB per call, and downstream bootstrap callers
+will typically hold ~B~ such matrices (bootstrap replications) or run
+B vmap'd calls — easily into the GB range.
+
+*Fix sketch:* Either document "memory: 8 N M bytes; for N=60k, M=50 ≈
+24 MB" so users can plan, /or/ provide a streaming-friendly variant
+~moment_contribution_scan(theta, init, fn)~ that lets the bootstrap
+caller fuse the (N, M) matrix into a per-replication scalar without
+materialising.
+
+** [MEDIUM] EmpiricalMeasure.jacobian: jacfwd-then-vmap allocates (N, M, K)
+
+*File:* ~src/emu_gmm/measures/empirical.py:231-264~
+
+*Issue:* The implementation materialises an (N, M, K) gradient batch
+via ~jax.vmap(grad_at)(x_safe)~. For N=60k, M=50, K=20 that is 480 MB
+at float64. The contraction ~jnp.sum(weight_mask[:, :, None] *
+grad_safe, axis=0)~ then sums over N to produce (M, K).
+
+*Fix sketch:* Push the weight multiplication inside a scanned reduction
+so the (N, M, K) never has to be materialised:
+#+begin_src python
+def per_row(x_i, mask_i, w_i):
+    g_i = jax.jacfwd(lambda flat: psi_flat(x_i, flat))(flat_theta)  # (M, K)
+    return (mask_i[:, None] > 0) * w_i * g_i
+
+acc = jax.lax.scan(
+    lambda carry, inputs: (carry + per_row(*inputs), None),
+    jnp.zeros((M, K)),
+    (x_safe, mask, weights),
+)[0]
+#+end_src
+This trades parallelism for memory; XLA on GPU can chunk via
+~jax.lax.scan~-with-window or ~jax.lax.map~. The right shape for v1 is
+to expose a ~jacobian_chunked(chunk_size=...)~ knob so the user can
+trade off.
+
+** [LOW] DiagonalTikhonov bisection always runs even when V is already PD-acceptable
+
+*File:* ~src/emu_gmm/regularization.py:94-125~
+
+*Issue:* The code computes ~tau_search~ unconditionally via 30
+bisection iterations, then selects ~tau = where(already_ok, 0,
+tau_search)~. So even on the common case (V already PD-acceptable, tau
+= 0) we still pay the full bisection cost. ~jax.lax.cond~ would skip
+the bisection entirely when ~already_ok~.
+
+*Cost:* Per residual eval, an extra 30 × (1 SVD + 1 diag-add). For
+M=50 the SVD dominates; this is on top of the H-level finding above.
+
+*Fix sketch:* Wrap the bisection in ~jax.lax.cond(already_ok, lambda:
+(V, 0.0), lambda: do_bisection())~. With the H-level anchor-once fix
+this becomes moot, but as a standalone improvement it's safe.
+
+** [LOW] linalg.cond inside fori_loop produces a 30-iteration scan in the LM jaxpr
+
+*File:* ~src/emu_gmm/regularization.py:104-116~
+
+*Issue:* ~jax.lax.fori_loop~ unrolls into a ~scan~ in the jaxpr;
+inside, ~jnp.linalg.cond~ expands to an SVD primitive. The LM-level
+JIT now contains a 30-iteration loop of SVDs as part of the residual
+function's computation graph, which:
+- inflates trace time and compile time noticeably (we saw 4 ~jit(scan)~
+  re-compiles per call);
+- defeats CSE on V across LM iterations because the bisection
+  re-randomises the trace shape.
+
+*Cost:* Mostly compile-time. Combined with [H1] and [H2] this is one
+of the reasons every call retraces ~jit(scan)~.
+
+** [LOW] Many small jax ops dispatched outside the optimistix JIT
+
+*File:* ~src/emu_gmm/estimator.py:196-245~,
+~src/emu_gmm/optimizer.py:108-109~
+
+*Issue:* The post-optimum block does dozens of eager JAX ops
+(~jnp.asarray~, ~cho.cholesky~, ~jax.scipy.linalg.solve_triangular~,
+~jnp.linalg.cond~, ~jnp.linalg.inv~, ~jnp.min(jnp.diag(L))~,
+~jax.grad(half_obj)~). Each fires a separate XLA dispatch — visible as
+~apply_primitive~ in the profile (~0.4 s cumulative on a call-2
+profile). Wrapping this whole block in a single ~jax.jit~ would
+collapse the dispatches and let XLA fuse the Cholesky / triangular-solve
+chain.
+
+*Fix sketch:* Move steps 1-9 (above) of the post-optimum block into a
+single ~_compute_inference(theta_hat_flat, ...) → (Sigma, V_X,
+J_stat, ...)~ helper decorated with ~@jax.jit~. This composes with
+fixing finding [HIGH 6].
+
+** [LOW] SyntheticMeasure.jacobian uses jacfwd of the whole expectation
+
+*File:* ~src/emu_gmm/measures/synthetic.py:87-101~
+
+*Issue:* ~jax.jacfwd(fn)(flat_theta)~ where ~fn~ samples + vmaps psi +
+averages. With K parameters, ~jacfwd~ runs K+1 forward-mode passes
+through the entire pipeline — including K+1 redraws of the synthetic
+sample, K+1 vmaps of psi. JAX may dedup the data-side via CRN (key is
+captured constant), but the sampler still runs in each tangent.
+
+*Fix sketch:* Move the sampler outside the differentiated function (the
+data are CRN; theta-independent in v1's Euler example) and only
+differentiate ~psi(x, theta)~ inside the vmap:
+#+begin_src python
+def jacobian(self, psi, theta):
+    x_batch = self._draws(theta)  # depends on theta only if sampler does
+    def psi_at_x(x, flat):
+        return _to_plain(psi(x, unflatten_params(flat, treedef)))
+    # If sampler ignores theta (Euler case), this is fine:
+    flat_theta, treedef = flatten_params(theta)
+    J_per_x = jax.vmap(lambda x: jax.jacfwd(lambda flat: psi_at_x(x, flat))(flat_theta))(x_batch)
+    return jnp.mean(J_per_x, axis=0)
+#+end_src
+This treats the sampler as constant w.r.t. theta when it is and
+differentiates only the residual — correct in v1's Euler example,
+flagged as an assumption (and easy to opt out of via a ~theta_in_sampler~
+hint on ~SyntheticMeasure~).
+
+* Out of scope but flagged
+
+- The CLAUDE.md commitment §3 "anchor-once-then-freeze policy keeps the
+  objective smooth" is /architectural/, not just performance — finding
+  [HIGH 2] is also a correctness concern (the CU gradient is now
+  carrying the wrong term through bisection ~where~ branches).
+- No ~jax.jit~ decorators anywhere in ~src/emu_gmm~. The framework
+  relies entirely on optimistix wrapping its own driver; everything
+  outside the LM call is eager. This is a deliberate design choice
+  (CLAUDE.md doesn't demand top-level JIT) but is the root cause of the
+  call-2 ~1.5 s/call floor.
+
+* Verdict
+
+~fix-first~. The ~1.5 s/call retrace floor is severe enough that the
+estimator is unsuitable as the backend for any sensitivity, bootstrap,
+or grid-search workflow without changes. The double-pipeline patterns
+(findings [HIGH 4], [HIGH 5], [HIGH 6]) only get worse as N and M grow,
+and the missing anchor-once for τ both inflates compile time and is an
+architectural-commitment violation.
+
+Recommended order of operations:
+
+1. Implement the anchor-once-then-freeze policy in ~estimate~ ([HIGH 2]
+   + [HIGH 3] + [LOW 11]).
+2. Fold the post-optimum block into a single JIT'd helper ([HIGH 6] +
+   [LOW 14]).
+3. Add a shared ~moments_and_contributions~ Measure-side helper to
+   eliminate double psi evaluation in synthetic / empirical / clustered
+   ([HIGH 4] + [HIGH 5]).
+4. Cache the optimistix LM compile via a ~build_estimator~ factory or
+   an internal closure-content cache ([HIGH 1]).
+
+The remaining MEDIUM / LOW findings are cleanups worth doing once
+[HIGH 1..6] are in.

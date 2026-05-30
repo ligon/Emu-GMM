@@ -1,0 +1,344 @@
+#+TITLE: Adversarial review of emu-gmm v1.x: API DESIGN lens
+#+AUTHOR: Adversarial reviewer (econometrician hat)
+#+DATE: 2026-05-29
+
+Persona: an econometrician trying to use Emu-GMM v1.x for the first
+time. Default: "this surprises me." Default: refuted=true if uncertain.
+
+* Verdict
+
+=concerns=.
+
+The estimator works end-to-end for the three measure paths and
+recovers the truth on the Euler example. The architectural commitments
+in =CLAUDE.md= are visible in the surface: =Measure= and
+=CovarianceStrategy= are orthogonal, CU is the default weighting, the
+information matrix is constructed via :math:`G^\top \Lambda G` not
+numerical Hessian. The migration guide is honest about what's not
+covered.
+
+But several gestures an econometrician routinely makes on day one are
+either (a) absent, (b) trapped (silently-wrong default), or (c) leak
+private machinery. The most consequential are listed under HIGH
+severity. None block "compute :math:`\hat\theta`" but several block
+"write up a table" or "compose with the rest of my workflow."
+
+* HIGH severity
+
+** 1. =estimate()= is documented as ~jit~/~vmap~-compatible but isn't
+
+   - =docs/api-sketch.org= and =docs/implementation-plan-v2-manifold.org=
+     both reference the v1 commitment that ~estimate()~ must be jit/vmap
+     compatible. The optimiser docstrings ("jit/vmap compatible") and
+     the regularizer docstring ("traces under jit/vmap") echo this.
+   - Reality (verified):
+     #+begin_src text
+     >>> jax.jit(lambda t: estimate(..., theta_init=t).J_stat)(EulerParams(0.9, 1.0))
+     ConcretizationTypeError: ... `float` function ... traced array with shape float64[]
+     #+end_src
+     The same failure for ~vmap(... EulerParams(beta=b, gamma=1.0))~ over
+     a batch of starting points.
+   - Root cause: =src/emu_gmm/estimator.py= calls Python =float(...)= on
+     traced JAX scalars in at least 6 places (J_stat, kappa_V,
+     tau_realised, cholesky_pivot_min, final_gradient_norm, tau in
+     _binding_ridge) and =scipy.stats.chi2.sf= for J_pvalue. These are
+     eager-only Python boundaries.
+   - User impact: the natural "fit the same model to S subsamples /
+     starting points / data cuts" gesture (issue #6, #13, generic
+     bootstrap / sensitivity) cannot use a single =vmap(estimate)= call;
+     the user must hand-roll a Python loop or restructure their code.
+     The framework's central JAX-native pitch is undelivered on its
+     primary entry point.
+   - Discoverability: the failure is at runtime, hundreds of lines
+     into a traceback inside =build_diagnostics= / the inference block.
+     Nothing on =estimate=' docstring warns the user.
+   - Suggested fix: split =estimate()= into a jit-pure core
+     (returns JAX-array fields only) and an outer wrapper that converts
+     to Python floats / runs =chi2.sf= eagerly. Or: store all scalar
+     diagnostics as 0-D JAX arrays and document that
+     ~float(result.J_stat)~ is required at the eager boundary.
+
+** 2. No standard-error table; user must compute sqrt(diag(Sigma_theta)) by hand
+
+   - The first thing an econometrician does with =result= is print a
+     table of point estimate, SE, t-stat, p-value. None of these are on
+     =EstimationResult=:
+     - =result.theta_hat= is a user-defined dataclass instance, not a
+       pandas Series or labelled NamedArray. The user must reach
+       into individual fields by name.
+     - =result.Sigma_theta= is the labelled covariance, but the
+       diagonal-as-SE step is not provided.
+     - =result.to_pandas()= returns
+       ={Sigma_theta, V_X, N_j, moment_residual, summary}=.
+       Neither ~theta_hat~ as a Series nor an SE / t-stat / p-value
+       Series is in the dict.
+     - There is no =result.standard_errors= property, no
+       =result.coef_table()= method, no =to_pandas()["coefficients"]=.
+   - User impact: every consumer writes the same 4-line incantation:
+     #+begin_src python
+     sigma = result.to_pandas()["Sigma_theta"]
+     se = pd.Series(np.sqrt(np.diag(sigma.values)), index=sigma.index)
+     theta = pd.Series({n: getattr(result.theta_hat, n)
+                        for n in result.labels.param_names})
+     coef = pd.concat({"estimate": theta, "se": se}, axis=1)
+     #+end_src
+     This is the single most-requested gesture in any econometric
+     package. Statsmodels has =res.summary()=; ManifoldGMM has its own.
+   - The =to_pandas()["summary"]= Series contains J-stat, kappa_V,
+     iterations etc., but /not/ the coefficient table that names the
+     output. The naming is misleading.
+   - Suggested fix: add =result.standard_errors= (NamedArray on the
+     Params axis) and =result.to_pandas()["coefficients"]= (DataFrame
+     with columns [estimate, se, t_stat, p_value]) inline. Cheap.
+
+** 3. =Fixed(W)= silently treats =W= as a Cholesky factor
+
+   - The =Fixed= weighting class stores =L0=, the lower-triangular
+     Cholesky factor of the anchor variance. =Fixed.from_V0(V0)= is
+     the right constructor; the positional argument =L0= is for the
+     internal pre-factored path.
+   - Reality: =Fixed(W)= with =W = jnp.eye(3) * 2.0= silently succeeds
+     and stores =W= as =L0=. The migration guide warns "pass V0 not W;
+     the framework's whitening uses :math:`V^{-1/2}` internally" but
+     this is a footnote in a table cell; nothing in the constructor
+     itself validates or rejects.
+   - User impact: a ManifoldGMM user porting
+     =weighting='fixed', W=W_hat= will write =Fixed(W_hat)= by
+     analogy. The estimator runs and returns a result --- a wrong one.
+   - The =Fixed= keyword is =L0=, which is internal jargon; neither =W=
+     nor =V0= work as kwargs:
+     #+begin_src text
+     >>> Fixed(V0=W)
+     TypeError: Fixed.__init__() got an unexpected keyword argument 'V0'
+     #+end_src
+   - Suggested fix: rename the stored field to make the intent
+     unambiguous, or accept =V=/=W= kwargs that route through
+     =from_V0=, or refuse construction without an explicit
+     "this-is-a-cholesky-factor" sentinel.
+
+** 4. =Identity= name is overloaded; econometricians read it as "identity weighting"
+
+   - In the econometric literature =W = I= ("identity weighting") is
+     standard shorthand. The class =Identity= satisfies the
+     =WeightingStrategy= protocol and returns =y = m= unweighted --- so
+     the name is technically right.
+   - But the class name carries no axis size: =Identity()= takes no
+     argument. Compare ManifoldGMM's =IdentityWeighting(n_instruments)=
+     (issue #21) which validates the moment dimension. A user who
+     instantiates =Identity()= and pairs it with a measure that has a
+     different M than expected gets no error.
+   - Combined with the bare =Identity= name appearing alongside
+     =DiagonalTikhonov=, =Fixed=, =ContinuouslyUpdated= in =from
+     emu_gmm import (Identity, Fixed, ContinuouslyUpdated)=, the user
+     has to look up the class hierarchy to know =Identity= is a
+     weighting strategy at all.
+   - The other names in the same import block disambiguate:
+     =DiagonalTikhonov= says "regularisation," =ContinuouslyUpdated=
+     says "weighting." =Identity= says nothing.
+   - Suggested fix: rename =IdentityWeighting= (parallel to
+     =ContinuouslyUpdated= which is a verb-form descriptor of a
+     /weighting/). Or document the convention at the import site.
+
+* MEDIUM severity
+
+** 5. No vmap-friendly multi-spec API and no "loop this manually" template
+
+   - Beyond the technical jit/vmap failure (#1), there is no
+     documented or sketched pattern for running the same =estimate=
+     across S specifications (bootstrap, subsample, sensitivity-to-
+     start, alternative weighting). The migration guide and the
+     README's Quickstart are both /single-call/ idiomatic.
+   - Adversarial expectation: an econometrician asks "how do I
+     bootstrap?" and the answer is "issue #13" (deferred to v2) plus
+     "see =EmpiricalMeasure.moment_contributions= and write your own
+     resampler." But =moment_contributions= is a method on the measure
+     and is not re-exported at the package level, not mentioned in the
+     migration guide's worked example, and only appears in
+     =docs/reviews/v1x-math-correctness.org= as a verification entry.
+   - Suggested fix: add =examples/run_bootstrap.py= that uses
+     =EmpiricalMeasure.moment_contributions= and =vmap= over keys, or
+     document the four-line resampler pattern in the migration guide.
+     Either signals that bootstrap is "user-writeable today, not v2
+     vapor."
+
+** 6. =OptimizerInfo= is less informative than =GMMResult.optimizer_report=
+
+   - Emu-GMM =OptimizerInfo= has four fields: =steps=, =status=,
+     =final_objective=, =backend=.
+   - ManifoldGMM's =optimizer_report= is a dict with
+     ={iterations, stopping_criterion, converged, cost, gradient_norm,
+       step_size, cost_evaluations, time, log}=.
+   - The migration table maps =result.optimizer_report= →
+     =result.diagnostics.optimizer_info= but the user loses
+     =gradient_norm=, =step_size=, =cost_evaluations=, =time=, =log=.
+   - Some of these (e.g., =final_gradient_norm=) /are/ computed in
+     =estimator.py= and stored on =Diagnostics= directly, not on
+     =OptimizerInfo=. The split is reasonable but the migration guide
+     should map both fields. Today it only mentions =optimizer_info=.
+   - Suggested fix: either expand =OptimizerInfo= to include the
+     ManifoldGMM fields, or document explicitly that
+     =diagnostics.final_gradient_norm= replaces
+     =optimizer_report["gradient_norm"]=.
+
+** 7. No convenient =EmpiricalMeasure(x)= construction; minimal path requires three arrays
+
+   - For a user with a clean numpy/JAX array (no missingness, equal
+     weights), the construction is:
+     #+begin_src python
+     EmpiricalMeasure(x=x, mask=jnp.ones((n, M)), weights=jnp.ones(n))
+     #+end_src
+     Three required arguments. =EmpiricalMeasure.from_nan_aware(x)= is
+     equivalent (infers a no-NaN mask) but the name suggests "use this
+     only when you have NaN."
+   - The natural form =EmpiricalMeasure(x)= or
+     =EmpiricalMeasure.from_array(x)= does not exist.
+   - Compare =ManifoldGMM.MomentRestriction(g, X)= which takes the
+     model and data positionally.
+   - Suggested fix: rename =from_nan_aware= to =from_array= (it handles
+     both cases) or add an =EmpiricalMeasure.from_array(x)= alias that
+     is honest about the no-missingness path.
+
+** 8. =LabelContext= is private machinery exposed on a public field
+
+   - =EstimationResult.labels: LabelContext= is the user-facing route
+     to parameter names, moment names, and (if present) variable
+     names: e.g., =result.labels.param_names=. The Sigma-table-by-hand
+     incantation in #2 above needs it.
+   - But =LabelContext= is imported from =emu_gmm._internal.labels=
+     and is not re-exported from the package. The user sees a public
+     attribute whose type is private. =help(result.labels)= takes them
+     into =_internal=.
+   - Either =LabelContext= is part of the API (re-export, document) or
+     =result.labels= should return a plain dict / NamedTuple, not a
+     private dataclass.
+
+** 9. Default =moment_names= and =variable_names= are uninformative
+
+   - With an =EmpiricalMeasure= built from a raw JAX array (no pandas
+     boundary), the resolved labels are =m_0, m_1, m_2= and
+     =v_0, v_1, v_2, v_3, v_4=. =result.to_pandas()["V_X"]= has these
+     as both axes.
+   - The =moment_names=...= kwarg on =estimate()= is the documented
+     escape, but only if the user happens to know it exists. The
+     migration guide does not mention it.
+   - For ManifoldGMM users porting a Euler / Seasonality script, the
+     moment names are usually known on paper (e.g.,
+     ="asset_food", "asset_durables"=). The framework does not collect
+     them from the user except through this single kwarg.
+   - For the empirical-from-pandas path the names /are/ inferred from
+     column labels (good); but the same DGP run through
+     =SyntheticMeasure= or =EmpiricalMeasure(x=jax_array, ...)= loses
+     them, silently.
+
+* LOW severity
+
+** 10. Public surface leaks =version=, =PackageNotFoundError=, and submodule objects
+
+   - =dir(emu_gmm)= shows =version=, =PackageNotFoundError= (both from
+     =importlib.metadata=), and the submodule objects =covariance=,
+     =diagnostics=, =estimator=, =measures=, =optimizer=,
+     =regularization=, =types=, =weighting=.
+   - Tab-completion in IPython surfaces all of these; the user has to
+     guess which ones are "real."
+   - Easy fix: =from importlib.metadata import version as _version,
+     PackageNotFoundError as _PackageNotFoundError= and document the
+     submodule re-exports as deliberate (or hide them under
+     ="_"=-prefixed names).
+
+** 11. =ContinuouslyUpdated= reads cleanly but =CU= literature alias is invisible
+
+   - The class is named =ContinuouslyUpdated=. In the literature
+     "Continuously Updated Estimator (CUE)" is the standard term
+     (Hansen, Heaton, Yaron 1996). The class docstring does call out
+     "CU" but the name isn't exported as an alias.
+   - Not a bug. A user grepping for "CUE" or "cue" or
+     "ContinuouslyUpdatedEstimator" will not find it.
+
+** 12. Migration guide doesn't show how to inspect results
+
+   - The "Worked example" section ends with
+     =theta_hat = result.theta_hat.theta; J_stat = result.J_stat=.
+     A new user doesn't know how to get an SE table, a coefficient
+     table, an SE on a single parameter, or a labelled summary.
+   - The "Result-field translation table" exists but is symbol-by-
+     symbol; it doesn't show the user-facing gesture.
+
+** 13. =covariance=, =weighting=, =theta_init= are kwarg-only with no defaults
+
+   - =estimate()= signature requires every estimation to specify
+     =covariance= explicitly; there is no default. The =weighting= and
+     =regularization= kwargs do have defaults (=ContinuouslyUpdated=,
+     =DiagonalTikhonov=), but =covariance= does not.
+   - The framework argues correctly that covariance is the design-
+     awareness choice that the user must make. Fair. But the
+     consistency would be: either no defaults (all three explicit) or
+     all three defaults (IID for empirical, etc.). Today's split
+     leaves the user wondering why one is required and the others
+     aren't.
+
+** 14. =SyntheticMeasure= construction takes =key=, =n_sim=, =sampler=, all positional/required
+
+   - The README example shows =SyntheticMeasure(key=..., n_sim=...,
+     sampler=...)=. =n_sim= and =sampler= are static fields; the
+     sampler factory =euler_sampler_factory(N_SIM)= is called once
+     with =N_SIM=, then again passed as =n_sim=. The duplication is
+     awkward but not wrong.
+   - The signature does not currently validate that
+     =sampler(key, theta).shape[0] == n_sim=. A user with a sampler
+     that produces 1000 draws while =n_sim=5000= gets quiet
+     mis-normalisation.
+
+* What works well
+
+- The =Measure= / =CovarianceStrategy= orthogonality is real and
+  visible in the public surface. The same =EmpiricalMeasure= switches
+  between =IIDCovariance= and =ClusteredCovariance= without other
+  changes (verified).
+- The three measure paths (synthetic, analytical, empirical) all run
+  the same =estimate= call against the same =euler_residual= residual.
+  The README example is honest about the demo.
+- The =Protocol=-based typing makes "bring your own measure / weighting"
+  feasible without inheritance; the framework duck-types.
+- =EmpiricalMeasure.from_pandas= handles NaN-as-missing correctly via
+  the "double where" pattern; the migration guide documents this in
+  depth.
+- =moment_contributions= is a smart abstraction for downstream
+  bootstrap / K-stat (issue #5, #6) --- the building block is there
+  even though the helpers aren't.
+
+* Recommendations (prioritised)
+
+1. *Fix the vmap/jit story* (#1). Either deliver the architectural
+   promise or document the eager-only boundary on =estimate=' docstring.
+2. *Add =result.standard_errors= and =to_pandas()["coefficients"]=*
+   (#2). Cheap; it's the single biggest day-one gesture.
+3. *Validate =Fixed= construction* (#3). At minimum, reject =Fixed(W)=
+   when =W= is not lower-triangular; ideally rename to make the
+   semantics unambiguous.
+4. *Expand the migration guide* with a "How to inspect results"
+   section (#12) and a sketch of the bootstrap-by-hand pattern (#5).
+5. *Polish the public surface* (#10, #8, #11). Reduce cognitive load
+   for tab-completers.
+
+* Notes on the question
+
+These are the gestures probed:
+
+- Instantiate a typical setup: works for empirical (#7 is a minor
+  papercut). Clustered SE works.
+- Migration guide coverage: covers symbols, not gestures. Result
+  inspection / multi-spec / bootstrap-template not covered.
+- Labelled SE table: not obvious, not hidden either --- it's the
+  =sqrt(diag(Sigma_theta))= incantation users have written for 30
+  years; the framework just doesn't provide it for them.
+- Optimizer report: less informative than ManifoldGMM's; key fields
+  =gradient_norm= and =time= are in =Diagnostics= not =OptimizerInfo=
+  and the migration table doesn't tell the user.
+- Multi-spec / vmap: no API today. =estimate()= breaks under
+  jit/vmap (verified). No "write a loop" template either.
+- Public surface NOT done: bootstrap (#6 #13), K-statistic (#5),
+  two-step (#15), iterated (#11). All documented as deferred in the
+  migration guide; honest but a lot for v1.
+- Naming sanity: =Identity= is the weakest, =Fixed= is the most
+  trappy (#4 #3). =ContinuouslyUpdated= is fine, though =CU= alias
+  would help discovery.

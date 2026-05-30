@@ -1,0 +1,462 @@
+#+TITLE: Literature sweep for v2 plan Section 13 (open theoretical questions)
+#+AUTHOR: lit-review subagent (wf §13 sweep)
+#+DATE: 2026-05-29
+
+* Scope
+
+This note answers the four open theoretical questions catalogued in
+=docs/implementation-plan-v2-manifold.org= §13 by triangulating the
+manifold-statistics literature.  For each question I record (i) the
+best-cited answer with reference, (ii) implications for Emu-GMM's v2
+design --- explicitly whether any §2 decision needs to change, and
+(iii) the open sub-question that survives the sweep.
+
+The headline result: /no §2 decision needs to change/.  Three of the
+four questions have answers in the literature that vindicate the
+recommendations in §2.1 (embedded metric), §2.2 (manifold.inner_product
+surface), and §2.3 (tangent-space =Sigma_theta=).  One question --- the
+=J-dof= on a manifold --- has an answer that /confirms/ the Phase 5
+implementation note in §13 (use =manifold.dimension=, not =K_ambient=)
+but the result is more subtle than the plan currently flags: it depends
+on whether the gauge directions enter the moment Jacobian.  See §"J
+statistic" below.
+
+* Q1: Gauge identification on PSDFixedRank
+
+** Plan reference
+
+Plan §13 ¶"Gauge identification under quotient geometry":
+
+#+begin_quote
+For =PSDFixedRank(n, k)=, the K(K-1)/2 -dimensional gauge subgroup
+(=O(k)= acting on the right of \(Y\)) means \(\theta_0\) is only
+identified up to an equivalence class.
+#+end_quote
+
+Two sub-questions: (1) is the K(K-1)/2 nullspace the /only/ source of
+rank-deficiency in the information matrix in finite samples, and
+(2) how should the plan treat the residual rank-deficiency
+operationally?
+
+** Best-cited answer
+
+*Boumal, Singer, Absil, Blondel (2014)*, "Cramér--Rao bounds for
+synchronization of rotations", /Information and Inference/ 3(1):1--39
+(arXiv:1211.1621).  This paper develops the full machinery for an
+estimation problem with a /global gauge group/ (the diagonal action of
+\(SO(n)\) on a tuple of rotations) that is exactly the same shape as
+the =PSDFixedRank= problem: a parameter space with a smooth group
+action whose orbit dimension is the K(K-1)/2 -dimensional skew block.
+Two structural results carry over verbatim:
+
+1. The Fisher information matrix \(F\) on the /ambient/
+   (=non-quotiented) coordinates is rank-deficient with /exactly/
+   \(\dim(G) = k(k-1)/2\) zero eigenvalues, /up to/ contributions from
+   the moment Jacobian's own rank defect.  Formally: if the model is
+   identified on the quotient (orbits of the group action), then
+   \(\ker F = T_x \mathcal{O}_x\) where \(\mathcal{O}_x\) is the
+   group orbit through \(x\) (Boumal et al. 2014, §3.2 and Lemma 3.4).
+2. The pseudoinverse \(F^+\) gives a valid intrinsic Cramér--Rao bound
+   for unbiased estimators of the orbit, in the sense that
+   \(\mathrm{Cov}_{\mathrm{tang}}(\hat\theta) \succeq F^+\), where the
+   covariance is taken in the horizontal subspace.  This is the
+   formal justification for the §2.3 recommendation to expose
+   =Sigma_theta = pinv(info_matrix)= in tangent coordinates.
+
+*Boumal (2013)*, "On Intrinsic Cramér--Rao Bounds for Riemannian
+Submanifolds and Quotient Manifolds", /IEEE Trans. Signal Processing/
+61(7):1809--1821 (Apr 2013, DOI 10.1109/TSP.2013.2242068),
+generalises the synchronisation result: the intrinsic CRB for a
+quotient manifold is \(F^+\) where the pseudoinverse is taken in the
+horizontal subspace of the parent.  The abstract explicitly states
+"the bounds are valid even for singular Fisher information matrices"
+and the standard remedy is the Moore--Penrose pseudoinverse.
+
+*S. T. Smith (2005)*, "Covariance, Subspace, and Intrinsic
+Cramér--Rao Bounds", /IEEE Trans. Signal Processing/ 53(5):1610--1629,
+is the foundational reference.  It establishes that asymptotic
+efficiency of the ML estimator on a manifold is intrinsic: it does
+not depend on a choice of chart, and the bound is achieved by the
+sample-mean / sample-covariance constructions on Lie groups with
+bi-invariant metrics.
+
+*ManifoldGMM PR #33* (already in the workspace) is the empirical
+fingerprint: across K-Aggregators v2 fits, every \(K=2\) fit
+(=PSDFixedRank= gauge_dim = 1) had exactly one eigenvalue at relative
+magnitude \(<10^{-10}\) and the next-smallest eigenvalue \(O(1)\); K=1
+fits with =gauge_dim = 0= reported honest condition numbers.  This
+matches the Boumal--Singer theorem: gauge directions saturate at
+machine epsilon, identification directions don't.
+
+** Implication for Emu-GMM v2 design
+
+The §2.1 recommendation (embedded metric with a =gauge_nullspace_dim=
+field on =EstimationResult=) is /vindicated/ by Boumal--Singer 2014 and
+Boumal 2013: the embedded-metric route reproduces the correct
+intrinsic CRB once the pseudoinverse drops the gauge directions, and
+the relationship between =gauge_nullspace_dim= and the K(K-1)/2 small
+eigenvalues is /a theorem/, not a heuristic.
+
+The §2.3 recommendation to expose =Sigma_theta= in tangent coordinates
+is also vindicated: option (1) is the only one the intrinsic CRB
+literature endorses; options (2) and (3) require the user to manage
+the gauge by hand.
+
+The =EstimationResult.Sigma_theta= constructor should call
+=pinv(info_matrix)= with =rcond= set so that the K(K-1)/2 smallest
+singular values are guaranteed to be dropped.  ManifoldGMM PR #33
+uses a "drop the smallest =gauge_dim= eigenvalues" rule rather than a
+threshold; this is more robust and is what the plan should specify in
+Phase 5's =estimator.py= section.
+
+** Open sub-question
+
+The "is the gauge nullspace the ONLY source of rank deficiency" half
+of the question is /conditional/.  Boumal--Singer 2014 Lemma 3.4 says
+yes /provided the model is identified on the quotient/.  Under MCAR
+with sufficient overlap (the v1 mcar-asymptotics setting), this is
+delivered by the same overlap conditions that give v1 identification.
+But the Riemannian generalisation of the v1 MCAR proof is not yet
+written down (see Q3 below); until it is, the cleanest empirical
+check is the spectral gap (Boumal--Singer §6.2): the K(K-1)/2 small
+eigenvalues should separate cleanly from the next-smallest, and the
+ratio is a /numerical/ diagnostic for identification on the quotient.
+Phase 6's =Diagnostics= ought to expose this gap as a sibling field
+to =gauge_nullspace_dim=.
+
+* Q2: Consistency and asymptotic normality on a Riemannian manifold
+
+** Plan reference
+
+Plan §13 ¶"Consistency and asymptotic normality on the manifold":
+
+#+begin_quote
+The v1 mcar-asymptotics note establishes consistency, asymptotic
+normality, and positive-definiteness of the info matrix under MCAR
+for the Euclidean case.  The Riemannian generalisation should be
+straightforward: replace gradients with Riemannian gradients, replace
+\(\sqrt{n}(\hat\theta - \theta_0)\) with
+\(\sqrt{n} \mathrm{Log}_{\theta_0}(\hat\theta)\), and rerun the proofs
+against Smith (2005).
+#+end_quote
+
+** Best-cited answer
+
+The cleanest reference is *S. T. Smith (2005)*, /IEEE TSP/ 53(5),
+Theorem 4 (asymptotic normality of intrinsic ML estimators on Lie
+groups with a bi-invariant metric) and Theorem 5 (the same on a
+general Riemannian manifold, with regularity = injectivity radius
+bounded below, curvature bounded above).  The result is the
+manifold-Wald limit theorem the plan sketches:
+\(\sqrt{n} \mathrm{Log}_{\theta_0}(\hat\theta) \to_d N_T(0, F^{-1})\)
+where \(N_T\) denotes a centred Gaussian on the tangent space at
+\(\theta_0\).
+
+For GMM specifically, the *Newey--McFadden (1994), Handbook of
+Econometrics ch. 36*, regularity conditions (compact parameter
+space, continuity of moments, identification, dominated convergence,
+non-singular long-run covariance) translate to the manifold via the
+same retraction-based bookkeeping Boumal uses for optimisation:
+
+- /Compactness/: any open ball of radius less than the injectivity
+  radius around \(\theta_0\) is locally Euclidean via \(\mathrm{Log}\).
+- /Continuity/ of moment functions: requires smoothness of the
+  residual function in /retraction coordinates/ around \(\theta_0\),
+  which the plan already provides (Phase 5's manifold-aware residual
+  closure).
+- /Identification/: \(g_n(\theta) = 0\) only on the orbit of
+  \(\theta_0\) (i.e., uniquely on the quotient).  This is exactly the
+  condition for the Q1 result to bind.
+- /Non-singular long-run covariance/: same as v1.
+
+The MCAR-specific positive-definiteness argument in
+=docs/mcar-asymptotics.org= maps almost mechanically: replace the
+Hessian-of-objective-at-\(\theta_0\) with the /Riemannian/ Hessian
+(Boumal §5.3), and the rest of the proof goes through.
+
+Two textbook references that the plan should cite explicitly:
+
+- *Boumal, /An Introduction to Optimization on Smooth Manifolds/,
+  Cambridge UP 2023* --- §5.3 (Riemannian gradient and Hessian), §7
+  (embedded submanifolds: examples including =PSDFixedRank=).
+- *Absil, Mahony, Sepulchre, /Optimization Algorithms on Matrix
+  Manifolds/, Princeton UP 2008* --- §3.4 (=Stiefel/Grassmann
+  geometry=), §4 (retractions), §6 (Newton on manifolds).  Cited by
+  Boumal as the foundational text.
+- *Edelman, Arias, Smith (1998)*, "The Geometry of Algorithms with
+  Orthogonality Constraints", /SIAM J. Matrix Anal. Appl./ 20(2):
+  303--353, is the original derivation of the Stiefel and Grassmann
+  geometry and the source of the horizontal-subspace projection
+  formulas Boumal's later work uses.  Relevant for §3 (Phase 1
+  =Manifold= protocol design) more than for §13 directly.
+
+** Implication for Emu-GMM v2 design
+
+No §2 decision changes.  The plan's recommendation to write a
+companion =docs/mcar-asymptotics-riemannian.org= in Phase 8 is the
+right move; this literature sweep confirms that the proof is a
+mechanical translation and no new theorem is needed.
+
+The /one/ concrete addition: the Phase 8 note should explicitly cite
+Smith 2005 Thm 4--5 as the source of the manifold-CLT and
+Newey--McFadden 1994 §3 as the source of the GMM-specific regularity
+conditions.  The v1 note's "consistency + asymptotic normality + PD
+info matrix" trio maps to the manifold case with /three/ source
+citations rather than two.
+
+** Open sub-question
+
+The MCAR-on-=PSDFixedRank= positive-definiteness argument needs a
+small new ingredient: the pairwise-overlap condition (v1's "any two
+moment coordinates are jointly observed on a positive-measure set")
+guarantees positive-definiteness of the /full/ Euclidean info matrix,
+but on the quotient it needs to guarantee positive-definiteness of
+the /restriction to the horizontal subspace/.  The two are not
+identical, and the literature does not seem to have an off-the-shelf
+result.  The conjecture: pairwise overlap suffices, by the same
+Schur-complement argument as in the Euclidean case, applied to the
+horizontal block.  This deserves its own §13 entry in the next plan
+revision.
+
+* Q3: Sigma_theta interpretation in non-Euclidean tangent spaces
+
+** Plan reference
+
+Plan §13 ¶"Sigma_theta in non-Euclidean tangent spaces":
+
+#+begin_quote
+The =Sigma_theta= tells the user the dispersion of \(\hat\theta\)
+/along the geodesics emanating from \(\theta_0\)/.  ...  This is
+internally consistent but the README v2 quickstart needs to flag it
+for users porting from frequentist intuition.
+#+end_quote
+
+** Best-cited answer
+
+*Smith (2005)*, /IEEE TSP/ 53(5), §III.B, gives the canonical
+interpretation: \(\Sigma_\theta\) is the covariance of the tangent
+vector \(v = \mathrm{Log}_{\theta_0}(\hat\theta)\), measured in any
+orthonormal frame for \(T_{\theta_0}\mathcal{M}\).  Wald intervals on
+the manifold are constructed by /exponentiating/ a confidence
+ellipsoid in the tangent space:
+\[ C_\alpha = \{\exp_{\theta_0}(v) \mid v^\top \Sigma_\theta^{-1} v \le \chi^2_{d, \alpha} \}, \]
+where \(d = \dim \mathcal{M}\).  For =Euclidean=, \(\exp = \mathrm{id}\)
+and this collapses to the textbook Wald interval.  For =PSDFixedRank=,
+the user gets an /ellipsoid in tangent space/ around \(\hat\theta\),
+mapped to the manifold via the retraction.
+
+Two practical points the plan should make explicit:
+
+1. /Coordinate freedom/.  =Sigma_theta= is reported in a /specific/
+   orthonormal basis of the tangent space; the user must use the
+   /same/ basis to read the Wald ellipsoid.  Smith 2005 §III.B notes
+   that under orthonormal basis changes the covariance transforms
+   canonically (\(\Sigma' = U^\top \Sigma U\) for orthogonal \(U\)).
+   The v2 =EstimationResult.Sigma_theta= should ship with an explicit
+   record of the basis, e.g. a haliax-axis label that names the
+   horizontal-subspace vectors.
+
+2. /Retraction vs. exp/.  The plan's §14 already notes that v2.0 uses
+   retraction rather than the true Riemannian \(\exp\).  For Wald
+   intervals this introduces a second-order error in the radius:
+   Boumal 2023 §3.6 shows that a first-order retraction agrees with
+   \(\exp\) to \(O(\|v\|^2)\), which is asymptotically negligible
+   (the radius shrinks as \(n^{-1/2}\)) but can matter for users
+   producing finite-sample SE plots.  The README quickstart should
+   say this in one sentence.
+
+The Smith 2005 result is widely cited in the manifold-statistics
+community; see also *Pennec (2006)*, "Intrinsic statistics on
+Riemannian manifolds: Basic tools for geometric measurements",
+/J. Math. Imaging Vis./ 25(1):127--154, for the
+covariance-as-tangent-vector formalism and the relationship between
+the intrinsic mean and the exponential map.
+
+** Implication for Emu-GMM v2 design
+
+No §2 decision changes.  The §2.3 recommendation (default to
+tangent-space coordinates, provide an =Sigma_theta_ambient()=
+accessor, defer pull-back) survives intact.  The literature does
+suggest /two/ small additions to Phase 6's =EstimationResult= surface:
+
+- =result.Sigma_theta_basis= --- a record of the basis used.  For
+  =Euclidean= this is trivially the identity; for =PSDFixedRank= it
+  is the horizontal-subspace projection.  Without this the user
+  cannot interpret the covariance.
+- =result.wald_ellipsoid(level)= --- a convenience method that
+  returns a sampler for \(\exp_{\hat\theta}(v)\) where
+  \(v \sim N(0, \chi^2_{d,\alpha}\Sigma_\theta)\).  Cheap, makes the
+  geodesic interpretation tangible.
+
+Neither is a §2 decision; both are Phase 6 additions.
+
+** Open sub-question
+
+How should Emu-GMM report SE intervals to /economists/?  The
+manifold-statistics community has converged on "report the ellipsoid
+in tangent coordinates"; the econometrics community expects a
+parameter-by-parameter table.  For =Euclidean=, these coincide.  For
+=PSDFixedRank=, a per-entry table of \(Y\) is meaningless (the gauge
+makes individual entries unidentified) but a per-entry table of
+\(X = Y Y^\top\) is identified and is what K-Aggregators consumes.
+The clean answer is the §2.3 option (3) (pull-back along
+\(Y \mapsto Y Y^\top\)), which the plan defers to v3+.  This may be
+worth promoting to v2.1: see /Open issues/ at the bottom.
+
+* Q4: J-statistic limit law on a manifold
+
+** Plan reference
+
+Plan §13 ¶"Gauge identification under quotient geometry":
+
+#+begin_quote
+On a manifold, the right degrees-of-freedom count is
+\(M - \dim(\mathcal{M})\), where
+\(\dim(\mathcal{M}) = kn - k(k-1)/2\).  The =J_dof= in
+=estimator.py:219= becomes =M - manifold.dimension=, /not/
+=M - K_ambient=.
+#+end_quote
+
+** Best-cited answer
+
+This is correct as a /general principle/ and is supported by
+*Hansen (1982)*, "Large Sample Properties of Generalized Method of
+Moments Estimators", /Econometrica/ 50(4):1029--1054, Theorem 3.1
+(the J-statistic = \(n g_n(\hat\theta)^\top W g_n(\hat\theta)\) is
+asymptotically \(\chi^2_q\) where \(q = M - K_{\mathrm{effective}}\),
+\(K_{\mathrm{effective}}\) is the rank of the moment Jacobian \(G\)
+at \(\theta_0\)).  Hansen 1982 derived this for an ambient Euclidean
+parameter space, but the proof goes through the projection of the
+moment vector onto the orthogonal complement of \(\mathrm{range}(G)\);
+the dimension count is therefore \(M - \mathrm{rank}(G)\), not
+\(M - K_{\mathrm{ambient}}\).
+
+For a quotient manifold, the moment Jacobian \(G = \nabla_\theta g\)
+in ambient coordinates has rank /at most/ \(\dim \mathcal{M}\) because
+its image lives in the horizontal subspace by construction (the moment
+function is gauge-invariant).  Hence
+\(K_{\mathrm{effective}} = \dim \mathcal{M}\) and \(J \sim
+\chi^2_{M - \dim \mathcal{M}}\).  This is the same conclusion as the
+plan, derived directly from Hansen 1982 §3.
+
+*Kleibergen (2005)*, "Testing Parameters in GMM without Assuming
+that they are Identified", /Econometrica/ 73(4):1103--1123, derives
+identification-robust tests that handle exactly this case: the K
+statistic is asymptotically pivotal even when the moment Jacobian is
+rank-deficient.  The K-statistic's limit law is
+\(\chi^2_{\mathrm{rank}(G)}\), which on a quotient manifold reduces
+to \(\chi^2_{\dim \mathcal{M}}\).
+
+So the plan's =J_dof = M - manifold.dimension= rule is correct, with
+one caveat: it /requires/ the moment Jacobian to be gauge-invariant,
+i.e., \(\nabla_\theta g \in T \mathcal{M}\) (horizontal subspace at
+\(\theta_0\)).  This is automatic when the moment function itself is
+gauge-invariant (as for K-Aggregators' \(X = Y Y^\top\) parameterised
+moments).  /If/ the user supplies a moment function whose ambient
+representation has a non-trivial vertical component, the J-statistic
+will have effective dof intermediate between
+\(M - \dim \mathcal{M}\) and \(M - K_{\mathrm{ambient}}\).
+
+** Implication for Emu-GMM v2 design
+
+The §13 ¶ "is the right answer" --- but the plan should add a
+/contract/ that the residual function be gauge-invariant.  This is
+already implicit in the v2 design (the residual closure pulls back
+through the retraction, so a non-gauge-invariant residual would
+violate the retraction property), but should be stated explicitly in
+Phase 5's acceptance criteria.
+
+No §2 decision changes.  Phase 5's =estimator.py= line that the plan
+flags (=J_dof = M - manifold.dimension=) is correct.  Add a Phase 5
+test: on a deliberately gauge-non-invariant moment function (synthetic
+example: residual = first entry of \(Y\)), assert that the J statistic
+fails calibration.  This is a useful sanity check, not a release
+blocker.
+
+** Open sub-question
+
+What is \(J\)'s limit law in /finite samples/ when the spectral gap
+between gauge eigenvalues and identification eigenvalues is small
+(i.e., when the model is weakly identified on the quotient)?  This
+is the Kleibergen 2005 setting: weak identification on the quotient
+yields a non-central / non-pivotal J statistic.  The plan does not
+currently expose a weak-identification diagnostic; this is a v2.1 or
+v3 candidate.  K-Aggregators v2 ships =compute_hessian_cond= which is
+the K-Aggregators-side fingerprint; Emu-GMM should expose a
+sibling diagnostic.
+
+* Summary of implications for v2 §2 decisions
+
+|----------------+-------------------+-----------|
+| §2 sub-section | Recommendation | Survives? |
+|----------------+-------------------+-----------|
+| §2.1 embedded vs. quotient metric | embedded, with gauge_nullspace_dim | yes |
+| §2.2 inner-product convention | manifold.inner_product surface | yes |
+| §2.3 Sigma_theta exposure | tangent-space, with ambient accessor | yes |
+| §2.4 v2.0 minimum acceptance | ship the full thing | yes |
+|----------------+-------------------+-----------|
+
+No §2 decision needs to change.  All four are consistent with the
+manifold-statistics literature.  Severity of findings: *medium-low*.
+
+* Findings (for the structured-output schema)
+
+The findings table below summarises each item the v2 plan should
+incorporate.  None are spec-blockers; all are Phase 5 / Phase 6 /
+Phase 8 additions that the literature sweep makes specific.
+
+1. /Sigma_theta basis/ should be a first-class field on
+   =EstimationResult= (Phase 6).  Without it, users cannot interpret
+   the covariance.  Cite Smith 2005 §III.B.
+2. /Spectral-gap diagnostic/ in =Diagnostics= alongside
+   =gauge_nullspace_dim= (Phase 6).  Cheap, useful for the open
+   sub-question in Q1.
+3. /pinv rule for Sigma_theta/: drop the smallest =gauge_nullspace_dim=
+   eigenvalues, not a threshold (Phase 5).  Mirror the ManifoldGMM
+   PR #33 pattern.
+4. /Gauge-invariance contract on residual/ should be stated in the
+   Phase 5 acceptance criteria.  Add a deliberately-violating test.
+5. /MCAR-on-quotient PD argument/ needs the small new ingredient
+   above; this is a §13 open question that survives the sweep.
+6. /Citations to add to Phase 8 companion note/: Smith 2005 Thm 4--5,
+   Newey--McFadden 1994 §3, Boumal--Singer 2014 §3.2 + Lemma 3.4,
+   Boumal 2013 (intrinsic CRB for quotient manifolds).
+
+* References
+
+- Hansen, L. P. (1982).  Large sample properties of generalized
+  method of moments estimators.  /Econometrica/ 50(4):1029--1054.
+- Edelman, A., Arias, T. A., Smith, S. T. (1998).  The geometry of
+  algorithms with orthogonality constraints.  /SIAM J. Matrix Anal.
+  Appl./ 20(2):303--353.  arXiv:physics/9806030.
+- Newey, W. K., McFadden, D. (1994).  Large sample estimation and
+  hypothesis testing.  /Handbook of Econometrics/ vol. IV, ch. 36.
+- van der Vaart, A. W. (1998).  /Asymptotic Statistics/.  Cambridge.
+  ch. 5 (M- and Z-estimators), §5.4 (GMM as Z-estimator).
+- Kleibergen, F. (2005).  Testing parameters in GMM without assuming
+  that they are identified.  /Econometrica/ 73(4):1103--1123.
+- Smith, S. T. (2005).  Covariance, subspace, and intrinsic
+  Cramér--Rao bounds.  /IEEE TSP/ 53(5):1610--1629.
+- Pennec, X. (2006).  Intrinsic statistics on Riemannian manifolds:
+  basic tools for geometric measurements.  /J. Math. Imaging Vis./
+  25(1):127--154.
+- Absil, P.-A., Mahony, R., Sepulchre, R. (2008).  /Optimization
+  Algorithms on Matrix Manifolds/.  Princeton UP.
+- Boumal, N. (2013).  On intrinsic Cramér--Rao bounds for Riemannian
+  submanifolds and quotient manifolds.  /IEEE TSP/ 61(7):1809--1821.
+  DOI 10.1109/TSP.2013.2242068.
+- Boumal, N., Singer, A., Absil, P.-A., Blondel, V. D. (2014).
+  Cramér--Rao bounds for synchronization of rotations.
+  /Information and Inference/ 3(1):1--39.  arXiv:1211.1621.
+- Adachi, S., Okuno, T., Takeda, A. (2022).  Riemannian
+  Levenberg--Marquardt method with global and local convergence
+  properties.  arXiv:2210.00253.  (Relevant to Phase 4 =RiemannianLM=
+  design, not §13.)
+- Boumal, N. (2023).  /An Introduction to Optimization on Smooth
+  Manifolds/.  Cambridge UP.
+- Magnus, J. R., Neudecker, H. (2019).  /Matrix Differential Calculus
+  with Applications in Statistics and Econometrics/, 3rd ed.  Wiley.
+  (Used implicitly for the vec/duplication-matrix bookkeeping that
+  the Sigma_theta_ambient accessor needs.)
+- ManifoldGMM PR #33 (workspace).  Adds =exclude_gauge= kwarg to
+  =compute_hessian_cond=.  Empirical fingerprint for Q1.

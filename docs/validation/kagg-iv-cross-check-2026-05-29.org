@@ -1,0 +1,185 @@
+#+TITLE: K-Aggregators 2SLS-via-GMM Closed-Form Cross-Check
+#+DATE: 2026-05-29
+#+AUTHOR: Reproduction-check agent
+
+* Goal
+
+Confirm that ~Fixed.from_V0((Z'Z)/N)~ weighting in over-identified IV
+reproduces the closed-form 2SLS ~beta_hat~ to floating-point tolerance,
+as claimed in R3b's port docstring (~max|diff| ~ 1e-8~).
+
+* Verdict (TL;DR)
+
+The 1e-8 tolerance claim *survives easily*. Actual agreement is at
+floating-point limit (~max|diff| = 1.93e-13~), eight orders of magnitude
+tighter than the docstring promised.
+
+The textbook 2SLS J-statistic is also recovered exactly through the
+identity
+\(J_{\text{textbook}} = N \cdot \texttt{result.J\_stat} / \hat\sigma^2\)
+to ~5e-14.
+
+The only deviations from the textbook are:
+
+1. *Standard errors* differ by ~6e-6 (1% relative) because emu_gmm's
+   ~Sigma_theta~ uses the IID pairwise-overlap estimate of
+   \(E[\psi\psi']\) (a "robust"-like form), while the closed-form 2SLS
+   SE uses \(\hat\sigma^2 (X'P_Z X)^{-1}\) (homoscedastic-only). They
+   coincide asymptotically under homoscedasticity; the residual
+   variability is finite-sample noise. *Expected behaviour, not a defect.*
+2. *Post-warmup timing* is 3.0--3.3 s vs the 2 s target. JIT trace
+   reuse across multiple ~estimate()~ calls would close this but is
+   currently rebuilt per call. *Filed for follow-up.*
+
+* Reproducible setup
+
+** DGP
+
+| Quantity | Value | Notes |
+|----------+-------+-------|
+| p (endog regressors) | 5 | "cereal" scale |
+| q (instruments)      | 43 | over-identified by 38 |
+| N (observations)     | 58037 | |
+| seed                 | 20260529 | =np.random.default_rng= |
+| beta_true | =[1.0, -0.5, 2.0, 0.25, -1.5]= | |
+
+Instruments built with moderate column-mixing to be realistic.
+Endogeneity injected via a shared latent factor in the first-stage
+error and the structural error.
+
+** Pipeline
+
+- ~Beta~ parameter dataclass with p separate ~@jdc.pytree_dataclass~
+  scalar fields (R3b's H1 fix pattern).
+- ~psi(obs_i, theta)~ returns a ~(q,)~-vector: \(z_{i,j} \cdot
+  (y_i - x_i' \beta)\) per instrument.
+- ~EmpiricalMeasure(x=obs_mat, mask=jnp.ones((N, q)), weights=jnp.ones(N))~
+  constructed directly (the H2 fix: q not D).
+- ~IIDCovariance~.
+- ~Fixed.from_V0((Z'Z) / N)~ (the H3 fix's required form).
+- Default ~DiagonalTikhonov~ regularisation.
+- ~optimistix_lm()~ optimiser.
+- ~theta_init~ = OLS solution (warm start).
+
+* Results
+
+** Coefficient recovery
+
+#+begin_example
+GMM beta_hat   : [ 0.99962637 -0.50080773  2.00271561  0.25205553 -1.50321652]
+Closed-form    : [ 0.99962637 -0.50080773  2.00271561  0.25205553 -1.50321652]
+max|diff|      : 1.930e-13
+#+end_example
+
+| metric | claimed | observed | survives? |
+|--------+---------+----------+-----------|
+| max\|beta_gmm - beta_2sls\| | < 1e-8 | 1.93e-13 | *yes* (1e5 x tighter) |
+| converged | true | true | yes |
+| LM iterations | n/a | 8 | --- |
+
+** J-statistic
+
+emu_gmm's ~J_stat~ uses the Fixed weighting V0 = (Z'Z)/N at the optimum
+(not the optimal weighting S = sigma^2 V0). The relation
+=textbook_J = N * emu.J / sigma_hat^2= holds exactly:
+
+#+begin_example
+emu_J                : 1.843626e-04
+N * emu.J / sigma^2  : 42.625771
+textbook  J          : 42.625771
+diff                 : 4.97e-14
+#+end_example
+
+If users want the textbook chi^2_{q-p} scaling directly, they can pass
+~Fixed.from_V0(sigma_hat^2 * (Z'Z)/N)~ instead. The current scaling
+matches what R3b's port already does; the relation is documented here
+for future readers.
+
+** Standard errors
+
+#+begin_example
+GMM SE         : [0.00079111 0.00121571 0.00147526 0.0014504  0.00197974]
+Closed-form SE : [0.00079623 0.00121577 0.00148059 0.00145333 0.00198596]
+max|SE diff|   : 6.22e-06   (≈ 1% relative)
+#+end_example
+
+Discrepancy source: emu_gmm's ~Sigma_theta~ = (G' V^{-1} G)^{-1} where
+V is the IID pairwise sample variance of \(E[\psi\psi']\) (effectively
+robust-style); closed-form 2SLS SE assumes homoscedasticity exactly.
+Asymptotically equivalent under homoscedasticity; finite-sample
+difference of O(1/sqrt(N)) per element is expected.
+
+** Conditioning / regularisation diagnostics
+
+| field | value |
+|-------+-------|
+| kappa(V_star) | 6.73 |
+| tau_realised | 0.0 |
+| binding_ridge | false |
+
+kappa is comfortably inside the target range (1e1--1e4), no ridge
+needed. This confirms the problem is well-conditioned at cereal
+scale --- a useful baseline for downstream stress tests.
+
+** Timing
+
+| call | wall-clock |
+|------+-----------|
+| warmup (first ~estimate()~) | 8.0 s |
+| post-warmup (run 2) | 3.18 s |
+| post-warmup (run 3) | 3.05 s |
+| post-warmup (run 4) | 3.07 s |
+
+Post-warmup is consistently ~3.0--3.3 s. *Misses the 2 s target by ~50%.*
+
+Diagnosis: each ~estimate()~ call rebuilds the residual closure
+(weighting / measure / model are bound inside a new closure), so JIT
+re-traces are not amortised across calls. The per-call cost at this
+scale (N=58037, q=43, p=5) is dominated by the residual + Jacobian
+~vmap(psi)~ pass plus the ~(N, M)~ tensor reshape inside
+~IIDCovariance~.
+
+Issue filed: see /Issues filed/ below.
+
+** j_test on a Wald-style residual-mean check
+
+Test: does the fitted 2SLS residual have mean zero?
+
+#+begin_example
+J_stat = 1.732885  J_dof = 1  p = 0.1880
+empirical u_hat mean = -0.002738  SE ~ 0.002080  t ~ -1.316
+#+end_example
+
+J_stat is exactly t^2 = 1.316^2 = 1.732 to all displayed digits, and
+the chi^2_1 survival function matches the two-sided normal p-value at
+that t. ~j_test~ behaves correctly under H_0.
+
+* Conclusions
+
+1. *The 1e-8 docstring claim is conservative by five orders of
+   magnitude.* Actual agreement is ~1.93e-13 = essentially the
+   float64 noise floor for an 8-iteration LM solve at this conditioning.
+2. *J-stat scaling is exact* under the documented relation
+   ~textbook_J = N * emu.J / sigma_hat^2~.
+3. *SE differs by ~1% relative*, attributable to the
+   robust-vs-homoscedastic-form distinction, not a numerical issue.
+4. *kappa = 6.73, no regularisation needed* at cereal scale.
+5. *Timing exceeds the 2 s post-warmup target* (3.0--3.3 s observed);
+   not a correctness issue but worth a follow-up.
+6. *~j_test~ produces correct chi^2 tail probabilities* in a
+   one-moment fitted-residual scenario.
+
+* Issues filed
+
+- Performance: post-warmup ~estimate()~ at cereal scale runs at
+  ~3.0--3.3 s vs the 2 s target. See follow-up issue.
+
+* Provenance
+
+- Repo: =/global/home/users/ligon/mirrors/Emu-GMM=
+- Branch: =main=
+- Driver script:
+  =scripts/kagg_iv_cross_check.py= (under the worktree
+  =.claude/worktrees/wf_b02dc4bb-652-4/=).
+- JAX 0.10.1, x64 enabled at package import per
+  ~emu_gmm.__init__~ commitment 7.

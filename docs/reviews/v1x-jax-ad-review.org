@@ -1,0 +1,299 @@
+#+TITLE: v1.x JAX-AD adversarial review
+#+DATE: 2026-05-29
+
+* Scope
+
+Adversarial code review of the merged v1.x state on ~main~, restricted
+to JAX semantics: jit-compatibility, vmap, AD (forward + reverse),
+pytree structure, static-field discipline, device placement,
+float-precision discipline.
+
+Branch: ~main~ at commit 5ed4f55. The Path-A v2 manifold tree under
+~src/emu_gmm/manifolds/~ is out of scope; the review focuses on the
+v1.x merged state at ~src/emu_gmm/{measures,covariance,weighting,
+regularization,optimizer,estimator,_internal}.py~.
+
+* Findings
+
+** HIGH: Double-where pattern in EmpiricalMeasure does NOT prevent reverse-mode NaN poisoning
+
+PR #26's premise is that the "double where" pattern protects
+=jax.grad= through =EmpiricalMeasure.expectation= when ~psi~ returns
+non-finite values at masked-out cells. The premise is false.
+
+The code in =src/emu_gmm/measures/empirical.py:148-163= (and the
+matching paths in =covariance/iid.py:95-122=, =covariance/clustered.py:108-132=,
+=measures/empirical.py:217-229,247-262= for ~moment_contributions~
+and ~jacobian~) does this:
+
+#+begin_src python
+x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)   # (1) clean NaN in x
+psi_batch = jax.vmap(psi_at)(x_safe)                  # (2) evaluate psi
+psi_safe = jnp.where(mask_bool, psi_batch, 0.0)       # (3) mask result
+numer = jnp.sum(weight_mask * psi_safe, axis=0)
+#+end_src
+
+This is the canonical "double where antipattern" the JAX FAQ warns
+about. Step (1) only protects against NaN /in the input x/; it does not
+protect against ~psi(x_safe, theta)~ /producing/ NaN/±Inf at
+masked-out cells (a common pattern: log(0), 1/0, sqrt(negative) at
+the "non-holder" rows after NaN-cleaning x to 0).
+
+Empirically (probes 11, 12, 12c, 24 in this review):
+
+- =psi = log(x[0])= with NaN-cleaned x ⇒ forward expectation finite,
+  =jacfwd= finite, but =jax.grad= returns =nan=.
+- =psi = theta / x[0]= with NaN-cleaned x ⇒ same: forward finite,
+  =jacfwd= finite, =jax.grad= = =nan=.
+
+This bites the estimator's own diagnostics: =estimator.py:240-245= computes
+=final_gradient_norm = ||grad(half_obj)||= via reverse-mode AD. A
+fully-converged estimate against any psi with this pattern returns
+=Diagnostics.final_gradient_norm = nan=. Probe 12d confirms this end
+to end:
+
+#+begin_example
+theta_hat: 2.25 (finite)
+final_gradient_norm: nan
+#+end_example
+
+The CU-weighting gradient that flows through the residual into the
+optimiser will also pollute under jacrev. =optimistix.LevenbergMarquardt=
+uses jacfwd internally (so the optimiser proceeds), but any user code
+that calls =jax.grad= on a downstream scalar of an =EmpiricalMeasure=-backed
+estimator — including the estimator's own =final_gradient_norm= — gets
+=nan=.
+
+The canonical NaN-safe pattern needs ~where(mask, x, x_default)~
+/before/ the call:
+
+#+begin_src python
+# Replace x at masked-out cells with a value where psi is safe.
+x_for_psi = jnp.where(mask_for_psi, x_safe, x_default)
+psi_batch = vmap(psi_at)(x_for_psi)
+psi_safe = jnp.where(mask_bool, psi_batch, 0.0)
+#+end_src
+
+Even that is awkward because the user's ~psi~ ingests a single
+~(D,)~ vector inside ~vmap~ and the mask is per-coordinate; the right
+solution is probably to drop the claim that NaN-producing psi works
+and require users to make psi finite over the full domain (i.e. clamp
+inputs before computing log/division), then document loudly that the
+"NaN-aware" facility protects only against NaN in raw =x=, not against
+NaN /produced by/ ~psi~.
+
+Locations:
+- src/emu_gmm/measures/empirical.py:140-163 (expectation)
+- src/emu_gmm/measures/empirical.py:216-229 (moment_contributions)
+- src/emu_gmm/measures/empirical.py:247-264 (jacobian)
+- src/emu_gmm/covariance/iid.py:94-122 (covariance)
+- src/emu_gmm/covariance/clustered.py:108-145 (covariance)
+- src/emu_gmm/estimator.py:240-245 (final_gradient_norm diagnostic poisoned)
+
+** HIGH: DiagonalTikhonov is a no-op on diagonal V (regularisation silently fails)
+
+=V_star = V + tau * diag(V)= becomes =(1 + tau) * V= when V is diagonal,
+so =kappa(V_star) = kappa(V)= regardless of tau. The bisection in
+=regularization.py:104-116= saturates at =_TAU_MAX=1000=, never satisfying
+the feasibility check, and returns ~hi_final = 1000~ — see probe 5b:
+
+#+begin_example
+ill (kappa=1e8): tau = 1000.000000, kappa(V*) = 1.000e+08
+very ill (kappa=1e15): tau = 1000.000000, kappa(V*) = 1.000e+15
+#+end_example
+
+A diagonal-valued V is not a corner case for emu-gmm: the IID and
+clustered covariance forms on /uncorrelated/ moments will produce
+exactly-diagonal V; the synthetic covariance form on /independent/
+psi components also produces diagonal V. In all these cases the
+regulariser silently fails and downstream Cholesky proceeds without
+help.
+
+Worse: the bisection invariant comment claims =kappa(V_star(hi))= is
+always within target, but the loop never verifies the initial =hi=
+is feasible. If =hi= is never feasible (the diagonal case), the loop
+returns =hi_final = TAU_MAX=, sometimes binding the ridge=true
+diagnostic, sometimes still failing the target — without raising.
+
+Fix candidates: switch to =V + tau * eye(M)= (true Tikhonov ridge) which
+shifts all eigenvalues by =tau= and DOES improve =kappa= on diagonal V;
+or check feasibility at =hi_init= and raise/warn when the target can't
+be met.
+
+Location:
+- src/emu_gmm/regularization.py:46-51 (=_apply_tau= formula)
+- src/emu_gmm/regularization.py:97-126 (bisection loop, no feasibility check at hi)
+
+** MEDIUM: from_pandas / from_nan_aware mask cast to float32 under float64 default
+
+=measures/empirical.py:343-344= and =:394=:
+
+#+begin_src python
+finite_mask = jnp.where(jnp.isnan(x_arr), 0.0, 1.0)
+mask_arr = finite_mask.astype(jnp.float32)
+#+end_src
+
+Probe 4 confirms: with =jax_enable_x64=True= (the framework default),
+=EmpiricalMeasure.from_pandas(df).mask.dtype= is =float32=. Because
+=weights= is f64 and JAX promotion rules promote f32×f64→f64, the
+downstream arithmetic ends up at f64 and the residual is f64-precise,
+so the bug is not observable in computed values. But the framework
+=CLAUDE.md= says "JAX-native in the hot path. No pandas inside compiled
+boundaries" — silently dropping precision at the I/O boundary is the
+class of thing the float64 commitment exists to prevent. The =.astype(jnp.float32)=
+should be =.astype(jnp.float64)= (or simply omitted; ~jnp.where(NaN, 0.0, 1.0)~
+on f64 returns f64 already).
+
+Location:
+- src/emu_gmm/measures/empirical.py:343-344 (from_pandas)
+- src/emu_gmm/measures/empirical.py:394 (from_nan_aware)
+
+** MEDIUM: OptimizerInfo is not a JAX pytree — optimizer claims jit/vmap-compatibility it doesn't deliver
+
+=optimizer.py:39= and =types.py:138-145= declare =OptimizerInfo= as a
+plain =@dataclasses.dataclass(frozen=True)=, not a =@jdc.pytree_dataclass=.
+The docstring on =optimistix_lm= (lines 11-12, 140-141) advertises
+"JIT-pure, ``vmap``-able". Probe 17 / 17b show:
+
+- ~jax.jit(opt(residual_fn, theta_init))~ raises =TypeError= on the
+  =(theta_opt, info)= return because =OptimizerInfo= isn't a valid JAX
+  type.
+- ~jax.vmap(opt(residual_fn, ti))~ also raises =TypeError= for the
+  same reason.
+
+Only ~opt(residual_fn, theta_init)[0]~ (theta_opt) is actually
+jit/vmap compatible. A bootstrap or batched-restart workflow that
+wants the full =(theta, info)= tuple under =vmap= cannot use the
+documented surface.
+
+Fix: convert =OptimizerInfo= to a =@jdc.pytree_dataclass= with
+=status= and =backend= as =jdc.static_field=, and =steps= /
+=final_objective= as traced fields (matching the existing comment
+in =optimizer.py:101-104= that those fields hold traced scalars in
+jit).
+
+Locations:
+- src/emu_gmm/types.py:138-145 (OptimizerInfo definition)
+- src/emu_gmm/optimizer.py:1-25, 140-141 (docstrings claim jit/vmap support)
+
+** MEDIUM: Sampler / expectation_fn / jacobian_fn / covariance_fn as static_field causes spurious recompilation
+
+=SyntheticMeasure.sampler=, =AnalyticalMeasure.expectation_fn=,
+=AnalyticalMeasure.jacobian_fn=, =AnalyticalCovariance.covariance_fn=
+are all =jdc.static_field=. JAX caches compiled functions by the pytree
+*structure* including static-field hash/equality. Two functionally
+equivalent Python callables (e.g. produced by separate factory calls
+returning identical lambdas/closures) are not equal — they have
+distinct =id()=. Probe 5 confirms two =make_sampler(n_sim)= calls
+produce non-equal samplers and trigger separate compilations.
+
+This is mostly a "documented trade-off" — there's no obvious fix that
+keeps the callable JAX-pure-compatible. But it's worth a doc note that
+users should keep their sampler / expectation_fn module-level (one
+Python identity), not constructed per-call inside a hot loop, or each
+estimator call retraces.
+
+Locations:
+- src/emu_gmm/measures/synthetic.py:58-62
+- src/emu_gmm/measures/analytical.py:69-74
+- src/emu_gmm/covariance/analytical.py:54-56
+
+** LOW: ClusteredCovariance silently truncates fractional cluster_ids
+
+=covariance/clustered.py:136= does =self.cluster_ids.astype(jnp.int32)=.
+A user who accidentally passes float-valued IDs (e.g. cluster index
+0.7 instead of 0) gets silent truncation to 0; no warning. Probe 13
+confirms.
+
+The framework's stated convention is "IDs as floats because JAX prefers
+a floating dtype for traced values" (covariance/clustered.py:21-22).
+That's defensible, but the truncation behavior should be documented in
+the cluster_ids field docstring, or the field type should be
+=Integer[Array, " N"]= explicitly and the cast tightened.
+
+** LOW: Cholesky returns NaN silently on non-PD; regularisation may fail to deliver PD
+
+=_internal/cholesky.py:27-50= documents that "the caller is responsible for
+ensuring V is PD, typically via the regularization strategy". When
+DiagonalTikhonov silently fails (see HIGH finding above for diagonal V),
+the Cholesky produces a NaN-laden L (probe 18 confirms), and the
+estimator returns NaN throughout. There's no NaN-check in the estimator
+pipeline that catches this — the user only sees =theta_hat = NaN= or
+=J_stat = NaN= after the solve.
+
+Fix: optional invariant check on =V_star= eigenvalues after
+regularisation (concrete-only path, behind a non-traced flag), or
+explicit =NaN= check on =cholesky_pivot_min < 0= in the diagnostics
+builder with a clearer status string.
+
+** LOW: half_obj reverse-mode grad re-traces residual_fn (estimator efficiency)
+
+=estimator.py:240-245= defines ~half_obj~ as a fresh closure inside
+=estimate=, then takes =jax.grad(half_obj)(theta_hat_flat)=. This
+re-builds the full residual_fn graph for one gradient call. Not a
+correctness issue, just an efficiency note: the gradient could be
+computed via =jax.vjp= alongside the optimiser's existing Jacobian
+evaluation at =theta_hat=. Minor.
+
+** Informational: Static fields ARE consistent across pytree dataclasses
+
+Probe checks across all dataclasses confirm static_field discipline is
+sound:
+
+| dataclass             | static_field          | rationale                       |
+|-----------------------+-----------------------+---------------------------------|
+| =SyntheticMeasure=    | n_sim, sampler        | sampler closure structure       |
+| =EmpiricalMeasure=    | none                  | all fields traced               |
+| =AnalyticalMeasure=   | expectation_fn, jac_fn | pure callable closures          |
+| =ClusteredCovariance= | n_clusters            | segment_sum num_segments static |
+| =DiagonalTikhonov=    | kappa_target, tau_threshold | hyperparameters           |
+| =Identity= / =ContinuouslyUpdated= | none      | stateless                       |
+| =Fixed=               | none (L0 is traced)   | anchor factor traced            |
+
+No field that "varies between problems but isn't marked static" — i.e.,
+no silent recompilation triggers from values that should be static.
+
+** Informational: float64 propagation works correctly
+
+=emu_gmm/__init__.py:38-40= calls =jax.config.update("jax_enable_x64", True)=
+before any sub-module import. Probe 14 confirms that even direct
+=from emu_gmm.examples.euler import NU= picks up float64, because the
+package import machinery runs =__init__.py= first. The module-level
+=jnp.array= in =examples/euler.py:73= is the only module-level JAX call
+in the source tree (grep verified); it correctly inherits f64.
+
+** Informational: jacfwd vs jacrev agree on all tested paths (where AD works)
+
+For finite-input cases:
+- SyntheticMeasure.expectation: jacfwd ≡ jacrev (probe 6)
+- AnalyticalMeasure.expectation: jacfwd ≡ jacrev (probe 6)
+- EmpiricalMeasure.expectation: jacfwd ≡ jacrev (probe 2)
+- Full estimator residual through CU: jacfwd ≡ jacrev (probe 3), matches FD
+
+The only AD divergence found is when psi produces NaN/Inf at masked
+cells (jacfwd finite, jacrev NaN) — the HIGH finding above.
+
+** Informational: CU weighting picks up dV/dtheta correctly
+
+Probe 3 (Test 12) verifies the CU gradient matches finite-difference,
+confirming JAX AD traces through the Cholesky and triangular solve
+exactly as Architectural Commitment #4 requires.
+
+* Verdict
+
+=fix-first=. Two HIGH issues warrant attention before further v2 work
+builds on the v1.x foundation:
+
+1. The reverse-mode NaN-poisoning in =EmpiricalMeasure= invalidates
+   the =final_gradient_norm= diagnostic for any psi that goes
+   non-finite at masked-out cells, and the documentation/comments
+   in PR #26 over-promise what the "double where" guard delivers.
+
+2. The =DiagonalTikhonov= no-op on diagonal V means the framework's
+   PD-restoration silently fails on a non-pathological matrix family,
+   and the bisection saturation isn't surfaced.
+
+The MEDIUM finding on =OptimizerInfo= not being a pytree blocks the
+documented vmap/jit surface and should be fixed before any
+bootstrap/multi-start workflow lands. The other MEDIUM/LOW items are
+correctness-adjacent or precision-discipline notes.

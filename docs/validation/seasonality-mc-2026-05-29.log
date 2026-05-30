@@ -1,0 +1,122 @@
+emu-gmm MC harness
+  BETA_TRUE  = 0.96
+  GAMMA_TRUE = 2.0
+  N_OBS      = 2000
+  N_CLUSTERS = 50 of size 40
+  N_MC       = 100
+
+Warm-up: estimate(rep=0)
+  warmup wall = 7.880s
+  theta_hat = (beta=0.95651, gamma=1.71643)
+  converged=True, J_stat=0.285, J_dof=1
+  post-warmup single-call wall = 1.400s
+
+Running 100 MC replications...
+  rep   0: beta_hat=0.95651, gamma_hat=1.71643, J=0.29/dof=1, elapsed=6.3s
+  rep  20: beta_hat=0.96159, gamma_hat=2.02881, J=0.51/dof=1, elapsed=39.4s
+  rep  40: beta_hat=0.94332, gamma_hat=1.08599, J=2.74/dof=1, elapsed=72.9s
+  rep  60: beta_hat=0.95552, gamma_hat=1.80511, J=1.36/dof=1, elapsed=107.2s
+  rep  80: beta_hat=0.97330, gamma_hat=2.63964, J=0.17/dof=1, elapsed=141.3s
+MC loop wall: 174.5s (1.745s / rep)
+
+=== MC SUMMARY ===
+converged: 99/100
+
+Recovery:
+  beta : mean=0.961290, bias=+0.001290, MC SD=0.008608
+  gamma: mean=2.051091, bias=+0.051091, MC SD=0.441429
+
+Coverage (target 0.95):
+  beta : 0.940  (mean SE=0.00872 vs MC SD=0.00861)
+  gamma: 0.930 (mean SE=0.44217 vs MC SD=0.44143)
+
+J-statistic vs chi^2_1:
+  median J=0.521 (chi^2 median = 0.455)
+  p90    J=3.094 (chi^2 p90    = 2.706)
+  mean   J=1.078 (chi^2 mean   = 1.000)
+  KS test vs chi^2_1: stat=0.0566, p=0.8876
+
+Kleibergen p_K at theta_true (target: uniform):
+  mean p_K   = 0.315 (target 0.5)
+  median p_K = 0.286
+  KS vs U(0,1): stat=0.3266, p=0.0000
+
+Wild bootstrap p-values at theta_true (target: uniform):
+  mean   = 0.463
+  median = 0.472
+  KS vs U(0,1): stat=0.1119, p=0.1517
+
+Cluster bootstrap SE vs analytic SE (rep 0, n_boot=100)...
+  cluster_bootstrap wall = 75.5s
+  beta : analytic SE = 0.01074, boot SD = 0.01002, ratio = 0.933
+  gamma: analytic SE = 0.57443, boot SD = 0.53379, ratio = 0.929
+  cb_convergence rate = 50/50
+
+=== SMOKE: jit / vmap / NaN-grad ===
+  jit(estimate) -> J_stat = 0.285  [OK]
+  vmap(estimate) over 5 theta_init -> shape=(5,), finite=True  [OK]
+  Building NaN-laden measure...
+Traceback (most recent call last):
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 213, in _broadcast_shapes_uncached
+    return _try_broadcast_shapes(*rank_promoted_shapes, name='broadcast_shapes')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 126, in _try_broadcast_shapes
+    raise TypeError(f'{name} got incompatible shapes for broadcasting: '
+TypeError: broadcast_shapes got incompatible shapes for broadcasting: (200, 5), (200, 3), (1, 1).
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 191, in broadcast_shapes
+    return _broadcast_shapes_cached(*shapes)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/util.py", line 274, in wrapper
+    return cached(trace_context(), *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/util.py", line 268, in cached
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 197, in _broadcast_shapes_cached
+    return _broadcast_shapes_uncached(*shapes)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 216, in _broadcast_shapes_uncached
+    raise ValueError(f"Incompatible shapes for broadcasting: shapes={list(shapes)}") from err
+ValueError: Incompatible shapes for broadcasting: shapes=[(200, 5), (200, 3), ()]
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 213, in _broadcast_shapes_uncached
+    return _try_broadcast_shapes(*rank_promoted_shapes, name='broadcast_shapes')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/lax/lax.py", line 126, in _try_broadcast_shapes
+    raise TypeError(f'{name} got incompatible shapes for broadcasting: '
+TypeError: broadcast_shapes got incompatible shapes for broadcasting: (200, 5), (200, 3), (1, 1).
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/tmp/emu_gmm_mc/mc_harness.py", line 301, in <module>
+    res_nan = estimate(
+              ^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/src/emu_gmm/estimator.py", line 338, in estimate
+    m_probe = measure.expectation(model, theta_init)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/src/emu_gmm/measures/empirical.py", line 270, in expectation
+    m, _psi_safe, _weight_mask, _N_j = self.expectation_and_contributions(
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/src/emu_gmm/measures/empirical.py", line 237, in expectation_and_contributions
+    psi_safe = jnp.where(mask_bool, psi_batch, 0.0)  # (N, M)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/numpy/lax_numpy.py", line 2797, in where
+    return util._where(condition, x, y)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/numpy/util.py", line 291, in _where
+    condition, x_arr, y_arr = _broadcast_arrays(condition, x, y)
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/global/scratch/fsa/fc_jevons/ligon/mirrors/Emu-GMM/.venv/lib/python3.11/site-packages/jax/_src/numpy/util.py", line 258, in _broadcast_arrays
+    result_shape = lax.broadcast_shapes(*shapes)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Incompatible shapes for broadcasting: shapes=[(200, 5), (200, 3), ()]
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.

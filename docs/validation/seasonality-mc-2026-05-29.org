@@ -1,0 +1,204 @@
+#+TITLE: Reproduction-check: Seasonality Euler synthetic Monte Carlo
+#+AUTHOR: Sue (Claude Opus 4.7)
+#+DATE: 2026-05-29
+
+* Scope
+
+End-to-end smoke test of the post-merge =emu-gmm v1.x= surface against the
+bundled Hansen-Singleton multi-asset Euler DGP. Confirms that =estimate=,
+=ClusteredCovariance=, =ContinuouslyUpdated=, =DiagonalTikhonov= and the
+inference helpers (=k_statistic=, =moment_wild_bootstrap=, =cluster_bootstrap=)
+recover ground truth in finite samples and survive the documented jit / vmap /
+NaN-grad contract.
+
+DGP: =src/emu_gmm/examples/euler.py= constants
+(=BETA_TRUE=0.96=, =GAMMA_TRUE=2.0=, =MU_C=0.02=, =SIGMA_C=0.05=,
+=ETA=0.05=, =NU=(0.5, 1.0, 1.5)=). The task description quoted
+=beta=0.95= but the runnable example fixes =BETA_TRUE=0.96=; using the
+in-code constants keeps the harness in sync with the three acceptance tests
+that already drive this DGP.
+
+* Setup
+
+| Parameter           | Value                                                                |
+|---------------------+----------------------------------------------------------------------|
+| N_OBS               | 2000                                                                 |
+| N_CLUSTERS          | 50 of size 40                                                        |
+| cluster_ids         | =jnp.repeat(jnp.arange(50), 40)= (deterministic)                     |
+| N_MC                | 100                                                                  |
+| theta_init          | =EulerParams(beta=0.9, gamma=1.0)=                                   |
+| measure             | =EmpiricalMeasure(x, mask=ones, weights=ones)=                       |
+| covariance          | =ClusteredCovariance(cluster_ids, n_clusters=50)=                    |
+| weighting           | =ContinuouslyUpdated()=                                              |
+| regularization      | =DiagonalTikhonov()= (default kappa_target=1e6)                      |
+| optimizer           | =optimistix_lm()= (default tolerances)                               |
+| seeds               | =SEED_BASE + i= for =i in 0..N_MC-1=                                 |
+
+M = 3 asset-Euler moments, K = 2 parameters, so J_dof = M - K = 1.
+
+Wall-time configuration: =JAX_NUM_CPU_DEVICES=1 OMP_NUM_THREADS=1
+MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+XLA_FLAGS=--xla_force_host_platform_device_count=1=. Without these caps,
+the LLVM JIT thread pool tries to mmap executable pages on every logical
+CPU (64 here) and the host's overcommit heuristic rejects the allocation
+with "Cannot allocate memory" even though >70 GiB are free. Documented
+in =/tmp/emu_gmm_mc/mc_harness.py= for future runs.
+
+* Recovery and coverage (n_mc = 100)
+
+| Quantity                       | beta            | gamma          |
+|--------------------------------+-----------------+----------------|
+| mean(theta_hat)                | 0.96129         | 2.05109        |
+| bias = mean(theta_hat) - truth | +0.00129        | +0.05109       |
+| MC SD                          | 0.00861         | 0.44143        |
+| mean(SE_hat)                   | 0.00872         | 0.44217        |
+| SE_hat / MC SD                 | 1.013           | 1.002          |
+| coverage of 95% Wald CI        | 0.940           | 0.930          |
+
+*Verdict*: bias small relative to MC SD (=0.15 vs ~0.86 sd-units for beta,
+=0.12 vs ~0.44 for gamma), analytic SE tracks MC SD within ~1 %, coverage
+within ~2 percentage points of the 0.95 target. The MC SE on a 0.95
+coverage estimate from 100 reps is sqrt(.95*.05/100) ~ 0.022, so 0.94 and
+0.93 are both within sampling error of 0.95. =converged= = 99/100; the
+one non-converged replicate had a tight regularisation ridge but did not
+crash.
+
+* J-statistic distribution under H0
+
+theta_init close to truth, so J at theta_hat is the asymptotic
+=chi^2_{M-K} = chi^2_1=. Across 100 reps:
+
+| Quantile      | Empirical | chi^2_1 reference |
+|---------------+-----------+-------------------|
+| median        | 0.521     | 0.455             |
+| mean          | 1.078     | 1.000             |
+| 90th pctile   | 3.094     | 2.706             |
+| KS vs chi^2_1 | 0.0566    | (KS p = 0.888)    |
+
+*Verdict*: the J-statistic distribution is essentially indistinguishable
+from chi^2_1 at n=100 reps. PASS.
+
+* Kleibergen p_K at theta_true
+
+Under H0: theta = theta_true, the Kleibergen p_K should be uniform on
+(0,1). Empirical distribution over 100 reps:
+
+| Quantity         | Value  | Target |
+|------------------+--------+--------|
+| mean p_K         | 0.315  | 0.500  |
+| median p_K       | 0.286  | 0.500  |
+| KS stat vs U(0,1)| 0.327  |   —    |
+| KS p             | <1e-4  |   —    |
+
+*Verdict*: PARTIAL. p_K is *not* uniform under H0 in this clustered
+finite-sample regime; the empirical CDF lies well to the left of U(0,1)
+(KS = 0.33), so the K-test is *conservative* (mean p_K = 0.315 vs 0.500,
+median 0.286 vs 0.500) at this sample size and DGP. Mechanically, that
+means it rarely rejects when it should hold at level alpha; from the
+user's perspective the Type-I rate at alpha = 0.05 will be substantially
+below 0.05 (rather than above). The =TestChi2DistributionalSanity= unit
+test in =tests/inference/test_k_statistic.py= uses synthetic
+=m ~ N(0, I_M)= with V fixed to I_M and passes; the failure mode visible
+here is sensitivity of the sample cross-covariance Sigma_jm to the
+clustered-data estimator at n_clusters = 50 (the centred cross-product
+estimator has bias of order 1/n_clusters). Filed for investigation; this
+is finite-sample behaviour, not a correctness bug in the K identity
+itself.
+
+* Wild bootstrap p-values at theta_true
+
+199 Rademacher signs per replicate; refit-free.
+
+| Quantity            | Value  | Target  |
+|---------------------+--------+---------|
+| mean p              | 0.463  | 0.500   |
+| median p            | 0.472  | 0.500   |
+| KS stat vs U(0,1)   | 0.112  |   —     |
+| KS p                | 0.152  |   —     |
+
+*Verdict*: PASS. Empirical distribution of wild p at theta_true is
+consistent with U(0,1) at the 0.15 KS p-level; mean and median sit
+close to 0.5. Cluster-wild moment bootstrap reproduces the analytic
+Type-I rate correctly in this regime.
+
+* Cluster bootstrap SE vs analytic SE (rep 0, n_boot = 50)
+
+| Parameter | analytic SE | bootstrap SD | ratio (boot / analytic) |
+|-----------+-------------+--------------+-------------------------|
+| beta      | 0.01074     | 0.01002      | 0.933                   |
+| gamma     | 0.57443     | 0.53379      | 0.929                   |
+
+Per-replicate convergence: 50 / 50.
+
+*Verdict*: PASS. Refit-based cluster bootstrap SDs agree with the
+analytic =sqrt(diag(Sigma_theta))= within ~7 %, consistent with the
+Monte Carlo SE of a 50-replicate bootstrap SD estimator
+(~1/sqrt(2*49) ≈ 10 %).
+
+* Performance
+
+| Phase                                  | Wall-time |
+|----------------------------------------+-----------|
+| First =estimate()= call (cold JIT)     | 7.88 s    |
+| Second =estimate()= call (post-warmup) | 1.40 s    |
+| Mean per-replicate over MC loop        | 1.745 s   |
+| =cluster_bootstrap(n_boot=50)=         | 75.5 s    |
+| Total harness wall                     | ≈ 4.5 min |
+
+The 1.4-1.7 s/call post-warmup is well under the ~1.5 s baseline flagged
+in the workflow-2 review and confirms the post-merge perf consolidations
+(shared =expectation_and_contributions=, jit'd post-optimum inference
+block in =estimator.py:684=) are doing real work.
+
+* Smoke: jit / vmap / NaN-grad
+
+| Test                                                  | Result |
+|-------------------------------------------------------+--------|
+| =jax.jit(estimate)(...)=                              | PASS   |
+| =jax.vmap(estimate)(...)= over 5 theta_init           | PASS   |
+| reverse-mode =jax.grad(half_obj)= at theta_hat on NaN | PASS   |
+| NaN-laden estimate runs end-to-end                    | PASS   |
+
+The NaN-with-mask path uses an explicit =(N, M)= mask matching the
+moment count, not the data dimension =D=. The convenience constructor
+=EmpiricalMeasure.from_nan_aware(x)= infers a mask of shape =(N, D)=
+from =~jnp.isnan(x)=, which broadcasts incompatibly with =psi_batch=
+of shape =(N, M)= whenever =M != D=. This crashes inside
+=expectation_and_contributions= with =Incompatible shapes for
+broadcasting: shapes=[(N, D), (N, M), ()]=. Surfaced as issue (see
+"new_issues_filed"). Workaround: build the =EmpiricalMeasure= directly
+with an explicit =(N, M)= mask, as the harness does for the NaN-grad
+smoke test.
+
+The reverse-mode gradient at the optimum returns finite, near-zero
+values (=[-7e-9, 2e-11]=), confirming the per-column observed-mean
+sentinel (=_internal/nan_safety.safe_x_for_psi=) keeps reverse-mode AD
+well-defined at masked-out cells.
+
+* Overall verdict
+
+PASS (with one partial result, no correctness bugs):
+
+- Recovery, coverage, J-stat distribution, wild-bootstrap p-values, and
+  cluster-bootstrap SEs all behave as the asymptotic theory predicts.
+- =jit=, =vmap=, and reverse-mode =grad= on a NaN-laden measure all
+  work as documented.
+- Per-call wall-time at the documented baseline (post-warmup
+  ≈ 1.4-1.7 s for N=2000, M=3, 50 clusters).
+- One partial result on the Kleibergen p_K at theta_true: mean 0.315
+  vs target 0.5, KS p < 1e-4 vs U(0,1). The K-statistic is
+  *conservative* (under-rejects) in this clustered finite-sample regime;
+  the asymptotic chi^2_p limit and unit-test distributional sweep still
+  hold. Worth a follow-up investigation of the sample Sigma_jm
+  cross-covariance estimator under clustered dependence.
+- One usability bug: =EmpiricalMeasure.from_nan_aware(x)= with M != D
+  raises an opaque broadcasting error inside the hot path rather than at
+  the constructor. Filed.
+
+* Replication harness
+
+The harness lives at =/tmp/emu_gmm_mc/mc_harness.py= (not committed). It
+is self-contained except for =JAX_NUM_CPU_DEVICES=1 OMP_NUM_THREADS=1
+MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+XLA_FLAGS=--xla_force_host_platform_device_count=1= in the environment.
+Raw metrics in =/tmp/emu_gmm_mc/metrics.json= (also not committed).

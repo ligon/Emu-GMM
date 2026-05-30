@@ -1,0 +1,299 @@
+#+TITLE: Adversarial Probe of v2 Plan §2 Decisions
+#+AUTHOR: subagent (review pass against implementation-plan-v2-manifold.org)
+#+DATE: 2026-05-29
+
+* Scope
+
+Probe of the four §2 pre-implementation decisions in
+=docs/implementation-plan-v2-manifold.org= (lines 51--150).  Default
+posture: refuted=true.  Each section below records a probe attempted
+against the recommendation, the surviving concern (if any), and a
+verdict.
+
+References by file:line in this document are to
+=docs/implementation-plan-v2-manifold.org= unless otherwise noted.
+
+* §2.1 Embedded metric on =PSDFixedRank= --- SURVIVES WITH CONCERNS
+
+** Probe A: Misnomer in "embedded vs quotient" framing
+
+Reading pymanopt's =psd.py:30-34=, =projection= already performs the
+horizontal projection via a Lyapunov solve.  Pymanopt's
+=PSDFixedRank.dimension = kn - k(k-1)/2= (line 113) is the /quotient/
+dimension, not the ambient =nk= dimension.  The plan's "embedded
+metric" terminology (lines 70--73) is therefore misleading: the
+proposal is /not/ "skip the horizontal projection".  Both options in
+§2.1 use the same projection operator; the real distinction is whether
+the tangent vectors carried through =RiemannianLM= are stored in the
+ambient =(n,k)= matrix shape (with a near-zero gauge subspace) or in
+horizontal-basis coordinates (no gauge directions).  This naming
+should be cleaned up before §2.1 is presented to a downstream user
+porting code from pymanopt.
+
+** Probe B (HIGH severity): arithmetic inconsistency between Phase 2
+   dimension and Phase 5 expected rank.
+
+Phase 2 (line 307--308) defines =manifold.dimension = k*n - k*(k-1)/2=
+(the quotient dimension), and =gauge_dim = k*(k-1)/2= (line 310).
+
+Phase 5 (line 514--516) asserts that =rank(Sigma_theta_arr)= must
+equal =manifold.dimension - manifold.gauge_dim=, which evaluates to
+=kn - k(k-1)/2 - k(k-1)/2 = kn - k(k-1)=.  /That double-counts the
+gauge subtraction./  Either:
+
+1. =manifold.dimension= is the /ambient/ =nk= (and Phase 2's line 307
+   is wrong), in which case rank of =Sigma_theta_arr= is
+   =nk - k(k-1)/2= which equals the /quotient/ dimension (good); or
+2. =manifold.dimension= is the /quotient/ =kn - k(k-1)/2= (and
+   Phase 5's line 516 is wrong; rank should be /equal to/
+   =manifold.dimension=, not minus =gauge_dim=); or
+3. The plan needs an explicit =ambient_dimension= field separate from
+   =manifold.dimension=, with Phase 5 explicit about which one is the
+   rank target.
+
+This is a /spec-revision/ ask: §2.1's recommendation needs to commit
+to one storage convention (ambient =nk= storage vs. quotient =kn-
+k(k-1)/2= storage), and Phase 2/Phase 5 must be made consistent with
+that choice.
+
+Phase 5 line 503--507 says "Flatten the per-leaf tangent Jacobians
+into one =(M, manifold.dimension)= matrix... for =PSDFixedRank(n, k)=
+an ambient-space flatten (since the embedded metric matches Frobenius)
+".  /Ambient-space flatten gives =nk= columns, not =kn - k(k-1)/2=./
+This contradicts Phase 2 line 307.
+
+** Probe C (MEDIUM severity): gauge ratio grows with K relative to m
+
+For =PSDFixedRank(m, K)= the gauge fraction is
+=k(k-1)/2 / (kn - k(k-1)/2)=.  Concrete numbers for K-Aggregators
+parameters (=m=5= from =tmp/cereal_data.py:42=, =MAX_K=3= from the
+=Makefile=):
+
+| K | dim_quotient | gauge_dim | gauge/quotient |
+|---+--------------+-----------+----------------|
+| 1 |            5 |         0 |              0 |
+| 2 |            9 |         1 |             11% |
+| 3 |           12 |         3 |             25% |
+| 4 |           14 |         6 |             43% |
+| 5 |           15 |        10 |             67% |
+
+At K-Agg's typical MAX_K=3 the gauge is 25% of the quotient
+dimension, which the embedded-metric rcond threshold can probably
+separate from genuine rank-deficient identification.  /But/ users who
+push to K=4 or K=5 (which K-Agg's =blp_rank_analysis.py:200= advertises
+as a comparison point) will hit a regime where the gauge dominates and
+=cond(info_matrix)= is unreliable as a rank-deficiency diagnostic.
+The plan's =gauge_nullspace_dim= field on =EstimationResult= (Phase 6)
+is the right escape hatch, but the §2.1 recommendation should /flag/
+this scaling explicitly --- "we recommend embedded metric for K
+materially less than m; at K \approx m the quotient route or an
+explicit horizontal-basis change should be the user's escape hatch".
+
+** Probe D: pymanopt's "embedded" is already quotient-aware
+
+Pymanopt's =projection= IS the horizontal projection.  When the plan
+says (line 84) "the quotient route adds a Lyapunov solve at every step
+of =RiemannianLM=", that Lyapunov solve is already in the embedded
+proposal --- every retraction step requires =projection= to compute the
+Riemannian gradient.  The cost differential between the two options is
+not what the plan claims.
+
+** Verdict: §2.1 needs spec revision
+
+The decision /direction/ survives (embedded-style storage matches
+pymanopt; K-Agg's gauge filter is an established pattern), but:
+
+- the arithmetic in Phase 2 vs Phase 5 must be made consistent;
+- the "embedded vs quotient" framing should be re-cast as "ambient
+  =(n,k)= storage with gauge nullspace" vs. "horizontal-basis storage
+  without gauge nullspace";
+- the K~m regime should be flagged in the Phase 6 docstring.
+
+* §2.2 Tangent inner product per-manifold method-defined --- SURVIVES
+
+** Probe A: from_pymanopt interaction with Product
+
+=Product= sums per-factor inner products (line 98).  If one factor is
+=from_pymanopt(...)= (Phase 7, lines 608--631), that factor's
+=inner_product= is non-JIT (line 624).  Therefore =Product=' s
+combined =inner_product= is non-JIT.  This is implicit in the plan but
+not flagged in §2.2 itself.  It is, however, flagged in §2.4's
+acceptance scope ("OK to drop JIT for =from_pymanopt= adapters"), so
+the user can recover.  Not a blocker.
+
+** Probe B: composition with §2.1's storage choice
+
+If §2.1 lands "ambient storage with gauge nullspace", then for
+=PSDFixedRank= the =inner_product= is Frobenius on the full =(n,k)=
+matrix, which is fine.  If §2.1 lands "horizontal-basis storage", the
+=inner_product= must be Frobenius on the horizontal-basis coordinates,
+which requires a basis transformation (computed once per call to
+=projection=).  §2.2 does not flag this cross-decision dependency.
+
+** Probe C: future Stiefel factor doesn't compose
+
+The Riemannian metric on Stiefel can be canonical (Stiefel inner
+product) or embedded (Frobenius restricted to tangent space) --- the
+two are not equivalent.  If a future Product factor is Stiefel via
+=from_pymanopt=, and pymanopt's default is one but the user wanted the
+other, the per-factor =inner_product= method correctly delegates, but
+the gradient transformations on adjacent factors don't see each other.
+For =Sigma_theta=, the per-factor inner products go into a block
+diagonal Gram matrix; the block diagonal structure is preserved.  This
+is fine.
+
+** Verdict: §2.2 decision survives probe
+
+The "per-manifold method-defined" rule is the standard Riemannian
+convention (Boumal §3) and the JAX-PyTree default for unspecified
+subclasses is a clean fallback.  No surviving refutation.
+
+* §2.3 =Sigma_theta= in tangent-space coordinates --- SURVIVES WITH CONCERNS
+
+** Probe A (MEDIUM severity): tangent-coord label format inconsistency
+
+Phase 6 (lines 562--567) shows the label format
+=["L_t_00", "L_t_01", ..., "mu_t_0", "sigma_t_0", "sigma_t_1"]=.
+These are /ambient indices/ ((i, j) on an (m, K) matrix), with
+=manifold.dimension = nk - k(k-1)/2= and =nk= labels.  Two of every
+=k(k-1)/2= labels per leaf are linear combinations (not basis
+elements); the user reading "L_t_00 = 0.123 (SE 0.05)" cannot
+interpret it as the standard error of L[0,0] without knowing the
+horizontal basis transformation.
+
+Compare K-Aggregators's =cereal.org:2576-2579= which uses the same
+ambient =Xi[i,j]= naming.  The K-Agg pattern returns a /singular/
+covariance matrix with the gauge nullspace explicitly present, not a
+quotient-coordinate covariance.
+
+If §2.3's recommendation is genuinely "tangent-space coordinates",
+then the label format must use a horizontal-basis convention
+(=L_t_horiz_0=, ..., =L_t_horiz_{kn-k(k-1)/2-1}=), not =(i, j)= ambient
+indices.  If the plan instead intends "ambient with gauge nullspace
+present", then the recommendation should be §2.3 option (2) not option
+(1), and the labels match.
+
+This is the same ambiguity as Probe B in §2.1; it needs to be resolved
+in tandem.
+
+** Probe B (MEDIUM severity): bootstrap (Section 13.4) compatibility
+
+The asymptotic =Sigma_theta= lives in the tangent space at
+=theta_hat=.  A bootstrap replicate produces a new =theta_hat^(b)=
+on the manifold.  To form an empirical covariance, one needs to map
+each =theta_hat^(b)= into a common chart, which on a quotient
+manifold like =PSDFixedRank= requires choosing a representative of the
+equivalence class (e.g., =theta_hat^(b)= rotated so =theta_hat^{(b)T}
+@ theta_hat= is symmetric).  /This alignment step is not in the plan./
+
+The =Sigma_theta= in tangent coords at =theta_hat= can be compared to
+the empirical bootstrap covariance only after this alignment, plus a
+=Log_{theta_hat}(theta_hat^{(b)})= step.  None of this is in the
+plan's Phase 5/6 or §13.4 (which just worries about pinv-via-vmap).
+
+For users porting from frequentist intuition --- and the plan flags
+this explicitly in §13.2 (lines 770--782) --- the SE interval has to
+be read as "geodesic dispersion in a particular tangent direction".
+Phase 6 needs an explicit docstring about which space the SE lives in,
+not just a labelled axis.
+
+** Probe C: §2.3 option (3) (pull-back to YY^T) defers correctly
+
+The deferral of option (3) is correct: K-Agg's
+=cov_for_B_from_tangent= (=cereal.org:2581=) shows the pattern is
+implementable as a delta-method post-processor, not a core engine
+change.  v2.1 is the right place for it.  No refutation.
+
+** Verdict: §2.3 decision survives but needs labels and bootstrap clarification
+
+Option (1) (tangent-space coordinates) is the right /default/, but
+the Phase 6 label format contradicts it (or the §2.1 storage choice
+is implicitly option-2-style and §2.3 should match).  Bootstrap
+interaction needs documentation, not implementation, before v2 ships.
+
+* §2.4 v2.0 scope: full PSDFixedRank --- SURVIVES
+
+** Probe A: partial PSDFixedRank (m=k, full-rank SPD) as a different manifold
+
+For =k = m= (e.g., PSDFixedRank(5, 5)), the manifold is full-rank
+symmetric PSD; pymanopt ships this as a separate class in
+=positive_definite.py= with /no gauge/.  The dimension is k(k+1)/2
+in an ambient k\times k space.  Could v2.0 ship this simpler manifold
+first?
+
+For K-Aggregators: =MAX_K=3= with =m=5=, so K < m always.  Full-rank
+SPD wouldn't cover the K-Agg use case.  Not a refutation in the
+context of the named v2 acceptance target.
+
+For future downstream consumers (e.g., Cholesky-factor inference on a
+covariance estimator), a full-rank SPD manifold is a clean
+intermediate.  But this is a v3+ candidate, not a v2.0 scope question.
+
+** Probe B: "delaying PSDFixedRank doesn't reduce Phase 1/3/4 risk"
+
+The recommendation claim (line 146) is that Phase 2 (PSDFixedRank) is
+the only numerical-risk Phase.  /False:/ Phase 4 (=RiemannianLM=) has
+non-trivial numerical risk independently:
+
+- The LM damping schedule (line 437--439) is a tuning choice;
+- the Gauss-Newton solve in tangent space (line 418--419) requires a
+  Gram-matrix-aware least-squares which JAX doesn't have natively;
+- the convergence criterion (line 440) requires a manifold-norm
+  evaluation that involves =projection= internally (gauge subtlety
+  again).
+
+The "delay PSDFixedRank to v2.1" alternative would still leave Phase 4
+risky.  But the converse argument --- "shipping PSDFixedRank in v2.0
+is essentially shipping all of v2 at once" --- is also true.  The
+"v2.0 = Euclidean only" alternative is genuinely lower-risk; the
+plan's argument for full v2.0 boils down to "K-Aggregators is blocked
+otherwise".
+
+If K-Aggregators's =MAX_K=3= production runs are not unblocked by
+emu-gmm in the next sprint, the lower-risk v2.0=Euclidean path
+becomes attractive.  Otherwise the plan's recommendation stands.
+
+** Verdict: §2.4 decision survives probe
+
+The argument from acceptance target (K-Agg is blocked) is the
+load-bearing one, and it is /currently/ true.  If K-Agg gets unblocked
+by another path, this decision should be revisited.
+
+* Summary
+
+| §   | Decision                                  | Verdict                  |
+|-----+-------------------------------------------+--------------------------|
+| 2.1 | Embedded metric on PSDFixedRank           | Spec revision needed     |
+| 2.2 | Per-manifold inner product                | Survives probe           |
+| 2.3 | Sigma_theta in tangent-space coordinates  | Survives with concerns   |
+| 2.4 | v2.0 scope = full PSDFixedRank            | Survives probe           |
+
+The §2.1 inconsistency between the quotient dimension (Phase 2 line
+307) and the ambient-flatten Jacobian (Phase 5 line 503--507) and the
+expected rank (Phase 5 line 516) is a real spec bug that needs
+resolution before Phase 2 implementation starts.  Both §2.3 and §2.1
+share an underlying ambiguity --- ambient =nk= storage with gauge
+nullspace vs. quotient =kn - k(k-1)/2= storage with no gauge --- that
+must be resolved in tandem.
+
+The §2.4 scope decision is contingent on K-Aggregators's blocking
+posture; the §2.2 inner-product decision is clean.
+
+* Recommendations to author
+
+1. /Decide explicitly:/ in §2.1, choose ambient =nk= storage OR
+   horizontal-basis storage and commit Phase 2/5/6 to that choice.  As
+   written, the plan implies both.
+2. /Replace "embedded vs quotient" framing/ in §2.1 with "ambient
+   storage + gauge nullspace" vs. "horizontal-basis storage", which
+   matches what pymanopt actually does.
+3. /Update Phase 6 labels/ (§2.3 line 565) to reflect the storage
+   choice; if ambient, use =L_t_00..L_t_{m-1,K-1}=; if horizontal,
+   use =L_t_horiz_0..L_t_{dim_q-1}=.
+4. /Add a Phase 6 docstring/ for bootstrap users, explaining which
+   chart =Sigma_theta= lives in and how to compare to
+   =vmap(estimate)(bootstrap_keys)= empirical covariance.  Reference
+   Section 13.4 explicitly.
+5. /Add a §2.1 caveat/ for K \to m regime: at K = m the gauge fraction
+   exceeds the information dimension; recommend an explicit
+   horizontal-basis change in that regime.

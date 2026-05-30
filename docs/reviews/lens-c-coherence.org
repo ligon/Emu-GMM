@@ -1,0 +1,381 @@
+#+TITLE: Lens C audit --- Public surface coherence
+#+AUTHOR: Lens C reviewer
+#+DATE: 2026-05-29
+
+* Verdict
+
+=concerning-drift=.
+
+The exports run end-to-end and =from emu_gmm import *= delivers 41 named
+symbols with broadly sensible categories. But after 16 PRs the surface
+has accumulated visible inconsistencies that an econometrician reading
+=src/emu_gmm/__init__.py= for the first time would notice on day one:
+
+- Two protocol names lack the =Strategy= suffix that four others carry
+  (=Measure=, =Optimizer= vs =CovarianceStrategy=, =WeightingStrategy=,
+  =RegularizationStrategy=, =PenaltyStrategy=).
+- The eight result-like dataclasses split into three different
+  decorator regimes (=@jdc.pytree_dataclass= / =@dataclass(frozen=True)= /
+  =@dataclass= mutable), so threading a result through =jit= or =vmap=
+  works on some but not others.
+- Three diagnostics-builder helpers (=build_diagnostics=,
+  =build_optimizer_health=, =compute_cond_info=) sit at the top level
+  but are only used by =estimator.py= and a couple of tests. They look
+  like public symbols and have full docstrings, but they are
+  construction plumbing.
+- =LabelContext= is the declared type of =EstimationResult.labels= but
+  lives in =_internal= and is not re-exported. The user reads
+  =result.labels= and tab-completes into =emu_gmm._internal.labels=.
+- =EmpiricalMeasure= has =from_pandas= and =from_nan_aware= but no
+  =from_array=; the bare-array clean-data path is the three-argument
+  constructor, which is awkward.
+- The migration guide (=docs/migration/manifoldgmm-to-emu-gmm.org=)
+  still lists =IteratedWeighting=, =MomentWildBootstrap=,
+  =KStatisticResult=, =ridge_inverse= as "deferred to v2+" even though
+  every one of them is now exported from the top level (PRs #34, #32,
+  #36, #33, #37).
+
+None of these block estimation. All of them surface as the first or
+second thing a careful new user notices.
+
+* Probe results
+
+** P1 --- Read =__init__.py= end-to-end; check grouping
+
+   The =__all__= block /is/ organised into categories with comments
+   (Entry point / Inference / Measures / Covariance strategies /
+   Weighting strategies / Regularization / Numerics helpers / Penalty /
+   Optimisers / Inference helpers / Result + diagnostics types /
+   Errors / Diagnostics builders / Inference / Protocols). That is more
+   structure than most growing libraries get.
+
+   But the categorisation is leaky:
+
+   - =k_statistic= and =KStatisticResult= are listed under the
+     standalone "Inference" group at the top of =__all__=, while
+     =j_test=, =cluster_bootstrap=, and =moment_wild_bootstrap= live
+     under the lower "Inference helpers" group. There is no clear
+     distinction between the two groups; they are the same kind of
+     thing.
+   - "Diagnostics builders" (=build_diagnostics=,
+     =build_optimizer_health=, =compute_cond_info=) is a separate
+     category despite being internal construction helpers. None of
+     them appear in any test outside =tests/test_penalty.py= where they
+     are imported from the submodule directly. The user does not need
+     these at the top level.
+   - "Numerics helpers" contains only =ridge_inverse=, which is
+     mostly a K-Aggregators escape hatch (docstring confirms). A
+     single-entry category looks unfinished.
+
+   Grouping verdict: structured but uneven.
+
+** P2 --- Naming consistency
+
+*** =-Strategy= suffix is uneven
+
+    | Symbol                     | Suffix? |
+    |----------------------------+---------|
+    | =Measure=                  | no      |
+    | =CovarianceStrategy=       | yes     |
+    | =WeightingStrategy=        | yes     |
+    | =RegularizationStrategy=   | yes     |
+    | =PenaltyStrategy=          | yes     |
+    | =Optimizer=                | no      |
+    | =StructuralModel=          | n/a (it's a =Callable= alias) |
+
+    Four of the six protocols carry =Strategy=, two do not. The
+    architectural commitment in =CLAUDE.md= point 1 explicitly
+    contrasts =Measure= with =CovarianceStrategy=, and that note also
+    explains why: =Measure= is /the/ integration operator (one
+    canonical concept), while a covariance strategy is a /choice/ that
+    can be swapped. By the same logic =Optimizer= is "the" solver
+    interface --- so the naming actually does encode a real
+    architectural distinction. But the docstring of =Measure= does not
+    flag this, and the user reading =__init__.py= top-to-bottom just
+    sees "two of these things look different."
+
+*** Inference helpers split between top level and submodule
+
+    The top-level =__all__= exposes
+    =k_statistic=, =j_test=, =moment_wild_bootstrap=,
+    =cluster_bootstrap= (all snake_case functions) plus the four
+    =*Result= types. That is consistent within itself: each helper has
+    a function and a result type.
+
+    But =emu_gmm.inference= is a real subpackage with its own
+    =__init__.py= and the same four helpers re-exported. Users reading
+    =CLAUDE.md= or the migration guide are not told which surface is
+    canonical:
+
+    - =from emu_gmm import j_test= --- works.
+    - =from emu_gmm.inference import j_test= --- also works.
+
+    The mixed convention is fine but undocumented. The plan-revision
+    PR (#39) is the natural place to pick one.
+
+*** =EmpiricalMeasure= constructor discoverability
+
+    =EmpiricalMeasure= has three construction paths:
+
+    | Path                                   | When                |
+    |----------------------------------------+---------------------|
+    | =EmpiricalMeasure(x, mask, weights)=   | already JAX arrays  |
+    | =EmpiricalMeasure.from_pandas(df, ...)=| pandas boundary     |
+    | =EmpiricalMeasure.from_nan_aware(x)=   | raw array w/ NaN    |
+
+    There is no =from_array(x)= for the clean-data raw-array case.
+    The user with =x: jnp.ndarray= and no missingness must either
+    write =EmpiricalMeasure(x=x, mask=jnp.ones((N,M)), weights=jnp.ones(N))=
+    or use =from_nan_aware= (whose name implies the wrong contract).
+
+    The previous review (=docs/reviews/v1x-api-design.org= item 7)
+    already flagged this. No PR has addressed it.
+
+    There is also a method-name asymmetry between measures:
+    =EmpiricalMeasure.expectation_and_contributions=
+    vs =SyntheticMeasure.moments_and_contributions=. Same role, two
+    names. Pick one (probably =expectation_and_contributions= to match
+    the protocol method =expectation=).
+
+** P3 --- Aliases and back-compat
+
+   - =CUE= (PR added in wf5) is exported as an alias for
+     =ContinuouslyUpdated=. Good.
+   - No =Fixed2Step= alias for the legacy two-step weighting --- but
+     =IteratedWeighting= now exists and the migration table maps
+     =weighting='two_step'= to =ContinuouslyUpdated= (which is /not/
+     two-step). With =IteratedWeighting= now landed, the migration
+     guide row for =weighting='two_step'= is wrong: a user who wants
+     literal two-step now /can/ have it, and they should be told.
+   - No =AnchorOnceTikhonov= alias for =DiagonalTikhonov=. Probably
+     not needed; =DiagonalTikhonov= is the descriptive name.
+   - No alias for =EmpiricalMeasure= reflecting its NaN-aware nature.
+
+   The migration guide is stale on a related point: section "What this
+   port does *not* cover" (lines 250--261) lists =MomentWildBootstrap=,
+   =KStatisticResult=, =ridge_inverse=, and "true iterated weighting"
+   as not-yet-implemented. Every one of those four has landed:
+   =moment_wild_bootstrap= (PR #32), =k_statistic= /
+   =KStatisticResult= (PR #36), =ridge_inverse= (PR #33),
+   =IteratedWeighting= (PR #34). The guide gives a wrong answer to
+   "can I bootstrap?".
+
+** P4 --- Result-type uniformity
+
+   Eight result-like types are now exported:
+
+   | Type                     | Decorator                       | Pytree? | Frozen? |
+   |--------------------------+---------------------------------+---------+---------|
+   | =EstimationResult=       | =@dataclass=                    | no (leaf) | no    |
+   | =Diagnostics=            | =@dataclass(frozen=True)=       | no (leaf) | yes   |
+   | =OptimizerInfo=          | =@jdc.pytree_dataclass=         | yes     | yes   |
+   | =JTestResult=            | =@jdc.pytree_dataclass=         | yes     | yes   |
+   | =KStatisticResult=       | =@jdc.pytree_dataclass=         | yes     | yes   |
+   | =WildBootstrapResult=    | =@jdc.pytree_dataclass=         | yes     | yes   |
+   | =ClusterBootstrapResult= | =@dataclass(frozen=True)=       | no (leaf) | yes   |
+   | =LabelContext=           | =@dataclass(frozen=True)=       | no (leaf) | yes (private) |
+
+   Verified empirically (=jax.tree_util.tree_leaves= on dummy
+   instances): four are JAX pytrees, three are leaves; one is
+   mutable (=EstimationResult=) and the other six are frozen;
+   =LabelContext= is private but reachable.
+
+   The mixed regime has consequences:
+
+   - PR #46 elevated =OptimizerInfo= to a pytree explicitly so the
+     =(theta_opt, info)= tuple returned by =Optimizer= survives =jit=.
+     But =Diagnostics= /contains/ =OptimizerInfo= and is itself a
+     leaf, so wrapping =OptimizerInfo= in =Diagnostics= immediately
+     re-buries it inside a non-pytree. The pytree promise on
+     =OptimizerInfo= cannot propagate into anything the user
+     ultimately sees.
+   - =ClusterBootstrapResult= is the inference outlier: =JTestResult=,
+     =KStatisticResult=, =WildBootstrapResult= are all pytrees, but
+     =cluster_bootstrap='s output is not. The user who writes
+     =vmap(j_test)= over a panel of nulls succeeds; the equivalent for
+     =vmap(cluster_bootstrap)= over a panel of seeds will fail at the
+     output.
+
+   Either decide that "result types are pytrees" or that "result types
+   are leaves." The current mixed regime is invisible at import time
+   and surprises the user when they vmap.
+
+** P5 --- Docstring sampling (5 symbols)
+
+   Sampled =estimate=, =j_test=, =k_statistic=, =moment_wild_bootstrap=,
+   =cluster_bootstrap=, =ridge_inverse=, =optimistix_lm=, =scipy_lm=,
+   =build_diagnostics=, =compute_cond_info=. All ten have full
+   numpydoc =Parameters= and =Returns= sections. =optimistix_lm= /
+   =scipy_lm= are shorter (~16 lines) but still numpydoc-shaped.
+   This is the best dimension of the surface. No drift here.
+
+** P6 --- Migration guide currency
+
+   =docs/migration/manifoldgmm-to-emu-gmm.org= contains four explicit
+   stale claims, all in the "What this port does NOT cover" section:
+
+   #+begin_quote
+   - =MomentWildBootstrap= and similar inference helpers; bootstrap
+     loops must be written by the caller in v1.
+   - =KStatisticResult=, =ridge_inverse=, and other identification
+     helpers.
+   - True iterated weighting (subsumed by CU for v1).
+   #+end_quote
+
+   All three lines are wrong post-wf5. The weighting-policy table
+   (lines 221--226) also still maps =weighting='two_step'= to
+   =ContinuouslyUpdated()= even though =IteratedWeighting= is now the
+   correct literal port.
+
+   The guide is also silent on the inference helpers in general: there
+   is no "How to bootstrap" or "How to run a K-statistic at theta_hat"
+   section, despite all four helpers now being one-liners.
+
+** Probe --- =from emu_gmm import *=
+
+   #+begin_src text
+   count: 41
+   AnalyticalCovariance, AnalyticalMeasure, CUE, ClusterBootstrapResult,
+   ClusteredCovariance, ContinuouslyUpdated, CovarianceStrategy,
+   Diagnostics, DiagonalTikhonov, EmpiricalMeasure,
+   Emu_GMM_DimensionError, EstimationResult, Fixed, IIDCovariance,
+   Identity, IteratedWeighting, JTestResult, KStatisticResult,
+   Measure, Optimizer, OptimizerInfo, PenaltyStrategy,
+   RegularizationStrategy, StructuralModel, SyntheticCovariance,
+   SyntheticMeasure, TikhonovPenalty, WeightingStrategy,
+   WildBootstrapResult, __version__, build_diagnostics,
+   build_optimizer_health, cluster_bootstrap, compute_cond_info,
+   estimate, j_test, k_statistic, moment_wild_bootstrap,
+   optimistix_lm, ridge_inverse, scipy_lm
+   #+end_src
+
+   =__all__= is well-curated --- =from emu_gmm import *= does not leak
+   =importlib.metadata.version=, =PackageNotFoundError=, or the
+   submodule objects. But interactive =dir(emu_gmm)= still surfaces
+   13 names not in =__all__= (=version=, =PackageNotFoundError=, and
+   the 11 submodules =covariance=, =diagnostics=, =estimator=,
+   =inference=, =measures=, =numerics=, =optimizer=, =penalty=,
+   =regularization=, =types=, =weighting=). Tab-completion in IPython
+   is noisy. v1x-api-design.org item 10 already flagged this; trivial
+   fix (private alias on import).
+
+* Findings
+
+** HIGH severity
+
+*** F-C1. Migration guide is stale on four landed features
+
+    File: =docs/migration/manifoldgmm-to-emu-gmm.org= lines 221--261.
+
+    The guide claims =MomentWildBootstrap=, =KStatisticResult=,
+    =ridge_inverse=, and =IteratedWeighting= are deferred to v2+, but
+    PRs #32, #36, #33, #34 (all merged before wf6) added them. The
+    weighting table's =two_step= row also still points at
+    =ContinuouslyUpdated()=, which is wrong now that
+    =IteratedWeighting= is the literal port.
+
+    A user reading this guide before reaching for the package will
+    not realise the bootstrap they need is already there.
+
+*** F-C2. Result-type regime is split three ways
+
+    =EstimationResult= is mutable; =Diagnostics=, =OptimizerInfo=,
+    =ClusterBootstrapResult=, =LabelContext= are frozen leaves;
+    =JTestResult=, =KStatisticResult=, =WildBootstrapResult=,
+    =OptimizerInfo= are frozen pytrees. The split has no documented
+    invariant.
+
+    Concretely, =ClusterBootstrapResult= (=src/emu_gmm/inference/cluster_bootstrap.py:131=)
+    uses =@dataclasses.dataclass(frozen=True)= while the three
+    sibling inference results (=j_test=, =k_statistic=,
+    =wild_bootstrap=) use =@jdc.pytree_dataclass=. vmap over seeds
+    succeeds for three of the four; fails for the fourth.
+
+    PR #46's promotion of =OptimizerInfo= to pytree only buys
+    pytree behaviour for the optimiser tuple in isolation;
+    =Diagnostics= and =EstimationResult= are leaves, so a
+    =jit=/=vmap= caller cannot reach =result.diagnostics.optimizer_info=
+    without the result already being eager.
+
+** MEDIUM severity
+
+*** F-C3. =LabelContext= type leaked on a public field, not re-exported
+
+    File: =src/emu_gmm/types.py:359=
+    (=labels: LabelContext= field), import from =_internal.labels=.
+
+    Anyone reading =EstimationResult.labels= --- which the docstring
+    points at via =to_pandas= and which the design intends as the
+    label-access surface --- discovers the type is private. =help()=
+    on a result instance takes them into =emu_gmm._internal.labels=,
+    which =CLAUDE.md= treats as off-limits.
+
+    Already flagged by =docs/reviews/v1x-api-design.org= item 8.
+    Cheap fix: re-export from =emu_gmm.types= (or top level) and
+    add to =__all__=.
+
+*** F-C4. =build_diagnostics=, =build_optimizer_health=, =compute_cond_info= leak from internal
+
+    File: =src/emu_gmm/__init__.py:50--54, 142--145=.
+
+    These three live in =src/emu_gmm/diagnostics.py= and are imported
+    /only/ by =src/emu_gmm/estimator.py= and two unit tests (which
+    import from the submodule directly, not from the top level).
+    They are not API for a user reaching for emu-gmm; they are the
+    glue inside =estimate()=.
+
+    Putting them on =__all__= adds three kwargs-heavy functions to
+    the surface that nobody needs.
+
+*** F-C5. =EmpiricalMeasure= constructor naming traps the clean-data path
+
+    File: =src/emu_gmm/measures/empirical.py:434, 575=.
+
+    For =x: jnp.ndarray= with no missingness, the user must write
+    either the three-argument =EmpiricalMeasure(x=x, mask=..., weights=...)=
+    or =EmpiricalMeasure.from_nan_aware(x)= (whose name implies they
+    do have NaN). =from_array(x)= would be the natural name; it does
+    not exist.
+
+    =SyntheticMeasure.moments_and_contributions= vs
+    =EmpiricalMeasure.expectation_and_contributions= is a smaller
+    naming asymmetry on the same theme: same method role, two names.
+
+** LOW severity
+
+*** F-C6. =-Strategy= suffix uneven on protocols
+
+    Four protocols carry =Strategy=, two do not. The distinction does
+    encode an intent (singular operator vs swappable choice) but
+    that intent is not documented anywhere a user would find it. Add
+    a one-line clarifier to =Measure= and =Optimizer= docstrings or
+    rename for uniformity.
+
+*** F-C7. Tab-completion surface still includes 13 non-API names
+
+    =dir(emu_gmm)= surfaces =version=, =PackageNotFoundError=, and
+    the 11 submodule objects. Trivial fix: rename to =_version=,
+    =_PackageNotFoundError= on import. v1x-api-design.org item 10
+    already flagged this.
+
+*** F-C8. =k_statistic= is grouped separately from the other three inference helpers
+
+    =__init__.py= lists =k_statistic= / =KStatisticResult= in a
+    standalone "Inference" block near the top of =__all__=, while
+    =j_test=, =moment_wild_bootstrap=, =cluster_bootstrap= live in a
+    second "Inference helpers" group lower down. There is no
+    distinction; the two should be merged.
+
+* Survived probes
+
+- =from emu_gmm import *= is clean (no internals leak through
+  =__all__=).
+- All ten sampled docstrings have numpydoc =Parameters= /
+  =Returns= sections; the docstring story is uniform.
+- Three out of four inference helpers are JAX pytrees; the v1
+  =jit=/=vmap= story holds /for those three/.
+- The =Measure= / =CovarianceStrategy= orthogonality is preserved at
+  the surface --- both empirical and clustered paths use the same
+  =EmpiricalMeasure=.
+- =CUE= alias for =ContinuouslyUpdated= landed and is exported
+  (=src/emu_gmm/weighting.py:324, __init__.py:120=).

@@ -1,0 +1,206 @@
+#+TITLE: Mathematical Correctness Adversarial Review --- v1.x state
+#+AUTHOR: Math-Correctness Reviewer
+#+DATE: 2026-05-29
+
+* Lens
+
+Adversarial review of the v1.x =src/emu_gmm/= implementation against
+textbook GMM formulas. References:
+
+- Hansen (1982), Econometrica 50:1029-54.
+- Hayashi (2000), /Econometrics/, Ch. 3.
+- Cameron & Miller (2015), J. Human Resources 50:317-72.
+- Kleibergen (2005), Econometrica 73:1103-23.
+- van der Vaart, /Asymptotic Statistics/, §5.
+
+* Summary verdict
+
+=concerns=. The core estimator math is correct and matches textbook
+formulas: Cholesky path, whitening, Sigma_theta via G' Lambda G,
+IIDCovariance, ClusteredCovariance, and SyntheticCovariance all
+reproduce reference computations to floating-point tolerance on toy
+inputs. The CU gradient correctly captures =nabla_theta V= via JAX AD
+through the Cholesky and forward-solve. The framework's "no external
+N multiplier" convention is verified: J converges cleanly to
+=chi^2_M= on a Monte Carlo experiment.
+
+The principal concern is /not/ wrong math but a /policy/ discrepancy:
+the design's "anchor-once-then-freeze" tau policy
+(=design.org= §5; =CLAUDE.md= commitment #3) is /not/ implemented in
+v1. =DiagonalTikhonov.apply= is called inside the residual closure at
+every theta evaluation, and the bisection contains a
+=jnp.where(kappa <= kappa_target, 0.0, tau_search)= short-circuit that
+makes =tau= a discontinuous function of theta where the condition
+crosses the target. This breaks the smoothness of the objective
+surface that LM / quasi-Newton solvers rely on.
+
+A second, milder concern: the centering convention is inconsistent
+across the covariance ladder. =IIDCovariance= and
+=ClusteredCovariance= use the uncentered Hansen outer-product form
+=sum psi_j psi_k=, while =SyntheticCovariance= and the
+=AnalyticalCovariance= contract use the centered population-variance
+form =E[psi psi'] - E[psi] E[psi]'=. The two coincide at theta_0
+(where E[psi] = 0 by the moment condition), so the asymptotic claims
+in =mcar-asymptotics.org= still go through, but off-optimum V (and
+hence the CU surface away from the optimum) differs from a centered
+counterpart.
+
+* Verified correctly
+
+| Claim                                                                                  | Status   |
+|----------------------------------------------------------------------------------------+----------|
+| =cholesky= uses =lower=True= (=_internal/cholesky.py:50=)                              | verified |
+| =V = L L'= reconstruction on 3x3 toy                                                   | verified |
+| Whitening identity ||L^{-1} m||^2 = m' V^{-1} m                                        | verified |
+| =Sigma_theta = (G' V^{-1} G)^{-1}= via triangular solve, NOT via inv(numerical Hessian) | verified |
+| =DiagonalTikhonov= form =V + tau diag(V)= (not =V + tau I=) and scale-equivariance     | verified |
+| =IIDCovariance= einsum matches design.org formula element-by-element on 3x3 toy        | verified |
+| =ClusteredCovariance= singletons reduce to =IIDCovariance=                             | verified |
+| =ClusteredCovariance= 2-cluster case matches Cameron-Miller cluster-sum outer product  | verified |
+| =SyntheticCovariance= matches biased sample variance / n (= V_sim per design.org)      | verified |
+| =ContinuouslyUpdated= gradient picks up =nabla_theta V= through Cholesky AD            | verified |
+| J-statistic at unregularised V converges to chi^2_M on 1000 trials                     | verified |
+| The "no external N multiplier" convention (V_X already has 1/N)                        | verified |
+| Sigma_theta delivers Var(theta_hat) directly (not 1/N scaled separately)                | verified |
+| Weighted IID uses w_i^2 inside (Hansen sandwich form), not w_i                         | verified |
+| =moment_contributions= returns d_ij w_i psi_j without 1/N_j normalisation              | verified |
+
+* Findings
+
+** [HIGH] Anchor-once-then-freeze tau policy NOT implemented in v1
+
+- /Where/: =src/emu_gmm/estimator.py:188= calls
+  =V_star, _tau = regularization.apply(V)= /inside/ the residual
+  closure =residual_fn(theta_flat)=, so =tau= is re-computed at every
+  theta evaluation during optimisation.
+- /What design.org §5 specifies/ (lines 285-287):
+  "tau is selected /once/ at an anchor point (first-stage theta_1 for
+  =Fixed= / =Iterated=; a pilot evaluation for =ContinuouslyUpdated=)
+  /and held fixed thereafter/."
+- /What =CLAUDE.md= commitment #3 specifies/:
+  "the anchor-once-then-freeze policy keeps the objective smooth."
+- /Smoothness consequence/: =DiagonalTikhonov.apply=
+  (=regularization.py:122-124=) contains
+  =tau = jnp.where(already_ok, jnp.asarray(0.0), tau_search)=. As
+  theta moves and =kappa(V(theta))= crosses =kappa_target=, =tau=
+  jumps from a positive value to zero (or vice versa). The resulting
+  =V_star(theta) = V(theta) + tau(theta) diag(V(theta))= is
+  discontinuous, hence so is =L(theta)= and the residual =y(theta)=.
+- /Risk/: Levenberg-Marquardt and other Jacobian-based optimisers
+  assume a smooth residual; a discontinuity in =tau= produces
+  spurious convergence behaviour, possibly silent failure to find
+  the true minimum.
+- /Reference/: Hansen (1982) §3 (assumption of continuity of the
+  weighting); van der Vaart §5.21 (smoothness conditions for the
+  delta-method argument that yields asymptotic normality).
+- /Fix sketch/: introduce a separate phase in =estimate()= that
+  computes =V0 = covariance(model, theta_init, measure)=,
+  =V0_star, tau_anchor = regularization.apply(V0)=, then constructs a
+  residual closure that uses
+  =V_star = V(theta) + tau_anchor * diag(V(theta))= /without/
+  recomputing tau at each theta. Pass =tau_anchor= through as a
+  static / frozen quantity.
+
+** [MEDIUM] Centering convention inconsistent across covariance strategies
+
+- /Where/:
+  - =covariance/iid.py:122= and =covariance/clustered.py:143= use
+    /uncentered/ outer products of =psi= values: =sum_i psi_j psi_k=.
+  - =covariance/synthetic.py:84-89= uses /centered/ outer products:
+    =sum_s (psi_s - mbar)(psi_s - mbar)'=.
+  - =design.org= §2 line 128 specifies the centered form for
+    =AnalyticalCovariance= (= ∫ psi psi' f - E[psi] E[psi]'); the
+    user-supplied =covariance_fn= is responsible.
+- /Why it's defensible/: at theta_0 the moment condition forces
+  E[psi(theta_0)] = 0, so centered and uncentered agree
+  asymptotically. Hansen (1982) §3.2 explicitly uses the uncentered
+  outer-product form for the optimal-weight matrix estimator. The
+  MCAR consistency theorem in =docs/mcar-asymptotics.org= Theorem 3
+  is stated and proved for the uncentered form.
+- /Why it's still a concern/: off-optimum (during optimisation) the
+  two differ by =mbar mbar'=, which is /not/ asymptotically negligible
+  at arbitrary theta. The CU objective therefore uses a different
+  surface from a centred counterpart at non-zero =m(theta)=. The
+  /resulting/ optimum is the same, but the /path/ and the
+  /finite-sample CU gradient/ at off-optimum theta differ.
+- /Reference/: Hansen (1982) Lemma 4.1 uses uncentered moments;
+  Hayashi (2000) §3.5 discusses both conventions and notes the
+  off-optimum discrepancy.
+- /Action/: either (a) document the off-optimum discrepancy
+  prominently in =design.org= §2 alongside the IIDCovariance formula,
+  or (b) provide a =CenteredIIDCovariance= variant for users who
+  want the centred form. Not a bug; a convention-documentation gap.
+
+** [LOW] SyntheticCovariance docstring says "n^2 form" without explaining the convention
+
+- /Where/: =covariance/synthetic.py:20-22=:
+  "This is the biased / maximum-likelihood form (denominator n^2)
+  rather than the unbiased n(n-1) form."
+- /Issue/: the wording elides which quantity has the n^2 denominator.
+  The standard "biased vs unbiased" distinction refers to the /sample
+  variance of psi/ (denominator n vs n-1), not to the /variance of
+  the sample mean/ (which gets an extra 1/n). The two-step reasoning
+  ("sample variance with 1/n; divide by n for variance of mean")
+  yields n^2 in the denominator, which is what the code does, but
+  the docstring obscures this.
+- /Action/: clarify the docstring; the n^2 comes from
+  =(sample variance) / n = (1/n) * (1/n) sum (psi-mbar)^2=.
+
+** [LOW] =_effective_n_per_moment= docstring lag
+
+- /Where/: =estimator.py:71-84=. Docstring says
+  "For EmpiricalMeasure (future)" but the code already handles
+  EmpiricalMeasure via the =mask= / =weights= attributes branch.
+- /Action/: tidy the docstring; remove "(future)".
+
+** [LOW] Quadratic-form derivation in design.org Section 4 is correct but does not match the implementation route
+
+- /Where/: =design.org= §4 line 241 derives
+  =nabla Q = 2 G' V^{-1} m - m' V^{-1} (nabla V) V^{-1} m=.
+- /Implementation route/: The estimator constructs the residual
+  =y(theta) = L(theta)^{-1} m(theta)= and lets the LM solver compute
+  =J^T y= with =J = dy/dtheta= via JAX AD. The full =nabla Q= falls
+  out automatically because LM forms =2 J^T y= for the gradient of
+  =||y||^2=.
+- /Sanity/: numerical check confirms the residual-path gradient
+  agrees with the direct =jax.grad(Q)= to floating-point tolerance.
+- /Action/: optional cross-reference in =design.org= §5 noting the
+  LM residual route delivers the §4 gradient automatically.
+
+* Methodology
+
+- Read =docs/design.org= §2-§5 and =docs/mcar-asymptotics.org=.
+- Read =src/emu_gmm/estimator.py=, =src/emu_gmm/weighting.py=,
+  =src/emu_gmm/regularization.py=, =src/emu_gmm/_internal/cholesky.py=,
+  =src/emu_gmm/covariance/{iid,clustered,synthetic,analytical}.py=,
+  and =src/emu_gmm/measures/{empirical,synthetic}.py=.
+- Wrote and ran three numerical-verification scripts in =/tmp/=
+  (not committed):
+  - =verify_math.py= --- Cholesky, whitening, Tikhonov,
+    IIDCovariance, ClusteredCovariance, SyntheticCovariance,
+    Sigma_theta, weighted IID.
+  - =verify_cu_gradient.py= --- CU gradient picks up nabla_theta V.
+  - =verify_lm_residual.py= --- LM residual gradient matches direct
+    nabla Q.
+  - =verify_jstat.py= --- J-stat distribution under null on 1000
+    Monte Carlo trials.
+- All checks pass to floating-point tolerance.
+
+* Map to the prompt's verification checklist
+
+| Item                                                                   | Result                                          |
+|------------------------------------------------------------------------+-------------------------------------------------|
+| V(θ) = E[ψψ'] − m m' (centered)                                       | partial: see [MEDIUM] above                     |
+| =V_X= has 1/N absorbed; J = ||L^{-1} m||^2 = chi^2_{M-K} without N    | verified                                        |
+| =V = L L'= with =lower=True= via =jax.scipy.linalg.cholesky=          | verified                                        |
+| Whitening y = L^{-1} m, Q = ||y||^2 = m' V^{-1} m                     | verified                                        |
+| Σ_θ = (G' Λ G)^{-1}, NOT inv(numerical Hessian)                       | verified                                        |
+| Pairwise-overlap IIDCovariance einsum matches design.org element-wise | verified                                        |
+| ClusteredCovariance cluster-totals matches Cameron-Miller             | verified                                        |
+| DiagonalTikhonov: V★ = V + τ·diag(V), scale-equivariant               | verified                                        |
+| anchor-once-then-freeze policy                                        | NOT implemented; see [HIGH] above              |
+
+* Open issues
+
+None filed in the GitHub tracker for this lens; the [HIGH] finding
+warrants one (see "Fix sketch" under that finding).

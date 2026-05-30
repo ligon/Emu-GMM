@@ -1,0 +1,178 @@
+#+TITLE: Lens B — Architectural-commitment audit (post-wf6)
+#+AUTHOR: Claude
+#+DATE: 2026-05-29
+
+* Verdict
+~preserved~ — all eight CLAUDE.md architectural commitments hold against the
+merged code. Each was probed with a concrete runtime experiment whose
+expected result would fail if the commitment were violated; all eight passed.
+
+* Scope
+Repository: ~/global/home/users/ligon/mirrors/Emu-GMM~ at branch ~main~
+post-wf6. Relevant recently-merged PRs:
+- wf4: #43, #44, #45, #39
+- wf5: #31, #33, #36, #30, #32, #37, #34, #35, #38, #46, #47, #48, #49
+
+All eight commitments from CLAUDE.md "Architectural commitments worth
+knowing" were checked.
+
+* Commitment 1 — Measure ⊥ CovarianceStrategy
+PRESERVED.
+
+Probe: instantiate a single ~EmpiricalMeasure(x, mask, weights)~ and pair it
+with both ~IIDCovariance()~ and ~ClusteredCovariance(cluster_ids, n_clusters)~
+without modifying the measure. Both produce ~(M, M)~ matrices; they differ
+numerically; ~em.x~ is unchanged after both calls.
+
+Verified at: ~src/emu_gmm/covariance/{iid,clustered}.py~ — both take
+~measure: Any~ and read only the measure's public interface.
+
+* Commitment 2 — Measure is a computational interface
+PRESERVED.
+
+Probe: define ~MyMinimalMeasure~ as a ~jdc.pytree_dataclass~ with only
+~expectation()~ and ~jacobian()~ methods, no data, no draws, no sampler.
+Pass it to ~estimate()~ with ~AnalyticalCovariance(covariance_fn=eye)~ and
+~scipy_lm()~. Recovers ~(a, b) = (0.5, 1.5)~ to numerical tolerance.
+~isinstance(mm, Measure)~ is ~True~ via the runtime-checkable Protocol.
+
+Verified at: ~src/emu_gmm/types.py~ lines 85-98 (Protocol only requires
+~expectation~ and ~jacobian~); ~src/emu_gmm/estimator.py~ lines 64-78
+(~_sample_observation~ gracefully returns None for measures that expose
+neither ~_draws~ nor ~x~).
+
+* Commitment 3 — Pairwise overlap → adaptive Tikhonov; anchor-once-then-freeze
+PRESERVED.
+
+Probe (post-#45, post-#47): construct a problem where
+~cond(V(theta_init)) = 22~ (below ~kappa_target=100~, so tau anchors at 0)
+but ~cond(V(theta_hat)) ≈ 9200~ (would re-anchor at tau=1000 if the policy
+were violated). ~result.diagnostics.tau_realised == 0~, matching the
+anchor at ~theta_init~ and *not* re-anchoring at ~theta_hat~. Confirmed
+that ~estimator.py~ lines 405-419 call ~regularization.apply(V0)~ once at
+~theta_init~ then route the residual closure through ~_apply_anchored~,
+which delegates to ~regularization.apply_fixed_tau(V, tau_anchor)~ for
+DiagonalTikhonov (line 417-419) and the algebraic form
+~V + tau_anchor * diag(V)~ for arbitrary RegularizationStrategy.
+
+Post-#47 diagonal-V branch: separately verified that ~apply_fixed_tau~
+correctly dispatches the diagonal branch
+(~V + tau * (tr(V)/M) * I~) but still uses the *anchor* tau, not a re-anchored
+one. Probe: anchor at diagonal ~V0 = diag(1, 1, 1e-4)~ to get
+~tau0 ≈ 0.015~; apply at ~V_hat = diag(1, 1, 1e-2)~ where a re-anchor
+would give ~tau = 0~. ~apply_fixed_tau~ returns the diagonal-branch
+algebraic form at the *frozen* tau0, not 0.
+
+Verified at: ~src/emu_gmm/regularization.py~ lines 220-257 (~apply_fixed_tau~
+takes an externally-supplied ~tau~ and dispatches diagonal vs canonical on
+the supplied V's structure, but never re-runs the bisection).
+
+* Commitment 4 — CU gradient retains ∇θV term
+PRESERVED.
+
+Probe: construct a tiny problem where
+- ~m(theta) = (theta.a - 1, theta.b - 2)~
+- ~V(theta) = diag(theta.a^2 + 1, theta.b^2 + 1)~
+
+Compute ~jax.grad~ of ~0.5 * ||L(theta)^{-1} m(theta)||^2~ under
+~ContinuouslyUpdated.whitening_residual~ vs the "naive" version that freezes
+V at the current theta and only varies m. The two gradients differ
+(~(-0.48, -0.75)~ vs ~(-0.40, -0.50)~), confirming AD threads through the
+Cholesky and the V dependence. The IteratedWeighting addition (#34) did
+not perturb the CU class — its ~whitening_residual~ still recomputes the
+Cholesky inside the call (weighting.py:215-217), preserving the V trace.
+
+* Commitment 5 — Sigma_theta via G' Λ G, never numerical Hessian
+PRESERVED.
+
+Verified at: ~src/emu_gmm/estimator.py~ lines 620-634 inside the post-#45
+hoisted ~_compute_inference~ jit'd helper:
+#+begin_src python
+L_local = cho.cholesky(V_star_local)
+...
+G_local = jnp.asarray(G_local_raw)  # from measure.jacobian
+Z_local = jax.scipy.linalg.solve_triangular(L_local, G_local, lower=True)
+info_local = Z_local.T @ Z_local           # G' Λ G via Cholesky
+Sigma_local = jnp.linalg.inv(info_local)
+#+end_src
+
+Also verified at: ~src/emu_gmm/diagnostics.py~ lines 290-296 inside
+~compute_cond_info~ (#31): the same ~Z = solve_triangular(L, G); info = Z.T @ Z~
+construction is used for the Hessian-condition trio. Comment in code at
+line 293 even says ~"G' Lambda G, data-only."~. No call to ~jax.hessian~ of
+the half-objective for inference purposes.
+
+The penalty Hessian (#35, when penalty != None) is added via
+~info_full = info_data + 0.5 * H_p~ (diagnostics.py:308-311) but Sigma_theta
+itself uses only the data G' Λ G — the penalty Hessian flows only into the
+~'raw'~ view of ~cond_info~.
+
+* Commitment 6 — Labelled outputs via LabelContext
+PRESERVED.
+
+Verified at: ~src/emu_gmm/types.py~ lines 384-428: ~EstimationResult.coef_table~
+uses ~param_names = list(self.labels.param_names)~ — i.e., it routes through
+the ~LabelContext~ stored on the result, *not* by hand-rolling parameter
+names from ~theta_hat~'s fields. ~to_pandas()~ at line 453-454 likewise
+reads ~param_names~ and ~moment_names~ from ~self.labels~.
+
+~standard_errors~ (line 380-381) builds a labelled NamedArray on the
+~params_axis(K)~ taken from the array shape — not from the LabelContext —
+but the consuming ~coef_table~ aligns it with the LabelContext's names.
+
+* Commitment 7 — JAX float64 enabled at package import
+PRESERVED.
+
+Probe (instrumented): monkey-patch ~jax.config.update~ to record what
+submodules are loaded at the moment ~jax_enable_x64~ is set; then
+~import emu_gmm~ from a fresh interpreter. Result: zero ~emu_gmm.*~
+submodules loaded before the float64 flip, and the flag is ~True~ after
+import.
+
+Verified at: ~src/emu_gmm/__init__.py~ — line 41 is
+~_jax.config.update("jax_enable_x64", True)~; *all* ~from emu_gmm.<sub>~
+imports start at line 44 (covariance) and later. The ~# ruff: noqa: E402~
+comment at line 22 acknowledges this deliberate order.
+
+* Commitment 8 — Optimiser modularity
+PRESERVED.
+
+Probe: run ~estimate()~ end-to-end on a synthetic GMM problem with
+~weighting=Identity()~ and ~optimizer=scipy_lm()~. Recovers theta_hat,
+~converged == True~, ~optimizer_info.backend == "scipy"~,
+~optimizer_info.status == "converged"~. Round-trip the returned
+~OptimizerInfo~ through ~jax.tree_util.tree_flatten~/~tree_unflatten~
+post-#46: 2 leaves (~steps~, ~final_objective~); ~status~ and ~backend~
+ride in the treedef and survive the round-trip. Passing the unflattened
+info through ~@jax.jit~ also returns the correct ~final_objective~.
+
+Verified at: ~src/emu_gmm/optimizer.py~ — both ~_OptimistixLM~ and ~_ScipyLM~
+implement the ~Optimizer~ protocol (~__call__(residual_fn, theta_init) ->
+(theta_opt, OptimizerInfo)~) and both produce ~OptimizerInfo~ instances
+with the post-#46 pytree structure (~types.py~ lines 169-187:
+~steps~/~final_objective~ traced; ~status~/~backend~ static).
+
+* Summary
+All eight architectural commitments listed in CLAUDE.md hold against the
+merged code post-wf6. No drift detected by these probes.
+
+Notes:
+- Commitment 3 is the one most at risk under future refactors because the
+  anchor-once-then-freeze policy is split across two files (the anchor is
+  computed in ~estimator.py~ and applied via ~_apply_anchored~, which calls
+  ~regularization.apply_fixed_tau~ when available). The probe explicitly
+  forced a regime where the realised tau differed from a re-anchored tau,
+  and the framework correctly used the realised (frozen) value. Post-#47's
+  diagonal-V dispatch is also exercised through ~apply_fixed_tau~ — both
+  branches respect the freeze.
+- Commitment 5 has a subtle interaction with the penalty hook (#35): the
+  penalty Hessian ~H_p~ is added in only ~cond_info['raw']~, never into
+  Sigma_theta itself. Sigma_theta remains the data-only ~(G' Λ G)^{-1}~,
+  matching the delta-method-variance interpretation.
+- Commitment 4: IteratedWeighting (#34) follows a different path
+  (Fixed-weight inner loop) but does *not* alter the CU pathway —
+  ~ContinuouslyUpdated.whitening_residual~ still recomputes the Cholesky
+  inside the call, so AD picks up the V dependence as before. The new
+  CU-fallback in ~IteratedWeighting.whitening_residual~ also recomputes
+  the Cholesky, but that fallback is only used outside the iterated
+  driver.

@@ -1,0 +1,478 @@
+#+TITLE: Lens D: design.org vs. implementation drift
+#+AUTHOR: Audit subagent (Lens D)
+#+OPTIONS: toc:nil num:nil
+
+* Summary
+
+Post-wf6 (16 PRs) the implementation is broadly faithful to
+=docs/design.org='s architectural commitments --- the interface algebra,
+Cholesky pipeline, anchored-tau policy, $G'\Lambda G$ information
+construction, and named-axis taxonomy are all preserved. The drift is
+*documentation-side*: =design.org= has not been updated to reflect six
+substantive landings (the diagonal-V regularisation branch from #47, the
+=cond_info= trio from #31, the Welch--Satterthwaite adjusted
+J-p-value from #45, the in-objective penalty hook from #35, the iterated
+weighting strategy from #34, and the multi-asset Euler example in
+=examples/euler.py= that was always inconsistent with §3's M=1 prose).
+
+Verdict: *minor-drift*. Nothing in the implementation contradicts
+=design.org='s core math; nothing in =design.org= is silently wrong
+about what the code does. But six places in the spec are stale enough
+that a reader relying on =design.org= alone would mispredict what the
+v1.x code actually offers.
+
+* Probe results
+
+** §2 (Mathematical Interfaces, Orthogonality)                       :passed:
+:PROPERTIES:
+:VERDICT: preserved
+:END:
+
+design.org lines 41--83 commit to:
+
+- =StructuralModel= / =Measure= / =CovarianceStrategy= as orthogonal
+  primitives (line 47);
+- =Context= as sugar, with the canonical call signature
+  =Estimator(model, measure, strategy, weighting)= (line 50);
+- =CovarianceStrategy= parallel to (not nested under) =Measure= (line 50).
+
+Implementation =src/emu_gmm/types.py:86-161= preserves all three as
+=Protocol= classes with the design's signatures. =estimate(model,
+measure, *, covariance, weighting, regularization, optimizer,
+theta_init, ...)= (=estimator.py:278-289=) takes the unbundled form
+verbatim. =EmpiricalContext= / =AnalyticalContext= / =SyntheticContext=
+are not implemented --- consistent with design.org line 83 calling them
+"sugar, not a third primitive".
+
+*Note:* design.org §3 (Euler walkthrough) references
+=EmpiricalContext= / =AnalyticalContext= / =SyntheticContext= by name
+in its ASCII diagram (lines 174--194) and bullet text. The implementation
+uses the unbundled =(measure, covariance)= pair. The diagram is
+illustrative, but a new reader expecting an =EmpiricalContext= class will
+not find one. *Recommend:* update design.org §3 to note that v1 uses the
+unbundled form (or adopt the sugar in §2). Low-priority doc churn.
+
+** §3 (Euler example)                                                :drift:
+:PROPERTIES:
+:VERDICT: minor-drift
+:END:
+
+design.org §3 lines 159--167 specify the *single-asset* Hansen-Singleton
+Euler:
+
+#+BEGIN_QUOTE
+The observation vector is $x_t = (c_t, c_{t+1}, r_{t+1}) \in \mathbb{R}^3$
+... With $M = 1$ and $K = 2$, the analytical $M \times K$ Jacobian is
+the $1 \times 2$ row ...
+#+END_QUOTE
+
+Implementation =src/emu_gmm/examples/euler.py= (line 73--82) implements
+the *multi-asset* version (=N_ASSETS = 3=, =M = 3=, observation vector
+=(c_t, c_{t+1}, r_1, r_2, r_3)=). The system is over-identified with
+=J_dof = 1=, which is required for a meaningful J-test (single-asset
+case has =J_dof = -1=).
+
+This is consistent with =docs/api-sketch.org= §5 (line 420--426) which
+correctly states $J = 3$ assets, $M = 3$, $J_\text{dof} = 1$, and with
+=CLAUDE.md='s commitment that =examples.euler= is the shared model
+backing all three acceptance tests. *The implementation is right;
+design.org §3 is stale and was never updated when the example moved from
+single-asset (degenerate, can't be estimated) to multi-asset (proper
+over-identified system).*
+
+design.org §3 line 184 also says "Log-normal preference shock simulator
+parameterised at theta", but =euler_sampler_factory.sampler= ignores
+theta (=examples/euler.py:122-123= =del theta=). =api-sketch.org= §5
+admits this ("the data-generating process is exogenous, e.g. the Euler
+demo case where ... the framework's AD treats both uniformly").
+design.org should match.
+
+*Recommend:* rewrite design.org §3 against the multi-asset
+implementation. Add a sentence acknowledging the
+theta-independent sampler / common-random-numbers shortcut for the
+identification round-trip.
+
+** §4 (Differentiation: AD at elementwise boundary)                  :passed:
+:PROPERTIES:
+:VERDICT: preserved
+:END:
+
+design.org §4 lines 213--219 commit to:
+
+#+BEGIN_QUOTE
+The AD graph is strictly isolated at the element-wise boundary:
+Observation-Level Graphing ... Vectorized Batches (Vmap) ... Graph
+Detachment.
+#+END_QUOTE
+
+Implementation:
+
+- =SyntheticMeasure.expectation= (=measures/synthetic.py:109-121=)
+  vmaps =psi= over the draws, then takes the mean. AD through
+  =jax.jacfwd= in =jacobian()= goes through the per-draw =psi=, not
+  through an aggregation loop.
+- =EmpiricalMeasure.expectation_and_contributions=
+  (=measures/empirical.py:164-243=) vmaps =psi_at= over =x_safe=
+  (line 232), then sums; the mask multiplication is post-vmap.
+- Post-#49 =_compute_inference= (=estimator.py:577-682=) is one
+  =jax.jit= boundary that XLA fuses; the =jax.vmap(psi_at)= calls
+  inside =expectation_and_contributions= still live at the observation
+  level inside that fused region. AD termination at the elementwise
+  boundary is preserved.
+
+#45's residual closure factory (=estimator.py:458-514=) preserves the
+elementwise-then-vmap pattern --- the vmapped =psi= evaluations flow
+through =measure.expectation= --> reduction --> Cholesky --> whitening
+--> ||y||^2, with =jax.grad/jax.jacfwd= picking up the chain at the
+right level.
+
+** §4 (CU vs Iterated equivalence)                                   :passed:
+:PROPERTIES:
+:VERDICT: preserved
+:END:
+
+design.org §4 lines 243--249 explicitly warn:
+
+#+BEGIN_QUOTE
+This is the theoretical justification for why the /Iterated/ weighting
+strategy ... converges to the same fixed point as the /Continuously
+Updated/ strategy. It is *not* a license to drop $\nabla_\theta V$ from
+the CU gradient implementation: away from the optimum the dropped term
+is $O_p(1)$, and silently omitting it produces an estimator that is
+neither CU nor Iterated.
+#+END_QUOTE
+
+Implementation (#34, =weighting.py:177-217=):
+
+- =ContinuouslyUpdated.whitening_residual= computes
+  =L = cholesky(V); return forward_solve(L, m)= --- both are
+  differentiable, so JAX AD threads through V's $\theta$-dependence
+  automatically. *No manual dropping of any term.* The CU gradient
+  picks up $\nabla_\theta V$ exactly because the Cholesky + forward
+  solve carry the dependence.
+
+- =IteratedWeighting.whitening_residual= (=weighting.py:297-316=)
+  delegates to a fresh =cholesky(V)= --- a continuously-updated fallback
+  for direct calls --- but the iterated *algorithm* is driven outside,
+  by =_run_iterated_weighting= (=estimator.py:113-275=) which builds a
+  =Fixed.from_V0(V_star_k)= per outer step. The inner Fixed-weight
+  residual has =L = L_k= held constant, so its gradient (correctly) does
+  not see $\nabla_\theta V_k$; the V-refresh between outer steps closes
+  the iteration. This is the architecturally clean realisation of
+  design.org §4: each strategy picks up the gradient the design wants
+  it to, via JAX AD, not by hand-derived terms.
+
+*Worth recording:* #34 did not silently fold an iterated computation
+into the CU gradient, nor vice versa. The two strategies are
+implemented as distinct surfaces.
+
+** §5 (Cholesky pipeline, Q = ||y||^2)                               :passed:
+:PROPERTIES:
+:VERDICT: preserved
+:END:
+
+design.org §5 lines 256--264 specify:
+
+\[ V = L L^\top,\quad L y = m,\quad Q = y^\top y = \|y\|^2 \]
+
+Implementation:
+
+- =_internal/cholesky.py:cholesky= (line 27--50) returns
+  =jax.scipy.linalg.cholesky(V, lower=True)=.
+- =forward_solve(L, b)= solves $L y = b$ (line 53--70).
+- =ContinuouslyUpdated.whitening_residual= computes
+  =L = cholesky(V); return forward_solve(L, m)= (=weighting.py:213-217=).
+- Post-#45 =_compute_inference= (=estimator.py:577-682=): builds
+  =V_star_local= --> =L_local= --> =y_local= (lines 618--624) --> =J_local
+  = jnp.sum(y_local * y_local)= (line 625). The pipeline is intact.
+- Post-#49 consolidation: =_compute_inference= folds the duplicate
+  Cholesky into one fused kernel; the path is still {V --> V* --> L -->
+  y --> Q} just XLA-fused. *No short-circuit.*
+
+The =numerics/ridge_inverse= helper (#33) exposes $M^{-1}_\text{ridged}$
+to external callers via Cholesky --- never =jnp.linalg.inv(M)= directly
+(line 122). Consistent with design.org §5's "avoids calculating
+$V^{-1}_\mu$ directly" commitment.
+
+** §5 (Regularisation: anchor-once-then-freeze)                      :drift:
+:PROPERTIES:
+:VERDICT: minor-drift
+:END:
+
+design.org §5 lines 277--285 specify diagonal-Tikhonov as:
+
+\[ V^\star = V + \tau\,\operatorname{diag}(V) \]
+
+with $\tau$ "selected once at an anchor point ... and held fixed
+thereafter".
+
+Implementation =regularization.py:DiagonalTikhonov.apply= and
+=apply_fixed_tau= preserve the anchor-once-then-freeze policy
+(=estimator.py:405-419=, calling =apply= once at =theta_init= and
+=apply_fixed_tau= during the optimization). *That part is intact.*
+
+But #47 added a *diagonal-V dispatch* (=regularization.py:80-120=,
+=_apply_tau=) which switches to
+
+\[ V^\star = V + \tau\,(\operatorname{tr}(V)/M)\,I \]
+
+whenever =V= is detected as (near-)diagonal --- because on a diagonal V
+the canonical form degenerates to $(1+\tau)V$ and the condition number
+is unchanged.
+
+design.org §5 does not mention this dispatch. It says diagonal-Tikhonov
+is "scale-equivariant under per-moment rescaling", which is true *in
+the non-diagonal branch* but not in the diagonal branch (the latter is
+only scale-equivariant under uniform rescaling --- the additive
+$\operatorname{tr}(V)/M\,I$ shift is isotropic).
+
+This is *engineering-necessary* (the regulariser was useless on
+=IIDCovariance= and =SyntheticCovariance= with independent moments,
+which is the most common case) but not currently documented as a
+deviation. *Recommend:* update design.org §5 with a one-paragraph note:
+
+#+BEGIN_QUOTE
+Implementation note: when V is detected as (near-)diagonal the canonical
+form degenerates to (1+τ)V (no change in κ); the v1 implementation
+falls back to V + τ·(tr V / M)·I in that case, which restores the κ
+control at the cost of trading per-moment scale equivariance for
+uniform-scale equivariance. The detector uses a tight relative tolerance
+(_DIAG_RTOL = 1e-12) so generic floating-point off-diagonals do not
+trip it; common-case diagonal covariances (e.g. IIDCovariance on
+uncorrelated moments) deterministically take the additive branch.
+#+END_QUOTE
+
+** §5 (Overidentification statistic + adjusted p-value)              :drift:
+:PROPERTIES:
+:VERDICT: minor-drift
+:END:
+
+design.org §5 lines 287, 299--301 say the J statistic converges to
+$\chi^2_{M-K}$ under nominal regularisation, and under binding
+regularisation:
+
+#+BEGIN_QUOTE
+the limit is a weighted sum of chi-squared variates; the inference
+engine reports both the nominal and regularization-adjusted critical
+values as described in the regularization section above.
+#+END_QUOTE
+
+Implementation (#45):
+
+- =EstimationResult.J_stat=, =J_dof=, =J_pvalue= (=types.py:335-338=)
+  are the nominal $\chi^2_{M-K}$ tail probability.
+- =J_pvalue_adjusted= (=types.py:338=) is the
+  *Welch--Satterthwaite-approximated* generalised-chi-squared survival
+  function under the unregularised limit. =diagnostics.py:120-226=
+  implements the projection onto $\operatorname{col}(\tilde G)^\perp$
+  and the moment-matching ratio. *This is more than design.org §5
+  describes:* the design says "regularization-adjusted critical
+  values"; the implementation reports a p-value (mathematically
+  equivalent) computed via a specific approximation scheme
+  (Welch--Satterthwaite, not Davies / Imhof) that design.org does not
+  name.
+
+*Recommend:* extend design.org §5 with a paragraph naming the v1
+adjustment scheme:
+
+#+BEGIN_QUOTE
+v1 reports the regularization-adjusted p-value via the
+Welch--Satterthwaite moment-matching approximation to the generalised
+chi-squared limit (mcar-asymptotics.org Theorem 6). The Welch--Satterthwaite
+form matches the first two moments of the weighted-chi^2 sum to a scaled
+chi^2; users requiring exact CDFs (Davies' or Imhof's algorithm) should
+compute them externally from the {V, V*, G} triple available on the
+EstimationResult. The =J_pvalue_adjusted= field equals =J_pvalue= when
+the ridge is not binding (tau <= tau_threshold).
+#+END_QUOTE
+
+** §5 (Identification diagnostics)                                   :passed:
+:PROPERTIES:
+:VERDICT: preserved
+:END:
+
+design.org §5.4 (lines 289--296) describes three pathology classes:
+
+1. Local boundary pathology (gradient zero, objective positive);
+2. Conditioning pathology (Cholesky pivot failure);
+3. Numerical instability (gradient nonzero at known root).
+
+It says "Each diagnostic surfaces a structured report (failure category,
+offending dimension index, residual magnitude)".
+
+Implementation surfaces:
+
+- =Diagnostics.cholesky_pivot_min= --- raw pivot (covers pathology 2);
+- =Diagnostics.final_gradient_norm= --- raw gradient norm (covers
+  pathology 1 and 3 jointly);
+- =Diagnostics.cond_info= (#31) --- ='raw'=, ='data_only'=,
+  ='exclude_gauge'= condition numbers of $G'\Lambda G$ (additional
+  conditioning diagnostic beyond design.org §5.4);
+- No structured *classification* into failure types.
+
+=CLAUDE.md= explicitly defers the classification: "Structured
+identification-failure taxonomy: design.org Section 5.4 describes three
+pathology classes; v1 surfaces the raw diagnostics but doesn't classify
+failures into typed reports."
+
+#31's =cond_info= *raises the bar* on the raw-diagnostics side (a
+condition number of $G'\Lambda G$ is the proper rank-defect identifier
+that the pivot-only diagnostic cannot catch), but does not promise the
+classification design.org §5.4 says is the long-term direction. Consistent
+with the v1 deferral.
+
+** §6 (Boundary Interfaces / Named Tensors)                          :drift:
+:PROPERTIES:
+:VERDICT: minor-drift
+:END:
+
+design.org §6 lines 325--351 commits to:
+
+- canonical Haliax axes =parameters=, =parameters_dual=, =moments=,
+  =moments_dual=, =observations= (line 332--336);
+- =Sigma_theta= as =NamedArray[Params, ParamsDual]= (line 348);
+- =V_X= type-equivalent (line 347 about Lambda);
+- "The InferenceEngine returns parameter arrays, covariance matrices,
+  and overidentification statistics that inherently carry their
+  coordinate strings."
+
+Implementation (=_internal/axes.py:30-34=, =estimator.py:704-710=):
+
+- Five canonical axes implemented as factory functions. The
+  *_dual naming convention is enforced (so =ha.dot= cannot alias
+  contractions). Matches design.org §6.
+- =EstimationResult.Sigma_theta= and =V_X= are =ha.NamedArray=
+  instances on the canonical axes. Matches.
+
+#44's additions:
+
+- =EstimationResult.standard_errors= (=types.py:362-381=) returns a
+  =NamedArray= on the =parameters= axis. *Correctly labelled.*
+- =EstimationResult.coef_table= (=types.py:384-428=) returns a *plain
+  =pandas.DataFrame=*, hand-rolling parameter-name indexing without
+  routing through =label_matrix=. The labels come from =self.labels=
+  (=LabelContext.param_names=), not from a =NamedArray=.
+
+This is a minor architectural seam: design.org §6 frames egress as
+"labelled NamedArrays --> pandas at the I/O boundary", and =coef_table=
+skips the NamedArray step, going =flat_params --> pandas= directly. The
+*output* labelling is correct (parameter names match the canonical
+axis), but the architectural claim that all labelled outputs route
+through NamedArray is weakened: =coef_table= would be unable to
+participate in a haliax-native downstream consumer.
+
+*Recommend:* either (a) document this exception in design.org §6 as a
+deliberate pandas-only egress path for tabular display, or (b) refactor
+=coef_table= to wrap intermediate values in =NamedArray= first and
+materialise to DataFrame at the boundary. (a) is the cheaper option and
+preserves the user-visible surface.
+
+design.org §6 line 354--356 also specifies =mask in
+ha.NamedArray[Obs, Moments, bool]=. Implementation
+=EmpiricalMeasure.mask= is a plain =Float[Array, "N M"]= (float 0/1, not
+bool, not NamedArray). =from_pandas= accepts NamedArray inputs but
+stores plain arrays. Same minor doc/impl seam: the storage is
+intentionally plain JAX for jit compatibility; design.org's NamedArray-
+bool spec is aspirational rather than realised. *Recommend:* qualify the
+sentence in §6 to "the boundary interfaces accept NamedArray[..., bool]
+inputs; internal storage is the underlying plain JAX array for jit
+compatibility."
+
+* Survived probes (no drift detected)
+
+- *§2 strict separation of Measure / CovarianceStrategy*: orthogonal
+  in =types.py= protocols and =estimator.py= call signature; matches
+  the "design-awareness ladder lives entirely on the strategy side"
+  claim. The =IIDCovariance= / =ClusteredCovariance= /
+  =SyntheticCovariance= split confirms.
+- *§4 elementwise AD boundary preserved after #49*: the jit hoisting
+  inside =_compute_inference= fuses the pipeline but the per-observation
+  =vmap(psi)= still lives at the right level inside the fused region.
+- *§5 anchor-once-then-freeze tau policy*: =estimator.py:405-419=
+  computes =tau_anchor= once at =theta_init= and reuses
+  =apply_fixed_tau= through the optimisation. Smoothness of the
+  residual surface is preserved.
+- *§5 Cholesky-only pipeline, no =inv(V)= in the hot path*:
+  =cholesky.py:whiten/quadratic_form= use forward solves; #33's
+  =ridge_inverse= helper materialises an inverse only on user
+  request and via Cholesky.
+- *§5 information matrix as $G'\Lambda G$, never numerical Hessian*:
+  =estimator.py:632-634= (=Z = solve_triangular(L, G, lower=True);
+  info_local = Z.T @ Z=); =compute_cond_info= (=diagnostics.py:286-325=)
+  reproduces the construction. Numerical Hessians of $Q$ are not used.
+- *§6 dual-axis naming convention*: =axes.py:30-78=. Matches
+  design.org's "naming both indices of a symmetric matrix with the same
+  string causes ha.dot to alias the contraction and silently produce
+  wrong results" warning.
+- *CLAUDE.md commitment 7 (float64)*: =__init__.py:39-41= updates
+  =jax_enable_x64= before any sub-module import.
+
+* Items consistent with design.org / CLAUDE.md deferral statements
+
+- No =EmpiricalContext= / =AnalyticalContext= / =SyntheticContext=
+  classes (design.org calls Context "sugar, not a third primitive";
+  v1 takes the unbundled path).
+- =SMM= (combining empirical and synthetic measures with $(1+1/S)$
+  inflation): not implemented. =SyntheticCovariance= docstring says
+  v2.
+- =StratifiedCovariance=, =ReplicateWeightCovariance=: not implemented.
+  =CLAUDE.md= confirms v2.
+- =EigenvalueFloor=, =NearestPSD=: not implemented (only
+  =DiagonalTikhonov=). =CLAUDE.md= confirms v2.
+- Structured identification-failure taxonomy: =CLAUDE.md= confirms
+  deferred.
+- Quadrature engine for =AnalyticalMeasure=: user supplies closed-form
+  =expectation_fn=. =CLAUDE.md= confirms deferred.
+- Real-data acceptance test on empirical path: deferred per =CLAUDE.md=.
+
+* Recommendations summary
+
+| # | Section          | Action            | Severity |
+|---+------------------+-------------------+----------|
+| 1 | design.org §3    | Rewrite for       | medium   |
+|   |                  | multi-asset Euler |          |
+|   |                  | (M=3, K=2,        |          |
+|   |                  | J_dof=1)          |          |
+| 2 | design.org §5    | Document          | medium   |
+|   | regularisation   | diagonal-V        |          |
+|   |                  | dispatch (#47)    |          |
+| 3 | design.org §5    | Name              | low      |
+|   | overidentification| Welch--          |          |
+|   |                  | Satterthwaite for |          |
+|   |                  | J_pvalue_adjusted |          |
+|   |                  | (#45) and point   |          |
+|   |                  | to mcar-          |          |
+|   |                  | asymptotics       |          |
+|   |                  | Theorem 6         |          |
+| 4 | design.org §3    | Note unbundled    | low      |
+|   |                  | (measure, cov)    |          |
+|   |                  | call vs. Context  |          |
+|   |                  | sugar             |          |
+| 5 | design.org §6    | Note coef_table's | low      |
+|   |                  | pandas-direct     |          |
+|   |                  | egress; clarify   |          |
+|   |                  | mask is plain     |          |
+|   |                  | JAX internal      |          |
+|   |                  | storage           |          |
+| 6 | design.org       | Mention #34       | low      |
+|   | §4 / §5          | IteratedWeighting |          |
+|   |                  | landed and points |          |
+|   |                  | to CU as default  |          |
+|   |                  | (currently §5     |          |
+|   |                  | describes it      |          |
+|   |                  | abstractly under  |          |
+|   |                  | the strategy      |          |
+|   |                  | enumeration but   |          |
+|   |                  | the convergence-  |          |
+|   |                  | caveat warning    |          |
+|   |                  | rationale is in   |          |
+|   |                  | =weighting.py=,   |          |
+|   |                  | not in the spec)  |          |
+
+None of these are *implementation* fixes. The implementation reflects
+=CLAUDE.md='s architectural commitments and matches the spec where the
+spec is current; =design.org= itself has been outpaced by six landings
+(#31, #34, #35, #45, #47, #49) and by the multi-asset Euler example that
+landed prior to wf4. Suggested fix: a single sweep of =design.org=
+sections 3, 4, 5, 6 against the post-wf6 surface, with the additions
+above documented inline.
