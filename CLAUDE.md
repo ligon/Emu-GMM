@@ -12,7 +12,7 @@ inference through a single pipeline.
 ## Status
 
 v1 is implemented and operational (plus the v2 #79/#80 stratified-covariance
-module). 654 tests pass; `make quick-check` is
+module). 659 tests pass; `make quick-check` is
 clean (ruff + black + mypy + pytest). All three measure paths (synthetic,
 analytical, empirical) run end-to-end against the bundled multi-asset Euler
 example in `src/emu_gmm/examples/euler.py`. The runnable demo at
@@ -148,21 +148,24 @@ been through four reviewer iterations; the abstractions are deliberate.
     enters via dof/centering), so a per-pair *numerator* would double-count
     it. Resolved jointly with the consumer's design appendix (the per-pair
     numerator was considered and rejected). The
-    `DesignAwareCovariance` mixed assembly (#80) is a *sum* $V^{des}+V^{smp}$
-    (PSD by construction); its cross block $V_{TS}$ is **estimated, not
-    zeroed**, and the all-design case reduces **bit-for-bit** to
-    `StratifiedCovariance` via a *shared* (not copied) engine. Stratified
-    reduces to `ClusteredCovariance` only *in expectation* (centered vs
-    uncentered), not bit-for-bit.
+    `DesignAwareCovariance` mixed assembly (#80) *composes* $V_{TT}$ (design,
+    delegated) + $V_{SS}$ (cluster, delegated) + an inline $V_{TS}$ cross
+    coupling — **estimated, not zeroed**, clustered at the caller's `sampling`
+    unit (stratum-level to capture the cross-arm term). The all-design case
+    reduces **bit-for-bit** to `StratifiedCovariance` via a *shared* (not
+    copied) engine. The design-exact-$V_{TT}$ **glue is NOT PSD-by-construction**
+    (it can be indefinite like `StratifiedCovariance`; `DiagonalTikhonov`
+    repairs it — don't over-claim PSD). Stratified reduces to
+    `ClusteredCovariance` only *in expectation* (centered vs uncentered), not
+    bit-for-bit.
 
 ## Deferred to v2+
 
 - **SMM matching**: combining `EmpiricalMeasure` and `SyntheticMeasure`
   in one moment vector with the $(1+1/S)$ asymptotic-variance inflation.
-- **`StratifiedCovariance`** is now implemented (#79; design-based
-  between-PSU Neyman variance). **`DesignAwareCovariance`** (#80) is a
-  scaffold: all-design reduction lands, the mixed `V_SS`/`V_TS` assembly is
-  deferred to a follow-up (cross-term theory).
+- **`StratifiedCovariance`** (#79) and **`DesignAwareCovariance`** (#80) are
+  both implemented: the design-based between-PSU Neyman variance, and the
+  composed mixed design/sampling assembly (`V_TT` + `V_SS` + estimated `V_TS`).
 - **`ReplicateWeightCovariance`**: rest of the design-awareness ladder
   (BRR, jackknife, bootstrap variants; `docs/design.org` Section 2).
 - **`EigenvalueFloor`, `NearestPSD` (Higham 1988) regularisers**:

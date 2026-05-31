@@ -18,8 +18,8 @@ design red-team / Seasonality review surfaced):
 
 Plus: CovarianceStrategy conformance, cached-vs-self-compute parity on a
 D != M real measure with NaN feeding a non-masked moment, gradient
-AD-safety with a singular psi, and the #80 all-design bit-for-bit reduction
-+ NotImplementedError on the mixed path.
+AD-safety with a singular psi, and the #80 DesignAwareCovariance assembly
+(all-design bit-for-bit reduction; mixed V_TT + V_SS + estimated V_TS).
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
-import pytest
 from emu_gmm import (
     ClusteredCovariance,
     DesignAwareCovariance,
@@ -871,11 +870,196 @@ def test_design_aware_is_pytree_and_jits_all_design():
     assert np.isfinite(V).all()
 
 
-def test_design_aware_mixed_mask_raises_not_implemented():
-    fx = build_full()
+# ---------------------------------------------------------------------------
+# #80 mixed design/sampling assembly (V_TT + V_SS + estimated V_TS)
+# ---------------------------------------------------------------------------
+def build_mixed(seed=11):
+    """Mixed fixture: full mask, M=4 (coords 0,1 design; 2,3 sampling), with a
+    per-PSU common component so the cluster totals are cross-correlated across
+    coordinates -> a genuinely non-zero V_TS cross block.
+    """
+    rng = np.random.default_rng(seed)
+    S, arms, Hpa, upp, M = 2, 2, 3, 4, 4
+    rows_x, weights, cell_ids, psu_ids, stratum_ids = [], [], [], [], []
+    g = c = 0
+    for s in range(S):
+        for _a in range(arms):
+            cell = c
+            c += 1
+            for _ in range(Hpa):
+                psu_common = rng.normal(size=M)  # shared across coords in a PSU
+                for _ in range(upp):
+                    rows_x.append(psu_common + rng.normal(size=M))
+                    weights.append(1.0)
+                    cell_ids.append(cell)
+                    psu_ids.append(g)
+                    stratum_ids.append(s)
+                g += 1
+    n = len(rows_x)
+    return dict(
+        x=np.array(rows_x),
+        mask=np.ones((n, M)),
+        weights=np.array(weights),
+        cell_ids=np.array(cell_ids),
+        psu_ids=np.array(psu_ids),
+        stratum_ids=np.array(stratum_ids),
+        n_psu=g,
+        n_cells=c,
+        n_strata=S,
+        M=M,
+    )
+
+
+def _numpy_cluster_cross(x, mask, weights, psu_ids, n_psu):
+    """Independent numpy cluster-total outer product / (N_j N_k)."""
+    contrib = mask * weights[:, None] * np.where(mask > 0, x, 0.0)
+    M = x.shape[1]
+    tot = np.zeros((n_psu, M))
+    psu = np.rint(psu_ids).astype(int)
+    for i in range(len(psu)):
+        tot[psu[i]] += contrib[i]
+    numer = tot.T @ tot
+    Nj = (mask * weights[:, None]).sum(0)
+    V = np.zeros((M, M))
+    for j in range(M):
+        for k in range(M):
+            d = Nj[j] * Nj[k]
+            V[j, k] = numer[j, k] / d if d != 0.0 else 0.0
+    return V
+
+
+_DESIGN_MASK = jnp.array([1.0, 1.0, 0.0, 0.0])  # coords 0,1 design; 2,3 sampling
+_T_IDX, _S_IDX = [0, 1], [2, 3]
+
+
+def _mixed_dac_and_measure(fx):
     design, sampling = _design_and_sampling(fx)
-    mask = jnp.array([1.0, 1.0, 0.0])  # one sampling coordinate -> mixed
-    dac = DesignAwareCovariance.from_design_mask(design, sampling, mask)
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
     measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
-    with pytest.raises(NotImplementedError, match="#81"):
-        dac.covariance(identity_psi, None, measure)
+    return dac, design, sampling, measure
+
+
+def test_design_aware_mixed_runs_finite_and_symmetric():
+    fx = build_mixed()
+    dac, *_, measure = _mixed_dac_and_measure(fx)
+    V = np.asarray(dac.covariance(identity_psi, None, measure))
+    assert np.isfinite(V).all()
+    assert np.max(np.abs(V - V.T)) < 1e-12  # symmetric
+
+
+def test_design_aware_VTS_estimated_not_zero_matches_numpy():
+    """The cardinal #80 property: the cross block is ESTIMATED, not zeroed,
+    and equals the independent cluster-total cross reference.
+    """
+    fx = build_mixed()
+    dac, *_, measure = _mixed_dac_and_measure(fx)
+    V = np.asarray(dac.covariance(identity_psi, None, measure))
+    cross = V[np.ix_(_T_IDX, _S_IDX)]
+    assert np.any(np.abs(cross) > 1e-9)  # NOT zeroed
+    Vc = _numpy_cluster_cross(
+        fx["x"], fx["mask"], fx["weights"], fx["psu_ids"], fx["n_psu"]
+    )
+    assert np.max(np.abs(cross - Vc[np.ix_(_T_IDX, _S_IDX)])) < TOL
+
+
+def test_design_aware_block_structure():
+    """V_TT is the design-exact (centered) block; V_SS is the uncentered
+    cluster block; they differ on the T coords (design != sampling form).
+    """
+    fx = build_mixed()
+    dac, design, sampling, measure = _mixed_dac_and_measure(fx)
+    V = np.asarray(dac.covariance(identity_psi, None, measure))
+    V_design = np.asarray(design.covariance(identity_psi, None, measure))
+    V_samp = np.asarray(sampling.covariance(identity_psi, None, measure))
+    assert (
+        np.max(np.abs(V[np.ix_(_T_IDX, _T_IDX)] - V_design[np.ix_(_T_IDX, _T_IDX)]))
+        < TOL
+    )
+    assert (
+        np.max(np.abs(V[np.ix_(_S_IDX, _S_IDX)] - V_samp[np.ix_(_S_IDX, _S_IDX)])) < TOL
+    )
+    # design-exact TT is the centered Neyman block, NOT the uncentered cluster form
+    assert (
+        np.max(np.abs(V[np.ix_(_T_IDX, _T_IDX)] - V_samp[np.ix_(_T_IDX, _T_IDX)]))
+        > 1e-9
+    )
+
+
+def test_design_aware_mixed_cached_self_parity():
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+    measure = EmpiricalMeasure(
+        x=jnp.asarray(fx["x"]),
+        mask=jnp.asarray(fx["mask"]),
+        weights=jnp.asarray(fx["weights"]),
+    )
+    cached = measure.expectation_and_contributions(identity_psi, None)
+    V_self = np.asarray(dac.covariance(identity_psi, None, measure))
+    V_cached = np.asarray(
+        dac.covariance(identity_psi, None, measure, cached_intermediates=cached)
+    )
+    assert np.array_equal(V_self, V_cached)
+
+
+def test_design_aware_VTS_uses_sampling_cluster_unit():
+    """The cross block clusters at self.sampling's unit (caller-controlled),
+    NOT the design PSU. Build sampling at the COARSER stratum unit: V_TS must
+    equal the stratum-level cross and DIFFER from the PSU-level cross (so a
+    regression hard-coding design.psu_ids would be caught).
+    """
+    fx = build_mixed()
+    design = StratifiedCovariance(
+        psu_ids=jnp.asarray(fx["psu_ids"], jnp.float64),
+        cell_ids=jnp.asarray(fx["cell_ids"], jnp.float64),
+        stratum_ids=jnp.asarray(fx["stratum_ids"], jnp.float64),
+        n_psu=fx["n_psu"],
+        n_cells=fx["n_cells"],
+        n_strata=fx["n_strata"],
+    )
+    sampling = ClusteredCovariance(
+        cluster_ids=jnp.asarray(fx["stratum_ids"], jnp.float64),
+        n_clusters=fx["n_strata"],
+    )
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    cross = np.asarray(dac.covariance(identity_psi, None, measure))[
+        np.ix_(_T_IDX, _S_IDX)
+    ]
+
+    cross_strat = _numpy_cluster_cross(
+        fx["x"], fx["mask"], fx["weights"], fx["stratum_ids"], fx["n_strata"]
+    )[np.ix_(_T_IDX, _S_IDX)]
+    cross_psu = _numpy_cluster_cross(
+        fx["x"], fx["mask"], fx["weights"], fx["psu_ids"], fx["n_psu"]
+    )[np.ix_(_T_IDX, _S_IDX)]
+    assert np.max(np.abs(cross - cross_strat)) < TOL  # uses sampling's unit
+    assert np.max(np.abs(cross_strat - cross_psu)) > 1e-9  # genuinely coarser
+
+
+def test_design_aware_fpc_enters_VTT_only():
+    """The design FPC scales V_TT only; V_SS and V_TS carry no FPC factor."""
+    fx = build_mixed()
+    psu = jnp.asarray(fx["psu_ids"], jnp.float64)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+
+    def _V(fpc):
+        design = StratifiedCovariance(
+            psu_ids=psu,
+            cell_ids=jnp.asarray(fx["cell_ids"], jnp.float64),
+            stratum_ids=jnp.asarray(fx["stratum_ids"], jnp.float64),
+            n_psu=fx["n_psu"],
+            n_cells=fx["n_cells"],
+            n_strata=fx["n_strata"],
+            fpc=fpc,
+        )
+        sampling = ClusteredCovariance(cluster_ids=psu, n_clusters=fx["n_psu"])
+        dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+        return np.asarray(dac.covariance(identity_psi, None, measure))
+
+    V0, V1 = _V(False), _V(True)
+    assert (
+        np.max(np.abs(V1[np.ix_(_T_IDX, _T_IDX)] - V0[np.ix_(_T_IDX, _T_IDX)])) > 1e-9
+    )
+    assert np.max(np.abs(V1[np.ix_(_S_IDX, _S_IDX)] - V0[np.ix_(_S_IDX, _S_IDX)])) < TOL
+    assert np.max(np.abs(V1[np.ix_(_T_IDX, _S_IDX)] - V0[np.ix_(_T_IDX, _S_IDX)])) < TOL

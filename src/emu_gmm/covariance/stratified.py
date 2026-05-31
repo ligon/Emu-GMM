@@ -18,17 +18,19 @@ This module ships two strategies:
     commitment 9). This is the single detail most easily dropped in a
     hand-rolled port.
 
-``DesignAwareCovariance`` (emu-gmm #80, scaffold)
+``DesignAwareCovariance`` (emu-gmm #80)
     The law-of-total-variance assembly
-    :math:`V_X = V^{\mathrm{des}} + V^{\mathrm{smp}}` for a moment vector
-    mixing randomized (design-driven, :math:`z_T`) and sampled
-    (:math:`z_S`) instruments. This PR lands the scaffold: the field
-    layout, the shared (not copied) design engine, and the all-design
-    reduction that returns :math:`V_{TT}` bit-for-bit. The general
-    mixed-block assembly --- the cluster-robust :math:`V_{SS}` and the
-    *estimated* (never zeroed) off-diagonal :math:`V_{TS}` of
-    ``ai_neyman_covariance.org`` eq:offdiag --- is deferred to its own PR
-    (the cross-term theory is emu-gmm #81).
+    :math:`V_X = V_{TT} + V_{SS} + V_{TS}` for a moment vector mixing
+    randomized (design-driven, :math:`z_T`) and sampled (:math:`z_S`)
+    instruments. A **composition** of strategies: :math:`V_{TT}` delegated
+    to a shared :class:`StratifiedCovariance` (the design-exact block),
+    :math:`V_{SS}` to a shared :class:`ClusteredCovariance` (uncentered
+    cluster-total), and the off-diagonal :math:`V_{TS}` computed inline ---
+    *estimated, never zeroed* (``ai_neyman_covariance.org`` eq:offdiag).
+    When every coordinate is design-driven it reduces bit-for-bit to
+    :math:`V_{TT}` via the shared engine. PSD is not guaranteed (the
+    design-exact :math:`V_{TT}` is glued to the sampling blocks);
+    ``DiagonalTikhonov`` handles repair.
 
 Scaling convention
 ------------------
@@ -361,7 +363,7 @@ class StratifiedCovariance:
 
 @jdc.pytree_dataclass
 class DesignAwareCovariance:
-    r"""Mixed design/sampling covariance via law of total variance (#80, scaffold).
+    r"""Mixed design/sampling covariance via law of total variance (#80).
 
     For a moment vector mixing randomized instruments :math:`z_T`
     (design-driven) and sampled instruments :math:`z_S`, conditioning on
@@ -369,40 +371,49 @@ class DesignAwareCovariance:
 
     .. math::
         V_X = \underbrace{\mathbb E_S[\operatorname{Var}_W(\bar m_X \mid S)]}_{V^{\mathrm{des}}}
-            + \underbrace{\operatorname{Var}_S[\mathbb E_W(\bar m_X \mid S)]}_{V^{\mathrm{smp}}},
+            + \underbrace{\operatorname{Var}_S[\mathbb E_W(\bar m_X \mid S)]}_{V^{\mathrm{smp}}}.
 
-    which the block estimator mirrors: :math:`V_{TT}` from the known-\pi
-    design formula (:class:`StratifiedCovariance`), :math:`V_{SS}`
-    cluster-robust (:class:`ClusteredCovariance`), and the off-diagonal
-    :math:`V_{TS}` **estimated, not zeroed** (``ai_neyman_covariance.org``
-    eq:offdiag). Because :math:`V_X` is a *sum* of two genuine covariance
-    matrices, the assembled estimator is PSD by construction --- unlike a
-    hand-glued block-diagonal with a zeroed corner.
+    The estimator is a **composition** of covariance strategies: :math:`V_{TT}`
+    (design coords) is delegated to a shared :class:`StratifiedCovariance` ---
+    the design-exact known-:math:`\pi` Neyman block --- :math:`V_{SS}` (sampled
+    coords) to a shared :class:`ClusteredCovariance` (uncentered cluster-total
+    form), and only the off-diagonal coupling :math:`V_{TS}` is computed inline
+    as a cluster-robust cross pass, **estimated, not zeroed**
+    (``ai_neyman_covariance.org`` eq:offdiag). See :meth:`covariance` for the
+    assembly, the shared-:math:`N_j` scale, and the all-design bit-for-bit
+    reduction.
 
-    .. warning::
-        **Scaffold.** This PR implements only the all-design reduction
-        (``design_moment_mask`` all ones), which returns :math:`V_{TT}`
-        bit-for-bit from the shared :attr:`design` engine. The general
-        mixed assembly (:math:`V_{SS}` + estimated :math:`V_{TS}`) raises
-        :class:`NotImplementedError`; the cross-term theory is emu-gmm #81.
+    .. note::
+        The design-exact :math:`V_{TT}` is **glued** to the sampling
+        cross/:math:`V_{SS}` blocks (not the literal :math:`V^{\mathrm{des}} +
+        V^{\mathrm{smp}}` sum), so the result is **not** guaranteed PSD --- it
+        can be indefinite under missingness / few PSUs exactly as
+        :class:`StratifiedCovariance` can. No internal PD repair is done; the
+        regularization layer (:class:`DiagonalTikhonov`) handles it. This is the
+        *coupled* composition a plain additive sum cannot express (the cross
+        corner is non-zero).
 
     Parameters
     ----------
     design : StratifiedCovariance
         The :math:`V_{TT}` engine. Held as a **shared reference**, never
         copied, so the all-design reduction is identical to calling it
-        directly.
+        directly. Carries the (optional) design FPC, which enters
+        :math:`V_{TT}` only --- never :math:`V_{SS}` / :math:`V_{TS}`.
     sampling : ClusteredCovariance
-        The :math:`V_{SS}` engine (cluster-robust on sampling coordinates).
-        Unused in the scaffold's all-design path; reserved for #81.
+        The :math:`V_{SS}` engine (uncentered cluster-total form). Its
+        ``cluster_ids`` / ``n_clusters`` are **also** the clustering unit for
+        the inline :math:`V_{TS}` cross pass. Because :math:`z_T` and
+        :math:`z_S` live in different arms, build ``sampling`` with
+        **stratum-level** clustering to capture the within-stratum cross-arm
+        term of eq:offdiag.
     design_moment_mask : (M,) jax array of floats
         ``1.0`` for design-driven (:math:`z_T`) coordinates, ``0.0`` for
         sampled (:math:`z_S`) coordinates. Traced leaf.
     all_design : bool (static)
         ``True`` iff every coordinate is design-driven. Computed at
         construction by :meth:`from_design_mask`; gates the Python-level
-        dispatch between the bit-for-bit reduction and the (not-yet-
-        implemented) mixed assembly.
+        dispatch between the bit-for-bit reduction and the mixed composition.
     """
 
     design: StratifiedCovariance
@@ -447,24 +458,81 @@ class DesignAwareCovariance:
             | None
         ) = None,
     ) -> Float[Array, "M M"]:
-        """Assemble the mixed design/sampling :math:`V_X` (scaffold).
+        r"""Assemble the mixed design/sampling :math:`V_X`.
 
-        When every coordinate is design-driven (``all_design``), returns
-        the shared :attr:`design` engine's :math:`V_{TT}` directly ---
-        bit-for-bit identical to :meth:`StratifiedCovariance.covariance`.
-        The mixed-block assembly is not yet implemented.
+        Composition of the law-of-total-variance blocks
+        :math:`V_X = V_{TT} + V_{SS} + V_{TS}` (+ :math:`V_{ST}`), placed into
+        the full :math:`(M, M)` matrix by outer-product masks of
+        :attr:`design_moment_mask` on a single shared :math:`N_j` Var(mean)
+        scale:
+
+        - :math:`V_{TT}` (design-driven coords) is **delegated** to the shared
+          :attr:`design` engine --- the design-exact known-:math:`\pi` Neyman
+          block (the lower-variance payoff). The child owns its residual
+          convention.
+        - :math:`V_{SS}` (sampled coords) is **delegated** to the shared
+          :attr:`sampling` engine (the uncentered cluster-total form).
+        - :math:`V_{TS}` (the cross coupling) is computed here as a
+          cluster-robust cross pass at :attr:`sampling`'s cluster unit
+          (caller-controlled) and is **estimated, never zeroed**
+          (``ai_neyman_covariance.org`` eq:offdiag).
+
+        When every coordinate is design-driven (``all_design``) this reduces
+        bit-for-bit to :meth:`StratifiedCovariance.covariance` via the shared
+        engine.
+
+        PSD is *not* guaranteed: the design-exact :math:`V_{TT}` glued to the
+        sampling cross/:math:`V_{SS}` blocks can be indefinite under
+        missingness / few PSUs, exactly as :class:`StratifiedCovariance` can.
+        No internal PD repair is performed; the regularization layer
+        (:class:`DiagonalTikhonov`) handles it.
         """
         if self.all_design:
             return self.design.covariance(psi, theta, measure, cached_intermediates)
-        raise NotImplementedError(
-            "DesignAwareCovariance mixed design/sampling assembly (cluster-robust "
-            "V_SS plus the estimated, non-zeroed V_TS cross block of "
-            "ai_neyman_covariance.org eq:offdiag) lands in a follow-up PR; the "
-            "cross-term theory is emu-gmm #81. This scaffold currently supports "
-            "only the all-design case (design_moment_mask all ones), which reduces "
-            "bit-for-bit to StratifiedCovariance. See docs/design.org, "
-            "'Empirical Covariance Strategies', the law-of-total-variance paragraph."
-        )
+
+        # --- shared intermediates (unpack cache or self-compute; the same
+        # safe_x_for_psi sanitisation the child engines use, so cached and
+        # self-compute agree by construction) -----------------------------
+        mask = measure.mask  # (N, M)
+        weights = measure.weights  # (N,)
+        if cached_intermediates is not None:
+            _m, psi_safe, _weight_mask, N_j = cached_intermediates
+        else:
+            x_safe = safe_x_for_psi(measure.x)
+
+            def psi_at(x: Any) -> jnp.ndarray:
+                return _to_plain(psi(x, theta))
+
+            psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
+            psi_safe = jnp.where(mask > 0.0, psi_batch, 0.0)  # (N, M)
+            N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
+
+        # --- delegated blocks (compose; same cached tuple threads through) -
+        V_TT = self.design.covariance(psi, theta, measure, cached_intermediates)
+        V_SS = self.sampling.covariance(psi, theta, measure, cached_intermediates)
+
+        # --- V_TS cross coupling: cluster-total outer product over ALL
+        # coords at the sampling engine's cluster unit. Its (T,S)/(S,T)
+        # corners are the estimated cross block. One shared N_j divides every
+        # block, so cross-pairs are scaled by exactly 1/(N_j N_k). ---------
+        contrib = mask * weights[:, None] * psi_safe  # (N, M)  d_ij w_i psi_j
+        seg = self.sampling.cluster_ids.astype(jnp.int32)
+        cluster_totals = jax.ops.segment_sum(
+            contrib, seg, num_segments=self.sampling.n_clusters
+        )  # (n_clusters, M)
+        numer_cross = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
+        V_cross = _safe_outer_divide(numer_cross, N_j)  # (M, M)
+
+        # --- assemble via design_moment_mask outer-product masks
+        # (exhaustive and mutually exclusive: P_TT + P_SS + P_TS == 1) -----
+        t = (self.design_moment_mask > 0.0).astype(V_TT.dtype)  # (M,) design
+        s = 1.0 - t  # (M,) sampled
+        P_TT = jnp.outer(t, t)
+        P_SS = jnp.outer(s, s)
+        P_TS = jnp.outer(t, s) + jnp.outer(s, t)
+
+        V = V_TT * P_TT + V_SS * P_SS + V_cross * P_TS
+        return 0.5 * (V + V.T)  # symmetrise against round-off
 
 
 __all__ = ["StratifiedCovariance", "DesignAwareCovariance"]
