@@ -11,7 +11,8 @@ inference through a single pipeline.
 
 ## Status
 
-v1 is implemented and operational. 226 tests pass; `make quick-check` is
+v1 is implemented and operational (plus the v2 #79/#80 stratified-covariance
+module). 654 tests pass; `make quick-check` is
 clean (ruff + black + mypy + pytest). All three measure paths (synthetic,
 analytical, empirical) run end-to-end against the bundled multi-asset Euler
 example in `src/emu_gmm/examples/euler.py`. The runnable demo at
@@ -132,13 +133,38 @@ been through four reviewer iterations; the abstractions are deliberate.
    "Scaling convention" and `mcar-asymptotics.org` Thm 3/6. **Never add an
    explicit $N$ (or $\sqrt N$) multiply to the criterion to "match a
    textbook."**
+10. **Design covariances generalise the pairwise-overlap rule per *pair*,
+    not per coordinate.** `StratifiedCovariance` (between-PSU Neyman, #79)
+    centers within each `(stratum x arm)` cell and weights entry $(j,k)$ by
+    the *pair-specific* effective PSU count $H_{c,jk}$ — the PSUs supporting
+    **both** $j$ and $k$ — exactly mirroring the $N_jN_k$ available-pairs
+    rule in commitment 9. Collapsing $H_{c,jk}$ to a per-coordinate $H_{c,j}$
+    mis-centers every off-diagonal under unequal observability; a balanced
+    `mask=ones` fixture cannot catch it (`tests/covariance/test_stratified.py`
+    F4 is the guard). FPC (`fpc=True`, default off) applies one
+    *coordinate-independent* per-cell scalar $1-H_{sD,c}/H_s$ to every $(j,k)$
+    — the assignment-fraction convention: the FPC is a property of the
+    without-replacement assignment, not of observability (which already
+    enters via dof/centering), so a per-pair *numerator* would double-count
+    it. Resolved jointly with the consumer's design appendix (the per-pair
+    numerator was considered and rejected). The
+    `DesignAwareCovariance` mixed assembly (#80) is a *sum* $V^{des}+V^{smp}$
+    (PSD by construction); its cross block $V_{TS}$ is **estimated, not
+    zeroed**, and the all-design case reduces **bit-for-bit** to
+    `StratifiedCovariance` via a *shared* (not copied) engine. Stratified
+    reduces to `ClusteredCovariance` only *in expectation* (centered vs
+    uncentered), not bit-for-bit.
 
 ## Deferred to v2+
 
 - **SMM matching**: combining `EmpiricalMeasure` and `SyntheticMeasure`
   in one moment vector with the $(1+1/S)$ asymptotic-variance inflation.
-- **`StratifiedCovariance`, `ReplicateWeightCovariance`**: rest of the
-  design-awareness ladder (`docs/design.org` Section 2).
+- **`StratifiedCovariance`** is now implemented (#79; design-based
+  between-PSU Neyman variance). **`DesignAwareCovariance`** (#80) is a
+  scaffold: all-design reduction lands, the mixed `V_SS`/`V_TS` assembly is
+  deferred to a follow-up (cross-term theory).
+- **`ReplicateWeightCovariance`**: rest of the design-awareness ladder
+  (BRR, jackknife, bootstrap variants; `docs/design.org` Section 2).
 - **`EigenvalueFloor`, `NearestPSD` (Higham 1988) regularisers**:
   alternatives to `DiagonalTikhonov`.
 - **Structured identification-failure taxonomy**: `design.org` Section 5.4

@@ -44,7 +44,9 @@ _jax.config.update("jax_enable_x64", True)
 from emu_gmm.covariance import (
     AnalyticalCovariance,
     ClusteredCovariance,
+    DesignAwareCovariance,
     IIDCovariance,
+    StratifiedCovariance,
     SyntheticCovariance,
 )
 from emu_gmm.diagnostics import (
@@ -115,6 +117,8 @@ __all__ = [
     "AnalyticalCovariance",
     "IIDCovariance",
     "ClusteredCovariance",
+    "StratifiedCovariance",
+    "DesignAwareCovariance",
     # Weighting strategies
     "Identity",
     "Fixed",
