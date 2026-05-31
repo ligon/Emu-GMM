@@ -320,3 +320,42 @@ class TestDofCorrection:
         leaves = jax.tree_util.tree_leaves(cov)
         assert not any(np.asarray(leaf).dtype == bool for leaf in leaves)
         assert isinstance(cov, CovarianceStrategy)
+
+
+class TestClusterIdRobustness:
+    """Cluster ids are rounded (not truncated) and integer dtype is accepted
+    (#82 item 3).
+    """
+
+    def test_near_integer_float_ids_round_not_truncate(self):
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0], [-1.0, 1.0], [2.0, -2.0]])
+        meas = EmpiricalMeasure(x=x, mask=jnp.ones((4, 2)), weights=jnp.ones(4))
+        theta = _P(0.0, 0.0)
+        ids_exact = jnp.array([0.0, 1.0, 2.0, 2.0])
+        # Obs 1's id sits a hair below 1.0 -- rounds to 1, truncates to 0.
+        ids_near = jnp.array([0.0, 1.0 - 1e-7, 2.0, 2.0])
+        V_exact = ClusteredCovariance(cluster_ids=ids_exact, n_clusters=3).covariance(
+            _identity_psi, theta, meas
+        )
+        V_near = ClusteredCovariance(cluster_ids=ids_near, n_clusters=3).covariance(
+            _identity_psi, theta, meas
+        )
+        np.testing.assert_allclose(np.asarray(V_near), np.asarray(V_exact), atol=1e-9)
+        # Truncation would mis-bin obs 1 into cluster 0 -> a genuinely
+        # different V (confirms the test discriminates the bug).
+        V_trunc = ClusteredCovariance(
+            cluster_ids=jnp.array([0.0, 0.0, 2.0, 2.0]), n_clusters=3
+        ).covariance(_identity_psi, theta, meas)
+        assert np.max(np.abs(np.asarray(V_exact) - np.asarray(V_trunc))) > 1e-6
+
+    def test_integer_dtype_ids_accepted(self):
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0], [-1.0, 1.0], [2.0, -2.0]])
+        meas = EmpiricalMeasure(x=x, mask=jnp.ones((4, 2)), weights=jnp.ones(4))
+        theta = _P(0.0, 0.0)
+        V_int = ClusteredCovariance(
+            cluster_ids=jnp.array([0, 0, 1, 1], dtype=jnp.int32), n_clusters=2
+        ).covariance(_identity_psi, theta, meas)
+        V_float = ClusteredCovariance(
+            cluster_ids=jnp.array([0.0, 0.0, 1.0, 1.0]), n_clusters=2
+        ).covariance(_identity_psi, theta, meas)
+        np.testing.assert_allclose(np.asarray(V_int), np.asarray(V_float), atol=1e-9)
