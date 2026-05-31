@@ -1,0 +1,125 @@
+#+TITLE: emu-gmm session handoff — covariance arc complete; manifold epic scoped
+#+AUTHOR: Sue (Claude Opus 4.8, 1M context)
+#+DATE: 2026-05-31
+#+OPTIONS: toc:nil num:nil
+
+Handoff from a long session. The covariance work is *done and merged*; the
+Riemannian manifold epic (#12, for the K-Aggregators consumer) is *scoped but
+not started*. A fresh session should pick up the manifold build from here.
+
+* What landed this session (all merged to =main=)
+
+The whole covariance ladder + the linear-solver and ergonomics items Seasonality
+surfaced. Nothing outstanding; =make quick-check= clean at *694 tests*.
+
+| PR  | What                                                                       |
+|-----+----------------------------------------------------------------------------|
+| #83 | =StratifiedCovariance= (#79) — design-based between-PSU Neyman variance     |
+| #87 | =DesignAwareCovariance= (#80) — mixed design/sampling; #81's /coupled/ half |
+| #95 | =SumCovariance= / =two_way_cluster= — signed-sum algebra; #81's /additive/  |
+| #89 | =ClusteredCovariance(dof_correction=True)= — finite-cluster G/(G-1) (#82.1) |
+| #85/#94 | =linear_solver= — eager + jit =lax.cond= + =verify=False= (#82.2)       |
+| #92 | cluster-id rounding robustness + =EmpiricalMeasure.from_arrays= (#82.3/4)   |
+| #84 | linear panel-regression example;  #86 — =CLAUDE.md= taskset recipe          |
+
+*Issues closed:* #79, #81, #82. These are settled — do not re-derive. The
+durable record is the merged code, =docs/design.org= ("Empirical Covariance
+Strategies"), and =CLAUDE.md= commitments 9 (per-coordinate N_j) and 10 (per-pair
+overlap). Each load-bearing covariance was design-red-teamed + adversarially
+reviewed and cross-checked against an independent numpy reference.
+
+* Infra worth keeping: the taskset recipe
+
+The 64-core JIT-mmap hazard is now handled by *core-pinning*, not serialization
+(=CLAUDE.md= "Running on this box"). Run suites pinned to disjoint halves:
+=taskset -c 0-31= and =taskset -c 32-63=; two JIT-heavy suites coexist with no
+segfault, ~20x faster than the old single-thread recipe. *Pitfall:* never gate on
+=pgrep -f "pytest"= in a wait loop — it self-matches and hangs (cost a delegated
+agent once this session).
+
+* The next job: the Riemannian manifold epic (#12) for K-Aggregators
+
+** Who and why
+=../K-Aggregators= is the consumer #12/#9/#3/#42 were /surfaced by/. Its
+=emu-gmm-port= branch already ported the *flat-parameter* callers
+(=cereal_linear_iv=, =encompassing= → =emu_gmm.j_test=) and TODO-marked the
+manifold callers pending this epic (=docs/EMU_PORT_STATUS.org= in that repo). Its
+model: =Product(PSDFixedRank(5, K), Euclidean(1)[, Euclidean(n_demog)])= —
+Gamma = A·Aᵀ (rank-K PSD, the cross-price substitution matrix) + a scalar
+log-elasticity phi (theta = exp(phi)). Optimizer =LoggingTrustRegions=; CUE
+default; reads results via =result.theta.components()= → (A, phi); needs SEs of
+/functionals of Gamma/ (eigenvalues), and reverse-mode AD for the moment Jacobian.
+
+** State of emu-gmm's manifold support
+*Preview only.* =src/emu_gmm/manifolds/= ships the TYPES (=Euclidean=,
+=PSDFixedRank=, =Product=, =Positive=) + =ManifoldSpec=/=LeafSpec= +
+=RiemannianLM= + the v2 estimator dispatch. The =Positive(1,1)= slice (#75) is
+estimable; *general =Product(PSDFixedRank, ...)= estimation is NOT*. The package
+docstring says so explicitly ("cannot yet be estimated with").
+
+** The full build plan
+*=docs/manifold-slice-scoping.md=* — the minimal-slice build spec from the
+scoping red-team (7 phases, 8 acceptance criteria, 7 risks). Read it first. It
+also flags *real bugs in the current preview path* that the slice must fix, e.g.:
+- =estimator.py:503-512= builds =G_riem= over =range(K)= where K is the /field
+  count/ (2), silently dropping the PSD factor's (5K) columns → a wrong-but-finite
+  Sigma_theta with no error.
+- =jnp.linalg.inv(info_local)= (=estimator.py:515=) is singular for a quotient
+  (gauge rank-deficient by K(K-1)/2) → inf/nan; needs =pinv_eigvalrule=.
+- =manifold_spec_from_params= / =flatten_params= hard-raise on =ndim != 0= leaves
+  (=params.py:60-64,213-218=) — the slice's two critical-path walls.
+
+The 4 independent critical-path walls (each wrong-but-silent if half-built):
+1. *Manifold-aware flatten* (=ManifoldLeaf= pytree node + 3-tuple
+   =flatten_params_with_spec=, preserving the v1 2-tuple bitwise).
+2. *Non-scalar spec builder* (offset/ambient_shape from real shape, populate
+   =total_gauge_dim=).
+3. *Per-leaf solver* (reuse =RiemannianLM='s =lax.while_loop= skeleton; add
+   per-leaf retraction/projection + a gauge λ-floor).
+4. *Gauge-aware Sigma_theta* (=pinv_eigvalrule= + per-leaf =G_riem=, then the
+   gauge-invariant pull-back to Gamma functionals).
+
+** Decisions LOCKED with the maintainer (2026-05-31)
+- *Sigma_theta:* deliver the *gauge-invariant Gamma-functional* SEs (delta-method
+  pull-back to Gamma=AAᵀ eigenvalue/entry functionals; #42), not raw ambient-Y
+  SEs (which are gauge-arbitrary and useless to K-Agg). This is the biggest scope
+  item — do not cut it.
+- *Solver:* =RiemannianLM= only (extend it; gauge λ-floor + per-leaf
+  retraction/projection). Defer a Riemannian TrustRegions (#9) unless LM proves
+  inadequate; verify LM==TR equivalence /on the quotient/ (functionals of Gamma),
+  not on raw Y.
+- *Backend:* native =Product=/=PSDFixedRank= constructors *only*. No pymanopt
+  runtime dep (=#3=); the consumer rewrites =Manifold.from_pymanopt(...)= to
+  native. Optional gated parity test against pymanopt in dev.
+
+** Open questions still to confirm (my recommendations — verify in the build)
+- *Reverse-mode AD scope (#77):* build =G = ∂m/∂θ= by AD of the moment function
+  at the /fixed/ theta_hat (delta method, commitment 5) — differentiating through
+  =riemannian_lm='s =lax.while_loop= is OUT of scope (the reference treats the
+  solver as a black box). Confirm no downstream wants differentiable-through-solver.
+- *Param expression:* use a =ManifoldLeaf=-wrapped pytree (what the flatten core
+  assumes), not a =__emu_manifolds__= annotation on a non-scalar field.
+- *Rank K / weighting:* K is user-supplied (runs use K=2,3); no auto rank-selection
+  in scope. CUE default + Identity optional needs no new manifold-path work.
+- *#78 (status=="traced" ⇒ always-converged under jit):* fix it in this slice
+  (propagate the =done= flag out of the while_loop) — cheap insurance, dangerous
+  for a wandering gauge orbit.
+
+** Acceptance gate (from the spec)
+=estimate()= on =Product(PSDFixedRank(5,2), Euclidean(1))= and =(5,3)= recovers a
+known Gamma=AAᵀ + phi on synthetic data; matches a ManifoldGMM/pymanopt-TR
+baseline /on the quotient/ (Gamma_hat, J_stat); gauge-invariant (two starts Y0,
+Y0·Q give the same Gamma_hat/J_stat/Sigma_theta(Gamma)); finite Sigma_theta
+dropping exactly K(K-1)/2 gauge directions; =components()= → (A, phi); flatten
+round-trip preserves leaf shapes; *all 226 v1 / 694 current tests pass unchanged*.
+
+* How to resume (fresh session)
+1. =git status= on =main= (should be clean at the SumCovariance merge).
+2. Read =docs/manifold-slice-scoping.md= (the build plan) + this note.
+3. Build the 4 walls in order (Phases 1→4), each its own PR with acceptance
+   tests; v1 non-regression is the hard constraint at every step.
+4. Use the taskset recipe for parallel test runs; lean on design-red-team +
+   adversarial-review workflows (subagent context) for the intricate geometry —
+   the gauge/Sigma_theta correctness is the part most likely to be silently wrong.
+
+End of handoff.
