@@ -765,5 +765,60 @@ class EmpiricalMeasure:
         x_clean = safe_x_for_psi(x_arr)
         return cls(x=x_clean, mask=mask_arr, weights=w_arr)
 
+    @classmethod
+    def from_arrays(
+        cls,
+        x: Any,
+        *,
+        M: int | None = None,
+        mask: Any = None,
+        weights: Any = None,
+    ) -> "EmpiricalMeasure":
+        """Build a complete-data measure from plain arrays, defaulting the mask.
+
+        The zero-boilerplate constructor for the common fully-observed case:
+        pass just ``x`` and the mask defaults to all-ones of shape ``(N, M)``
+        and the weights to all-ones, so the caller need not hand-build
+        ``jnp.ones((N, M))`` / ``jnp.ones(N)``.
+
+        Unlike :meth:`from_pandas` / :meth:`from_nan_aware`, this does **not**
+        infer missingness from NaN --- it asserts complete data. Use the
+        NaN-aware constructors when cells are missing.
+
+        Parameters
+        ----------
+        x : array-like, shape (N, D)
+            Observations. Coerced to ``float64``.
+        M : int, keyword-only, optional
+            Number of moments returned by ``psi``. The default mask has shape
+            ``(N, M)``; ``M`` defaults to the data width ``D`` (``x.shape[1]``).
+            Pass ``M=`` when ``M != D`` --- e.g. a Hansen--Singleton Euler
+            equation where ``x`` is ``(N, 3)`` but ``psi`` is scalar
+            (``M=1``). Ignored when ``mask`` is given explicitly.
+        mask : array-like, shape (N, M), keyword-only, optional
+            Override the all-ones default (e.g. a hand-built observability
+            pattern with no NaN in ``x``).
+        weights : array-like of length N, keyword-only, optional
+            Override the all-ones default.
+
+        Returns
+        -------
+        measure : :class:`EmpiricalMeasure`
+        """
+        x_arr = jnp.asarray(x, dtype=jnp.float64)
+        n = x_arr.shape[0]
+        m = M if M is not None else x_arr.shape[1]
+        mask_arr = (
+            jnp.ones((n, m), dtype=jnp.float64)
+            if mask is None
+            else jnp.asarray(mask, dtype=jnp.float64)
+        )
+        w_arr = (
+            jnp.ones((n,), dtype=jnp.float64)
+            if weights is None
+            else jnp.asarray(weights, dtype=jnp.float64)
+        )
+        return cls(x=x_arr, mask=mask_arr, weights=w_arr)
+
 
 __all__ = ["EmpiricalMeasure"]

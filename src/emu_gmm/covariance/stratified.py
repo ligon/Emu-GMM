@@ -516,7 +516,7 @@ class DesignAwareCovariance:
         # corners are the estimated cross block. One shared N_j divides every
         # block, so cross-pairs are scaled by exactly 1/(N_j N_k). ---------
         contrib = mask * weights[:, None] * psi_safe  # (N, M)  d_ij w_i psi_j
-        seg = self.sampling.cluster_ids.astype(jnp.int32)
+        seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
         cluster_totals = jax.ops.segment_sum(
             contrib, seg, num_segments=self.sampling.n_clusters
         )  # (n_clusters, M)
