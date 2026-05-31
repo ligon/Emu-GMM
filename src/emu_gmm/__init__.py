@@ -47,6 +47,7 @@ from emu_gmm.covariance import (
     DesignAwareCovariance,
     IIDCovariance,
     StratifiedCovariance,
+    SumCovariance,
     SyntheticCovariance,
 )
 from emu_gmm.diagnostics import (
@@ -119,6 +120,7 @@ __all__ = [
     "ClusteredCovariance",
     "StratifiedCovariance",
     "DesignAwareCovariance",
+    "SumCovariance",
     # Weighting strategies
     "Identity",
     "Fixed",
