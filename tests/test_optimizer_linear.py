@@ -250,5 +250,65 @@ def test_jit_nonlinear_falls_back_via_cond():
     assert np.allclose(np.asarray(theta_hat) ** 2, np.asarray(c), atol=1e-6)
 
 
+# ---------------------------------------------------------------------------
+# verify=False: caller-asserted linearity (unconditional one-step; vmap-clean)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_false_affine_exact_one_step():
+    rng = np.random.default_rng(9)
+    A_np = rng.standard_normal((3, 3))
+    b_np = rng.standard_normal(3)
+    A, b = jnp.asarray(A_np), jnp.asarray(b_np)
+
+    def residual_fn(theta):
+        return A @ theta - b
+
+    theta_hat, info = linear_solver(verify=False)(residual_fn, jnp.zeros(3))
+    assert np.allclose(np.asarray(theta_hat), np.linalg.solve(A_np, b_np), atol=1e-10)
+    assert info.steps == 1
+    assert info.backend == "linear"
+
+
+def test_verify_false_vmaps_over_right_hand_sides():
+    """The motivation: a vmapped (and jitted) MC over a known-linear moment
+    solves every replicate in one step, with NO fallback / NO select cost.
+    """
+    rng = np.random.default_rng(11)
+    A_np = rng.standard_normal((3, 3))
+    A = jnp.asarray(A_np)
+    b_batch = jnp.asarray(rng.standard_normal((16, 3)))
+    solver = linear_solver(verify=False)
+
+    def solve_for(b):
+        def residual_fn(theta):
+            return A @ theta - b
+
+        theta_hat, _ = solver(residual_fn, jnp.zeros(3))
+        return theta_hat
+
+    thetas = jax.jit(jax.vmap(solve_for))(b_batch)  # (16, 3)
+    expected = np.linalg.solve(A_np, np.asarray(b_batch).T).T  # (16, 3)
+    assert np.allclose(np.asarray(thetas), expected, atol=1e-9)
+
+
+def test_verify_false_does_not_fall_back_on_nonlinear():
+    """verify=False trusts the caller: it takes ONE step and does not fall
+    back, so on a nonlinear residual it returns the (non-converged) one-step
+    point and final_objective is not ~0 (the misuse is surfaced, not fixed).
+    """
+    c = jnp.asarray([2.0, 5.0])
+
+    def residual_fn(theta):
+        return theta**2 - c
+
+    theta_hat, info = linear_solver(verify=False)(residual_fn, jnp.asarray([1.0, 1.0]))
+    assert info.steps == 1  # one unconditional step, no fallback
+    assert info.backend == "linear"
+    # One Gauss-Newton step from [1, 1] lands at [1.5, 3], not the root.
+    assert np.allclose(np.asarray(theta_hat), [1.5, 3.0], atol=1e-6)
+    assert float(info.final_objective) > 1e-3  # NOT converged -> misuse visible
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

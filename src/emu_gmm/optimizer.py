@@ -368,6 +368,7 @@ class _LinearSolver:
 
     fallback: Any  # an Optimizer; constructed in :func:`linear_solver`.
     tol: float
+    verify: bool
 
     def __call__(
         self,
@@ -378,7 +379,9 @@ class _LinearSolver:
 
         Take one linear least-squares step from ``theta_init`` and accept
         it iff the first-order optimality certificate holds; otherwise
-        delegate to :attr:`fallback`.
+        delegate to :attr:`fallback`. When :attr:`verify` is ``False`` the
+        step is taken *unconditionally* (the caller asserts affinity), with
+        no certificate, no fallback, and no control flow.
 
         Parameters
         ----------
@@ -395,6 +398,25 @@ class _LinearSolver:
             ``backend == "linear"`` with ``steps == 1`` on an accepted
             certificate; otherwise the fallback's own ``info`` verbatim.
         """
+        if not self.verify:
+            # Caller asserts the residual is affine: take the one-step
+            # Gauss--Newton solution UNCONDITIONALLY -- no certificate, no
+            # fallback, no Python branch and no lax.cond. Being control-flow
+            # free it vmaps as cleanly as it jits (the use case the certified
+            # path cannot speed up under vmap). The caller owns correctness;
+            # ``final_objective`` still surfaces a misuse (it is not ~0 when
+            # the residual was in fact nonlinear).
+            j0 = jax.jacfwd(residual_fn)(theta_init)  # (M, K)
+            r0 = residual_fn(theta_init)  # (M,)
+            theta_hat = theta_init - jnp.linalg.lstsq(j0, r0, rcond=None)[0]
+            r1 = residual_fn(theta_hat)
+            return theta_hat, OptimizerInfo(
+                steps=1,
+                final_objective=0.5 * jnp.sum(r1 * r1),
+                status="converged",
+                backend="linear",
+            )
+
         # The Gauss--Newton candidate and its first-order optimality
         # certificate. All of this traces cleanly (jacfwd / lstsq / norms);
         # only the concrete accept/reject is eager-only.
@@ -469,15 +491,16 @@ def linear_solver(
     *,
     fallback: Any = None,
     tol: float = 1e-7,
+    verify: bool = True,
 ) -> _LinearSolver:
-    """Build a certificate-based linear fast-path optimiser.
+    """Build a linear fast-path optimiser for affine-in-``theta`` residuals.
 
     For an affine-in-``theta`` residual the least-squares minimiser is
-    reached in one Gauss--Newton step; this optimiser takes that step and
-    *certifies* it via the first-order optimality condition. On a failed
-    certificate (a nonlinear residual --- including the continuously
-    updated whitened moment, which is non-affine even for a linear model)
-    it delegates to ``fallback``.
+    reached in one Gauss--Newton step. By default this optimiser takes that
+    step and *certifies* it via the first-order optimality condition,
+    delegating to ``fallback`` on a failed certificate (a nonlinear residual
+    --- including the continuously-updated whitened moment, which is
+    non-affine even for a linear model).
 
     Parameters
     ----------
@@ -486,22 +509,35 @@ def linear_solver(
         including the continuously-updated whitened moment). Reached eagerly
         by direct delegation and under :func:`jax.jit` via
         :func:`jax.lax.cond`. Defaults to :func:`optimistix_lm` with default
-        tolerances.
+        tolerances. Unused (and not constructed) when ``verify=False``.
     tol : float, optional
         Certificate tolerance. The step is accepted iff
         ``||J1' r1|| <= tol * max(||J0' r0||, 1.0)``. Default ``1e-7``.
+        Ignored when ``verify=False``.
+    verify : bool, optional
+        When ``True`` (default), certify the step and fall back on failure
+        (safe; the certified path's ``vmap`` lowers ``lax.cond`` to a
+        ``select`` so both branches run). When ``False``, the caller
+        **asserts** the residual is affine and the one-step solution is
+        taken *unconditionally* --- no certificate, no fallback, no control
+        flow. This is the variant to use inside a ``vmap`` / ``lax.scan``
+        Monte Carlo over a *known*-linear moment: it is exact for an affine
+        residual and vmaps with no wasted fallback work. The result is
+        meaningless if the residual is in fact nonlinear (``final_objective``
+        on the returned info will not be ~0).
 
     Returns
     -------
     optimiser
         A callable satisfying the :class:`~emu_gmm.types.Optimizer`
-        protocol. Jit-safe: under :func:`jax.jit` the affine fast path fires
-        via :func:`jax.lax.cond` (see :class:`_LinearSolver` for the ``vmap``
-        caveat).
+        protocol. Jit-safe; with ``verify=True`` the affine fast path fires
+        under :func:`jax.jit` via :func:`jax.lax.cond` (see
+        :class:`_LinearSolver` for the ``vmap`` caveat), and with
+        ``verify=False`` it is control-flow free and so vmaps cleanly.
     """
-    if fallback is None:
+    if fallback is None and verify:
         fallback = optimistix_lm()
-    return _LinearSolver(fallback=fallback, tol=tol)
+    return _LinearSolver(fallback=fallback, tol=tol, verify=verify)
 
 
 __all__ = ["optimistix_lm", "scipy_lm", "linear_solver"]
