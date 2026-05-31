@@ -69,10 +69,30 @@ class ClusteredCovariance:
         Number of distinct cluster IDs. Must satisfy
         ``max(cluster_ids) < n_clusters``. Treated as a static field so
         the segment-sum output dimension is concrete at trace time.
+    dof_correction : bool (static), default ``False``
+        Apply the finite-cluster degrees-of-freedom correction
+        :math:`G_{jk}/(G_{jk}-1)`, where :math:`G_{jk}` is the number of
+        clusters that hold at least one observed unit for **both** moments
+        :math:`j` and :math:`k` (the per-pair effective cluster count). Off
+        by default --- the bare cluster-totals sandwich underestimates the
+        sampling variance with few clusters, and the correction is the
+        standard small-sample inflation. With complete data every
+        :math:`G_{jk}` equals the total cluster count :math:`G`, so the
+        factor collapses to the textbook scalar :math:`G/(G-1)`; the
+        per-pair form is the design-aware generalisation (CLAUDE.md
+        commitment 10), mirroring :class:`StratifiedCovariance`'s own
+        :math:`H/(H-1)` Bessel factor and the available-pairs
+        :math:`N_j N_k` rule. A pair with :math:`G_{jk} < 2` is left
+        uncorrected (factor 1; a single cluster furnishes no between-cluster
+        variance). **Recommended whenever the cluster count is small.**
+        (The secondary :math:`(N-1)/(N-K)` Stata adjustment is an
+        inference-layer concern --- it needs :math:`K` --- and is not
+        applied here.)
     """
 
     cluster_ids: Float[Array, " N"]
     n_clusters: int = jdc.static_field()  # type: ignore[attr-defined]
+    dof_correction: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     def covariance(
         self,
@@ -135,6 +155,8 @@ class ClusteredCovariance:
                 contrib, segment_ids, num_segments=self.n_clusters
             )  # (n_clusters, M)
             numer = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
+            if self.dof_correction:
+                numer = numer * self._finite_cluster_correction(measure.mask)
             return _safe_outer_divide(numer, N_j)
 
         # Pre-sanitise data with the per-column observed-mean sentinel
@@ -176,8 +198,30 @@ class ClusteredCovariance:
         # Outer product per cluster, then sum across clusters.
         # einsum: c is summed; j, k are kept.
         numer = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
+        if self.dof_correction:
+            numer = numer * self._finite_cluster_correction(mask)
 
         return _safe_outer_divide(numer, N_j)
+
+    def _finite_cluster_correction(
+        self, mask: Float[Array, "N M"]
+    ) -> Float[Array, "M M"]:
+        r"""Per-pair finite-cluster factor :math:`G_{jk}/(G_{jk}-1)`.
+
+        :math:`G_{jk}` is the number of clusters with at least one observed
+        unit for **both** :math:`j` and :math:`k`. Pairs with
+        :math:`G_{jk} < 2` get factor 1 (a single cluster furnishes no
+        between-cluster variance). With complete data every :math:`G_{jk}`
+        equals the total cluster count, so this is the scalar
+        :math:`G/(G-1)`.
+        """
+        seg = self.cluster_ids.astype(jnp.int32)
+        per_cluster_obs = jax.ops.segment_sum(
+            (mask > 0.0).astype(mask.dtype), seg, num_segments=self.n_clusters
+        )  # (n_clusters, M): observed-unit count per (cluster, coord)
+        s = (per_cluster_obs > 0.0).astype(mask.dtype)  # support, (n_clusters, M)
+        G = jnp.einsum("cj,ck->jk", s, s)  # (M, M) per-pair cluster counts
+        return jnp.where(G >= 2.0, G / jnp.where(G >= 2.0, G - 1.0, 1.0), 1.0)
 
 
 __all__ = ["ClusteredCovariance"]
