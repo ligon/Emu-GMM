@@ -71,7 +71,7 @@ from emu_gmm.measures import (
     SyntheticMeasure,
 )
 from emu_gmm.numerics import ridge_inverse
-from emu_gmm.optimizer import optimistix_lm, scipy_lm
+from emu_gmm.optimizer import linear_solver, optimistix_lm, scipy_lm
 from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -134,6 +134,7 @@ __all__ = [
     # Optimisers
     "optimistix_lm",
     "scipy_lm",
+    "linear_solver",
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
