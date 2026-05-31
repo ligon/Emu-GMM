@@ -218,3 +218,105 @@ class TestJit:
         V_eager = cov.covariance(_identity_psi, theta, meas)
         V_jit = compute(cov, theta, meas)
         assert jnp.allclose(V_eager, V_jit, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+
+
+def _numpy_cluster_correction(mask, cluster_ids, n_clusters):
+    """Independent per-pair G_jk/(G_jk-1) correction matrix."""
+    mask = np.asarray(mask)
+    cl = np.rint(np.asarray(cluster_ids)).astype(int)
+    M = mask.shape[1]
+    s = np.zeros((n_clusters, M))
+    for i in range(len(cl)):
+        s[cl[i]] += (mask[i] > 0).astype(float)
+    s = (s > 0).astype(float)
+    G = s.T @ s  # (M, M) per-pair cluster counts
+    return np.where(G >= 2, G / np.where(G >= 2, G - 1, 1.0), 1.0)
+
+
+class TestDofCorrection:
+    """Finite-cluster G_jk/(G_jk-1) degrees-of-freedom correction (#82 item 1)."""
+
+    def test_complete_data_is_scalar_G_over_Gminus1(self):
+        # 2 clusters, complete data -> G_jk == 2 for every pair -> factor 2.0.
+        psi_vals = jnp.array([[1.0, 2.0], [3.0, 4.0], [-1.0, 1.0], [2.0, -2.0]])
+        meas = EmpiricalMeasure(x=psi_vals, mask=jnp.ones((4, 2)), weights=jnp.ones(4))
+        cl = jnp.array([0.0, 0.0, 1.0, 1.0])
+        V0 = ClusteredCovariance(cluster_ids=cl, n_clusters=2).covariance(
+            _identity_psi, _P(0.0, 0.0), meas
+        )
+        V1 = ClusteredCovariance(
+            cluster_ids=cl, n_clusters=2, dof_correction=True
+        ).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        np.testing.assert_allclose(np.asarray(V1), 2.0 * np.asarray(V0), atol=1e-7)
+
+    def test_per_pair_under_missingness_matches_numpy(self):
+        # coord 1 observed only in clusters 0,1; coord 0 in all 3 clusters.
+        x = jnp.array(
+            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0], [6.0, 6.0]]
+        )
+        mask = jnp.array(
+            [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        cl = jnp.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0])
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(6))
+        V0 = ClusteredCovariance(cluster_ids=cl, n_clusters=3).covariance(
+            _identity_psi, _P(0.0, 0.0), meas
+        )
+        V1 = ClusteredCovariance(
+            cluster_ids=cl, n_clusters=3, dof_correction=True
+        ).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        corr = _numpy_cluster_correction(mask, cl, 3)
+        # G_00=3 -> 1.5 ; G_11=2 -> 2 ; G_01=2 -> 2 (per-pair, NOT a single scalar)
+        assert corr[0, 0] == pytest.approx(1.5)
+        assert corr[1, 1] == pytest.approx(2.0)
+        assert corr[0, 1] == pytest.approx(2.0)
+        np.testing.assert_allclose(np.asarray(V1), np.asarray(V0) * corr, atol=1e-9)
+
+    def test_default_is_uncorrected_and_correction_inflates(self):
+        psi_vals = jnp.array([[1.0, 2.0], [3.0, 4.0], [-1.0, 1.0], [2.0, -2.0]])
+        meas = EmpiricalMeasure(x=psi_vals, mask=jnp.ones((4, 2)), weights=jnp.ones(4))
+        cl = jnp.array([0.0, 0.0, 1.0, 1.0])
+        V_default = ClusteredCovariance(cluster_ids=cl, n_clusters=2).covariance(
+            _identity_psi, _P(0.0, 0.0), meas
+        )
+        V_off = ClusteredCovariance(
+            cluster_ids=cl, n_clusters=2, dof_correction=False
+        ).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        V_on = ClusteredCovariance(
+            cluster_ids=cl, n_clusters=2, dof_correction=True
+        ).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        np.testing.assert_array_equal(np.asarray(V_default), np.asarray(V_off))
+        # correction strictly inflates the (nonzero) diagonal
+        assert float(V_on[0, 0]) > float(V_off[0, 0])
+
+    def test_cached_self_parity_with_correction(self):
+        x = jnp.array(
+            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0], [6.0, 6.0]]
+        )
+        mask = jnp.array(
+            [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(6))
+        cov = ClusteredCovariance(
+            cluster_ids=jnp.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0]),
+            n_clusters=3,
+            dof_correction=True,
+        )
+        cached = meas.expectation_and_contributions(_identity_psi, _P(0.0, 0.0))
+        V_self = cov.covariance(_identity_psi, _P(0.0, 0.0), meas)
+        V_cached = cov.covariance(
+            _identity_psi, _P(0.0, 0.0), meas, cached_intermediates=cached
+        )
+        np.testing.assert_array_equal(np.asarray(V_self), np.asarray(V_cached))
+
+    def test_is_pytree_static_field(self):
+        cov = ClusteredCovariance(
+            cluster_ids=jnp.array([0.0, 1.0]), n_clusters=2, dof_correction=True
+        )
+        # dof_correction is static -> NOT a pytree leaf; jit-safe.
+        leaves = jax.tree_util.tree_leaves(cov)
+        assert not any(np.asarray(leaf).dtype == bool for leaf in leaves)
+        assert isinstance(cov, CovarianceStrategy)

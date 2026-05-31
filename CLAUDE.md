@@ -12,7 +12,7 @@ inference through a single pipeline.
 ## Status
 
 v1 is implemented and operational (plus the v2 #79/#80 stratified-covariance
-module). 659 tests pass; `make quick-check` is
+module). 673 tests pass; `make quick-check` is
 clean (ruff + black + mypy + pytest). All three measure paths (synthetic,
 analytical, empirical) run end-to-end against the bundled multi-asset Euler
 example in `src/emu_gmm/examples/euler.py`. The runnable demo at
