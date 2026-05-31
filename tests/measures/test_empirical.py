@@ -698,6 +698,46 @@ class TestJit:
         assert jnp.allclose(G_eager, G_jit)
 
 
+class TestFromArrays:
+    """Zero-boilerplate complete-data constructor (#82 item 4)."""
+
+    def test_defaults_to_all_ones_mask_and_weights(self):
+        x = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        meas = EmpiricalMeasure.from_arrays(x)
+        assert isinstance(meas, Measure)
+        np.testing.assert_array_equal(np.asarray(meas.mask), np.ones((3, 2)))
+        np.testing.assert_array_equal(np.asarray(meas.weights), np.ones(3))
+        np.testing.assert_allclose(np.asarray(meas.x), x)
+        assert meas.x.dtype == jnp.float64
+        assert meas.mask.dtype == jnp.float64
+
+    def test_M_override_for_M_not_equal_D(self):
+        x = np.zeros((4, 3))  # D = 3
+        meas = EmpiricalMeasure.from_arrays(x, M=1)  # scalar moment, M != D
+        assert meas.mask.shape == (4, 1)
+        np.testing.assert_array_equal(np.asarray(meas.mask), np.ones((4, 1)))
+
+    def test_explicit_mask_and_weights_override_defaults(self):
+        x = np.array([[1.0, 2.0], [3.0, 4.0]])
+        mask = np.array([[1.0, 0.0], [1.0, 1.0]])
+        w = np.array([2.0, 0.5])
+        meas = EmpiricalMeasure.from_arrays(x, mask=mask, weights=w)
+        np.testing.assert_array_equal(np.asarray(meas.mask), mask)
+        np.testing.assert_array_equal(np.asarray(meas.weights), w)
+
+    def test_matches_explicit_constructor(self):
+        x = np.array([[1.0, 2.0], [3.0, 4.0]])
+        m1 = EmpiricalMeasure.from_arrays(x)
+        m2 = EmpiricalMeasure(
+            x=jnp.asarray(x, dtype=jnp.float64),
+            mask=jnp.ones((2, 2)),
+            weights=jnp.ones(2),
+        )
+        np.testing.assert_array_equal(np.asarray(m1.x), np.asarray(m2.x))
+        np.testing.assert_array_equal(np.asarray(m1.mask), np.asarray(m2.mask))
+        np.testing.assert_array_equal(np.asarray(m1.weights), np.asarray(m2.weights))
+
+
 class TestFromPandasExplicitMaskNaNConflict:
     """An explicit mask combined with NaN in ``df`` is now an error.
 

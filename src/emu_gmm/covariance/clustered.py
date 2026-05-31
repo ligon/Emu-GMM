@@ -61,10 +61,13 @@ class ClusteredCovariance:
 
     Parameters
     ----------
-    cluster_ids : (N,) jax array of floats
-        Per-observation cluster index in ``[0, n_clusters)``. JAX prefers
-        a float dtype for traced arrays; the implementation casts to a
-        32-bit integer inside :func:`jax.ops.segment_sum`.
+    cluster_ids : (N,) jax array
+        Per-observation cluster index in ``[0, n_clusters)``. Integer-valued;
+        a float dtype is accepted (JAX prefers floats for traced arrays) and
+        is **rounded** to the nearest 32-bit integer inside
+        :func:`jax.ops.segment_sum` --- so a near-integer float id (e.g. from
+        float32 round-off on a large code) bins to the right cluster rather
+        than truncating into a neighbour. Integer-dtype arrays work directly.
     n_clusters : int (static)
         Number of distinct cluster IDs. Must satisfy
         ``max(cluster_ids) < n_clusters``. Treated as a static field so
@@ -150,7 +153,7 @@ class ClusteredCovariance:
             # ``weight_mask`` already encodes d_ij * w_i, so multiply
             # directly by ``psi_safe``.
             contrib = weight_mask * psi_safe  # (N, M)
-            segment_ids = self.cluster_ids.astype(jnp.int32)
+            segment_ids = jnp.round(self.cluster_ids).astype(jnp.int32)
             cluster_totals = jax.ops.segment_sum(
                 contrib, segment_ids, num_segments=self.n_clusters
             )  # (n_clusters, M)
@@ -190,7 +193,7 @@ class ClusteredCovariance:
         # Segment-sum into cluster totals. jax.ops.segment_sum operates
         # on the leading axis only, so we sum the (N, M) contribution
         # along N grouped by cluster ID and end up with (n_clusters, M).
-        segment_ids = self.cluster_ids.astype(jnp.int32)
+        segment_ids = jnp.round(self.cluster_ids).astype(jnp.int32)
         cluster_totals = jax.ops.segment_sum(
             contrib, segment_ids, num_segments=self.n_clusters
         )  # (n_clusters, M)
@@ -215,7 +218,7 @@ class ClusteredCovariance:
         equals the total cluster count, so this is the scalar
         :math:`G/(G-1)`.
         """
-        seg = self.cluster_ids.astype(jnp.int32)
+        seg = jnp.round(self.cluster_ids).astype(jnp.int32)
         per_cluster_obs = jax.ops.segment_sum(
             (mask > 0.0).astype(mask.dtype), seg, num_segments=self.n_clusters
         )  # (n_clusters, M): observed-unit count per (cluster, coord)
