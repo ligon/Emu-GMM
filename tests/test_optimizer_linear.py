@@ -13,6 +13,7 @@ linear/OLS moment.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
@@ -201,6 +202,52 @@ def test_estimate_cu_falls_back():
         [float(result_fallback.theta_hat.b0), float(result_fallback.theta_hat.b1)]
     )
     assert np.allclose(est_linear, est_fallback, atol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Under jit, the fast path fires via lax.cond (rather than always delegating)
+# ---------------------------------------------------------------------------
+
+
+def test_jit_affine_fires_linear_path():
+    """Under jit, an affine residual takes the one-step linear path
+    (steps == 1) and lands on the exact least-squares solution.
+    """
+    rng = np.random.default_rng(7)
+    A_np = rng.standard_normal((3, 3))
+    b_np = rng.standard_normal(3)
+    A, b = jnp.asarray(A_np), jnp.asarray(b_np)
+
+    def residual_fn(theta):
+        return A @ theta - b
+
+    solver = linear_solver()
+    theta_hat, info = jax.jit(lambda t0: solver(residual_fn, t0))(jnp.zeros(3))
+
+    assert np.allclose(np.asarray(theta_hat), np.linalg.solve(A_np, b_np), atol=1e-10)
+    assert int(info.steps) == 1  # the linear branch ran, not the fallback
+    assert info.backend == "linear"
+    # Matches the eager linear path exactly.
+    theta_eager, _ = solver(residual_fn, jnp.zeros(3))
+    assert np.allclose(np.asarray(theta_hat), np.asarray(theta_eager), atol=1e-12)
+
+
+def test_jit_nonlinear_falls_back_via_cond():
+    """Under jit, a nonlinear residual's certificate fails at runtime, so
+    lax.cond runs the fallback branch (steps > 1) and still converges.
+    """
+    c = jnp.asarray([2.0, 5.0])
+
+    def residual_fn(theta):
+        return theta**2 - c
+
+    solver = linear_solver()
+    theta_hat, info = jax.jit(lambda t0: solver(residual_fn, t0))(
+        jnp.asarray([1.0, 1.0])
+    )
+    # The fallback ran inside the cond: more than one step, and it converged.
+    assert int(info.steps) > 1
+    assert np.allclose(np.asarray(theta_hat) ** 2, np.asarray(c), atol=1e-6)
 
 
 if __name__ == "__main__":
