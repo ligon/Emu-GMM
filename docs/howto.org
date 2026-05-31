@@ -244,6 +244,7 @@ build the callable once with =build_estimator(...)= and reuse it, or
 | =coin_plus_noise.py=      | Two moments, composing a DGP                                      |
 | =run_euler.py=            | One model, three measures (synthetic / analytical / empirical)    |
 | =twfe.py=                 | Two-way fixed effects: clustered covariance + iterated weighting  |
+| =panel_regression.py=     | Linear panel (fixed-effects) regression as OLS; IID == HC0 SE, clustered == CRVE |
 | =hierarchical.py=         | Variance components + clustered covariance + bootstrap            |
 | =empirical_bootstrap.py=  | Wild + cluster bootstrap inference side-by-side                   |
 
