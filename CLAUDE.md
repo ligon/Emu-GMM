@@ -230,20 +230,39 @@ bootstrap helpers — is **owned by the package** and read off
 ## Running on this box — the 64-core JIT-mmap hazard
 
 This host has 64 logical CPUs. JAX/XLA sizes its JIT thread pool to the CPU
-count and `mmap`s executable pages per worker; running several JAX processes
-at once (multiple `make quick-check` invocations, or a multi-agent workflow
-where each agent runs pytest) oversubscribes the cores and stalls or kills
-the runs. This is the most likely cause of the mid-session segfault this
-project has hit, and of `pytest` runs dying partway with no summary line.
+count and `mmap`s executable pages per worker; running several *uncapped*
+JAX processes at once (multiple `make quick-check` invocations, or a
+multi-agent workflow where each agent runs pytest) oversubscribes the cores
+(2 × 64 threads on 64 cores) and stalls or kills the runs. This is the most
+likely cause of the mid-session segfault this project has hit, and of
+`pytest` runs dying partway with no summary line.
 
-- Run **one** `make quick-check` / pytest at a time. A backgrounded run
-  whose shell wrapper exits can leave the `pytest` child alive — check `ps`
-  before relaunching; "completed" on a piped background command does not
-  mean the child died.
-- For heavy or concurrent JAX work, cap the thread pools and force a single
-  host device:
-  `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 XLA_FLAGS=--xla_force_host_platform_device_count=1`
-  (slower per-test, but completes reliably; the `../Seasonality` MC harness
-  documents the same workaround).
-- Multi-agent workflows must instruct every agent to use these caps and to
-  serialise pytest (never two suites at once).
+The fix is to **bound the cores each process uses** with CPU affinity, not
+to serialise. XLA/Eigen size their pools to the affinity-limited CPU count
+(`len(os.sched_getaffinity(0))`), so `taskset` makes a JAX process behave as
+an N-core process — fewer threads, fewer mmaps, confined to its cores. Pin
+concurrent suites to **disjoint halves** and they coexist at full speed:
+
+```
+XLA_FLAGS=--xla_force_host_platform_device_count=1 taskset -c 0-31  .venv/bin/python -m pytest <...>   # suite A
+XLA_FLAGS=--xla_force_host_platform_device_count=1 taskset -c 32-63 .venv/bin/python -m pytest <...>   # suite B
+```
+
+Validated: two JIT-heavy suites pinned to `0-31` / `32-63` both pass
+concurrently (~35 s each), no segfault. This supersedes the old
+`OMP_NUM_THREADS=1` single-thread recipe, which was reliable but ~20× slower
+(it forced one thread). Use `taskset` halves instead; reach for the
+single-thread caps only as a last resort.
+
+- For a **single** run, `taskset -c 0-31` is still worth it: a 32-core run is
+  fast and leaves 32 cores free for other work.
+- **Multi-agent workflows / delegated agents:** give each agent a distinct
+  core range (`0-31` vs `32-63`) rather than telling them to serialise.
+- **Pitfall:** do **not** gate on `pgrep -f "pytest"` in a wait loop — the
+  loop's own command line contains `pytest`, so it self-matches and never
+  exits. (Cost a hung agent once.) Match the concrete process,
+  e.g. `pgrep -f "bin/python -m pytest"`, and exclude your own PID — or just
+  pin with `taskset` and skip the wait entirely.
+- A backgrounded run whose shell wrapper exits can leave the `pytest` child
+  alive — check `ps` before relaunching; "completed" on a piped background
+  command does not mean the child died.
