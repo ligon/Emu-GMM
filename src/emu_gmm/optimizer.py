@@ -32,6 +32,7 @@ import weakref
 from collections.abc import Callable
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optimistix as optx
@@ -314,4 +315,156 @@ def _scipy_status(code: int) -> str:
     return "diverged"
 
 
-__all__ = ["optimistix_lm", "scipy_lm"]
+# ---------------------------------------------------------------------------
+# Linear (affine-in-theta) fast-path adapter
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _LinearSolver:
+    """Certificate-based fast path for affine-in-``theta`` residuals.
+
+    When ``residual_fn`` is affine in ``theta`` --- i.e. the structural
+    moment is linear in the parameters and the whitening does *not* make
+    it non-affine (so ``weighting=Identity()`` or ``Fixed(...)``, **not**
+    ``ContinuouslyUpdated``) --- the least-squares minimiser is reached in
+    a single Gauss--Newton step. This adapter takes that step and then
+    *certifies* it by checking the first-order optimality condition at the
+    candidate, rather than trying to *detect* affinity structurally
+    (comparing Jacobians at two points is unsound: equal Jacobians at
+    sampled points do not imply the function is affine --- e.g.
+    ``cos(0) == cos(2*pi)``).
+
+    The certificate is exact for an affine residual (the post-step
+    gradient is zero up to round-off) and fails for a genuinely nonlinear
+    one (a single Gauss--Newton step leaves the gradient at ``O(||g0||)``).
+    On a failed certificate the call delegates *entirely* to the fallback
+    optimiser and returns its ``(theta_opt, info)`` unchanged, so the
+    reported ``backend`` reflects the fallback that actually solved the
+    problem.
+
+    The accept/reject decision is a Python ``bool(...)`` on a concrete
+    value, which is correct in the eager path :func:`emu_gmm.estimate`
+    drives the optimiser through. Under :func:`jax.jit` ``theta_init`` is
+    a tracer and the ``bool(...)`` raises; that case is caught and the
+    call delegates wholly to the fallback (always JIT-safe). The
+    speculative linear solve is *not* attempted under trace.
+
+    Instances satisfy the :class:`~emu_gmm.types.Optimizer` protocol.
+    """
+
+    fallback: Any  # an Optimizer; constructed in :func:`linear_solver`.
+    tol: float
+
+    def __call__(
+        self,
+        residual_fn: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+        theta_init: Float[Array, " K"],
+    ) -> tuple[Float[Array, " K"], OptimizerInfo]:
+        """Solve ``min_theta || residual_fn(theta) ||^2`` via the fast path.
+
+        Take one linear least-squares step from ``theta_init`` and accept
+        it iff the first-order optimality certificate holds; otherwise
+        delegate to :attr:`fallback`.
+
+        Parameters
+        ----------
+        residual_fn
+            Maps a flat ``(K,)`` parameter array to a flat ``(M,)``
+            residual. JAX-traceable.
+        theta_init
+            Initial parameter guess, a 1-D JAX array of length ``K``.
+
+        Returns
+        -------
+        theta_opt : (K,) jax array
+        info : OptimizerInfo
+            ``backend == "linear"`` with ``steps == 1`` on an accepted
+            certificate; otherwise the fallback's own ``info`` verbatim.
+        """
+        # Under jit, ``theta_init`` is a tracer: the speculative solve and
+        # its concrete accept/reject are unsafe. Delegate wholly. We probe
+        # for the traced case via the certificate's bool(...) below, but
+        # also guard the whole linear attempt in try/except so any
+        # tracer-leak path falls back safely.
+        try:
+            j0 = jax.jacfwd(residual_fn)(theta_init)  # (M, K)
+            r0 = residual_fn(theta_init)  # (M,)
+
+            # One Gauss--Newton / linear least-squares step. Exact for an
+            # affine residual in both the just-identified (M == K) and
+            # over-identified (M > K) cases.
+            delta = -jnp.linalg.lstsq(j0, r0, rcond=None)[0]
+            theta_hat = theta_init + delta
+
+            # Certify the first-order optimality condition at the
+            # candidate: g1 = J1' r1 should vanish for an affine residual.
+            j1 = jax.jacfwd(residual_fn)(theta_hat)
+            r1 = residual_fn(theta_hat)
+            g1 = j1.T @ r1
+            g0 = j0.T @ r0
+
+            g1_norm = jnp.linalg.norm(g1)
+            g0_norm = jnp.linalg.norm(g0)
+            threshold = self.tol * jnp.maximum(g0_norm, 1.0)
+
+            # Concrete bool: fine eagerly, raises under trace (caught
+            # below to delegate to the fallback).
+            accept = bool(g1_norm <= threshold)
+        except (
+            jax.errors.TracerBoolConversionError,
+            jax.errors.ConcretizationTypeError,
+        ):
+            return self.fallback(residual_fn, theta_init)
+
+        if accept:
+            final_objective = 0.5 * jnp.sum(r1 * r1)
+            info = OptimizerInfo(
+                steps=1,
+                final_objective=final_objective,
+                status="converged",
+                backend="linear",
+            )
+            return theta_hat, info
+
+        # Certificate failed: genuinely nonlinear residual. Delegate
+        # entirely to the fallback and surface its result unchanged.
+        return self.fallback(residual_fn, theta_init)
+
+
+def linear_solver(
+    *,
+    fallback: Any = None,
+    tol: float = 1e-7,
+) -> _LinearSolver:
+    """Build a certificate-based linear fast-path optimiser.
+
+    For an affine-in-``theta`` residual the least-squares minimiser is
+    reached in one Gauss--Newton step; this optimiser takes that step and
+    *certifies* it via the first-order optimality condition. On a failed
+    certificate (a nonlinear residual --- including the continuously
+    updated whitened moment, which is non-affine even for a linear model)
+    it delegates to ``fallback``.
+
+    Parameters
+    ----------
+    fallback : :class:`~emu_gmm.types.Optimizer`, optional
+        Optimiser invoked when the certificate fails or when called under
+        :func:`jax.jit` (where the speculative concrete solve is unsafe).
+        Defaults to :func:`optimistix_lm` with default tolerances.
+    tol : float, optional
+        Certificate tolerance. The step is accepted iff
+        ``||J1' r1|| <= tol * max(||J0' r0||, 1.0)``. Default ``1e-7``.
+
+    Returns
+    -------
+    optimiser
+        A callable satisfying the :class:`~emu_gmm.types.Optimizer`
+        protocol. Safe under :func:`jax.jit` (delegates to ``fallback``).
+    """
+    if fallback is None:
+        fallback = optimistix_lm()
+    return _LinearSolver(fallback=fallback, tol=tol)
+
+
+__all__ = ["optimistix_lm", "scipy_lm", "linear_solver"]
