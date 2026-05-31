@@ -343,18 +343,32 @@ class _LinearSolver:
     reported ``backend`` reflects the fallback that actually solved the
     problem.
 
-    The accept/reject decision is a Python ``bool(...)`` on a concrete
-    value, which is correct in the eager path :func:`emu_gmm.estimate`
-    drives the optimiser through. Under :func:`jax.jit` ``theta_init`` is
-    a tracer and the ``bool(...)`` raises; that case is caught and the
-    call delegates wholly to the fallback (always JIT-safe). The
-    speculative linear solve is *not* attempted under trace.
+    Eagerly (the path :func:`emu_gmm.estimate` drives the optimiser
+    through) the accept/reject is a concrete Python ``bool``: an accepted
+    certificate returns the one-step solution with ``backend == "linear"``,
+    a rejected one delegates and surfaces the fallback's info verbatim.
+
+    Under :func:`jax.jit` ``theta_init`` is a tracer and the concrete branch
+    is unavailable, so the dispatch uses :func:`jax.lax.cond`: the affine
+    fast path *fires* under jit (the iterative fallback is compiled but only
+    the taken branch runs), rather than always delegating. In the traced
+    case ``backend`` is reported "linear" with ``steps`` distinguishing the
+    path (``1`` = linear fast path; ``> 1`` = the fallback ran).
+
+    .. note::
+        ``vmap`` turns ``lax.cond`` into a ``select`` (both branches
+        execute), so a vmapped call runs the fallback for every batch
+        element regardless of the certificate --- correct, but no speed-up.
+        For a vmapped Monte Carlo over a *known*-linear moment, prefer
+        ``jax.jit`` + ``lax.scan`` (where the cond's untaken branch is
+        skipped) over ``vmap``.
 
     Instances satisfy the :class:`~emu_gmm.types.Optimizer` protocol.
     """
 
     fallback: Any  # an Optimizer; constructed in :func:`linear_solver`.
     tol: float
+    verify: bool
 
     def __call__(
         self,
@@ -365,7 +379,9 @@ class _LinearSolver:
 
         Take one linear least-squares step from ``theta_init`` and accept
         it iff the first-order optimality certificate holds; otherwise
-        delegate to :attr:`fallback`.
+        delegate to :attr:`fallback`. When :attr:`verify` is ``False`` the
+        step is taken *unconditionally* (the caller asserts affinity), with
+        no certificate, no fallback, and no control flow.
 
         Parameters
         ----------
@@ -382,89 +398,146 @@ class _LinearSolver:
             ``backend == "linear"`` with ``steps == 1`` on an accepted
             certificate; otherwise the fallback's own ``info`` verbatim.
         """
-        # Under jit, ``theta_init`` is a tracer: the speculative solve and
-        # its concrete accept/reject are unsafe. Delegate wholly. We probe
-        # for the traced case via the certificate's bool(...) below, but
-        # also guard the whole linear attempt in try/except so any
-        # tracer-leak path falls back safely.
-        try:
+        if not self.verify:
+            # Caller asserts the residual is affine: take the one-step
+            # Gauss--Newton solution UNCONDITIONALLY -- no certificate, no
+            # fallback, no Python branch and no lax.cond. Being control-flow
+            # free it vmaps as cleanly as it jits (the use case the certified
+            # path cannot speed up under vmap). The caller owns correctness;
+            # ``final_objective`` still surfaces a misuse (it is not ~0 when
+            # the residual was in fact nonlinear).
             j0 = jax.jacfwd(residual_fn)(theta_init)  # (M, K)
             r0 = residual_fn(theta_init)  # (M,)
-
-            # One Gauss--Newton / linear least-squares step. Exact for an
-            # affine residual in both the just-identified (M == K) and
-            # over-identified (M > K) cases.
-            delta = -jnp.linalg.lstsq(j0, r0, rcond=None)[0]
-            theta_hat = theta_init + delta
-
-            # Certify the first-order optimality condition at the
-            # candidate: g1 = J1' r1 should vanish for an affine residual.
-            j1 = jax.jacfwd(residual_fn)(theta_hat)
+            theta_hat = theta_init - jnp.linalg.lstsq(j0, r0, rcond=None)[0]
             r1 = residual_fn(theta_hat)
-            g1 = j1.T @ r1
-            g0 = j0.T @ r0
+            return theta_hat, OptimizerInfo(
+                steps=1,
+                final_objective=0.5 * jnp.sum(r1 * r1),
+                status="converged",
+                backend="linear",
+            )
 
-            g1_norm = jnp.linalg.norm(g1)
-            g0_norm = jnp.linalg.norm(g0)
-            threshold = self.tol * jnp.maximum(g0_norm, 1.0)
+        # The Gauss--Newton candidate and its first-order optimality
+        # certificate. All of this traces cleanly (jacfwd / lstsq / norms);
+        # only the concrete accept/reject is eager-only.
+        j0 = jax.jacfwd(residual_fn)(theta_init)  # (M, K)
+        r0 = residual_fn(theta_init)  # (M,)
+        # One Gauss--Newton / linear least-squares step. Exact for an affine
+        # residual in both the just-identified (M == K) and over-identified
+        # (M > K) cases.
+        delta = -jnp.linalg.lstsq(j0, r0, rcond=None)[0]
+        theta_hat = theta_init + delta
+        # Certify: g1 = J1' r1 vanishes for an affine residual; a single
+        # Gauss--Newton step leaves it at O(||g0||) for a nonlinear one.
+        j1 = jax.jacfwd(residual_fn)(theta_hat)
+        r1 = residual_fn(theta_hat)
+        g1_norm = jnp.linalg.norm(j1.T @ r1)
+        g0_norm = jnp.linalg.norm(j0.T @ r0)
+        accept = g1_norm <= self.tol * jnp.maximum(g0_norm, 1.0)
+        final_objective = 0.5 * jnp.sum(r1 * r1)
 
-            # Concrete bool: fine eagerly, raises under trace (caught
-            # below to delegate to the fallback).
-            accept = bool(g1_norm <= threshold)
+        try:
+            accept_concrete = bool(accept)
         except (
             jax.errors.TracerBoolConversionError,
             jax.errors.ConcretizationTypeError,
         ):
-            return self.fallback(residual_fn, theta_init)
+            accept_concrete = None
 
-        if accept:
-            final_objective = 0.5 * jnp.sum(r1 * r1)
-            info = OptimizerInfo(
+        if accept_concrete is True:
+            # Eager, certificate holds: the exact one-step linear solution.
+            return theta_hat, OptimizerInfo(
                 steps=1,
                 final_objective=final_objective,
                 status="converged",
                 backend="linear",
             )
-            return theta_hat, info
+        if accept_concrete is False:
+            # Eager, certificate fails (genuinely nonlinear residual):
+            # delegate, surfacing the fallback's own info verbatim.
+            return self.fallback(residual_fn, theta_init)
 
-        # Certificate failed: genuinely nonlinear residual. Delegate
-        # entirely to the fallback and surface its result unchanged.
-        return self.fallback(residual_fn, theta_init)
+        # Traced (under jit / lax control flow): the concrete branch is
+        # unavailable, so dispatch with ``lax.cond``. Both branches are
+        # traced -- the fallback is *compiled* -- but only the taken branch
+        # runs, so a genuinely affine residual takes the one-step linear path
+        # with the iterative solve compiled-but-skipped. The OptimizerInfo is
+        # rebuilt with a uniform static structure (``lax.cond`` requires both
+        # branches to agree on it): ``backend`` is reported "linear" and
+        # ``steps`` distinguishes the path (1 = linear; >1 = fallback ran).
+        def _linear_branch(_: Any) -> tuple[Any, Any, Any]:
+            return theta_hat, jnp.asarray(1, jnp.int32), final_objective
+
+        def _fallback_branch(_: Any) -> tuple[Any, Any, Any]:
+            tf, finfo = self.fallback(residual_fn, theta_init)
+            return (
+                tf,
+                jnp.asarray(finfo.steps, jnp.int32),
+                jnp.asarray(finfo.final_objective, theta_hat.dtype),
+            )
+
+        theta_opt, steps, fobj = jax.lax.cond(
+            accept, _linear_branch, _fallback_branch, None
+        )
+        return theta_opt, OptimizerInfo(
+            steps=steps,
+            final_objective=fobj,
+            status="converged",
+            backend="linear",
+        )
 
 
 def linear_solver(
     *,
     fallback: Any = None,
     tol: float = 1e-7,
+    verify: bool = True,
 ) -> _LinearSolver:
-    """Build a certificate-based linear fast-path optimiser.
+    """Build a linear fast-path optimiser for affine-in-``theta`` residuals.
 
     For an affine-in-``theta`` residual the least-squares minimiser is
-    reached in one Gauss--Newton step; this optimiser takes that step and
-    *certifies* it via the first-order optimality condition. On a failed
-    certificate (a nonlinear residual --- including the continuously
-    updated whitened moment, which is non-affine even for a linear model)
-    it delegates to ``fallback``.
+    reached in one Gauss--Newton step. By default this optimiser takes that
+    step and *certifies* it via the first-order optimality condition,
+    delegating to ``fallback`` on a failed certificate (a nonlinear residual
+    --- including the continuously-updated whitened moment, which is
+    non-affine even for a linear model).
 
     Parameters
     ----------
     fallback : :class:`~emu_gmm.types.Optimizer`, optional
-        Optimiser invoked when the certificate fails or when called under
-        :func:`jax.jit` (where the speculative concrete solve is unsafe).
-        Defaults to :func:`optimistix_lm` with default tolerances.
+        Optimiser invoked when the certificate fails (a nonlinear residual,
+        including the continuously-updated whitened moment). Reached eagerly
+        by direct delegation and under :func:`jax.jit` via
+        :func:`jax.lax.cond`. Defaults to :func:`optimistix_lm` with default
+        tolerances. Unused (and not constructed) when ``verify=False``.
     tol : float, optional
         Certificate tolerance. The step is accepted iff
         ``||J1' r1|| <= tol * max(||J0' r0||, 1.0)``. Default ``1e-7``.
+        Ignored when ``verify=False``.
+    verify : bool, optional
+        When ``True`` (default), certify the step and fall back on failure
+        (safe; the certified path's ``vmap`` lowers ``lax.cond`` to a
+        ``select`` so both branches run). When ``False``, the caller
+        **asserts** the residual is affine and the one-step solution is
+        taken *unconditionally* --- no certificate, no fallback, no control
+        flow. This is the variant to use inside a ``vmap`` / ``lax.scan``
+        Monte Carlo over a *known*-linear moment: it is exact for an affine
+        residual and vmaps with no wasted fallback work. The result is
+        meaningless if the residual is in fact nonlinear (``final_objective``
+        on the returned info will not be ~0).
 
     Returns
     -------
     optimiser
         A callable satisfying the :class:`~emu_gmm.types.Optimizer`
-        protocol. Safe under :func:`jax.jit` (delegates to ``fallback``).
+        protocol. Jit-safe; with ``verify=True`` the affine fast path fires
+        under :func:`jax.jit` via :func:`jax.lax.cond` (see
+        :class:`_LinearSolver` for the ``vmap`` caveat), and with
+        ``verify=False`` it is control-flow free and so vmaps cleanly.
     """
-    if fallback is None:
+    if fallback is None and verify:
         fallback = optimistix_lm()
-    return _LinearSolver(fallback=fallback, tol=tol)
+    return _LinearSolver(fallback=fallback, tol=tol, verify=verify)
 
 
 __all__ = ["optimistix_lm", "scipy_lm", "linear_solver"]
