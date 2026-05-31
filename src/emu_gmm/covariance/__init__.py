@@ -7,6 +7,7 @@ from emu_gmm.covariance.stratified import (
     DesignAwareCovariance,
     StratifiedCovariance,
 )
+from emu_gmm.covariance.sum import SumCovariance
 from emu_gmm.covariance.synthetic import SyntheticCovariance
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "DesignAwareCovariance",
     "IIDCovariance",
     "StratifiedCovariance",
+    "SumCovariance",
     "SyntheticCovariance",
 ]
