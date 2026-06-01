@@ -152,10 +152,17 @@ def unflatten_params(
         if ls.ambient_shape == ():
             # Scalar leaf: 0-d, matching v1 reconstruction exactly
             # (red-team R10/R33/R37). flat[offset] is a 0-d array.
-            leaves.append(flat_arr[ls.offset])
+            leaf = flat_arr[ls.offset]
         else:
             block = flat_arr[ls.offset : ls.offset + size]
-            leaves.append(jnp.reshape(block, ls.ambient_shape))
+            leaf = jnp.reshape(block, ls.ambient_shape)
+        # Restore the leaf's original dtype: jnp.concatenate promotes the
+        # flat buffer to a common dtype, so a bare float32/int32 scalar
+        # would otherwise come back float64. For wrapped leaves this
+        # agrees with the ManifoldLeaf aux_data dtype (harmless no-op).
+        if ls.dtype is not None:
+            leaf = leaf.astype(ls.dtype)
+        leaves.append(leaf)
     return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
@@ -270,6 +277,7 @@ def flatten_params_with_spec(
                 ambient_shape=ambient_shape,
                 manifold=manifold,
                 field_name=name,
+                dtype=arr.dtype,
             )
         )
         # C/row-major ravel; pinned so flatten and unflatten agree

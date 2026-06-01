@@ -309,6 +309,45 @@ class TestEuclideanVectorLeaf:
         assert float(restored.s) == pytest.approx(9.0)
 
 
+# ---------------------------------------------------------------------------
+# Per-leaf dtype preservation across concat-promotion (#12 Phase 1 fix).
+# ---------------------------------------------------------------------------
+class TestPerLeafDtypePreservation:
+    def test_bare_f32_scalar_with_f64_wrapped_matrix(self):
+        # A *bare* float32 scalar leaf beside a float64 ManifoldLeaf-wrapped
+        # (5,2) matrix: each leaf's original dtype must survive the
+        # round-trip even though jnp.concatenate promotes the flat buffer.
+        A = jnp.asarray(np.arange(10.0).reshape((5, 2)), dtype=jnp.float64)
+        phi = jnp.asarray(0.37, dtype=jnp.float32)
+        p = _ProductParams(A=ManifoldLeaf(A, PSDFixedRank(5, 2)), phi=phi)
+        flat, treedef, spec = params_mod.flatten_params_with_spec(p)
+        restored = params_mod.unflatten_params(flat, treedef, spec)
+        assert jnp.asarray(restored.phi).dtype == jnp.float32
+        assert restored.A.array.dtype == jnp.float64
+        assert jnp.array_equal(restored.A.array, A)
+        assert float(restored.phi) == pytest.approx(float(phi))
+
+    def test_int32_bare_scalar_with_f64_matrix(self):
+        # An int32 bare scalar must come back int32, not float64.
+        A = jnp.asarray(np.arange(10.0).reshape((5, 2)), dtype=jnp.float64)
+        phi = jnp.asarray(3, dtype=jnp.int32)
+        p = _ProductParams(A=ManifoldLeaf(A, PSDFixedRank(5, 2)), phi=phi)
+        flat, treedef, spec = params_mod.flatten_params_with_spec(p)
+        restored = params_mod.unflatten_params(flat, treedef, spec)
+        assert jnp.asarray(restored.phi).dtype == jnp.int32
+        assert restored.A.array.dtype == jnp.float64
+        assert int(restored.phi) == 3
+        assert jnp.array_equal(restored.A.array, A)
+
+
+def test_manifold_leaf_rejects_product():
+    # Wrapping a Product in a ManifoldLeaf raises a clear ValueError
+    # mentioning leaf manifolds / Product, not a bare NotImplementedError.
+    prod = Product(PSDFixedRank(5, 2), Euclidean())
+    with pytest.raises(ValueError, match="(?i)leaf manifold.*Product|Product"):
+        ManifoldLeaf(jnp.zeros((5, 2)), prod)
+
+
 def test_product_manifold_constructs_for_spec():
     # Sanity that the Product manifold the slice targets composes the
     # factor gauge dims the spec sums independently.

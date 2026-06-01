@@ -82,6 +82,21 @@ class ManifoldLeaf:
     manifold: ManifoldParam
 
     def __init__(self, array: Any, manifold: ManifoldParam) -> None:
+        # A ManifoldLeaf must wrap a *simple* leaf manifold (e.g.
+        # PSDFixedRank, Euclidean). Product structure is expressed by the
+        # PyTree itself (one ManifoldLeaf per factor), not by wrapping a
+        # Product. Reject it with a readable message rather than letting
+        # the later ``ambient_shape`` access raise a bare
+        # NotImplementedError from Product.
+        from emu_gmm.manifolds.product import Product
+
+        if isinstance(manifold, Product):
+            raise ValueError(
+                "ManifoldLeaf must wrap a simple leaf manifold (e.g. "
+                "PSDFixedRank, Euclidean); got a Product. Express Product "
+                "structure as the parameter PyTree itself (one "
+                "ManifoldLeaf per factor), not by wrapping a Product."
+            )
         if not isinstance(manifold, ManifoldParam):
             raise TypeError(
                 "ManifoldLeaf.manifold must satisfy the ManifoldParam "
