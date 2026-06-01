@@ -166,6 +166,123 @@ def unflatten_params(
     return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
+def _walk_leaf_specs(params: Any) -> tuple[ManifoldSpec, list[Any]]:
+    """Shared leaf-walk that builds a :class:`ManifoldSpec` from ``params``.
+
+    This is the single source of truth for the per-leaf manifold geometry:
+    leaf order, ``offset`` / ``ambient_shape`` / ``manifold`` / ``dtype``
+    population, manifold validation, the ``offset += prod(ambient_shape)``
+    accumulation, the ``__emu_manifolds__`` annotation handling, and the
+    final block-boundary INT-06 guard. Both :func:`flatten_params_with_spec`
+    (Phase 1, the production flatten path) and
+    :func:`manifold_spec_from_params` (Phase 2, the estimator's spec probe)
+    delegate here so the two builders cannot drift (red-team
+    R1/R6/R8/R26/R33).
+
+    Returns
+    -------
+    spec
+        The :class:`ManifoldSpec` describing ``params``.
+    raveled_blocks
+        One C/row-major ``(size,)`` block per leaf, in leaf-walk order.
+        :func:`flatten_params_with_spec` concatenates these into the flat
+        buffer; :func:`manifold_spec_from_params` discards them (it is
+        callable without ever materialising a flat array, which
+        ``estimate()`` needs before optimisation).
+
+    The walk treats :class:`ManifoldLeaf` as opaque
+    (``is_leaf=isinstance(x, ManifoldLeaf)``) so a wrapped non-scalar block
+    is one leaf, matching the topology the returned treedef descends into
+    (red-team R1/R6/R26).
+    """
+    if dataclasses.is_dataclass(params):
+        field_names: list[str | None] = [f.name for f in dataclasses.fields(params)]
+    else:
+        field_names = []
+
+    field_manifolds: dict[str, Any] = {}
+    if dataclasses.is_dataclass(params):
+        field_manifolds = dict(getattr(type(params), "__emu_manifolds__", {}) or {})
+
+    wrapped_leaves = jax.tree_util.tree_leaves(
+        params, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
+    )
+    if len(field_names) != len(wrapped_leaves):
+        field_names = [None] * len(wrapped_leaves)
+
+    leaf_specs: list[LeafSpec] = []
+    blocks: list[Any] = []
+    offset = 0
+    total_dim = 0
+    total_gauge = 0
+    for leaf, name in zip(wrapped_leaves, field_names, strict=True):
+        if isinstance(leaf, ManifoldLeaf):
+            arr = jnp.asarray(leaf.array)
+            manifold = leaf.manifold
+            ambient_shape = tuple(int(s) for s in arr.shape)
+            decl = getattr(manifold, "ambient_shape", None)
+            if decl is not None and tuple(int(s) for s in decl) != ambient_shape:
+                raise ValueError(
+                    f"_walk_leaf_specs: leaf {name!r} array shape "
+                    f"{ambient_shape} does not match its manifold's "
+                    f"ambient_shape {tuple(decl)}"
+                )
+        else:
+            arr = jnp.asarray(leaf)
+            ambient_shape = tuple(int(s) for s in arr.shape)
+            annotated = field_manifolds.get(name) if name is not None else None
+            if annotated is not None:
+                manifold = annotated
+                decl = getattr(manifold, "ambient_shape", None)
+                if decl is not None and tuple(int(s) for s in decl) != ambient_shape:
+                    raise ValueError(
+                        f"_walk_leaf_specs: annotated leaf "
+                        f"{name!r} array shape {ambient_shape} does not match "
+                        f"its manifold's ambient_shape {tuple(decl)}"
+                    )
+            else:
+                if ambient_shape != ():
+                    raise ValueError(
+                        f"_walk_leaf_specs: bare (unwrapped) leaf "
+                        f"{name!r} has shape {ambient_shape}; non-scalar "
+                        "leaves must be wrapped in a ManifoldLeaf carrying "
+                        "their ManifoldParam (or annotated via "
+                        "__emu_manifolds__)"
+                    )
+                manifold = Euclidean()
+
+        size = int(np.prod(ambient_shape))
+        leaf_specs.append(
+            LeafSpec(
+                offset=offset,
+                ambient_shape=ambient_shape,
+                manifold=manifold,
+                field_name=name,
+                dtype=arr.dtype,
+            )
+        )
+        blocks.append(jnp.reshape(arr, (size,)))
+        offset += size
+        total_dim += size
+        total_gauge += int(manifold.gauge_dim)
+
+    total_ambient = sum(int(np.prod(ls.ambient_shape)) for ls in leaf_specs)
+    if not (total_ambient == offset == total_dim):
+        raise AssertionError(
+            f"_walk_leaf_specs: block-boundary corruption: sum of "
+            f"prod(ambient_shape)={total_ambient}, offset={offset}, "
+            f"total_dimension={total_dim} disagree"
+        )
+
+    spec = ManifoldSpec(
+        leaf_specs=tuple(leaf_specs),
+        total_ambient_dim=offset,
+        total_dimension=total_dim,
+        total_gauge_dim=total_gauge,
+    )
+    return spec, blocks
+
+
 def flatten_params_with_spec(
     params: Any,
 ) -> tuple[Float[Array, " D"], jax.tree_util.PyTreeDef, ManifoldSpec]:
@@ -353,91 +470,55 @@ def param_names(params: Any) -> list[str]:
 def manifold_spec_from_params(params: Any) -> ManifoldSpec:
     """Build a :class:`ManifoldSpec` describing the leaves of ``params``.
 
-    For v1-style parameter trees (every leaf is a 0-d scalar), this
-    returns a :class:`ManifoldSpec` whose ``leaf_specs`` are all
-    :class:`Euclidean` (scalar) entries (per plan §2.8: scalar leaves
-    map to ``Euclidean()`` --- the 0-d-shape Euclidean --- not to
-    ``Euclidean(1)``). The resulting ``total_ambient_dim`` and
-    ``total_dimension`` equal the v1 flat length ``K``, and
+    This is the spec builder ``estimate()`` calls before optimisation
+    (estimator.py); it must produce a spec **field-for-field identical**
+    to ``flatten_params_with_spec(params)[2]`` for the same ``params``
+    (the two are deliberately two builders of one spec). To guarantee
+    they cannot drift, both delegate to the shared :func:`_walk_leaf_specs`
+    leaf-walk (red-team R1/R6/R8/R26/R33); this function discards the
+    raveled blocks so it is callable **without ever materialising a flat
+    array** (the ``estimate()`` pre-optimisation requirement).
+
+    For v1-style parameter trees (every leaf is a 0-d scalar) the result
+    is unchanged from before: all ``leaf_specs`` are :class:`Euclidean`
+    (0-d) entries (plan §2.8 --- ``Euclidean()`` not ``Euclidean(1)``),
+    ``total_ambient_dim == total_dimension == K``, and
     ``total_gauge_dim == 0``.
 
-    v2-style parameter trees may carry larger ambient shapes per leaf;
-    that path activates once v2's :class:`ManifoldLeaf` wrapper lands
-    in a later phase. For now this helper handles the v1 contract and
-    leaves a clear seam for v2 leaves.
+    Non-scalar leaves expressed as :class:`ManifoldLeaf`-wrapped pytree
+    leaves (the Phase-1 representation) or via an ``__emu_manifolds__``
+    annotation are now accepted: each ``LeafSpec.offset`` /
+    ``ambient_shape`` is populated from the **actual array shape**, with
+    ``offset += prod(ambient_shape)`` (the ambient-storage convention,
+    *not* ``manifold.dimension``; plan §2.1, §2.3). Each leaf's
+    ``manifold.gauge_dim`` sums into ``total_gauge_dim`` (e.g.
+    ``K(K-1)/2`` for ``PSDFixedRank(n, K)``) and ``prod(ambient_shape)``
+    sums into ``total_dimension`` (the ambient ``nK``).
 
     Parameters
     ----------
     params
         A parameter PyTree. Dataclass field names are used for
         ``LeafSpec.field_name`` when the PyTree root is a dataclass.
+        Non-scalar leaves must be wrapped in a :class:`ManifoldLeaf`
+        (or annotated via ``__emu_manifolds__``); a bare non-scalar
+        leaf is rejected with a clear ``ValueError`` (red-team R19).
 
     Returns
     -------
     spec
-        A frozen, jit-hashable :class:`ManifoldSpec`.
+        A frozen, jit-hashable :class:`ManifoldSpec`. The shared walk
+        asserts the INT-06 block-boundary invariant
+        (``sum(prod(ambient_shape)) == total_ambient_dim ==
+        total_dimension``) before returning (red-team R3/R5/R9/R25).
 
     Notes
     -----
     The returned spec is consumed downstream by Phase 5 dispatch
     (see plan §2.6) and Phase 6 label generation (plan §2.10).
     """
-    if dataclasses.is_dataclass(params):
-        field_names: list[str | None] = [f.name for f in dataclasses.fields(params)]
-    else:
-        leaves_only, _ = jax.tree_util.tree_flatten(params)
-        field_names = [None] * len(leaves_only)
-
-    leaves, _ = jax.tree_util.tree_flatten(params)
-    if len(leaves) != len(field_names):
-        # Dataclass with non-scalar field structure --- fall back to
-        # positional None names. (v2 may handle nested dataclasses
-        # explicitly; for v1 contracts, leaves and field names match.)
-        field_names = [None] * len(leaves)
-
-    # Per-field manifold annotations (v2 lite slice, plan §2.8): a
-    # parameter dataclass may carry an ``__emu_manifolds__`` class
-    # attribute mapping field-name -> :class:`ManifoldParam` (e.g.
-    # ``{"sigma": Positive()}``). Scalar Positive leaves keep the same
-    # 0-d flatten layout, so this annotation is the *only* change needed
-    # to route a field onto a non-Euclidean manifold; the
-    # flatten/unflatten 2-tuple contract is preserved bitwise.
-    field_manifolds: dict[str, Any] = {}
-    if dataclasses.is_dataclass(params):
-        field_manifolds = dict(getattr(type(params), "__emu_manifolds__", {}) or {})
-
-    leaf_specs: list[LeafSpec] = []
-    offset = 0
-    total_dim = 0
-    total_gauge = 0
-    for leaf, name in zip(leaves, field_names, strict=True):
-        arr = jnp.asarray(leaf)
-        if arr.ndim != 0:
-            raise NotImplementedError(
-                f"manifold_spec_from_params: leaf {name!r} has shape "
-                f"{arr.shape}; v2 ManifoldLeaf wrapping is required for "
-                "non-scalar leaves (lands in a later phase)."
-            )
-        annotated = field_manifolds.get(name) if name is not None else None
-        manifold = annotated if annotated is not None else Euclidean()
-        leaf_specs.append(
-            LeafSpec(
-                offset=offset,
-                ambient_shape=(),
-                manifold=manifold,
-                field_name=name,
-            )
-        )
-        offset += manifold.dimension
-        total_dim += manifold.dimension
-        total_gauge += manifold.gauge_dim
-
-    return ManifoldSpec(
-        leaf_specs=tuple(leaf_specs),
-        total_ambient_dim=offset,
-        total_dimension=total_dim,
-        total_gauge_dim=total_gauge,
-    )
+    spec, _ = _walk_leaf_specs(params)
+    return spec
 
 
 __all__ = [
