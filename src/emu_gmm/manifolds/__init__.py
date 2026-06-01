@@ -1,12 +1,17 @@
-"""Riemannian manifold support for v2 (see docs/implementation-plan-v2-manifold.org).
+"""Riemannian manifold support (see docs/manifold-epic-progress.org).
 
-PREVIEW SURFACE. These types can be constructed and unit-tested, but cannot
-yet be *estimated with*: the manifold-aware ``flatten_params`` / ``ManifoldLeaf``
-path and ``RiemannianLM`` land in Phase 4/5 (plan §0.1). Deliberately NOT
-re-exported from the top-level ``emu_gmm`` namespace until then; import via
-``from emu_gmm.manifolds import ...``. The ``ManifoldParam`` protocol will gain
-methods (``norm``, ``inner_product``, ...) in Phase 4 --- an additive,
-non-breaking change.
+A first-class problem-tuple menu, peer to Measures and Covariance strategies:
+the user expresses a non-scalar / constrained parameter by wrapping each leaf in
+``ManifoldLeaf(array, manifold)`` and estimates with the ordinary
+``emu_gmm.estimate`` entry point (a non-Euclidean parameter auto-routes to
+``riemannian_lm``). These types are re-exported at the top level, e.g.
+``from emu_gmm import PSDFixedRank, Euclidean, Product, ManifoldLeaf``.
+
+Estimation is gauge-aware end-to-end: recovery, a calibrated J-statistic, and
+gauge-invariant standard errors on functionals of ``Gamma = A @ A.T`` via
+``result.eigenvalue_se()`` / ``result.gamma_se()`` / ``result.functional_se(f)``.
+(Epic #12, PRs #97--#103; ``ManifoldSpec`` / ``LeafSpec`` remain
+submodule-internal machinery.)
 
 This package exposes :class:`ManifoldParam` (the runtime-checkable
 protocol every concrete manifold satisfies), three native manifold
