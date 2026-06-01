@@ -896,9 +896,17 @@ def estimate(
         Defaults to :func:`emu_gmm.optimizer.optimistix_lm` with default
         tolerances.
     theta_init
-        Starting parameters as a ``@jdc.pytree_dataclass`` with scalar
-        fields. The user's dataclass type is preserved in the returned
-        ``EstimationResult.theta_hat``.
+        Starting parameters as a ``@jdc.pytree_dataclass``. Scalar (0-d)
+        fields are estimated on the (Euclidean) real line as in v1. **The
+        parameter geometry is declared here, not via an ``estimate()``
+        argument:** a non-scalar or constrained leaf is expressed by wrapping
+        its array in ``ManifoldLeaf(array, manifold)`` (e.g.
+        ``ManifoldLeaf(A, PSDFixedRank(n, K))`` for a rank-``K`` PSD block,
+        ``ManifoldLeaf(v, Euclidean(d))`` for a vector). A tree containing any
+        such leaf auto-routes to ``RiemannianLM`` and yields gauge-aware
+        inference; mix scalar and ``ManifoldLeaf`` fields freely (the product
+        geometry is the pytree itself). The user's dataclass type is preserved
+        in the returned ``EstimationResult.theta_hat``.
     moment_names : tuple of str, optional
         Override for moment labels. Precedence: model-return NamedArray
         > this kwarg > positional ``("m_0", "m_1", ...)``.
