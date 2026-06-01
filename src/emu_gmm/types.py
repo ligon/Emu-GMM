@@ -205,6 +205,12 @@ class OptimizerInfo:
     final_objective: Any  # traced; Python float (eager) or 0-d JAX float (jit)
     status: str = jdc.static_field()  # type: ignore[attr-defined]
     backend: str = jdc.static_field()  # type: ignore[attr-defined]
+    # #78: the optimiser's REAL convergence flag (traced 0-d bool array).
+    # Defaults to ``None`` so every pre-existing backend that omits it stays
+    # backward-compatible: the estimator falls back to the status string
+    # when ``done is None`` and uses the traced ``done`` when supplied (the
+    # Riemannian-LM path). Carried as a traced child of the PyTree.
+    done: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
