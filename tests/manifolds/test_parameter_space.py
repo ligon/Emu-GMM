@@ -32,9 +32,11 @@ from emu_gmm import (
     ManifoldLeaf,
     ParameterSpace,
     PSDFixedRank,
+    build_estimator,
     estimate,
     on,
 )
+from emu_gmm._internal import params as params_mod
 from emu_gmm.covariance import IIDCovariance
 from emu_gmm.measures import EmpiricalMeasure
 
@@ -355,3 +357,122 @@ def test_all_scalar_parameter_space_reduces_to_v1():
     # routing): like the bare scalar dataclass, manifold_spec is None.
     assert r_space.manifold_spec is None
     assert r_v1.manifold_spec is None
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 -- two-level inheritance MERGES fields across the MRO.
+# ---------------------------------------------------------------------------
+def test_subclass_merges_inherited_fields():
+    K = 2
+    X, _mu, _Sig = _make_data(K, n=3000, seed=1207)
+    M = _moment_count(K)
+    model = _make_model(K)
+    mean_hat, cov_hat = _sample_moments(X)
+
+    class Base(ParameterSpace):
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.linalg.cholesky(cov_hat))
+
+    class Derived(Base):
+        mu: jax.Array = on(Euclidean(K), default=mean_hat)
+
+    # Both point paths build the FULL 2-field instance (parent A + child mu),
+    # in MRO order (parent first). Previously raised TypeError(missing arg).
+    p0 = Derived.point()
+    p_seed = Derived.point(0)
+    for p in (p0, p_seed):
+        assert isinstance(p.A, ManifoldLeaf) and isinstance(p.mu, ManifoldLeaf)
+        assert p.A.array.shape == (K, K) and p.mu.array.shape == (K,)
+    # Merged order: parent's field first, then child's.
+    assert tuple(Derived.__emu_fields__) == ("A", "mu")
+    assert tuple(params_mod.param_names(p0)) == ("A", "mu")
+
+    # And the merged space estimates end-to-end.
+    result = estimate(
+        model,
+        EmpiricalMeasure.from_arrays(X, M=M),
+        covariance=IIDCovariance(),
+        parameters=Derived,
+    )
+    assert bool(result.converged)
+    A_hat, mu_hat = result.components()
+    assert bool(jnp.allclose(mu_hat, mean_hat, atol=1e-6))
+    assert bool(jnp.allclose(A_hat @ A_hat.T, cov_hat, atol=1e-6))
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 -- mixed annotated/unannotated on() fields keep DECLARATION order.
+# ---------------------------------------------------------------------------
+def test_mixed_annotation_preserves_declaration_order():
+    K = 2
+
+    class Mixed(ParameterSpace):
+        mu = on(Euclidean(K), default=jnp.zeros(K))  # unannotated, FIRST
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K))  # annotated, SECOND
+        b = on(Euclidean(1), default=jnp.zeros(1))  # unannotated, THIRD
+
+    # True declaration order preserved -- NOT annotated-first ("A", "mu", "b").
+    assert tuple(Mixed.__emu_fields__) == ("mu", "A", "b")
+    assert tuple(params_mod.param_names(Mixed.point())) == ("mu", "A", "b")
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 -- a float32 default yields a float64 leaf matching point(seed).
+# ---------------------------------------------------------------------------
+def test_float32_default_casts_to_float64_matching_seed_treedef():
+    K = 2
+
+    class Normal(ParameterSpace):
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K, dtype=jnp.float32))
+        mu: jax.Array = on(Euclidean(K), default=jnp.zeros(K, dtype=jnp.float32))
+
+    p_default = Normal.point()
+    p_seed = Normal.point(0)
+
+    # point() leaves are float64 despite the float32 declared defaults...
+    assert p_default.A.array.dtype == jnp.float64
+    assert p_default.mu.array.dtype == jnp.float64
+    # ...matching point(seed)'s float64 leaves.
+    assert p_seed.A.array.dtype == jnp.float64
+    assert p_seed.mu.array.dtype == jnp.float64
+    # Identical treedef -> no spurious jit recompile when switching forms.
+    assert jax.tree_util.tree_structure(p_default) == jax.tree_util.tree_structure(
+        p_seed
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 4 -- the build_estimator() callable's first arg is polymorphic too.
+# ---------------------------------------------------------------------------
+def test_run_callable_first_arg_is_polymorphic():
+    K = 2
+    X, _mu, _Sig = _make_data(K, n=3000, seed=1209)
+    M = _moment_count(K)
+    model = _make_model(K)
+    mean_hat, cov_hat = _sample_moments(X)
+    measure = EmpiricalMeasure.from_arrays(X, M=M)
+
+    class Normal(ParameterSpace):
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.linalg.cholesky(cov_hat))
+        mu: jax.Array = on(Euclidean(K), default=mean_hat)
+
+    run = build_estimator(
+        model, measure=measure, covariance=IIDCovariance(), parameters=Normal
+    )
+    # Baseline: a fitted result to warm-start from.
+    prev = run(Normal, measure)
+    assert bool(prev.converged)
+
+    # All polymorphic first-arg forms run and match run(prev.theta_hat, ...).
+    r_class = run(Normal, measure)
+    r_seed = run(Normal.point(0), measure)
+    r_theta = run(prev.theta, measure)  # ManifoldPoint view
+    r_theta_hat = run(prev.theta_hat, measure)  # raw pytree
+
+    for r in (r_class, r_seed, r_theta, r_theta_hat):
+        assert bool(r.converged)
+        A_hat, mu_hat = r.components()
+        # All recover the same gauge-invariant Gamma + mean.
+        assert bool(jnp.allclose(mu_hat, mean_hat, atol=1e-6))
+        assert bool(jnp.allclose(A_hat @ A_hat.T, cov_hat, atol=1e-6))
+    # theta / theta_hat warm starts match each other bitwise on J.
+    assert float(r_theta.J_stat) == float(r_theta_hat.J_stat)

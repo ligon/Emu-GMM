@@ -139,22 +139,38 @@ class ParameterSpace:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
 
-        # Collect declared fields in definition (annotation) order. Reading
-        # the class __dict__ (not inherited attrs) keeps each subclass owning
-        # its own fields.
-        fields: dict[str, _FieldSpec] = {}
-        annotations = getattr(cls, "__annotations__", {}) or {}
-        seen: set[str] = set()
-        for name in annotations:
-            val = cls.__dict__.get(name, _NO_DEFAULT)
+        # --- FIX 2 (declaration order) ---
+        # Collect *this class's own* declared fields in true definition order.
+        # ``vars(cls)`` (the class body dict) preserves definition order
+        # regardless of whether the field was annotated (``A: Array = on(...)``)
+        # or bare (``mu = on(...)``); keying off ``__annotations__`` first
+        # would float the annotated fields ahead of the bare ones and corrupt
+        # the order that ``param_names`` / ``manifold_spec`` read off. We do
+        # NOT touch ``__annotations__`` for order.
+        own_fields: dict[str, _FieldSpec] = {}
+        for name, val in vars(cls).items():
             if isinstance(val, _FieldSpec):
-                fields[name] = val
-                seen.add(name)
-        for name, val in cls.__dict__.items():
-            if name in seen:
-                continue
-            if isinstance(val, _FieldSpec):
-                fields[name] = val
+                own_fields[name] = val
+
+        # --- FIX 1 (two-level inheritance: MERGE across the MRO) ---
+        # ``__init_subclass__`` runs once per subclass and (below) lowers the
+        # class to a jdc dataclass keyed on ITS OWN field set. A subclass of a
+        # ParameterSpace therefore must re-establish the *full* field set:
+        # parent-declared fields first (in MRO order, parents before child),
+        # then this class's own fields, preserving declaration order. A child
+        # re-declaring a parent field OVERRIDES the parent's spec but KEEPS the
+        # parent's position (the field is not moved to the end) -- documented
+        # dedupe choice: inherited position wins, child spec wins.
+        merged: dict[str, _FieldSpec] = {}
+        for base in reversed(cls.__mro__[1:]):  # parents first, child last
+            base_fields = base.__dict__.get("__emu_fields__")
+            if isinstance(base_fields, dict):
+                for name, fs in base_fields.items():
+                    merged[name] = fs  # parent position established here
+        for name, fs in own_fields.items():
+            merged[name] = fs  # child overrides spec; keeps inherited position
+
+        fields = merged
         if not fields:
             raise TypeError(
                 f"ParameterSpace subclass {cls.__name__!r} declares no "
@@ -163,12 +179,14 @@ class ParameterSpace:
         cls.__emu_fields__ = fields
 
         # Lower to a real @jdc.pytree_dataclass: one ManifoldLeaf-typed field
-        # per declaration, in declaration order. We rewrite the class'
-        # annotations to ManifoldLeaf and strip the _FieldSpec class attrs so
-        # the dataclass machinery sees plain (no-default) fields. The
-        # resulting class is a genuine dataclass whose pytree children are the
-        # per-field ManifoldLeaf nodes --- the exact topology the manifold core
-        # already validates.
+        # per MERGED declaration (parent + own), in declaration order. We
+        # rewrite the class' annotations to ManifoldLeaf for the FULL merged
+        # set (FIX 1: a subclass otherwise inherits only the parent's lowered
+        # field and ``point()`` raises missing-positional-arg) and strip the
+        # _FieldSpec class attrs so the dataclass machinery sees plain
+        # (no-default) fields. The resulting class is a genuine dataclass whose
+        # pytree children are the per-field ManifoldLeaf nodes --- the exact
+        # topology the manifold core already validates.
         for name in fields:
             if name in cls.__dict__:
                 delattr(cls, name)
@@ -209,7 +227,16 @@ class ParameterSpace:
                         "default; pass a default to on(manifold, default=...) "
                         "or call .point(seed) for a random start."
                     )
-                leaves[name] = ManifoldLeaf(jnp.asarray(fs.default), fs.manifold)
+                # FIX 3: cast a floating default to the canonical float64 the
+                # leaf manifold's ``random_point`` produces, so ``point()`` and
+                # ``point(seed)`` yield leaves of the SAME dtype and IDENTICAL
+                # treedef. A float32 default would otherwise pin a float32 leaf
+                # whose treedef differs from the seed path (silent float32 vs
+                # the float64 commitment; a spurious jit recompile on switch).
+                arr = jnp.asarray(fs.default)
+                if jnp.issubdtype(arr.dtype, jnp.floating):
+                    arr = arr.astype(jnp.float64)
+                leaves[name] = ManifoldLeaf(arr, fs.manifold)
         else:
             key = jax.random.PRNGKey(int(seed))
             subkeys = jax.random.split(key, len(declared))

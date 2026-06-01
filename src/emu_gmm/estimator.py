@@ -721,6 +721,15 @@ def build_estimator(
         theta_init_call: ParamsLike,
         measure_call: Measure,
     ) -> EstimationResult:
+        # FIX 4: the returned callable's first arg is polymorphic too, routed
+        # through the SAME pure-Python resolver as estimate()/build_estimator()
+        # (a ParameterSpace subclass -> .point(); a ManifoldPoint view ->
+        # .theta_hat; anything else used directly). This runs before any
+        # tracing, so the class-vs-point dispatch never interferes with jit.
+        # ``parameters=theta_init_call`` / ``theta_init=_THETA_INIT_UNSET``
+        # selects the parameters channel; a plain theta PyTree falls straight
+        # through unchanged (bitwise the prior run() path).
+        theta_init_call = _resolve_parameters(theta_init_call, _THETA_INIT_UNSET)
         if dispatch_mode == "v2":
             # Manifold-aware flatten: the v1 2-tuple raises on non-scalar
             # ManifoldLeaf blocks (R19). The optimiser path below ignores
