@@ -203,3 +203,23 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   (c) The =isolation:worktree= implement agent leaked edits into the MAIN checkout in 4 of
   7 phases (caught + recovered every time by the post-workflow leak-check); a harness quirk
   worth reporting.
+
+* Post-epic ergonomics: ParameterSpace (#107) — landed
+- *PR #108 @ a7d6e39.* Declarative parameter-geometry layer, additive over the
+  ManifoldLeaf core (core not edited, only called): =ParameterSpace= base +
+  =on(manifold, default=...)= field descriptor; =.point()= / =.point(seed)= produce points
+  (composing the per-leaf =random_point=); =estimate=/=build_estimator= + the returned
+  =run()= take a polymorphic =parameters== (class→=.point()=, =ManifoldPoint=→=.theta_hat=,
+  else direct); =theta_init== kept as a deprecated, bitwise-identical alias. Top-level
+  re-exports =ParameterSpace=, =on=. Geometry is declared once, in the class; an instance is
+  the space located at a point. Closes #107.
+- *Hardened over two adversarial rounds* (focused workflow, not the full epic pattern):
+  round 1 caught a *[high]* silent two-level-inheritance break + 2 [low]; round 2 caught 2
+  [low] (int-default int64 leaf; =default=None= error). All fixed + regression-tested;
+  final verdict back-compat SOLID / dispatch SOLID / pytree-lowering MINOR (no high/crit).
+  Full v1 gate 843 green.
+- *Follow-up #110* (deferred, core surgery): a parameter of *only non-scalar Euclidean*
+  leaves can't estimate — pre-existing all-Euclidean→v1-flatten dispatch trap, surfaced by
+  the sugar. Documented as a known limitation in the =ParameterSpace= docstring; the proper
+  fix (route v1-vs-v2 on all-*scalar*, not all-Euclidean) is tracked in #110. MVN example /
+  K-Aggregators unaffected (they carry a PSDFixedRank leaf).
