@@ -15,6 +15,7 @@ shape-and-sizes metadata (no traced arrays), so the composed
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from emu_gmm.manifolds.base import ManifoldParam
 
@@ -38,12 +39,15 @@ class LeafSpec:
         unnamed PyTree leaves. Used by
         :func:`emu_gmm._internal.labels.tangent_basis_names` to emit
         readable labels.
+    dtype
+        Original leaf dtype, restored on unflatten; None for v1-built specs.
     """
 
     offset: int
     ambient_shape: tuple[int, ...]
     manifold: ManifoldParam
     field_name: str | None = None
+    dtype: Any = None
 
 
 @dataclass(frozen=True)
