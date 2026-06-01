@@ -1,0 +1,92 @@
+#+TITLE: Manifold epic (#12) — autonomous build progress + goal
+#+AUTHOR: Sue (Claude Opus 4.8, 1M context)
+#+DATE: 2026-05-31
+#+OPTIONS: toc:nil num:nil
+
+* GOAL
+Finish *all 7 phases* of the #12 Riemannian-manifold epic so
+=Product(PSDFixedRank(5,K), Euclidean(1))= is estimable end-to-end for the
+K-Aggregators consumer. Build autonomously, one phase at a time; surface to the
+maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
+=docs/manifold-slice-scoping.md=; resume context: =docs/handoff-2026-05-31.org=.
+
+* The 7 phases (each = its own workflow + its own PR)
+1. [X] *Manifold-aware flatten core* — =ManifoldLeaf= pytree + =flatten_params_with_spec=
+   3-tuple + manifold-aware =unflatten=; v1 =flatten_params= bitwise unchanged.
+   *DONE* — PR #97, merged @ 89cb103.
+2. [ ] *Non-scalar spec builder* — offset/=ambient_shape= from real shape; populate
+   =total_gauge_dim=. (=_resolve_optimizer= already routes correctly — no work there.)
+3. [ ] *Per-leaf solver* — PSDFixedRank retraction/projection in =RiemannianLM= +
+   gauge λ-floor; also fix #78 =status=="traced"= always-converged collapse here.
+4. [ ] *Gauge-aware Sigma_theta (minimal)* — =pinv_eigvalrule= (drop =total_gauge_dim=
+   smallest eigs BY COUNT) + per-leaf =G_riem= over ALL ambient columns; surface
+   =gauge_nullspace_dim=. (Bugs confirmed live: G_riem range(K) column-drop;
+   singular inv() on the quotient — see below.)
+5. [ ] *components() readout* — =result.theta.components() -> (A, phi)=; route
+   =coef_table=/=standard_errors= through manifold-aware flatten.
+6. [ ] *Validation gate* — synthetic Gamma+phi recovery; gauge-invariance (Y0 vs Y0·Q);
+   ManifoldGMM/pymanopt-TR cross-check ON THE QUOTIENT; J_dof calibration; v1 bitwise
+   non-regression.
+7. [ ] *#42 fast-follow* — gauge-INVARIANT Gamma-functional Sigma_theta (delta-method
+   pull-back to Gamma=AAᵀ eigenvalue/entry functionals). The deferred SE work.
+
+* Per-phase workflow pattern (the agreed shape)
+=red-team (3 read-only lenses, parallel) -> implement (1 agent, isolated worktree) ->
+adversarial attack (3 lenses, parallel) -> return to coordinator=. Workflow STOPS after
+adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges to
+=main= inside a workflow.
+
+* Locked decisions (do not re-litigate)
+- *Sigma_theta:* minimal slice in Phases 1–6 (=pinv_eigvalrule= ambient sandwich +
+  =gauge_nullspace_dim=); the gauge-invariant Gamma-functional pull-back is *Phase 7 /
+  #42 fast-follow* (maintainer chose "minimal now, #42 fast-follow", 2026-05-31).
+- *Solver:* =RiemannianLM= only (gauge λ-floor + per-leaf retraction/projection); defer
+  Riemannian TrustRegions (#9); verify LM==TR equivalence on the quotient if needed.
+- *Backend:* native =Product=/=PSDFixedRank= constructors only; no pymanopt runtime dep
+  (#3); optional gated parity test only.
+- *Param expression:* =ManifoldLeaf=-wrapped pytree (not a =__emu_manifolds__= annotation
+  on a non-scalar field).
+- *AD scope:* =G=∂m/∂θ= by AD of the moment fn at the *fixed* theta_hat (delta method,
+  commitment 5); differentiating through the solver's =lax.while_loop= is OUT of scope.
+
+* Compute discipline (this box: n0023.savio3, 32 cores via affinity)
+- Editable install is a *plain-path* =.pth= pinning main's =src=. Worktree agents MUST
+  run python with =PYTHONPATH=<worktree>/src= or they silently test main's code.
+  (Verified: PYTHONPATH shadows the plain-path .pth.)
+- Bound XLA: =XLA_FLAGS=--xla_force_host_platform_device_count=1= + disjoint =taskset=
+  ranges; never =pytest -n auto=.
+
+* STOP-TRIGGERS — surface to maintainer, do NOT proceed autonomously
+- v1 (694-test) non-regression breaks and the fix isn't trivial/obvious.
+- Adversarial stage reproduces a *high/critical* real break.
+- A phase needs a design decision not covered by the locked decisions or the spec
+  (e.g. a new Sigma_theta convention question, a tolerance change on an acceptance test).
+- Any stop-list breach would be required: touching baselines/fixtures, deps/lockfiles,
+  weakening/xfailing a test, or changing acceptance tolerances.
+- Compute trouble: segfault, OOM, the JIT-mmap hazard, a hung agent.
+- The LM-vs-TR (#9) or pymanopt (#3) fork resurfaces as actually-needed.
+
+* Running log
+** 2026-05-31
+- Session start: on =main= @ f18a846, clean, 694 tests green. Removed a stale
+  covariance-session worktree (=agent-a89406dd4e7fb9cc5=, 9 behind main, dead scratch).
+- Verified the 3 flagged preview-path bugs CONFIRMED on current main:
+  =params.py:60-64/213-218= hard-raise on ndim!=0; =estimator.py:503-512= G_riem
+  =range(K)= (K=field count) silent column-drop; =estimator.py:515= =inv()= on a
+  rank-deficient quotient info matrix. (#78 traced-collapse present @ estimator.py:690.)
+- Phase 1 workflow (run =wf_48cefb41-b21=): red-team(3) -> implement(worktree) ->
+  adversarial(3). v1 gate green (~723 tests), acceptance round-trip green. Adversarial
+  caught a *real [high]* bug: =flatten_params_with_spec= concat promotes the buffer dtype,
+  so a bare float32/int32 scalar leaf beside a float64 matrix came back float64 silently;
+  fixed by recording per-leaf dtype in =LeafSpec.dtype= and casting back on unflatten.
+  Also fixed a [low] sharp edge (ManifoldLeaf wrapping a Product -> clear ValueError).
+  *Landed PR #97 @ 89cb103.*
+- *Hazard observed + recovered:* the workflow's =isolation:worktree= implement agent
+  *leaked its pre-fix edits into the MAIN checkout* (uncommitted params.py/__init__.py +
+  untracked manifold_leaf.py/test). Caught by the post-workflow main-cleanliness check;
+  discarded the stale leak (kept progress doc) and landed the verified worktree commit.
+  *Standing rule for every phase: after the workflow, verify =git status= on the MAIN
+  checkout is clean before trusting/landing the worktree branch.*
+- v1-gate compute recipe that works here: per-directory =taskset -c 0-15= for
+  _internal/manifolds/covariance/measures; *per-FILE* for inference/examples/top-level
+  (whole-dir single-invocation segfaults on the XLA JIT-mmap hazard).
