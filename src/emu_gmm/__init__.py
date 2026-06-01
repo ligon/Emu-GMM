@@ -66,6 +66,15 @@ from emu_gmm.inference import (
     k_statistic,
     moment_wild_bootstrap,
 )
+from emu_gmm.manifolds import (
+    Euclidean,
+    ManifoldLeaf,
+    ManifoldParam,
+    Positive,
+    Product,
+    PSDFixedRank,
+    riemannian_lm,
+)
 from emu_gmm.measures import (
     AnalyticalMeasure,
     EmpiricalMeasure,
@@ -137,6 +146,7 @@ __all__ = [
     "optimistix_lm",
     "scipy_lm",
     "linear_solver",
+    "riemannian_lm",
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
@@ -156,12 +166,16 @@ __all__ = [
     # Inference
     "moment_wild_bootstrap",
     "WildBootstrapResult",
-    # NOTE: the v2 manifolds package (Euclidean / PSDFixedRank / Product /
-    # ManifoldParam / ManifoldSpec) is intentionally NOT re-exported here
-    # while it is a preview surface — it can be constructed but not yet
-    # estimated with (manifold-aware flatten + RiemannianLM land in Phase
-    # 4/5). Import it explicitly via `from emu_gmm.manifolds import ...`.
-    # See docs/implementation-plan-v2-manifold.org §0.1.
+    # Manifolds (parameter geometry — a first-class problem-tuple menu, peer
+    # to Measures / Covariance strategies; wrap a non-scalar parameter leaf in
+    # ManifoldLeaf(array, manifold) and estimate via the ordinary entry point.
+    # ManifoldSpec / LeafSpec stay submodule-internal — they are machinery,
+    # not part of the user-composed tuple.)
+    "Euclidean",
+    "PSDFixedRank",
+    "Product",
+    "Positive",
+    "ManifoldLeaf",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",
@@ -170,4 +184,5 @@ __all__ = [
     "PenaltyStrategy",
     "Optimizer",
     "StructuralModel",
+    "ManifoldParam",
 ]
