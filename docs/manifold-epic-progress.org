@@ -20,10 +20,11 @@ maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
 3. [X] *Per-leaf solver* — PSDFixedRank retraction/projection in =RiemannianLM= +
    gauge λ-floor; also fix #78 =status=="traced"= always-converged collapse here.
    *DONE* — PR #99, merged @ b291a8e.
-4. [ ] *Gauge-aware Sigma_theta (minimal)* — =pinv_eigvalrule= (drop =total_gauge_dim=
+4. [X] *Gauge-aware Sigma_theta (minimal)* — =pinv_eigvalrule= (drop =total_gauge_dim=
    smallest eigs BY COUNT) + per-leaf =G_riem= over ALL ambient columns; surface
-   =gauge_nullspace_dim=. (Bugs confirmed live: G_riem range(K) column-drop;
-   singular inv() on the quotient — see below.)
+   =gauge_nullspace_dim=. Both live bugs (G_riem range(K) column-drop; singular inv() on
+   the quotient) fixed; non-scalar =estimate()= now runs end-to-end through inference.
+   *DONE* — PR #100, merged @ c7957d3.
 5. [ ] *components() readout* — =result.theta.components() -> (A, phi)=; route
    =coef_table=/=standard_errors= through manifold-aware flatten.
 6. [ ] *Validation gate* — synthetic Gamma+phi recovery; gauge-invariance (Y0 vs Y0·Q);
@@ -115,3 +116,16 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   Solver now flattens via =flatten_params_with_spec=; =OptimizerInfo.done= carries the
   real convergence flag; estimator prefers it when present, falls back to status-string
   when =done is None= (no v1 change). *Landed PR #99 @ b291a8e.* No main-leak this round.
+- Phase 4 workflow (run =wfctnybob=): the gauge math is SOLID — both confirmed live bugs
+  fixed (=G_riem= now uses all 11 ambient columns; =pinv_eigvalrule= drops exactly
+  K(K-1)/2 smallest eigs by count via eigh, reduces to inv() at gauge_dim=0 bitwise), J_dof
+  calibrates, gauge-violating residual doesn't leak into dof. Non-scalar =estimate()= runs
+  end-to-end through inference (drives a real estimate() on Product over a SyntheticMeasure).
+  Adversarial caught one *[high]*: the under-id guard reword dropped the "M >= K" substring
+  an existing test matches — fixed by phrasing "M >= K_id" (K_id == K for v1; no test
+  modified). Full v1 gate 768 green. *Landed PR #100 @ c7957d3.*
+- *Leak recurred again* (Phase 4 implement agent wrote to MAIN via absolute paths, caught
+  + self-cleaned; my leak-check independently confirmed MAIN clean). Standing rule holds.
+- *Minimal-slice caveat now on main:* raw per-entry Y SEs from the ambient-horizontal
+  pinv sandwich are NOT gauge-invariant/interpretable (documented in the Diagnostics
+  docstring); only Gamma=AAᵀ functionals are — that pull-back is Phase 7 / #42.
