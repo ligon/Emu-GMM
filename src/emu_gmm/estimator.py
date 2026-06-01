@@ -687,7 +687,25 @@ def build_estimator(
             optimizer_health=optimizer_health,
         )
 
-        converged = optimizer_info.status in ("converged", "traced")
+        # #78: prefer the optimiser's REAL traced ``done`` flag when the
+        # backend supplies it (the Riemannian-LM path). ``done`` is True
+        # only when the while_loop exited on a convergence criterion --- it
+        # is False when ``max_steps`` was hit --- so it does NOT suffer the
+        # ``status == "traced"`` always-converged hazard under jit. Backends
+        # that omit it (``done is None``: optimistix / scipy / iterated)
+        # keep the original status-string semantics unchanged (no v1
+        # regression). When ``done`` is a traced array under an outer jit,
+        # ``converged`` rides as a traced bool just as ``optimizer_info``
+        # already did.
+        done_flag = getattr(optimizer_info, "done", None)
+        if done_flag is None:
+            converged: Any = optimizer_info.status in ("converged", "traced")
+        else:
+            converged = jnp.asarray(done_flag)
+            try:
+                converged = bool(converged)
+            except (jax.errors.TracerBoolConversionError, TypeError):
+                pass
         iterations = optimizer_info.steps
         if iterated_status in ("max_iterations", "inner_non_convergence"):
             converged = False
