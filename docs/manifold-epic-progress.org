@@ -25,8 +25,9 @@ maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
    =gauge_nullspace_dim=. Both live bugs (G_riem range(K) column-drop; singular inv() on
    the quotient) fixed; non-scalar =estimate()= now runs end-to-end through inference.
    *DONE* — PR #100, merged @ c7957d3.
-5. [ ] *components() readout* — =result.theta.components() -> (A, phi)=; route
+5. [X] *components() readout* — =result.theta.components() -> (A, phi)=; route
    =coef_table=/=standard_errors= through manifold-aware flatten.
+   *DONE* — PR #101, merged @ 0b2da47.
 6. [ ] *Validation gate* — synthetic Gamma+phi recovery; gauge-invariance (Y0 vs Y0·Q);
    ManifoldGMM/pymanopt-TR cross-check ON THE QUOTIENT; J_dof calibration; v1 bitwise
    non-regression.
@@ -129,3 +130,14 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
 - *Minimal-slice caveat now on main:* raw per-entry Y SEs from the ambient-horizontal
   pinv sandwich are NOT gauge-invariant/interpretable (documented in the Diagnostics
   docstring); only Gamma=AAᵀ functionals are — that pull-back is Phase 7 / #42.
+- Phase 5 workflow (run =wo0j7hm8x=): all 3 adversarial lenses SOLID, *0 real breaks*; all
+  five gates pass. =ManifoldPoint.components() -> (A, phi)=; =coef_table=/=standard_errors=
+  routed through manifold-aware flatten (gated by =_is_non_scalar_spec=, v1 → bitwise);
+  =tangent_basis_names= gives positional tangent labels (count == total_dimension), no claim
+  raw Y SEs are interpretable; warm-start round-trips. Full v1 gate 791 green. *Landed PR
+  #101 @ 0b2da47.* (Recovery accuracy ~0.012 for k=3 under 0.1 DGP noise → a NEW Phase-5
+  test used atol 5e-2; the principled tight recovery gate is Phase 6's job, on a low-noise
+  /large-N DGP.)
+- *Phase 6 reminders:* the ManifoldGMM/pymanopt-TR cross-check must be an OPTIONAL
+  import-gated test (=skipif= on availability), NEVER a runtime dep (locked backend
+  decision). Set a defensible tight recovery tolerance on a clean DGP.
