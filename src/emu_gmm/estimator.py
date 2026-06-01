@@ -53,12 +53,14 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 import jax.scipy.stats
+import numpy as np
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
+from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.diagnostics import (
     build_diagnostics,
     build_optimizer_health,
@@ -286,10 +288,25 @@ def build_estimator(
             "J-test of over-identifying restrictions use the helper "
             "requested in issue #29 (``emu_gmm.j_test``), once it lands."
         )
-    if K_probe > M:
+    # Under-identification guard on the *identified ambient* dimension
+    # (Phase 4 / INT-01 / R5/R9). The information matrix is the ambient
+    # horizontal-projected sandwich G' Lambda G of size
+    # ``total_dimension`` with an exact ``total_gauge_dim`` gauge
+    # nullspace; the rank available to identify parameters is therefore
+    # ``total_dimension - total_gauge_dim``. For v1 / all-Euclidean /
+    # scalar-Positive trees ``total_dimension == K_probe`` and
+    # ``total_gauge_dim == 0``, so this reduces to ``K_probe > M`` exactly
+    # (bitwise v1 non-regression). For Product(PSDFixedRank(5,2),
+    # Euclidean(1)): identified == 11 - 1 == 10, so M >= 10 is required.
+    identified_dim = manifold_spec.total_dimension - manifold_spec.total_gauge_dim
+    if identified_dim > M:
         raise Emu_GMM_DimensionError(
-            f"estimate() requires M >= K (over-/just-identified); got "
-            f"M={M} moments and K={K_probe} parameters (under-identified). "
+            f"estimate() requires M >= K_id, the identified parameter "
+            f"dimension (over-/just-identified); got M={M} moments and "
+            f"K_id={identified_dim} (= total_dimension "
+            f"{manifold_spec.total_dimension} - gauge "
+            f"{manifold_spec.total_gauge_dim}) (under-identified). "
+            "For v1 / scalar trees K_id == K (the parameter count). "
             "An under-identified problem has rank-deficient G' V^{-1} G "
             "and yields inf/nan Sigma_theta. Reduce the parameter count, "
             "add moments, or impose an identifying restriction."
@@ -319,9 +336,26 @@ def build_estimator(
     )
 
     # Flatten the template parameters --- the treedef pinned here is
-    # used for unflatten on every call.
-    _, treedef = params_mod.flatten_params(theta_init)
-    K = K_probe
+    # used for unflatten on every call. For v1 / all-Euclidean trees the
+    # v1 2-tuple ``flatten_params`` produces a scalar-only treedef and
+    # ``unflatten_params`` reindexes scalars (manifold_spec=None). For a
+    # v2 manifold tree (non-scalar ManifoldLeaf blocks) we take the
+    # manifold-aware 3-tuple ``flatten_params_with_spec`` so the treedef
+    # descends into each ManifoldLeaf and every later unflatten passes
+    # ``manifold_spec`` to reshape the ambient blocks (Phase 4 / R19).
+    # ``unflatten_spec`` is None on the v1 path -> v1 unflatten is bitwise
+    # unchanged.
+    if dispatch_mode == "v2":
+        _, treedef, _ = params_mod.flatten_params_with_spec(theta_init)
+        unflatten_spec: ManifoldSpec | None = manifold_spec
+    else:
+        _, treedef = params_mod.flatten_params(theta_init)
+        unflatten_spec = None
+    # ``total_dimension`` is the ambient tangent dimension that the
+    # inference / label / axes path keys on. For v1 / all-Euclidean /
+    # scalar-Positive trees it equals the field count ``K_probe``, so the
+    # 226 v1 tests are bitwise unchanged.
+    total_dimension = manifold_spec.total_dimension
 
     # Anchor-once-then-freeze tau policy (design.org §5; CLAUDE.md
     # commitment 3).
@@ -368,7 +402,9 @@ def build_estimator(
             def residual_fn(
                 theta_flat: Float[Array, " K"],
             ) -> Float[Array, " M"]:
-                theta = params_mod.unflatten_params(theta_flat, treedef)
+                theta = params_mod.unflatten_params(
+                    theta_flat, treedef, manifold_spec=unflatten_spec
+                )
                 if cache_method is not None:
                     cached = cache_method(model, theta)
                     m = cached[0]
@@ -390,7 +426,9 @@ def build_estimator(
             def residual_fn(
                 theta_flat: Float[Array, " K"],
             ) -> Float[Array, " M"]:
-                theta = params_mod.unflatten_params(theta_flat, treedef)
+                theta = params_mod.unflatten_params(
+                    theta_flat, treedef, manifold_spec=unflatten_spec
+                )
                 if cache_method is not None:
                     cached = cache_method(model, theta)
                     m = cached[0]
@@ -448,25 +486,30 @@ def build_estimator(
         )
 
         def _compute_inference(
-            theta_flat: Float[Array, " K"],
+            # theta_flat has length total_ambient_dim == total_dimension
+            # (the ambient tangent dim D), which equals the field count K
+            # only for v1 / all-scalar trees.
+            theta_flat: Float[Array, " D"],
         ) -> tuple[
-            Float[Array, "K K"],  # Sigma_theta_arr
+            Float[Array, "D D"],  # Sigma_theta_arr
             Float[Array, "M M"],  # V_star_hat
             Float[Array, ""],  # J_stat
             Float[Array, ""],  # kappa_V
             Float[Array, ""],  # tau_hat
-            Float[Array, "K K"],  # info_matrix
+            Float[Array, "D D"],  # info_matrix
             Float[Array, " M"],  # m_hat
             Float[Array, "M M"],  # L_hat
             Float[Array, " M"],  # y_hat
-            Float[Array, "M K"],  # G_hat
+            Float[Array, "M D"],  # G_hat
             Float[Array, "M M"],  # V_hat
             Float[Array, ""],  # cholesky_pivot_min
             Float[Array, ""],  # final_gradient_norm
             Float[Array, ""],  # J_pvalue
             Float[Array, ""],  # J_pvalue_adjusted
         ]:
-            theta_local = params_mod.unflatten_params(theta_flat, treedef)
+            theta_local = params_mod.unflatten_params(
+                theta_flat, treedef, manifold_spec=unflatten_spec
+            )
             if cache_method is not None:
                 cached = cache_method(model, theta_local)
                 m_local = cached[0]
@@ -483,36 +526,87 @@ def build_estimator(
             L_local = cho.cholesky(V_star_local)
             y_local = weighting.whitening_residual(m_local, V_star_local, theta_local)
             J_local = jnp.sum(y_local * y_local)
-            G_local_raw = measure_local.jacobian(model, theta_local)
-            if hasattr(G_local_raw, "array"):
-                G_local_raw = G_local_raw.array
-            G_local = jnp.asarray(G_local_raw)
-            # Per-column retraction-differential scaling (plan §2.4):
-            # replace column j of G with dx/dv|_0 * G[:, j], the Jacobian
-            # in the retraction chart. Every first-order retraction has
-            # UNIT differential at v=0 (DR_x(0)=Id) -- Euclidean (x+v) and
-            # Positive (x e^{v/x}) alike -- so this scaling is the identity
-            # and G_riem is the ambient Jacobian. The reported Sigma_theta
-            # is therefore the ambient natural-scale sandwich
-            # (G'LambdaG)^{-1} = Var(theta_hat), matching ../ManifoldGMM's
-            # convention (NOT a metric-rescaled / log-scale variance; the
-            # affine-invariant euclidean_to_riemannian_gradient=x^2 is for
-            # the geometry, not the covariance). Kept as an explicit
-            # per-leaf call so a future non-identity chart would compose.
-            # All leaves are scalar so flat index == leaf.
-            G_riem = jnp.stack(
-                [
-                    manifold_spec.leaf_specs[j].manifold.retraction_differential(
-                        theta_flat[j]
+            # G = d m / d theta_flat at the FIXED theta_hat (commitment 5 /
+            # delta method; AD of the MOMENT function, never through the
+            # solver). For the v1 path this is exactly ``measure.jacobian``
+            # (which itself ``jacfwd``s the unflatten->expectation closure),
+            # kept verbatim so v1 stays bitwise. For the v2 manifold path
+            # ``measure.jacobian`` would route through the v1 scalar-only
+            # flatten and raise on a non-scalar ManifoldLeaf block, so we
+            # AD a manifold-aware unflatten->expectation closure inline; the
+            # result is the same (M, total_dimension) ambient Jacobian.
+            if dispatch_mode == "v2":
+
+                def _moment_of_flat(tf: Float[Array, " K"]) -> Float[Array, " M"]:
+                    th = params_mod.unflatten_params(
+                        tf, treedef, manifold_spec=unflatten_spec
                     )
-                    * G_local[:, j]
-                    for j in range(K)
-                ],
-                axis=1,
-            )
+                    return jnp.asarray(measure_local.expectation(model, th))
+
+                G_local = jax.jacfwd(_moment_of_flat)(theta_flat)
+            else:
+                G_local_raw = measure_local.jacobian(model, theta_local)
+                if hasattr(G_local_raw, "array"):
+                    G_local_raw = G_local_raw.array
+                G_local = jnp.asarray(G_local_raw)
+            # Per-leaf G_riem assembly (Phase 4 / BUG-A / R4/R7). Iterate
+            # over the manifold spec's leaves -- NOT range(K) over field
+            # count -- slicing each leaf's ambient column block
+            # ``G_local[:, offset:offset+size]``, scaling by the leaf's
+            # retraction differential (the unit Convention-B differential
+            # at v=0 for every native retraction, so this is the identity),
+            # and applying the leaf's HORIZONTAL projection (a Lyapunov
+            # solve for PSDFixedRank; identity for Euclidean / Positive) so
+            # the gauge / vertical directions carry no information. ALL
+            # ambient columns flow through -> G_riem is (M, total_dimension)
+            # with no silent column drop. For v1 / all-scalar trees each
+            # block is one column, the differential is 1, and the
+            # projection is the identity, so G_riem == G_local bitwise.
+            riem_blocks = []
+            for ls in manifold_spec.leaf_specs:
+                size = int(np.prod(ls.ambient_shape)) if ls.ambient_shape != () else 1
+                block = G_local[:, ls.offset : ls.offset + size]  # (M, size)
+                diff = ls.manifold.retraction_differential(
+                    theta_flat[ls.offset : ls.offset + size]
+                )
+                block = jnp.asarray(diff) * block
+                if ls.ambient_shape == () or ls.manifold.gauge_dim == 0:
+                    # Scalar / Euclidean / Positive leaf: horizontal
+                    # projection is the identity (bitwise v1 path).
+                    riem_blocks.append(block)
+                else:
+                    # Non-scalar gauge-bearing leaf (PSDFixedRank): reshape
+                    # the point block to ambient_shape and project each
+                    # of the M Jacobian rows row-by-row onto the horizontal
+                    # subspace, then ravel back to (M, size).
+                    pt = jnp.reshape(
+                        theta_flat[ls.offset : ls.offset + size], ls.ambient_shape
+                    )
+                    manifold = ls.manifold
+                    shape = ls.ambient_shape
+
+                    def _proj_row(
+                        row: Float[Array, " size"],
+                        _pt: Any = pt,
+                        _m: Any = manifold,
+                        _shape: Any = shape,
+                        _size: int = size,
+                    ) -> Float[Array, " size"]:
+                        row_m = jnp.reshape(row, _shape)
+                        proj = _m.projection(_pt, row_m)
+                        return jnp.reshape(proj, (_size,))
+
+                    riem_blocks.append(jax.vmap(_proj_row)(block))
+            G_riem = jnp.concatenate(riem_blocks, axis=1)  # (M, total_dimension)
             Z_local = jax.scipy.linalg.solve_triangular(L_local, G_riem, lower=True)
             info_local = Z_local.T @ Z_local
-            Sigma_local = jnp.linalg.inv(info_local)
+            # Gauge-aware pseudo-inverse (Phase 4 / BUG-B / R6/R8): drop the
+            # ``total_gauge_dim`` smallest eigenvalues BY COUNT. For
+            # ``total_gauge_dim == 0`` (v1 / Euclidean / Positive) this is
+            # exactly ``inv()`` (bitwise v1 non-regression).
+            Sigma_local = pinv_eigvalrule(
+                info_local, drop_smallest=manifold_spec.total_gauge_dim
+            )
             kappa_local = jnp.linalg.cond(V_star_local)
             pivot_min_local = jnp.min(jnp.diag(L_local))
 
@@ -561,7 +655,14 @@ def build_estimator(
         theta_init_call: ParamsLike,
         measure_call: Measure,
     ) -> EstimationResult:
-        theta_init_flat, _ = params_mod.flatten_params(theta_init_call)
+        if dispatch_mode == "v2":
+            # Manifold-aware flatten: the v1 2-tuple raises on non-scalar
+            # ManifoldLeaf blocks (R19). The optimiser path below ignores
+            # ``theta_init_flat`` for v2 (it consumes the pytree directly),
+            # but the buffer must still flatten without raising.
+            theta_init_flat, _, _ = params_mod.flatten_params_with_spec(theta_init_call)
+        else:
+            theta_init_flat, _ = params_mod.flatten_params(theta_init_call)
         # Reuse the pre-built residual / inference closures when the
         # measure identity matches the template. The pjit cache inside
         # optimistix keys on the residual_fn closure identity, so this
@@ -612,11 +713,15 @@ def build_estimator(
             theta_hat_pytree, optimizer_info = cast(Any, optimizer)(
                 residual_fn, theta_init_call, manifold_spec
             )
-            theta_hat_flat, _ = params_mod.flatten_params(theta_hat_pytree)
+            # Manifold-aware flatten of the recovered pytree: the v1
+            # 2-tuple raises on non-scalar ManifoldLeaf blocks (R19).
+            theta_hat_flat, _, _ = params_mod.flatten_params_with_spec(theta_hat_pytree)
         else:
             theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)
 
-        theta_hat = params_mod.unflatten_params(theta_hat_flat, treedef)
+        theta_hat = params_mod.unflatten_params(
+            theta_hat_flat, treedef, manifold_spec=unflatten_spec
+        )
 
         (
             Sigma_theta_arr,
@@ -636,8 +741,13 @@ def build_estimator(
             J_pvalue_adjusted,
         ) = compute_inference_jit(theta_hat_flat)
 
-        Params = axes_mod.params_axis(K)
-        ParamsDual = axes_mod.params_dual_axis(K)
+        # Param axes are sized by the ambient tangent dimension
+        # ``total_dimension`` (Phase 4 / BUG-D / R14/R17), matching the
+        # (total_dimension, total_dimension) Sigma_theta the inference
+        # block now returns. For v1 / all-scalar trees
+        # ``total_dimension == K``, so these are bitwise unchanged.
+        Params = axes_mod.params_axis(total_dimension)
+        ParamsDual = axes_mod.params_dual_axis(total_dimension)
         Moments = axes_mod.moments_axis(M)
         MomentsDual = axes_mod.moments_dual_axis(M)
 
@@ -656,7 +766,11 @@ def build_estimator(
             final_objective_full = J_stat + p_hat
 
             def _p_flat(tf: Float[Array, " K"]) -> Float[Array, ""]:
-                return penalty.penalty(params_mod.unflatten_params(tf, treedef))
+                return penalty.penalty(
+                    params_mod.unflatten_params(
+                        tf, treedef, manifold_spec=unflatten_spec
+                    )
+                )
 
             penalty_hessian = jax.hessian(_p_flat)(theta_hat_flat)
 
@@ -685,6 +799,7 @@ def build_estimator(
             optimizer_info=optimizer_info,
             cond_info=cond_info,
             optimizer_health=optimizer_health,
+            gauge_nullspace_dim=manifold_spec.total_gauge_dim,
         )
 
         # #78: prefer the optimiser's REAL traced ``done`` flag when the
