@@ -82,6 +82,7 @@ from emu_gmm.measures import (
 )
 from emu_gmm.numerics import ridge_inverse
 from emu_gmm.optimizer import linear_solver, optimistix_lm, scipy_lm
+from emu_gmm.parameter_space import ParameterSpace, on
 from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -176,6 +177,11 @@ __all__ = [
     "Product",
     "Positive",
     "ManifoldLeaf",
+    # Parameter-space declaration layer (#107): declare field -> manifold
+    # geometry once in a class, then ParameterSpace.point([seed]) lowers to a
+    # ManifoldLeaf pytree (a valid theta_init) consumed by estimate(parameters=).
+    "ParameterSpace",
+    "on",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",

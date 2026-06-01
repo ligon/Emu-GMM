@@ -191,6 +191,65 @@ def _resolve_optimizer(
     )
 
 
+# Sentinel so a literal ``theta_init=None`` is distinguishable from "unset".
+_THETA_INIT_UNSET = object()
+
+
+def _resolve_parameters(
+    parameters: Any,
+    theta_init: Any,
+) -> Any:
+    """Resolve the polymorphic ``parameters=`` / deprecated ``theta_init=`` pair.
+
+    Returns the concrete starting-point PyTree (``theta_init``) the rest of
+    the estimator consumes. This is **pure Python**, run before any tracing,
+    so the class-vs-point dispatch never interferes with ``jit`` (#107).
+
+    Dispatch (in order):
+
+    * both ``parameters`` and ``theta_init`` supplied -> :class:`TypeError`
+      (they are the same channel; ``theta_init`` is a deprecated alias).
+    * ``parameters`` is a :class:`ParameterSpace` *subclass* -> ``.point()``
+      (the deterministic per-field default point).
+    * ``parameters`` is a :class:`ManifoldPoint` (a ``result.theta`` view)
+      -> its raw ``theta_hat`` PyTree (warm start).
+    * ``parameters`` is any other value (a :class:`ParameterSpace` instance,
+      a ``@jdc.pytree_dataclass`` of ``ManifoldLeaf``, ``prev.theta_hat``,
+      or a v1 scalar dataclass) -> used directly.
+    * only ``theta_init`` supplied -> used directly (bitwise the v1 path).
+    """
+    # Local imports avoid a circular import at module load.
+    from emu_gmm.parameter_space import ParameterSpace
+    from emu_gmm.types import ManifoldPoint
+
+    has_params = parameters is not None
+    has_theta = theta_init is not _THETA_INIT_UNSET
+
+    if has_params and has_theta:
+        raise TypeError(
+            "estimate()/build_estimator(): pass exactly one of "
+            "parameters= or theta_init= (theta_init is a deprecated alias "
+            "for parameters); got both."
+        )
+    if not has_params and not has_theta:
+        raise TypeError(
+            "estimate()/build_estimator(): missing required starting point; "
+            "pass parameters= (a ParameterSpace class/instance or a theta "
+            "PyTree). theta_init= is accepted as a deprecated alias."
+        )
+
+    resolved = parameters if has_params else theta_init
+
+    # A ParameterSpace *subclass* (a class, not an instance) -> .point().
+    if isinstance(resolved, type) and issubclass(resolved, ParameterSpace):
+        return resolved.point()
+    # A ManifoldPoint readout view (e.g. ``prev_result.theta``) -> raw pytree.
+    if isinstance(resolved, ManifoldPoint):
+        return resolved.theta_hat
+    # Otherwise it is already a concrete starting-point PyTree.
+    return resolved
+
+
 def build_estimator(
     model: StructuralModel,
     *,
@@ -199,7 +258,8 @@ def build_estimator(
     weighting: WeightingStrategy | None = None,
     regularization: RegularizationStrategy | None = None,
     optimizer: Optimizer | None = None,
-    theta_init: ParamsLike,
+    parameters: Any = None,
+    theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
 ) -> Callable[[ParamsLike, Measure], EstimationResult]:
@@ -239,13 +299,19 @@ def build_estimator(
     covariance : :class:`CovarianceStrategy`
         Captured in the factory's closure; fixed for the lifetime of the
         returned callable.
-    weighting, regularization, optimizer, theta_init, moment_names, penalty
+    weighting, regularization, optimizer, parameters, theta_init, moment_names, penalty
         See :func:`estimate`.
 
     Returns
     -------
     Callable taking ``(theta_init, measure) -> EstimationResult``.
     """
+    # Resolve the polymorphic starting point (pure Python, pre-tracing): a
+    # ParameterSpace class -> .point(); a ManifoldPoint view -> its raw
+    # pytree; anything else used directly. theta_init= is a deprecated alias
+    # for parameters= (#107).
+    theta_init = _resolve_parameters(parameters, theta_init)
+
     # Defaults.
     if weighting is None:
         weighting = ContinuouslyUpdated()
@@ -655,6 +721,15 @@ def build_estimator(
         theta_init_call: ParamsLike,
         measure_call: Measure,
     ) -> EstimationResult:
+        # FIX 4: the returned callable's first arg is polymorphic too, routed
+        # through the SAME pure-Python resolver as estimate()/build_estimator()
+        # (a ParameterSpace subclass -> .point(); a ManifoldPoint view ->
+        # .theta_hat; anything else used directly). This runs before any
+        # tracing, so the class-vs-point dispatch never interferes with jit.
+        # ``parameters=theta_init_call`` / ``theta_init=_THETA_INIT_UNSET``
+        # selects the parameters channel; a plain theta PyTree falls straight
+        # through unchanged (bitwise the prior run() path).
+        theta_init_call = _resolve_parameters(theta_init_call, _THETA_INIT_UNSET)
         if dispatch_mode == "v2":
             # Manifold-aware flatten: the v1 2-tuple raises on non-scalar
             # ManifoldLeaf blocks (R19). The optimiser path below ignores
@@ -863,7 +938,8 @@ def estimate(
     weighting: WeightingStrategy | None = None,
     regularization: RegularizationStrategy | None = None,
     optimizer: Optimizer | None = None,
-    theta_init: ParamsLike,
+    parameters: Any = None,
+    theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
 ) -> EstimationResult:
@@ -895,8 +971,25 @@ def estimate(
     optimizer : :class:`Optimizer`, optional
         Defaults to :func:`emu_gmm.optimizer.optimistix_lm` with default
         tolerances.
+    parameters
+        Polymorphic starting point (#107). Accepts:
+
+        * a :class:`~emu_gmm.parameter_space.ParameterSpace` **subclass**
+          (a class) --- the estimator calls ``.point()`` to materialise the
+          per-field default start;
+        * a :class:`~emu_gmm.parameter_space.ParameterSpace` **instance**
+          (e.g. ``Normal.point()`` / ``Normal.point(seed)``) --- used
+          directly;
+        * any existing ``theta_init`` PyTree (a ``@jdc.pytree_dataclass`` of
+          ``ManifoldLeaf`` / scalar fields), or a warm start
+          ``prev_result.theta`` / ``prev_result.theta_hat``.
+
+        Exactly one of ``parameters`` and ``theta_init`` may be supplied;
+        passing both is an error. ``parameters`` supersedes ``theta_init``.
     theta_init
-        Starting parameters as a ``@jdc.pytree_dataclass``. Scalar (0-d)
+        **Deprecated alias for** ``parameters`` (bitwise-identical
+        behaviour; retained for back-compat). Starting parameters as a
+        ``@jdc.pytree_dataclass``. Scalar (0-d)
         fields are estimated on the (Euclidean) real line as in v1. **The
         parameter geometry is declared here, not via an ``estimate()``
         argument:** a non-scalar or constrained leaf is expressed by wrapping
@@ -921,6 +1014,10 @@ def estimate(
     -------
     :class:`EstimationResult`
     """
+    # Resolve once here so the same concrete start is used both to build the
+    # estimator and to invoke it (the run() call needs a concrete PyTree, not
+    # a ParameterSpace class). Pure Python; runs before any tracing (#107).
+    resolved_theta = _resolve_parameters(parameters, theta_init)
     run = build_estimator(
         model,
         measure=measure,
@@ -928,11 +1025,11 @@ def estimate(
         weighting=weighting,
         regularization=regularization,
         optimizer=optimizer,
-        theta_init=theta_init,
+        parameters=resolved_theta,
         moment_names=moment_names,
         penalty=penalty,
     )
-    return run(theta_init, measure)
+    return run(resolved_theta, measure)
 
 
 __all__ = ["estimate", "build_estimator"]
