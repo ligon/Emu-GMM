@@ -11,13 +11,19 @@ inference through a single pipeline.
 
 ## Status
 
-v1 is implemented and operational (plus the v2 #79/#80 stratified-covariance
-module). 694 tests pass; `make quick-check` is
-clean (ruff + black + mypy + pytest). All three measure paths (synthetic,
-analytical, empirical) run end-to-end against the bundled multi-asset Euler
-example in `src/emu_gmm/examples/euler.py`. The runnable demo at
-`examples/run_euler.py` exercises all three contexts and prints recovery
-and the J-statistic for each.
+v1 is implemented and operational. v2 adds the #79/#80 stratified/design-aware
+covariance module and the **Riemannian-manifold epic (#12)**: a
+`Product(PSDFixedRank(n, K), Euclidean(...))` parameter is estimable end-to-end
+via `RiemannianLM`, with gauge-aware `Sigma_theta` and gauge-invariant standard
+errors on functionals of `Gamma = A @ A.T` (`result.eigenvalue_se()`,
+`result.gamma_se()`, `result.functional_se(f)`). The manifold types
+(`PSDFixedRank`, `Euclidean`, `Product`, `Positive`, `ManifoldLeaf`) are
+re-exported at the top level alongside the Measure/Covariance menus. 839 tests
+pass; `make quick-check` is clean (ruff + black + mypy + pytest). All three
+measure paths (synthetic, analytical, empirical) run end-to-end against the
+bundled multi-asset Euler example in `src/emu_gmm/examples/euler.py`. The
+runnable demo at `examples/run_euler.py` exercises all three contexts and prints
+recovery and the J-statistic for each.
 
 ## Where the architecture lives
 
@@ -29,6 +35,10 @@ and the J-statistic for each.
   worked Euler-equation example in three variants.
 - `docs/implementation-plan.org` — phased task list; Phases 1-7 complete,
   Phase 8 (polish) underway.
+- `docs/manifold-epic-progress.org` — the Riemannian-manifold epic (#12)
+  record: the 7-phase build (PRs #97–#104), the locked design decisions, and the
+  gauge / `Sigma_theta` design brief. `docs/manifold-slice-scoping.md` is the
+  original minimal-slice build spec.
 - `docs/migration/` — user-facing migration guides (e.g.,
   `manifoldgmm-to-emu-gmm.org`). `docs/design.org` and `docs/api-sketch.org`
   are implementer-facing specs; this CLAUDE.md is the agent-facing index.
@@ -166,6 +176,16 @@ been through four reviewer iterations; the abstractions are deliberate.
 - **`StratifiedCovariance`** (#79) and **`DesignAwareCovariance`** (#80) are
   both implemented: the design-based between-PSU Neyman variance, and the
   composed mixed design/sampling assembly (`V_TT` + `V_SS` + estimated `V_TS`).
+- **Riemannian-manifold estimation (#12)** is implemented (PRs #97–#104): native
+  `Euclidean` / `PSDFixedRank` / `Product` / `Positive` + `RiemannianLM`, the
+  manifold-aware flatten/spec path, gauge-aware `Sigma_theta` (`pinv_eigvalrule`
+  dropping the `K(K-1)/2` gauge directions by count), and gauge-invariant
+  Gamma-functional SEs (#42). Still deferred: a Riemannian TrustRegions solver
+  (#9 — LM suffices and was verified equivalent on the quotient), a pymanopt
+  backend (#3 — native constructors only; pymanopt is a dev-only gated
+  cross-check), and the high-gauge-fraction `k/n > 0.7` regime (surfaced as a
+  caveat, not supported). Validated against a pymanopt-TrustRegions baseline on
+  the quotient.
 - **`ReplicateWeightCovariance`**: rest of the design-awareness ladder
   (BRR, jackknife, bootstrap variants; `docs/design.org` Section 2).
 - **`EigenvalueFloor`, `NearestPSD` (Higham 1988) regularisers**:
