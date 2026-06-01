@@ -28,11 +28,42 @@ maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
 5. [X] *components() readout* — =result.theta.components() -> (A, phi)=; route
    =coef_table=/=standard_errors= through manifold-aware flatten.
    *DONE* — PR #101, merged @ 0b2da47.
-6. [ ] *Validation gate* — synthetic Gamma+phi recovery; gauge-invariance (Y0 vs Y0·Q);
-   ManifoldGMM/pymanopt-TR cross-check ON THE QUOTIENT; J_dof calibration; v1 bitwise
-   non-regression.
+6. [X] *Validation gate* — synthetic Gamma+phi recovery; gauge-invariance (Y0 vs Y0·Q);
+   pymanopt-TR cross-check ON THE QUOTIENT; J_dof calibration; v1 bitwise non-regression.
+   *DONE* — PR #102, merged @ 3b46ba2. pymanopt cross-check ran + agreed (J diff 5.6e-14).
 7. [ ] *#42 fast-follow* — gauge-INVARIANT Gamma-functional Sigma_theta (delta-method
-   pull-back to Gamma=AAᵀ eigenvalue/entry functionals). The deferred SE work.
+   pull-back to Gamma=AAᵀ eigenvalue/entry functionals). The deferred SE work. *Design
+   brief below.*
+
+* Phase 7 design brief (#42 gauge-invariant Gamma-functional SEs)
+*Problem.* The Phase-4 minimal =Sigma_theta= is the ambient-horizontal =pinv_eigvalrule=
+sandwich over the tangent θ=(Y,phi). Its raw per-entry Y SEs are gauge-ARBITRARY (any
+Y in the O(K) orbit gives a different Y but the same Gamma=AAᵀ). The consumer (K-Aggregators)
+needs interpretable SEs of *functionals of Gamma* (eigenvalues, entries) and of phi.
+
+*Method (delta method, gauge-invariant by construction).* For a functional
+=f(θ) = g(Gamma(θ), phi)= that depends on θ ONLY through gauge-invariants (Gamma=AAᵀ and phi):
+- =J_f = ∂f/∂θ= at the fixed =theta_hat= (AD of =f∘unflatten= on the flat ambient θ;
+  commitment 5 — at fixed theta_hat, NOT through the solver).
+- =Cov(f) = J_f Sigma_theta J_f'= ; =SE(f) = sqrt(diag)=.
+- Gauge-invariance is automatic: a gauge-invariant =f= has =J_f= orthogonal to the O(K)
+  gauge fibre, so it annihilates the exact gauge nullspace already pinned out of
+  =Sigma_theta=; the result is identical for Y0 and Y0·Q. (A gauge-VIOLATING f gets nonzero
+  variance from the gauge directions — used as a negative control.)
+
+*API (proposed; conveniences over one general primitive).*
+- =result.functional_se(f)= — general: =f(components)->R^p= returns =(se_vector, covariance)=.
+- =result.gamma_se()= — SE of each Gamma entry (vech(Gamma)); =result.gamma_covariance()=.
+- =result.eigenvalue_se()= — SE of =eigvalsh(Gamma)= (the K-Agg primary).
+The conveniences are thin wrappers over =functional_se=. v1/scalar trees: reduces to the
+ordinary delta-method SE (e.g. SE of a scalar transform), bitwise where it overlaps.
+
+*Validation.* (a) gauge-invariance: Y0 vs Y0·Q give identical functional SEs (the core
+guarantee); (b) correctness: delta-method eigenvalue/entry SEs match a parametric-bootstrap
+(or finite-difference) reference on a synthetic DGP to MC tolerance; (c) negative control:
+a gauge-violating functional shows nonzero variance / is rejected; (d) v1 non-regression.
+*Out of scope / optional:* =spectral_gap= diagnostic, the high-gauge-fraction (k/n>0.7)
+regime (K-Agg stays k/n=0.4–0.6 — surface a caveat, don't support it).
 
 * Per-phase workflow pattern (the agreed shape)
 =red-team (3 read-only lenses, parallel) -> implement (1 agent, isolated worktree) ->
@@ -141,3 +172,10 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
 - *Phase 6 reminders:* the ManifoldGMM/pymanopt-TR cross-check must be an OPTIONAL
   import-gated test (=skipif= on availability), NEVER a runtime dep (locked backend
   decision). Set a defensible tight recovery tolerance on a clean DGP.
+- Phase 6 workflow (run =wmajtg2v1=): all 3 adversarial lenses SOLID, *0 real breaks*,
+  *src_changed=False* (test-only). Tight recovery (atol 4e-3 ≈ 5.7σ_m, justified from
+  noise=0.01/n=200; robust over 80 seeds); gauge invariance machine-precision over 72
+  adversarial O(K) starts; *pymanopt-TR cross-check RAN + AGREED on the quotient* (J diff
+  5.6e-14, Gamma diff 1.7e-12; import-gated, not a dep); J_dof MC centered on
+  M-(5K+1-K(K-1)/2). Full v1 gate 807 green. *Landed PR #102 @ 3b46ba2.* The minimal-slice
+  epic is complete + independently validated; only the #42 SE pull-back (Phase 7) remains.
