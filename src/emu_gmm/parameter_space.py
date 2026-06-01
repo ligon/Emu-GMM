@@ -130,7 +130,18 @@ class ParameterSpace:
     subclass is lowered to a ``@jdc.pytree_dataclass`` with one
     :class:`ManifoldLeaf`-typed field per declaration, so it flows through
     :func:`emu_gmm.estimate` exactly like a hand-built dataclass of
-    ``ManifoldLeaf`` fields.
+    ``ManifoldLeaf`` fields. Subclassing a :class:`ParameterSpace` merges the
+    parent's declared fields (parents first, then the child's; a re-declared
+    field overrides the parent spec but keeps its inherited position).
+
+    Known limitation (issue #108-followup): a space whose fields are *all*
+    Euclidean must use **scalar** (0-d) Euclidean leaves to estimate with the
+    default optimiser --- a space of only *non-scalar* Euclidean leaves (e.g.
+    a bare ``Euclidean(K)`` mean vector with no constrained/gauge leaf) hits a
+    pre-existing core-dispatch trap (the all-Euclidean path routes to the v1
+    scalar flatten, which rejects non-0-d leaves). Pairing a non-scalar leaf
+    with a constrained leaf (e.g. ``PSDFixedRank``) takes the v2 path and works
+    --- as in the multivariate-normal example.
     """
 
     # Populated per-subclass by __init_subclass__: ordered field -> _FieldSpec.
@@ -221,21 +232,20 @@ class ParameterSpace:
         leaves: dict[str, ManifoldLeaf] = {}
         if seed is None:
             for name, fs in declared.items():
-                if fs.default is _NO_DEFAULT:
+                if fs.default is _NO_DEFAULT or fs.default is None:
                     raise ValueError(
-                        f"{cls.__name__}.point(): field {name!r} has no "
-                        "default; pass a default to on(manifold, default=...) "
-                        "or call .point(seed) for a random start."
+                        f"{cls.__name__}.point(): field {name!r} has no default "
+                        "available (a None default is not usable); pass a "
+                        "(non-None) default to on(manifold, default=...) or call "
+                        ".point(seed) for a random start."
                     )
-                # FIX 3: cast a floating default to the canonical float64 the
-                # leaf manifold's ``random_point`` produces, so ``point()`` and
-                # ``point(seed)`` yield leaves of the SAME dtype and IDENTICAL
-                # treedef. A float32 default would otherwise pin a float32 leaf
-                # whose treedef differs from the seed path (silent float32 vs
-                # the float64 commitment; a spurious jit recompile on switch).
-                arr = jnp.asarray(fs.default)
-                if jnp.issubdtype(arr.dtype, jnp.floating):
-                    arr = arr.astype(jnp.float64)
+                # Cast EVERY default to canonical float64 (a parameter is a
+                # continuous real). An int or float32 default would otherwise
+                # pin an int64/float32 leaf whose treedef differs from the seed
+                # path's float64 ``random_point`` (a spurious jit recompile on
+                # switch; broken gradients for an int leaf) --- the float64
+                # commitment. This matches ``point(seed)``'s dtype exactly.
+                arr = jnp.asarray(fs.default).astype(jnp.float64)
                 leaves[name] = ManifoldLeaf(arr, fs.manifold)
         else:
             key = jax.random.PRNGKey(int(seed))

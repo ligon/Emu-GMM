@@ -440,6 +440,37 @@ def test_float32_default_casts_to_float64_matching_seed_treedef():
     )
 
 
+def test_int_default_casts_to_float64_matching_seed_treedef():
+    # An INTEGER default must also normalise to float64 (a parameter is a
+    # continuous real); else point() pins an int64 leaf -> spurious jit
+    # recompile vs the float64 seed path and broken gradients downstream.
+    K = 2
+
+    class Normal(ParameterSpace):
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K, dtype=jnp.int32))
+        mu: jax.Array = on(Euclidean(K), default=jnp.zeros(K, dtype=jnp.int32))
+
+    p_default = Normal.point()
+    p_seed = Normal.point(0)
+    assert p_default.A.array.dtype == jnp.float64
+    assert p_default.mu.array.dtype == jnp.float64
+    assert jax.tree_util.tree_structure(p_default) == jax.tree_util.tree_structure(
+        p_seed
+    )
+
+
+def test_none_default_raises_clean_error():
+    # on(manifold, default=None) is not a usable default: point() must raise a
+    # clear error, not a low-level None-arithmetic failure.
+    K = 2
+
+    class Normal(ParameterSpace):
+        A: jax.Array = on(PSDFixedRank(K, K), default=None)
+
+    with pytest.raises(ValueError, match="(?i)None default is not usable"):
+        Normal.point()
+
+
 # ---------------------------------------------------------------------------
 # FIX 4 -- the build_estimator() callable's first arg is polymorphic too.
 # ---------------------------------------------------------------------------
