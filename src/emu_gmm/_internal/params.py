@@ -173,11 +173,18 @@ def _walk_leaf_specs(params: Any) -> tuple[ManifoldSpec, list[Any]]:
     leaf order, ``offset`` / ``ambient_shape`` / ``manifold`` / ``dtype``
     population, manifold validation, the ``offset += prod(ambient_shape)``
     accumulation, the ``__emu_manifolds__`` annotation handling, and the
-    final block-boundary INT-06 guard. Both :func:`flatten_params_with_spec`
-    (Phase 1, the production flatten path) and
-    :func:`manifold_spec_from_params` (Phase 2, the estimator's spec probe)
-    delegate here so the two builders cannot drift (red-team
-    R1/R6/R8/R26/R33).
+    final block-boundary INT-06 guard. :func:`manifold_spec_from_params`
+    (Phase 2, the estimator's pre-optimisation spec probe) delegates here.
+    :func:`flatten_params_with_spec` (Phase 1, the production flatten path)
+    keeps its **own** inline leaf-walk so its byte-for-byte output is
+    preserved --- the two walks are therefore independent code, *not* a
+    shared implementation. Their agreement on the :class:`ManifoldLeaf`
+    representation (the v2 parameter contract) is enforced by
+    ``TestSpecBuilderConsistency``, not by shared code. They intentionally
+    **diverge** on the legacy ``__emu_manifolds__`` annotation path: this
+    walk honours the annotation (e.g. ``Positive()`` for the v1-lite scalar
+    slice), whereas ``flatten_params_with_spec`` maps a bare/annotated
+    scalar to ``Euclidean()`` (red-team R1/R6/R8/R26/R33).
 
     Returns
     -------
@@ -471,13 +478,17 @@ def manifold_spec_from_params(params: Any) -> ManifoldSpec:
     """Build a :class:`ManifoldSpec` describing the leaves of ``params``.
 
     This is the spec builder ``estimate()`` calls before optimisation
-    (estimator.py); it must produce a spec **field-for-field identical**
-    to ``flatten_params_with_spec(params)[2]`` for the same ``params``
-    (the two are deliberately two builders of one spec). To guarantee
-    they cannot drift, both delegate to the shared :func:`_walk_leaf_specs`
-    leaf-walk (red-team R1/R6/R8/R26/R33); this function discards the
-    raveled blocks so it is callable **without ever materialising a flat
-    array** (the ``estimate()`` pre-optimisation requirement).
+    (estimator.py). For the :class:`ManifoldLeaf` representation (the v2
+    parameter contract) it produces a spec **field-for-field identical**
+    to ``flatten_params_with_spec(params)[2]`` --- a contract enforced by
+    ``TestSpecBuilderConsistency``. It delegates to the shared
+    :func:`_walk_leaf_specs` leaf-walk and discards the raveled blocks, so
+    it is callable **without ever materialising a flat array** (the
+    ``estimate()`` pre-optimisation requirement). Note
+    ``flatten_params_with_spec`` does **not** share this walk --- it keeps
+    its own inline copy to preserve its Phase-1 output --- and the two
+    intentionally diverge on the legacy ``__emu_manifolds__`` annotation
+    path; see :func:`_walk_leaf_specs` (red-team R1/R6/R8/R26/R33).
 
     For v1-style parameter trees (every leaf is a 0-d scalar) the result
     is unchanged from before: all ``leaf_specs`` are :class:`Euclidean`
