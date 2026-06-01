@@ -47,6 +47,7 @@ def build_diagnostics(
     optimizer_health: dict[str, Any] | None = None,
     final_objective_data: Any | None = None,
     final_objective_full: Any | None = None,
+    gauge_nullspace_dim: int = 0,
 ) -> Diagnostics:
     """Assemble a :class:`Diagnostics` from raw estimator-pipeline values.
 
@@ -114,6 +115,7 @@ def build_diagnostics(
         optimizer_health=(
             dict(optimizer_health) if optimizer_health is not None else {}
         ),
+        gauge_nullspace_dim=int(gauge_nullspace_dim),
     )
 
 

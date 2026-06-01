@@ -331,6 +331,18 @@ class Diagnostics:
     #     LM steps, if the backend exposes it; otherwise ``None``.
     optimizer_health: dict[str, Any] = dataclasses.field(default_factory=dict)
 
+    # Gauge nullspace dimension of the parameter manifold (Phase 4, #12).
+    # Equal to the manifold spec's ``total_gauge_dim``: the number of
+    # exact-zero gauge directions of the information matrix. ``0`` for
+    # every Euclidean / scalar-Positive (v1) tree; ``k(k-1)/2`` for a
+    # ``PSDFixedRank(n, k)`` leaf (the tangent dimension of the O(k) gauge
+    # group). ``Sigma_theta`` is reported at rank ``total_dimension -
+    # gauge_nullspace_dim``: the ``gauge_nullspace_dim`` smallest
+    # eigenvalues of the info matrix are pinned to exact zero by
+    # ``pinv_eigvalrule``, so users can distinguish these *expected* gauge
+    # zeros from genuine near-zero (weakly-identified) directions.
+    gauge_nullspace_dim: int = 0
+
 
 @dataclasses.dataclass
 class EstimationResult:
