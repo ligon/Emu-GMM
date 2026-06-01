@@ -14,8 +14,9 @@ maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
 1. [X] *Manifold-aware flatten core* — =ManifoldLeaf= pytree + =flatten_params_with_spec=
    3-tuple + manifold-aware =unflatten=; v1 =flatten_params= bitwise unchanged.
    *DONE* — PR #97, merged @ 89cb103.
-2. [ ] *Non-scalar spec builder* — offset/=ambient_shape= from real shape; populate
+2. [X] *Non-scalar spec builder* — offset/=ambient_shape= from real shape; populate
    =total_gauge_dim=. (=_resolve_optimizer= already routes correctly — no work there.)
+   *DONE* — PR #98, merged @ 2deb9a2.
 3. [ ] *Per-leaf solver* — PSDFixedRank retraction/projection in =RiemannianLM= +
    gauge λ-floor; also fix #78 =status=="traced"= always-converged collapse here.
 4. [ ] *Gauge-aware Sigma_theta (minimal)* — =pinv_eigvalrule= (drop =total_gauge_dim=
@@ -90,3 +91,17 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
 - v1-gate compute recipe that works here: per-directory =taskset -c 0-15= for
   _internal/manifolds/covariance/measures; *per-FILE* for inference/examples/top-level
   (whole-dir single-invocation segfaults on the XLA JIT-mmap hazard).
+- Phase 2 workflow (run =wf_4726523d-d59=): gates green (acceptance + ManifoldLeaf-path
+  builder consistency + v1 non-regression, full gate 741 tests). Adversarial caught two
+  *[low]* issues: (1) a docstring over-claimed the two spec builders "share a walk /
+  cannot drift" — actually =flatten_params_with_spec= keeps its own inline walk; fixed the
+  docstring (consistency is enforced by =TestSpecBuilderConsistency= on the ManifoldLeaf
+  rep, and the two intentionally diverge on the legacy =__emu_manifolds__= path,
+  pre-existing on main). (2) that annotation-path divergence — benign given ManifoldLeaf
+  is the locked v2 rep. Minor intended: v1 scalar =LeafSpec.dtype= now =float64= not
+  =None= (harmless; only unflatten's manifold branch reads it). *Landed PR #98 @ 2deb9a2.*
+- *Leak recurred:* the Phase-2 =isolation:worktree= implement agent again leaked edits
+  into the MAIN checkout (this time a comment-superset of its own committed tip) despite
+  reporting =in_worktree_confirmed=. The leak-check caught it; landed the committed
+  worktree tip, discarded the drift. The hazard is systematic — keep the post-workflow
+  =git status= leak-check every phase.
