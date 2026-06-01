@@ -31,6 +31,13 @@ from emu_gmm.inference.cluster_bootstrap import (
     ClusterBootstrapResult,
     cluster_bootstrap,
 )
+from emu_gmm.inference.functional_se import (
+    eigenvalue_se,
+    functional_se,
+    gamma_se,
+    gamma_vech,
+    vech_indices,
+)
 from emu_gmm.inference.j_test import JTestResult, j_test
 from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
 from emu_gmm.inference.wild_bootstrap import (
@@ -44,7 +51,12 @@ __all__ = [
     "KStatisticResult",
     "WildBootstrapResult",
     "cluster_bootstrap",
+    "eigenvalue_se",
+    "functional_se",
+    "gamma_se",
+    "gamma_vech",
     "j_test",
     "k_statistic",
     "moment_wild_bootstrap",
+    "vech_indices",
 ]

@@ -524,6 +524,169 @@ class EstimationResult:
         Params = axes_mod.params_axis(int(se.shape[0]))
         return label_vector(se, Params)
 
+    def functional_se(
+        self, f: Callable[[tuple[Any, ...]], Any]
+    ) -> tuple[Float[Array, " p"], Float[Array, "p p"]]:
+        r"""Gauge-invariant delta-method SE / covariance of ``f(components)``.
+
+        The general Phase-7 (#42) primitive. For a functional
+        ``f(components) -> R^p`` that depends on ``theta_hat`` only through
+        gauge invariants, returns ``(se, cov)`` where
+        ``cov = J_f @ Sigma_theta @ J_f.T`` (the delta method) and
+        ``se = sqrt(diag(cov))``. ``J_f`` is the Jacobian of ``f`` w.r.t. the
+        ambient flat parameter, taken at the **fixed** ``theta_hat`` (never
+        through the solver; commitment 5).
+
+        Parameters
+        ----------
+        f
+            A JAX-AD-able callable mapping the components tuple
+            ``(A, phi, ...)`` -- exactly what :meth:`components` returns, same
+            order -- to a 1-D JAX array of length ``p`` (a scalar is treated
+            as ``p == 1``). ``f`` must be **gauge-invariant**: it must depend
+            on each gauge-bearing leaf (a ``PSDFixedRank`` factor ``A``) only
+            through that leaf's gauge invariants (e.g. ``Gamma = A @ A.T``).
+
+            Example::
+
+                def gamma00(comps):
+                    A, phi = comps
+                    return (A @ A.T)[0, 0]      # one Gamma entry, gauge-inv.
+
+                se, cov = result.functional_se(gamma00)
+
+        Returns
+        -------
+        se : ``(p,)`` ``jax`` array
+            ``sqrt(diag(cov))``; negative diagonal entries from round-off
+            clip to ``nan`` (matching :attr:`standard_errors`).
+        cov : ``(p, p)`` ``jax`` array
+            The symmetrised delta-method covariance.
+
+        Notes
+        -----
+        Gauge-invariance is automatic for a gauge-invariant ``f`` (its ``J_f``
+        annihilates the gauge nullspace already pinned out of
+        ``Sigma_theta``), so ``Y0`` and ``Y0 @ Q`` give identical SEs. A
+        gauge-VIOLATING ``f`` (one that leaks raw ``Y``) returns a valid but
+        gauge-dependent SE -- the routine cannot detect the violation; it is
+        the caller's responsibility. **v1 / scalar reduction:** for an
+        all-scalar tree ``components()`` is the tuple of scalar leaves and
+        ``Sigma_theta`` is the ordinary ``(K, K)`` covariance, so this reduces
+        to the ordinary delta-method SE; for ``f = lambda c: c[i]`` it agrees
+        with ``standard_errors[i]``.
+
+        Eager-only: call outside any ``jax.jit`` boundary.
+        """
+        from emu_gmm.inference.functional_se import functional_se as _fse
+
+        return _fse(f, self.components(), jnp.asarray(self.Sigma_theta.array))
+
+    def gamma_covariance(self) -> Float[Array, "q q"]:
+        r"""Delta-method covariance of ``vech(Gamma)``, ``Gamma = A @ A.T``.
+
+        ``A`` is the first (``PSDFixedRank``) component. The ``q = n(n+1)/2``
+        entries follow the row-major lower-triangular ``vech`` order
+        (``Gamma[0,0], Gamma[1,0], Gamma[1,1], ...``; see
+        :func:`emu_gmm.inference.functional_se.vech_indices`). Gauge-invariant:
+        ``Gamma`` is unchanged under ``A -> A @ Q`` for ``Q in O(K)``.
+        """
+        from emu_gmm.inference.functional_se import gamma_se as _gse
+
+        _se, cov = _gse(self.components(), jnp.asarray(self.Sigma_theta.array))
+        return cov
+
+    def gamma_se(self) -> Float[Array, " q"]:
+        r"""Delta-method SE of each ``vech(Gamma)`` entry, ``Gamma = A @ A.T``.
+
+        Returns a ``(q,)`` vector of standard errors for the
+        ``q = n(n+1)/2`` unique entries of the symmetric ``Gamma`` in
+        row-major lower-triangular ``vech`` order (``Gamma[0,0]``,
+        ``Gamma[1,0]``, ``Gamma[1,1]``, ...; see
+        :func:`emu_gmm.inference.functional_se.vech_indices`). Thin wrapper
+        over :meth:`functional_se`; gauge-invariant.
+
+        Note this axis (``n(n+1)/2`` Gamma-functional entries) is **distinct**
+        from the ``coef_table`` / ``standard_errors`` axis (the
+        ``total_dimension`` ambient tangent coordinates, whose raw per-entry
+        ``Y`` SEs are gauge-arbitrary and not interpretable). They are
+        different spaces (R29).
+        """
+        from emu_gmm.inference.functional_se import gamma_se as _gse
+
+        se, _cov = _gse(self.components(), jnp.asarray(self.Sigma_theta.array))
+        return se
+
+    def eigenvalue_se(self, rank: int | None = None) -> Float[Array, " k"]:
+        r"""Delta-method SE of the nonzero eigenvalues of ``Gamma = A @ A.T``.
+
+        The K-Aggregators primary: SEs of the eigenvalues of the cross-price
+        substitution matrix ``Gamma``. For a rank-``k`` ``Gamma in R^{n x n}``
+        (``A`` a ``PSDFixedRank(n, k)`` factor) this returns a length-``k``
+        vector of SEs for the ``k`` **nonzero** eigenvalues, ordered ascending
+        to match :func:`jax.numpy.linalg.eigvalsh`.
+
+        The ``n - k`` structural zeros are **not** returned: the zero block is
+        a repeated eigenvalue, so its eigenvalue Jacobian is degenerate /
+        undefined; the consumer cares only about the ``k`` nonzero eigenvalues.
+
+        Parameters
+        ----------
+        rank
+            The number ``k`` of nonzero eigenvalues. Defaults to the
+            ``PSDFixedRank`` rank read from the first leaf of
+            :attr:`manifold_spec` when present; otherwise the
+            numerically-nonzero eigenvalue count of ``Gamma_hat``
+            (``|lambda| > 1e-10 * max|lambda|``).
+
+        Returns
+        -------
+        ``(k,)`` ``jax`` array of standard errors.
+
+        Degenerate eigenvalues
+        ----------------------
+        If two of the ``k`` nonzero eigenvalues coincide the individual
+        eigenvalues are not smooth functions of ``Gamma`` (only symmetric
+        functions of the degenerate block are), so the per-eigenvalue SE is
+        not well-defined at exact degeneracy: ``eigvalsh`` returns a finite
+        but eigenbasis-dependent derivative there. This is non-generic (the
+        generic case is distinct eigenvalues, where the SEs are exact); a
+        near-degenerate spectrum yields large but finite SEs. With
+        (near-)repeated eigenvalues, prefer a symmetric functional of the
+        block (e.g. its sum) via :meth:`functional_se`. Gauge-invariant: the
+        eigenvalues of ``Gamma`` do not depend on the O(K) representative of
+        ``A``.
+        """
+        from emu_gmm.inference.functional_se import eigenvalue_se as _evse
+
+        comps = self.components()
+        if rank is None:
+            rank = self._gamma_rank(comps)
+        se, _cov = _evse(comps, jnp.asarray(self.Sigma_theta.array), int(rank))
+        return se
+
+    def _gamma_rank(self, components: tuple[Any, ...]) -> int:
+        """Infer the rank ``k`` of the ``PSDFixedRank`` factor ``A``.
+
+        Prefers the manifold spec's first non-scalar leaf rank (the declared
+        ``PSDFixedRank(n, k)``); falls back to the numerically-nonzero
+        eigenvalue count of ``Gamma_hat`` when no spec is present.
+        """
+        from emu_gmm.inference.functional_se import count_nonzero_eigenvalues
+
+        spec = self.manifold_spec
+        if spec is not None:
+            for ls in spec.leaf_specs:
+                amb = tuple(int(s) for s in ls.ambient_shape)
+                if len(amb) == 2:
+                    rank_attr = getattr(ls.manifold, "rank", None)
+                    if rank_attr is None:
+                        rank_attr = getattr(ls.manifold, "k", None)
+                    if rank_attr is not None:
+                        return int(rank_attr)
+                    return int(amb[1])  # (n, k) ambient shape -> k columns
+        return count_nonzero_eigenvalues(components)
+
     @functools.cached_property
     def coef_table(self) -> pd.DataFrame:
         """Coefficient table: estimate, std error, t-stat, p-value.
