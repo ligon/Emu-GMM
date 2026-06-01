@@ -17,8 +17,9 @@ maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
 2. [X] *Non-scalar spec builder* — offset/=ambient_shape= from real shape; populate
    =total_gauge_dim=. (=_resolve_optimizer= already routes correctly — no work there.)
    *DONE* — PR #98, merged @ 2deb9a2.
-3. [ ] *Per-leaf solver* — PSDFixedRank retraction/projection in =RiemannianLM= +
+3. [X] *Per-leaf solver* — PSDFixedRank retraction/projection in =RiemannianLM= +
    gauge λ-floor; also fix #78 =status=="traced"= always-converged collapse here.
+   *DONE* — PR #99, merged @ b291a8e.
 4. [ ] *Gauge-aware Sigma_theta (minimal)* — =pinv_eigvalrule= (drop =total_gauge_dim=
    smallest eigs BY COUNT) + per-leaf =G_riem= over ALL ambient columns; surface
    =gauge_nullspace_dim=. (Bugs confirmed live: G_riem range(K) column-drop;
@@ -105,3 +106,12 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   reporting =in_worktree_confirmed=. The leak-check caught it; landed the committed
   worktree tip, discarded the drift. The hazard is systematic — keep the post-workflow
   =git status= leak-check every phase.
+- Phase 3 workflow (run =wn9rcg72r=): *all 3 adversarial lenses SOLID, 0 real breaks*;
+  all four gates pass (recovery k=2/3/5, gauge invariance to machine precision incl.
+  near-degenerate Q/reflections/singular starts, honest #78 done-flag, v1/Positive
+  bitwise). Full v1 gate 749 tests green. Red-team's critical pre-build warnings
+  (λ-floor needs a real scale → impl added =gauge_floor= hyperparam default 1e-6; project
+  Jacobian columns not the post-solve step) were addressed in the build. *No fix needed.*
+  Solver now flattens via =flatten_params_with_spec=; =OptimizerInfo.done= carries the
+  real convergence flag; estimator prefers it when present, falls back to status-string
+  when =done is None= (no v1 change). *Landed PR #99 @ b291a8e.* No main-leak this round.
