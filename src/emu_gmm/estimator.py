@@ -301,11 +301,12 @@ def build_estimator(
     identified_dim = manifold_spec.total_dimension - manifold_spec.total_gauge_dim
     if identified_dim > M:
         raise Emu_GMM_DimensionError(
-            f"estimate() requires M >= identified parameter dimension "
-            f"(over-/just-identified); got M={M} moments and identified "
-            f"dimension={identified_dim} (= total_dimension "
+            f"estimate() requires M >= K_id, the identified parameter "
+            f"dimension (over-/just-identified); got M={M} moments and "
+            f"K_id={identified_dim} (= total_dimension "
             f"{manifold_spec.total_dimension} - gauge "
             f"{manifold_spec.total_gauge_dim}) (under-identified). "
+            "For v1 / scalar trees K_id == K (the parameter count). "
             "An under-identified problem has rank-deficient G' V^{-1} G "
             "and yields inf/nan Sigma_theta. Reduce the parameter count, "
             "add moments, or impose an identifying restriction."
