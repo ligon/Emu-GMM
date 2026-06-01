@@ -842,6 +842,14 @@ def build_estimator(
             regularization=regularization,
             diagnostics=diagnostics,
             labels=label_context,
+            # ``unflatten_spec`` is the manifold_spec for the manifold-aware
+            # (v2) path and ``None`` for v1 / all-scalar trees (set above
+            # alongside the treedef). Threading it onto the result drives the
+            # Phase-5 readout: ``components()``, the manifold-aware
+            # ``coef_table`` flatten, and positional tangent labels. For v1
+            # it is ``None`` so every result-path method takes the v1 branch
+            # bitwise (R5/R10/R28).
+            manifold_spec=unflatten_spec,
         )
 
     return _run

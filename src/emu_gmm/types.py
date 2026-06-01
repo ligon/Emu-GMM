@@ -37,6 +37,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
 import haliax as ha
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pandas as pd
@@ -45,8 +46,14 @@ from jaxtyping import Array, Float
 
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal.labels import LabelContext as LabelContext  # re-export
-from emu_gmm._internal.labels import label_vector
-from emu_gmm._internal.params import flatten_params
+from emu_gmm._internal.labels import label_vector, tangent_basis_names
+
+# ``flatten_params`` is the v1 scalar-only flatten; ``flatten_params_with_spec``
+# is the manifold-aware ambient flatten. ``coef_table`` routes through the
+# latter when a non-scalar ``manifold_spec`` is present on the result (Phase 5,
+# manifold epic #12) and falls back to the former for v1 / all-scalar trees so
+# the v1 output is bitwise unchanged.
+from emu_gmm._internal.params import flatten_params, flatten_params_with_spec
 
 # A user's parameter PyTree: typically a @jdc.pytree_dataclass. We use
 # Any in the protocol signatures because users define their own types;
@@ -344,6 +351,70 @@ class Diagnostics:
     gauge_nullspace_dim: int = 0
 
 
+def _is_non_scalar_spec(manifold_spec: Any) -> bool:
+    """True iff any leaf of ``manifold_spec`` is non-scalar (ambient ndim>0).
+
+    For an all-Euclidean / scalar-Positive (v1) tree every leaf has
+    ``ambient_shape == ()`` so this is ``False`` and every result-path
+    method takes the bitwise-v1 branch (R5/R28). ``None`` (no spec threaded:
+    a v1 estimate) is also ``False``.
+    """
+    if manifold_spec is None:
+        return False
+    return any(
+        tuple(int(s) for s in ls.ambient_shape) != () for ls in manifold_spec.leaf_specs
+    )
+
+
+def _walk_components(theta_hat: Any) -> tuple[Any, ...]:
+    """Per-leaf array tuple of ``theta_hat`` in dataclass field order.
+
+    Treats :class:`~emu_gmm.manifolds.manifold_leaf.ManifoldLeaf` as opaque
+    so each wrapped block is one leaf, unwrapping it to its raw ambient
+    ``array``; bare (scalar) leaves are returned verbatim. The ordering is
+    the PyTree leaf-walk order, which for a flat ``@jdc.pytree_dataclass``
+    is declaration / field order --- the same order
+    :func:`flatten_params_with_spec` and ``manifold_spec.leaf_specs`` use,
+    so ``components()`` round-trips a warm start (Phase 5, #12).
+    """
+    from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
+
+    leaves = jax.tree_util.tree_leaves(
+        theta_hat, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
+    )
+    return tuple(
+        leaf.array if isinstance(leaf, ManifoldLeaf) else leaf for leaf in leaves
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class ManifoldPoint:
+    """Thin, inspectable view of an estimated parameter PyTree (Phase 5, #12).
+
+    Wraps the raw ``theta_hat`` PyTree (left untouched: ``result.theta_hat``
+    is still the user's dataclass, R19) and exposes the K-Aggregators
+    structural readout contract:
+
+    * :meth:`components` returns the per-leaf ambient array tuple
+      ``(A, phi, ...)`` in dataclass field order, so a caller computes
+      ``Gamma_hat = A @ A.T``, ``theta = exp(phi)``, ``eigvalsh(Gamma)``;
+    * a warm start reads ``prev.theta.components()`` straight back into a
+      new ``estimate()``'s ``theta_init`` (it round-trips, since the tuple
+      is in leaf-walk order).
+
+    Pure and immutable: :meth:`components` returns the same per-leaf arrays
+    (identity-stable) on every call. This object is **not** a JAX PyTree and
+    never replaces ``theta_hat`` in the tree; it is a readout convenience.
+    """
+
+    theta_hat: Any
+    manifold_spec: Any = None
+
+    def components(self) -> tuple[Any, ...]:
+        """Per-leaf ambient array tuple in dataclass field order."""
+        return _walk_components(self.theta_hat)
+
+
 @dataclasses.dataclass
 class EstimationResult:
     """The output of :func:`emu_gmm.estimate`.
@@ -396,6 +467,41 @@ class EstimationResult:
     # to_pandas() for DataFrame construction.
     labels: LabelContext
 
+    # Manifold metadata describing ``theta_hat``'s leaf geometry (Phase 5,
+    # manifold epic #12). ``None`` for a v1 / all-scalar estimate; a
+    # :class:`emu_gmm.manifolds.spec.ManifoldSpec` (== the estimate's
+    # ``unflatten_spec``) for the manifold-aware path. Drives the
+    # ``components()`` readout, the manifold-aware ``coef_table`` flatten,
+    # and the positional tangent labels (so a non-scalar leaf's ambient
+    # coordinates are NOT mislabelled as scalar field-names; INT-12/R5).
+    # Defaults to ``None`` so every existing v1 callsite constructs the
+    # result unchanged.
+    manifold_spec: Any = None
+
+    @property
+    def theta(self) -> ManifoldPoint:
+        """Inspectable view of ``theta_hat`` exposing :meth:`components`.
+
+        ``result.theta.components()`` returns the per-leaf ambient array
+        tuple ``(A, phi, ...)`` in dataclass field order (Phase 5, #12);
+        ``result.theta_hat`` remains the raw user dataclass (R19). Equivalent
+        to :meth:`components`.
+        """
+        return ManifoldPoint(self.theta_hat, self.manifold_spec)
+
+    def components(self) -> tuple[Any, ...]:
+        """Per-leaf ambient array tuple of ``theta_hat`` in field order.
+
+        For a ``Product(PSDFixedRank(n, k), Euclidean(1))`` estimate this is
+        ``(A, phi)`` with ``A.shape == (n, k)`` and ``phi`` shape ``(1,)``;
+        callers compute ``Gamma_hat = A @ A.T`` and ``eigvalsh(Gamma_hat)``.
+        For a v1 / all-scalar tree it is the tuple of 0-d scalar leaves in
+        leaf-walk order. A warm start feeds ``prev.components()`` back into
+        a new ``estimate()`` (it round-trips). Convenience alias for
+        ``self.theta.components()``.
+        """
+        return _walk_components(self.theta_hat)
+
     @functools.cached_property
     def standard_errors(self) -> ha.NamedArray:
         """Asymptotic standard errors of ``theta_hat``.
@@ -435,15 +541,47 @@ class EstimationResult:
           normal reference (``2 * (1 - Phi(|t_stat|))``), matching the
           asymptotic-normality of the GMM estimator.
 
-        Cached on first access. The flattening of ``theta_hat`` uses
-        :func:`emu_gmm._internal.params.flatten_params`, which requires
-        all parameter leaves to be 0-d scalars (the v1 contract).
+        Cached on first access.
+
+        Flattening of ``theta_hat`` is manifold-aware. For a v1 / all-scalar
+        tree (no ``manifold_spec`` or a spec whose leaves are all scalar)
+        the estimate column uses :func:`flatten_params` and is indexed by
+        the dataclass field names --- bitwise unchanged from v1. For a
+        non-scalar manifold leaf (e.g. ``PSDFixedRank``) the estimate column
+        uses :func:`flatten_params_with_spec` (the ambient flatten the
+        ``Sigma_theta`` / ``standard_errors`` axis is sized by), and the
+        table rows carry **positional tangent labels** (``Y[0,0]``,
+        ``Y[0,1]`` ... ``phi[0]``) rather than scalar field names: the raw
+        per-entry ambient coordinates of a manifold leaf are gauge-arbitrary
+        and not individually interpretable (INT-12/R5). Gauge-invariant
+        functionals of ``Gamma = A @ A.T`` (issue #42) must be computed from
+        :meth:`components` and their SEs estimated via the delta method.
         """
         import numpy as _np
 
-        param_names = list(self.labels.param_names)
-        estimate, _treedef = flatten_params(self.theta_hat)
+        if _is_non_scalar_spec(self.manifold_spec):
+            estimate, _treedef, _spec = flatten_params_with_spec(self.theta_hat)
+            param_names = list(
+                tangent_basis_names(
+                    self.manifold_spec,
+                    fallback_param_names=tuple(self.labels.param_names),
+                )
+            )
+        else:
+            estimate, _treedef = flatten_params(self.theta_hat)
+            param_names = list(self.labels.param_names)
         estimate_arr = jnp.asarray(estimate)
+        # The estimate column, the SE column, and the row index must all
+        # describe the same ambient tangent axis: size == total_dimension
+        # for a manifold leaf, == field count for v1. A mismatch is a
+        # routing bug, not a user error (R7).
+        if len(param_names) != int(estimate_arr.shape[0]):
+            raise ValueError(
+                "coef_table: parameter label count "
+                f"{len(param_names)} does not match the flattened estimate "
+                f"length {int(estimate_arr.shape[0])}; this indicates a "
+                "manifold-spec / flatten routing mismatch"
+            )
         se_arr = jnp.asarray(self.standard_errors.array)
         # Where se_arr is non-positive or NaN, t_stat and p_value go
         # to NaN rather than dividing by zero. ``jnp.where`` evaluates
@@ -488,7 +626,21 @@ class EstimationResult:
         :class:`haliax.NamedArray` fields remain available on ``self``
         for users who prefer to stay in the JAX/Haliax stack.
         """
-        param_names = list(self.labels.param_names)
+        # ``Sigma_theta`` is sized by the ambient tangent dimension
+        # (== field count for v1; > field count for a non-scalar manifold
+        # leaf). Index it by the positional tangent labels so the rows /
+        # columns match the matrix shape and are not mislabelled as scalar
+        # field-names (INT-12/R5). For v1 these labels coincide with the
+        # field names, so the DataFrame is unchanged.
+        if _is_non_scalar_spec(self.manifold_spec):
+            param_names = list(
+                tangent_basis_names(
+                    self.manifold_spec,
+                    fallback_param_names=tuple(self.labels.param_names),
+                )
+            )
+        else:
+            param_names = list(self.labels.param_names)
         moment_names = list(self.labels.moment_names)
 
         sigma_df = pd.DataFrame(
@@ -554,6 +706,7 @@ __all__ = [
     "OptimizerInfo",
     "Diagnostics",
     "EstimationResult",
+    "ManifoldPoint",
     "Emu_GMM_DimensionError",
     # Re-exported from emu_gmm._internal.labels so the type that
     # annotates ``EstimationResult.labels`` has a public home (#56).

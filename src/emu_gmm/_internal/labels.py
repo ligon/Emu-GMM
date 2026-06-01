@@ -267,6 +267,70 @@ def resolve_moment_names(
     return tuple(f"m_{i}" for i in range(m))
 
 
+def tangent_basis_names(
+    manifold_spec: Any,
+    fallback_param_names: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Positional ambient-tangent coordinate labels for a parameter spec.
+
+    The manifold-aware result path (Phase 5, manifold epic #12) needs one
+    label per *ambient* tangent coordinate of ``theta_hat`` --- the axis
+    along which ``Sigma_theta`` / ``standard_errors`` / ``coef_table`` are
+    sized (``manifold_spec.total_dimension``), which for a non-scalar leaf
+    exceeds the dataclass field count. These are deliberately **positional**
+    (INT-12/R5): the raw per-entry coordinates of a ``PSDFixedRank`` factor
+    are gauge-arbitrary, so a field-name-per-entry scheme would falsely
+    imply the entries are interpretable. Only gauge-invariant functionals of
+    ``Gamma = A @ A.T`` (issue #42) have meaning.
+
+    Labelling rule, per leaf in spec order:
+
+    * scalar leaf (``ambient_shape == ()``) -> the field name if known, else
+      ``p_{global_index}``. For an all-scalar / Euclidean v1 tree this
+      reproduces ``param_names`` exactly (bitwise v1 non-regression), so the
+      coefficient table index is unchanged for v1 callers.
+    * non-scalar leaf -> one positional label per ambient entry, prefixed by
+      the field name (or ``p`` when unknown) and suffixed by the C-order
+      multi-index, e.g. ``Y[0,0]``, ``Y[0,1]`` ... ``phi[0]``. The prefix is
+      a *grouping* hint only; the per-entry SE is NOT a field estimate.
+
+    Parameters
+    ----------
+    manifold_spec
+        A :class:`emu_gmm.manifolds.spec.ManifoldSpec`. ``None`` selects the
+        ``fallback_param_names`` (v1 path).
+    fallback_param_names
+        Field-level names to return verbatim when ``manifold_spec`` is
+        ``None`` (the v1 / no-spec path).
+
+    Returns
+    -------
+    names
+        Tuple of length ``manifold_spec.total_dimension`` (or
+        ``len(fallback_param_names)`` on the fallback path).
+    """
+    import itertools
+
+    if manifold_spec is None:
+        return tuple(fallback_param_names or ())
+
+    names: list[str] = []
+    global_index = 0
+    for ls in manifold_spec.leaf_specs:
+        shape = tuple(int(s) for s in ls.ambient_shape)
+        base = ls.field_name if ls.field_name is not None else f"p_{global_index}"
+        if shape == ():
+            # Scalar leaf: keep the bare field name (v1 bitwise identity).
+            names.append(base)
+            global_index += 1
+        else:
+            for idx in itertools.product(*(range(s) for s in shape)):
+                idx_str = ",".join(str(i) for i in idx)
+                names.append(f"{base}[{idx_str}]")
+                global_index += 1
+    return tuple(names)
+
+
 def label_matrix(
     arr: Float[Array, "R C"],
     row_axis: ha.Axis,
@@ -331,4 +395,5 @@ __all__ = [
     "resolve_moment_names",
     "label_matrix",
     "label_vector",
+    "tangent_basis_names",
 ]
