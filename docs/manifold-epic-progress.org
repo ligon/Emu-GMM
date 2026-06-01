@@ -31,9 +31,16 @@ maintainer only on a *sideways* event (see stop-triggers). Authoritative spec:
 6. [X] *Validation gate* — synthetic Gamma+phi recovery; gauge-invariance (Y0 vs Y0·Q);
    pymanopt-TR cross-check ON THE QUOTIENT; J_dof calibration; v1 bitwise non-regression.
    *DONE* — PR #102, merged @ 3b46ba2. pymanopt cross-check ran + agreed (J diff 5.6e-14).
-7. [ ] *#42 fast-follow* — gauge-INVARIANT Gamma-functional Sigma_theta (delta-method
-   pull-back to Gamma=AAᵀ eigenvalue/entry functionals). The deferred SE work. *Design
-   brief below.*
+7. [X] *#42 fast-follow* — gauge-INVARIANT Gamma-functional Sigma_theta (delta-method
+   pull-back to Gamma=AAᵀ eigenvalue/entry functionals). The deferred SE work.
+   *DONE* — PR #103, merged @ e1dd155. *Design brief below.*
+
+* EPIC COMPLETE (2026-06-01)
+All 7 phases merged to =main=; full v1 gate green at every step (825 tests at the finish).
+=Product(PSDFixedRank(5,K), Euclidean(1))= is now estimable end-to-end with gauge-invariant
+=Gamma=-functional standard errors. PRs #97–#103. Independently cross-checked against
+pymanopt-TrustRegions on the quotient. K-Aggregators (#12 consumer) is unblocked to port
+its manifold callers to native =emu_gmm.estimate= + =result.eigenvalue_se()=.
 
 * Phase 7 design brief (#42 gauge-invariant Gamma-functional SEs)
 *Problem.* The Phase-4 minimal =Sigma_theta= is the ambient-horizontal =pinv_eigvalrule=
@@ -179,3 +186,20 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   5.6e-14, Gamma diff 1.7e-12; import-gated, not a dep); J_dof MC centered on
   M-(5K+1-K(K-1)/2). Full v1 gate 807 green. *Landed PR #102 @ 3b46ba2.* The minimal-slice
   epic is complete + independently validated; only the #42 SE pull-back (Phase 7) remains.
+- Phase 7 workflow (run =wfni6iq5a=): all 3 adversarial lenses SOLID, *0 real breaks*,
+  purely additive. =result.functional_se(f)= / =gamma_se()= / =gamma_covariance()= /
+  =eigenvalue_se(rank)= via the delta method, routed through =components()= + a pure
+  slice/reshape closure (no treedef/unflatten/retraction-diff → resolved the red-team's 3
+  critical concerns at once). Gauge-invariant SEs to machine eps; matches an independent
+  parametric bootstrap + finite-diff Jacobian; negative control holds. Full v1 gate 825
+  green. *Landed PR #103 @ e1dd155.* Honest deviation: jax =eigvalsh= JVP is finite (not
+  NaN) at exact degeneracy — documented as basis-dependent / use a block functional.
+- *Follow-ups for the maintainer (NOT auto-done — flagged at wrap-up):*
+  (a) =src/emu_gmm/manifolds/__init__.py= docstring still says manifold estimation is
+  "preview only / cannot yet be estimated" — now stale, should be updated.
+  (b) =CLAUDE.md= status line (694 tests) + the "Deferred to v2+" framing could be
+  refreshed to reflect the landed manifold epic — left to the maintainer since CLAUDE.md is
+  the architectural index.
+  (c) The =isolation:worktree= implement agent leaked edits into the MAIN checkout in 4 of
+  7 phases (caught + recovered every time by the post-workflow leak-check); a harness quirk
+  worth reporting.
