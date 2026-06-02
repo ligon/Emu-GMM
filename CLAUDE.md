@@ -102,7 +102,15 @@ been through four reviewer iterations; the abstractions are deliberate.
    measures internally; invisible to the rest of the framework.
 3. **Pairwise overlap → finite-sample non-PD risk → adaptive regularisation.**
    `DiagonalTikhonov` is the v1 default; anchor-once-then-freeze policy
-   keeps the objective smooth in $\theta$.
+   keeps the objective smooth in $\theta$. Its feasibility test is on the
+   **signed** spectrum (`λ_min > 0` *and* `λ_max ≤ κ_target·λ_min`), not on
+   `jnp.linalg.cond` (an SVD ratio of *absolute* eigenvalues, which is blind
+   to a small negative eigenvalue). This is what makes the regulariser
+   actually deliver the `V ≻ 0` that `_internal/cholesky.py` assumes — a
+   conditioning-only rule let a barely-indefinite-but-well-conditioned `V`
+   pass through with ~zero ridge and silently NaN'd `k_statistic` /
+   `moment_wild_bootstrap` (issue #111). Don't revert it to a `cond`-based
+   test.
 4. **CU vs Iterated weighting are asymptotically equivalent but not
    identical in finite samples.** CU is the v1 default. Don't silently
    drop the $\nabla_\theta V$ term from the CU gradient; the residual

@@ -315,3 +315,92 @@ class TestDiagonalVCase:
         eager = reg.apply_fixed_tau(V, tau)
         jitted = compute(reg, V, tau)
         assert jnp.allclose(eager, jitted, atol=1e-12)
+
+
+def _indefinite_well_conditioned_V(
+    neg_eig: float = -2.715e-7,
+    pos_eigs=(1.0, 5.0, 30.0, 123.0),
+    seed: int = 0,
+) -> jnp.ndarray:
+    """Symmetric V with ONE tiny negative eigenvalue, SVD-cond < a loose target.
+
+    Mirrors the #111 reproduction (Seasonality design-aware Euler spec at
+    sigma=1.2): ``eig[min,max] = [-2.715e-07, 123]`` so ``cond = 123/2.715e-7
+    ~ 4.5e8`` is below a loose ``kappa_target`` of 1e10, yet V is indefinite.
+    Non-axis-aligned (random Q) so ``V + tau diag(V)`` actually moves the
+    spectrum.
+    """
+    rng = np.random.default_rng(seed)
+    w = np.array([neg_eig, *pos_eigs])
+    Q, _ = np.linalg.qr(rng.standard_normal((w.size, w.size)))
+    V = (Q * w) @ Q.T
+    return jnp.asarray(0.5 * (V + V.T))
+
+
+class TestDefinitenessFloor:
+    """Regression for #111: an indefinite-but-well-conditioned V must be
+    repaired to PD, not passed through with ~zero ridge (which silently NaNs
+    the downstream Cholesky)."""
+
+    def test_raw_input_is_indefinite_but_well_conditioned(self):
+        # Sanity: the fixture really is the #111 trap -- indefinite, yet its
+        # SVD condition number sits below the loose target.
+        V = _indefinite_well_conditioned_V()
+        ev = np.linalg.eigvalsh(np.asarray(V))
+        assert ev[0] < 0.0  # indefinite
+        svd_cond = float(jnp.linalg.cond(V))
+        assert svd_cond < 1.0e10  # would have read as "well-conditioned"
+
+    def test_apply_makes_v_star_pd(self):
+        V = _indefinite_well_conditioned_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e10)
+        V_star, tau = reg.apply(V)
+        ev = np.linalg.eigvalsh(np.asarray(V_star))
+        assert ev[0] > 0.0  # strictly PD now
+        assert float(tau) > 0.0  # a repairing ridge was actually applied
+
+    def test_v_star_cholesky_is_finite(self):
+        # The concrete downstream symptom: Cholesky of the regularised V must
+        # be finite (not NaN), so k_statistic / bootstrap whitening is valid.
+        V = _indefinite_well_conditioned_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e10)
+        V_star, _ = reg.apply(V)
+        L = jnp.linalg.cholesky(V_star)
+        assert bool(jnp.all(jnp.isfinite(L)))
+
+    def test_v_star_respects_condition_target(self):
+        V = _indefinite_well_conditioned_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e10)
+        V_star, _ = reg.apply(V)
+        assert float(jnp.linalg.cond(V_star)) <= 1.0e10 * (1.0 + 1e-6)
+
+    def test_tighter_target_also_pd(self):
+        # A much tighter target should also yield PD (and a larger ridge).
+        V = _indefinite_well_conditioned_V()
+        V_loose, tau_loose = DiagonalTikhonov(kappa_target=1.0e10).apply(V)
+        V_tight, tau_tight = DiagonalTikhonov(kappa_target=1.0e4).apply(V)
+        assert np.linalg.eigvalsh(np.asarray(V_tight))[0] > 0.0
+        assert float(tau_tight) >= float(tau_loose)
+
+    def test_well_conditioned_psd_still_no_op(self):
+        # Non-regression: a PD, well-conditioned V is still returned unchanged
+        # at tau = 0 (the signed-spectrum predicate agrees with the old SVD
+        # predicate on PSD inputs).
+        V = _ill_conditioned_V(target_kappa=1.0e3, dim=4)
+        reg = DiagonalTikhonov(kappa_target=1.0e6)
+        V_star, tau = reg.apply(V)
+        assert float(tau) == 0.0
+        assert jnp.allclose(V_star, V)
+
+    def test_apply_jits_on_indefinite_V(self):
+        V = _indefinite_well_conditioned_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e10)
+
+        @jax.jit
+        def compute(r, vv):
+            return r.apply(vv)
+
+        Vs_e, tau_e = reg.apply(V)
+        Vs_j, tau_j = compute(reg, V)
+        assert jnp.allclose(Vs_e, Vs_j, atol=1e-10)
+        assert float(tau_e) == pytest.approx(float(tau_j), rel=1e-6)

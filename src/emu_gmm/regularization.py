@@ -39,6 +39,24 @@ preserve uniform-scale equivariance (:math:`V \\to \\alpha V`). Per-moment
 scale equivariance survives in the non-diagonal branch (the standard
 case).
 
+Definiteness, not just conditioning (#111). The feasibility test the
+:math:`\\tau` search targets is on the **signed** spectrum
+(:func:`numpy.linalg.eigvalsh`), not on :func:`jax.numpy.linalg.cond` (an
+SVD ratio of *singular values*, i.e. *absolute* eigenvalues). The SVD
+condition number is blind to sign: a ``V`` with one tiny negative
+eigenvalue can read as "well-conditioned" while being indefinite, so the
+old conditioning-only rule added ~zero ridge and returned a non-PD matrix.
+The downstream Cholesky (in the estimator residual, ``k_statistic``,
+``moment_wild_bootstrap``) then silently produced NaNs. The fix requires
+:math:`V^\\star` to be PD (``lambda_min > _PD_FLOOR_REL * scale``) *in
+addition to* meeting the condition-number target, expressing the joint
+constraint as ``lambda_max <= kappa_target * lambda_min`` (well-defined and
+false at ``lambda_min <= 0``). Cholesky's contract --- "the regularisation
+layer is responsible for ensuring ``V`` is PD" (see
+:mod:`emu_gmm._internal.cholesky`) --- is therefore actually upheld, not
+merely hoped for. This is the concrete realisation of the "minimum-tau
+knob" anticipated in #8.
+
 The :math:`\\tau` search is implemented via bisection over a fixed
 number of iterations so the routine remains jit-compatible. The
 "anchor-once-then-freeze" policy that pins :math:`\\tau` to the
@@ -71,10 +89,53 @@ _TAU_MAX: float = 1.0e3
 # constructions.
 _DIAG_RTOL: float = 1.0e-12
 
+# Relative positive-definiteness floor. ``V_star`` is required to satisfy
+# ``lambda_min(V_star) > _PD_FLOOR_REL * spectral_scale`` so the returned
+# matrix is PD with a Cholesky-safe margin even when ``kappa_target`` is so
+# loose that the conditioning constraint alone would tolerate a
+# vanishing-or-negative smallest eigenvalue. This is the concrete form of
+# the "minimum-tau knob" (#8) and closes #111 (an indefinite-but-well-
+# conditioned V used to pass through with ~zero ridge and silently NaN the
+# downstream Cholesky in k_statistic / moment_wild_bootstrap).
+_PD_FLOOR_REL: float = 1.0e-12
 
-def _kappa(V: Float[Array, "M M"]) -> Float[Array, ""]:
-    """Condition number :math:`\\kappa(V) = \\sigma_{\\max}/\\sigma_{\\min}`."""
-    return jnp.linalg.cond(V)
+
+def _spectrum(V: Float[Array, "M M"]) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    """Return ``(lambda_min, lambda_max)`` of the symmetrised ``V``.
+
+    Uses ``eigvalsh`` on ``0.5 (V + V')`` so the eigenvalues are real and
+    **signed** --- unlike ``jnp.linalg.cond`` (an SVD ratio of *singular
+    values*, i.e. absolute eigenvalues), which is blind to a small negative
+    eigenvalue and is exactly why the old conditioning-only feasibility test
+    let an indefinite ``V`` slip through (#111). One symmetric eigendecomp
+    yields both the definiteness check and the (signed) condition ratio.
+    """
+    w = jnp.linalg.eigvalsh(0.5 * (V + V.T))
+    return w[0], w[-1]
+
+
+def _feasible(
+    V_star: Float[Array, "M M"],
+    kappa_target: Float[Array, ""],
+    pd_floor: Float[Array, ""],
+) -> Bool[Array, ""]:
+    """True iff ``V_star`` is PD (with margin) **and** within the kappa target.
+
+    Definiteness and conditioning are tested jointly on the *signed* spectrum:
+
+    - ``pd_ok``: ``lambda_min > pd_floor`` (strictly PD, Cholesky-safe).
+    - ``cond_ok``: ``lambda_max <= kappa_target * lambda_min``. Written as a
+      product rather than a ratio so it is well-defined at ``lambda_min <= 0``
+      (then the RHS is ``<= 0 < lambda_max`` and the test fails), which means
+      "well-conditioned" can only be satisfied by a positive-definite matrix.
+
+    Either condition failing makes an indefinite or ill-conditioned ``V_star``
+    infeasible, so the bisection keeps increasing the ridge until both hold.
+    """
+    lam_min, lam_max = _spectrum(V_star)
+    pd_ok = lam_min > pd_floor
+    cond_ok = lam_max <= kappa_target * lam_min
+    return pd_ok & cond_ok
 
 
 def _is_diagonal(V: Float[Array, "M M"]) -> Bool[Array, ""]:
@@ -158,13 +219,17 @@ class DiagonalTikhonov:
         self,
         V: Float[Array, "M M"],
     ) -> tuple[Float[Array, "M M"], Float[Array, ""]]:
-        """Return :math:`(V^\\star, \\tau)` with :math:`\\kappa(V^\\star) \\leq \\kappa_{\\mathrm{target}}`.
+        """Return :math:`(V^\\star, \\tau)` that is PD with :math:`\\kappa(V^\\star) \\leq \\kappa_{\\mathrm{target}}`.
 
-        If ``V`` already satisfies the target, returns ``(V, 0.0)``.
-        Otherwise bisects :math:`\\tau \\in [0, \\tau_{\\max}]` until the
-        smallest interval-upper-bound satisfies the constraint, with a
-        fixed iteration count so the routine traces under ``jit`` /
-        ``vmap``.
+        The realised :math:`V^\\star` is guaranteed positive-definite (with a
+        Cholesky-safe margin) **and** within the condition-number target ---
+        the two requirements are tested jointly on the *signed* spectrum, so a
+        barely-indefinite ``V`` (a tiny negative eigenvalue) whose SVD
+        condition number happens to sit below ``kappa_target`` is repaired
+        rather than passed through (#111). If ``V`` already satisfies both,
+        returns ``(V, 0.0)``. Otherwise bisects :math:`\\tau \\in [0,
+        \\tau_{\\max}]` for the smallest ridge meeting both, with a fixed
+        iteration count so the routine traces under ``jit`` / ``vmap``.
 
         The ridge formula is dispatched based on ``V``'s structure:
         diagonal ``V`` uses :math:`V + \\tau (\\operatorname{tr}(V)/M) I`,
@@ -183,21 +248,28 @@ class DiagonalTikhonov:
             The realised :math:`\\tau`.
         """
         kappa_target = jnp.asarray(self.kappa_target)
-        kappa_V = _kappa(V)
         is_diag = _is_diagonal(V)
 
-        # Bisection state: (lo, hi). Loop invariant: kappa(V_star(hi))
-        # is always within the target (or hi is the explicit upper
-        # bound, which we trust to be feasible for the inputs we
-        # encounter).
+        # Relative PD floor, fixed across the bisection so feasibility is a
+        # clean function of tau. The spectral scale is the largest-magnitude
+        # eigenvalue of V (floored at 1.0 so a tiny-scaled V keeps a sane
+        # absolute floor and an all-zero V does not produce a zero floor).
+        lam_min0, lam_max0 = _spectrum(V)
+        scale0 = jnp.maximum(jnp.maximum(jnp.abs(lam_max0), jnp.abs(lam_min0)), 1.0)
+        pd_floor = jnp.asarray(_PD_FLOOR_REL) * scale0
+
+        # Bisection state: (lo, hi). Loop invariant: V_star(hi) is always
+        # feasible (PD + within the kappa target), or hi is the explicit
+        # upper bound, which we trust to be feasible for the inputs we
+        # encounter (a large enough ridge makes V + tau R(V) PD by Weyl,
+        # since R(V) = diag(V) >= 0 / (tr V / M) I > 0).
         lo_init = jnp.asarray(0.0)
         hi_init = jnp.asarray(_TAU_MAX)
 
         def bisect_step(_: int, state: tuple) -> tuple:
             lo, hi = state
             mid = 0.5 * (lo + hi)
-            kappa_mid = _kappa(_apply_tau(V, mid, is_diag))
-            feasible = kappa_mid <= kappa_target
+            feasible = _feasible(_apply_tau(V, mid, is_diag), kappa_target, pd_floor)
             # If feasible, tighten the upper bound; otherwise raise lo.
             new_lo = jnp.where(feasible, lo, mid)
             new_hi = jnp.where(feasible, mid, hi)
@@ -211,8 +283,12 @@ class DiagonalTikhonov:
         # have verified to be feasible during the search.
         tau_search = hi_final
 
-        # Short-circuit when V already meets the target: take tau = 0.
-        already_ok = kappa_V <= kappa_target
+        # Short-circuit only when V ALREADY meets the joint PD + conditioning
+        # target: take tau = 0. The PD half of the predicate is what fixes
+        # #111 -- a barely-indefinite V (lambda_min < 0) whose SVD condition
+        # number happens to sit below kappa_target is NOT already-ok and so
+        # gets a repairing ridge rather than passing through unchanged.
+        already_ok = _feasible(V, kappa_target, pd_floor)
         tau = jnp.where(already_ok, jnp.asarray(0.0), tau_search)
         V_star = _apply_tau(V, tau, is_diag)
         return V_star, tau
