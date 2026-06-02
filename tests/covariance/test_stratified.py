@@ -1063,3 +1063,137 @@ def test_design_aware_fpc_enters_VTT_only():
     )
     assert np.max(np.abs(V1[np.ix_(_S_IDX, _S_IDX)] - V0[np.ix_(_S_IDX, _S_IDX)])) < TOL
     assert np.max(np.abs(V1[np.ix_(_T_IDX, _S_IDX)] - V0[np.ix_(_T_IDX, _S_IDX)])) < TOL
+
+
+# ---------------------------------------------------------------------------
+# #109: native cross-block (V_TS) ablation / accessor.
+# ---------------------------------------------------------------------------
+def test_design_aware_couple_false_zeroes_cross_corners():
+    """couple=False gives the block-diagonal V_TT (+) V_SS: cross corners are
+    exactly zero, while the coupled default leaves them estimated."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    dac_coupled = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+    dac_block = DesignAwareCovariance.from_design_mask(
+        design, sampling, _DESIGN_MASK, couple=False
+    )
+    Vc = np.asarray(dac_coupled.covariance(identity_psi, None, measure))
+    Vb = np.asarray(dac_block.covariance(identity_psi, None, measure))
+    # Block-diagonal: cross corners are exactly zero.
+    assert np.all(Vb[np.ix_(_T_IDX, _S_IDX)] == 0.0)
+    assert np.all(Vb[np.ix_(_S_IDX, _T_IDX)] == 0.0)
+    # Coupled: cross corners are NOT zero (regression vs #80's estimated cross).
+    assert np.any(np.abs(Vc[np.ix_(_T_IDX, _S_IDX)]) > 1e-9)
+
+
+def test_design_aware_couple_false_keeps_diagonal_blocks_bit_identical():
+    """Dropping the cross must not perturb the TT or SS diagonal blocks."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    Vc = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+    Vb = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling, _DESIGN_MASK, couple=False
+        ).covariance(identity_psi, None, measure)
+    )
+    assert np.array_equal(Vc[np.ix_(_T_IDX, _T_IDX)], Vb[np.ix_(_T_IDX, _T_IDX)])
+    assert np.array_equal(Vc[np.ix_(_S_IDX, _S_IDX)], Vb[np.ix_(_S_IDX, _S_IDX)])
+
+
+def test_design_aware_cross_block_decomposition_identity():
+    """The cardinal #109 identity: coupled == block-diagonal + cross_block."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+    dac_block = DesignAwareCovariance.from_design_mask(
+        design, sampling, _DESIGN_MASK, couple=False
+    )
+    Vc = np.asarray(dac.covariance(identity_psi, None, measure))
+    Vb = np.asarray(dac_block.covariance(identity_psi, None, measure))
+    cross = np.asarray(dac.cross_block(identity_psi, None, measure))
+    assert np.max(np.abs(Vc - (Vb + cross))) < TOL
+    # cross_block carries ONLY the off-diagonal corners (TT/SS are zero).
+    assert np.all(cross[np.ix_(_T_IDX, _T_IDX)] == 0.0)
+    assert np.all(cross[np.ix_(_S_IDX, _S_IDX)] == 0.0)
+    # ...and its corners equal the coupled cross corners.
+    assert (
+        np.max(np.abs(cross[np.ix_(_T_IDX, _S_IDX)] - Vc[np.ix_(_T_IDX, _S_IDX)])) < TOL
+    )
+
+
+def test_design_aware_cross_block_matches_numpy_reference():
+    """cross_block's estimated corner equals the independent cluster-cross ref."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+    cross = np.asarray(dac.cross_block(identity_psi, None, measure))
+    Vc = _numpy_cluster_cross(
+        fx["x"], fx["mask"], fx["weights"], fx["psu_ids"], fx["n_psu"]
+    )
+    assert (
+        np.max(np.abs(cross[np.ix_(_T_IDX, _S_IDX)] - Vc[np.ix_(_T_IDX, _S_IDX)])) < TOL
+    )
+
+
+def test_design_aware_couple_default_is_true_bitwise_unchanged():
+    """Non-regression: the default construction is couple=True and bit-for-bit
+    equal to the explicit couple=True (the pre-#109 behaviour)."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    V_default = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+    V_explicit = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling, _DESIGN_MASK, couple=True
+        ).covariance(identity_psi, None, measure)
+    )
+    assert np.array_equal(V_default, V_explicit)
+
+
+def test_design_aware_all_design_cross_block_is_zero():
+    """all_design => no sampled coords => cross_block is exactly zero, and
+    couple has no effect on covariance()."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    M = fx["M"]
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, jnp.ones(M))
+    cross = np.asarray(dac.cross_block(identity_psi, None, measure))
+    assert np.all(cross == 0.0)
+    V_coupled = np.asarray(dac.covariance(identity_psi, None, measure))
+    V_block = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling, jnp.ones(M), couple=False
+        ).covariance(identity_psi, None, measure)
+    )
+    assert np.array_equal(V_coupled, V_block)
+
+
+def test_design_aware_cross_block_cached_self_parity():
+    """cross_block agrees between the cached and self-compute paths."""
+    fx = build_mixed()
+    design, sampling = _design_and_sampling(fx)
+    dac = DesignAwareCovariance.from_design_mask(design, sampling, _DESIGN_MASK)
+    measure = EmpiricalMeasure(
+        x=jnp.asarray(fx["x"]),
+        mask=jnp.asarray(fx["mask"]),
+        weights=jnp.asarray(fx["weights"]),
+    )
+    cached = measure.expectation_and_contributions(identity_psi, None)
+    c_self = np.asarray(dac.cross_block(identity_psi, None, measure))
+    c_cached = np.asarray(
+        dac.cross_block(identity_psi, None, measure, cached_intermediates=cached)
+    )
+    assert np.array_equal(c_self, c_cached)
