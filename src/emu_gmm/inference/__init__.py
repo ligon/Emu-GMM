@@ -23,10 +23,26 @@ Currently exposed:
 - :func:`cluster_bootstrap` and :class:`ClusterBootstrapResult` ---
   refit-based cluster bootstrap helper for
   :class:`~emu_gmm.covariance.clustered.ClusteredCovariance`.
+- :func:`adaptive_bootstrap` and :class:`AdaptiveBootstrapResult` ---
+  a precision-targeted (Andrews-Buchinsky) *stopping rule* wrapping any
+  batched bootstrap: draw batches until the reported functional
+  (:class:`BootstrapMean` / :class:`BootstrapSE` / :class:`BootstrapQuantile`
+  / :class:`BootstrapPValue`) meets a Monte Carlo precision target, with a
+  loud ``converged`` flag at ``b_max``. See
+  :mod:`emu_gmm.inference.adaptive`.
 """
 
 from __future__ import annotations
 
+from emu_gmm.inference.adaptive import (
+    AdaptiveBootstrapResult,
+    BootstrapMean,
+    BootstrapPValue,
+    BootstrapQuantile,
+    BootstrapSE,
+    adaptive_bootstrap,
+    maritz_jarrett_quantile_se,
+)
 from emu_gmm.inference.cluster_bootstrap import (
     ClusterBootstrapResult,
     cluster_bootstrap,
@@ -46,11 +62,18 @@ from emu_gmm.inference.wild_bootstrap import (
 )
 
 __all__ = [
+    "AdaptiveBootstrapResult",
+    "BootstrapMean",
+    "BootstrapPValue",
+    "BootstrapQuantile",
+    "BootstrapSE",
     "ClusterBootstrapResult",
     "JTestResult",
     "KStatisticResult",
     "WildBootstrapResult",
+    "adaptive_bootstrap",
     "cluster_bootstrap",
+    "maritz_jarrett_quantile_se",
     "eigenvalue_se",
     "functional_se",
     "gamma_se",

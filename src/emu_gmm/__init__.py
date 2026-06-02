@@ -57,10 +57,16 @@ from emu_gmm.diagnostics import (
 )
 from emu_gmm.estimator import build_estimator, estimate
 from emu_gmm.inference import (
+    AdaptiveBootstrapResult,
+    BootstrapMean,
+    BootstrapPValue,
+    BootstrapQuantile,
+    BootstrapSE,
     ClusterBootstrapResult,
     JTestResult,
     KStatisticResult,
     WildBootstrapResult,
+    adaptive_bootstrap,
     cluster_bootstrap,
     j_test,
     k_statistic,
@@ -167,6 +173,13 @@ __all__ = [
     # Inference
     "moment_wild_bootstrap",
     "WildBootstrapResult",
+    # Adaptive (precision-targeted) bootstrap stopping (#91)
+    "adaptive_bootstrap",
+    "AdaptiveBootstrapResult",
+    "BootstrapMean",
+    "BootstrapSE",
+    "BootstrapQuantile",
+    "BootstrapPValue",
     # Manifolds (parameter geometry — a first-class problem-tuple menu, peer
     # to Measures / Covariance strategies; wrap a non-scalar parameter leaf in
     # ManifoldLeaf(array, manifold) and estimate via the ordinary entry point.
