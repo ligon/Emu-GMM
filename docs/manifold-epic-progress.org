@@ -218,8 +218,17 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   [low] (int-default int64 leaf; =default=None= error). All fixed + regression-tested;
   final verdict back-compat SOLID / dispatch SOLID / pytree-lowering MINOR (no high/crit).
   Full v1 gate 843 green.
-- *Follow-up #110* (deferred, core surgery): a parameter of *only non-scalar Euclidean*
-  leaves can't estimate — pre-existing all-Euclidean→v1-flatten dispatch trap, surfaced by
-  the sugar. Documented as a known limitation in the =ParameterSpace= docstring; the proper
-  fix (route v1-vs-v2 on all-*scalar*, not all-Euclidean) is tracked in #110. MVN example /
-  K-Aggregators unaffected (they carry a PSDFixedRank leaf).
+- *Follow-up #110* (landed): a parameter of *only non-scalar Euclidean* leaves used to fail
+  at flatten time — the all-Euclidean→v1-flatten dispatch trap, surfaced by the sugar. The
+  fix /splits the two dispatch decisions that ~dispatch_mode~ had conflated/: the flatten /
+  Jacobian *representation* now keys on ~all_scalar~ (every leaf 0-d → scalar-only
+  ~flatten_params~; otherwise the ambient ~flatten_params_with_spec~), while the optimiser
+  *calling convention* still keys on ~dispatch_mode~ (all-Euclidean → ~optimistix_lm~, since a
+  Euclidean leaf has no gauge/curvature). So a non-scalar Euclidean tree takes the ambient
+  flatten + the v1 optimiser — exactly right. Three representation sites moved
+  (~estimator.py~: template flatten, ~G_local~ inline-AD vs ~measure.jacobian~, ~run()~
+  flatten); the optimiser-convention site stayed. Regression test:
+  =tests/manifolds/test_euclidean_nonscalar_110.py= (hand-built ~ManifoldLeaf(Euclidean(K))~
+  + the ~ParameterSpace~ sugar form). v1 bitwise path preserved (~all_scalar~ True ⇒ identical
+  to before). MVN example / K-Aggregators were never affected (they carry a PSDFixedRank leaf
+  ⇒ ~dispatch_mode == "v2"~ already).

@@ -134,14 +134,15 @@ class ParameterSpace:
     parent's declared fields (parents first, then the child's; a re-declared
     field overrides the parent spec but keeps its inherited position).
 
-    Known limitation (issue #108-followup): a space whose fields are *all*
-    Euclidean must use **scalar** (0-d) Euclidean leaves to estimate with the
-    default optimiser --- a space of only *non-scalar* Euclidean leaves (e.g.
-    a bare ``Euclidean(K)`` mean vector with no constrained/gauge leaf) hits a
-    pre-existing core-dispatch trap (the all-Euclidean path routes to the v1
-    scalar flatten, which rejects non-0-d leaves). Pairing a non-scalar leaf
-    with a constrained leaf (e.g. ``PSDFixedRank``) takes the v2 path and works
-    --- as in the multivariate-normal example.
+    A space whose fields are *all* Euclidean is estimated with the default
+    ``optimistix_lm`` optimiser (Euclidean leaves carry no gauge/curvature), and
+    non-scalar Euclidean leaves are fully supported: a space of only non-scalar
+    Euclidean leaves (e.g. a bare ``Euclidean(K)`` mean vector with no
+    constrained/gauge leaf) estimates correctly via the ambient flatten path.
+    (This was the #110 dispatch trap --- the all-Euclidean path used to route to
+    the scalar-only v1 flatten, which rejected non-0-d leaves; fixed by keying
+    the flatten/Jacobian representation on whether every leaf is scalar rather
+    than on the optimiser dispatch mode.)
     """
 
     # Populated per-subclass by __init_subclass__: ordered field -> _FieldSpec.

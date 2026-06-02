@@ -325,6 +325,19 @@ def build_estimator(
     manifold_spec = params_mod.manifold_spec_from_params(theta_init)
     optimizer, dispatch_mode = _resolve_optimizer(manifold_spec, optimizer)
 
+    # The flatten / Jacobian *representation* dispatch is independent of the
+    # optimiser *calling-convention* dispatch above (#110). ``dispatch_mode``
+    # ("v1"/"v2") picks the optimiser surface; it is "v1" for any all-Euclidean
+    # tree, including one with NON-scalar Euclidean leaves (a plain matrix
+    # parameter -- no gauge, no curvature, so optimistix_lm is correct). But the
+    # v1 2-tuple ``flatten_params`` is scalar-only and raises on a non-scalar
+    # ManifoldLeaf block, and ``measure.jacobian`` routes through it. So the
+    # representation must key on whether every leaf is a 0-d *scalar*, NOT on
+    # all-Euclidean. ``all_scalar`` reproduces the v1 bitwise path for genuine
+    # scalar trees and the ambient (``flatten_params_with_spec``) path for any
+    # non-scalar leaf, Euclidean or not.
+    all_scalar = all(ls.ambient_shape == () for ls in manifold_spec.leaf_specs)
+
     # Capture the template measure so subsequent calls can detect
     # identity reuse and short-circuit residual-closure rebuilding.
     template_measure = measure
@@ -409,9 +422,10 @@ def build_estimator(
     # manifold-aware 3-tuple ``flatten_params_with_spec`` so the treedef
     # descends into each ManifoldLeaf and every later unflatten passes
     # ``manifold_spec`` to reshape the ambient blocks (Phase 4 / R19).
-    # ``unflatten_spec`` is None on the v1 path -> v1 unflatten is bitwise
-    # unchanged.
-    if dispatch_mode == "v2":
+    # ``unflatten_spec`` is None on the scalar-only path -> v1 unflatten is
+    # bitwise unchanged. Keyed on ``all_scalar`` (not ``dispatch_mode``) so a
+    # non-scalar Euclidean tree takes the ambient flatten too (#110).
+    if not all_scalar:
         _, treedef, _ = params_mod.flatten_params_with_spec(theta_init)
         unflatten_spec: ManifoldSpec | None = manifold_spec
     else:
@@ -596,12 +610,14 @@ def build_estimator(
             # delta method; AD of the MOMENT function, never through the
             # solver). For the v1 path this is exactly ``measure.jacobian``
             # (which itself ``jacfwd``s the unflatten->expectation closure),
-            # kept verbatim so v1 stays bitwise. For the v2 manifold path
+            # kept verbatim so v1 stays bitwise. For any non-scalar tree
             # ``measure.jacobian`` would route through the v1 scalar-only
             # flatten and raise on a non-scalar ManifoldLeaf block, so we
             # AD a manifold-aware unflatten->expectation closure inline; the
             # result is the same (M, total_dimension) ambient Jacobian.
-            if dispatch_mode == "v2":
+            # Keyed on ``all_scalar`` (not ``dispatch_mode``) so a non-scalar
+            # Euclidean tree takes the inline AD path too (#110).
+            if not all_scalar:
 
                 def _moment_of_flat(tf: Float[Array, " K"]) -> Float[Array, " M"]:
                     th = params_mod.unflatten_params(
@@ -730,11 +746,13 @@ def build_estimator(
         # selects the parameters channel; a plain theta PyTree falls straight
         # through unchanged (bitwise the prior run() path).
         theta_init_call = _resolve_parameters(theta_init_call, _THETA_INIT_UNSET)
-        if dispatch_mode == "v2":
+        if not all_scalar:
             # Manifold-aware flatten: the v1 2-tuple raises on non-scalar
-            # ManifoldLeaf blocks (R19). The optimiser path below ignores
-            # ``theta_init_flat`` for v2 (it consumes the pytree directly),
-            # but the buffer must still flatten without raising.
+            # ManifoldLeaf blocks (R19). A RiemannianOptimizer ignores
+            # ``theta_init_flat`` (it consumes the pytree directly), but for a
+            # non-scalar Euclidean tree on the v1 optimiser path the ambient
+            # buffer below IS what optimistix consumes -- either way it must
+            # flatten without raising. Keyed on ``all_scalar`` (#110).
             theta_init_flat, _, _ = params_mod.flatten_params_with_spec(theta_init_call)
         else:
             theta_init_flat, _ = params_mod.flatten_params(theta_init_call)
