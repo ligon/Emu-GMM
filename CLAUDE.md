@@ -175,7 +175,13 @@ been through four reviewer iterations; the abstractions are deliberate.
     (it can be indefinite like `StratifiedCovariance`; `DiagonalTikhonov`
     repairs it — don't over-claim PSD). Stratified reduces to
     `ClusteredCovariance` only *in expectation* (centered vs uncentered), not
-    bit-for-bit.
+    bit-for-bit. The $V_{TS}$ cross block is **ablatable in-framework** (#109):
+    `from_design_mask(..., couple=False)` returns the block-diagonal
+    $V_{TT}\oplus V_{SS}$ ($V_{TS}=0$ counterfactual) and `.cross_block(...)`
+    returns the estimated $V_{TS}$ alone, with
+    `covariance(couple=True) == covariance(couple=False) + cross_block`. Default
+    `couple=True` is bit-for-bit the original; consumers must use these rather
+    than hand-rolling a block-diagonal wrapper.
 
 ## Deferred to v2+
 

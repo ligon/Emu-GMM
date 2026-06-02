@@ -414,12 +414,24 @@ class DesignAwareCovariance:
         ``True`` iff every coordinate is design-driven. Computed at
         construction by :meth:`from_design_mask`; gates the Python-level
         dispatch between the bit-for-bit reduction and the mixed composition.
+    couple : bool (static), default ``True``
+        Whether to include the off-diagonal :math:`V_{TS}` cross block (#109).
+        ``True`` (default) is the full law-of-total-variance assembly
+        :math:`V_{TT} + V_{SS} + V_{TS}`. ``couple=False`` zeroes the cross
+        corners, giving the **block-diagonal** :math:`V_{TT} \oplus V_{SS}` on
+        the same coords / shared :math:`N_j` scale --- the :math:`V_{TS}=0`
+        counterfactual for the cross-block *materiality* diagnostic (compare
+        the J-statistic with and without the coupling). The estimated cross
+        block itself is also exposed directly via :meth:`cross_block`. When
+        ``all_design`` there are no sampled coords, so :math:`V_{TS}\equiv 0`
+        and ``couple`` has no effect.
     """
 
     design: StratifiedCovariance
     sampling: ClusteredCovariance
     design_moment_mask: Float[Array, " M"]
     all_design: bool = jdc.static_field()  # type: ignore[attr-defined]
+    couple: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
 
     @classmethod
     def from_design_mask(
@@ -427,12 +439,18 @@ class DesignAwareCovariance:
         design: StratifiedCovariance,
         sampling: ClusteredCovariance,
         design_moment_mask: Any,
+        couple: bool = True,
     ) -> "DesignAwareCovariance":
         """Build, computing the static ``all_design`` flag eagerly.
 
         ``all_design`` must be a concrete Python bool (it drives a
         Python-level branch in :meth:`covariance`), so it is evaluated here
         at construction time rather than under trace.
+
+        Pass ``couple=False`` for the block-diagonal :math:`V_{TT}\\oplus
+        V_{SS}` assembly (the :math:`V_{TS}=0` counterfactual, #109); the
+        default ``couple=True`` is the full coupled :math:`V_{TT}+V_{SS}+
+        V_{TS}`.
         """
         m = jnp.asarray(design_moment_mask)
         all_design = bool(jnp.all(m > 0.0))
@@ -441,6 +459,7 @@ class DesignAwareCovariance:
             sampling=sampling,
             design_moment_mask=m,
             all_design=all_design,
+            couple=couple,
         )
 
     def covariance(
@@ -479,7 +498,9 @@ class DesignAwareCovariance:
 
         When every coordinate is design-driven (``all_design``) this reduces
         bit-for-bit to :meth:`StratifiedCovariance.covariance` via the shared
-        engine.
+        engine. With ``couple=False`` the :math:`V_{TS}` term is dropped,
+        yielding the block-diagonal :math:`V_{TT}\oplus V_{SS}` counterfactual
+        (#109).
 
         PSD is *not* guaranteed: the design-exact :math:`V_{TT}` glued to the
         sampling cross/:math:`V_{SS}` blocks can be indefinite under
@@ -490,9 +511,54 @@ class DesignAwareCovariance:
         if self.all_design:
             return self.design.covariance(psi, theta, measure, cached_intermediates)
 
-        # --- shared intermediates (unpack cache or self-compute; the same
-        # safe_x_for_psi sanitisation the child engines use, so cached and
-        # self-compute agree by construction) -----------------------------
+        # --- delegated diagonal blocks (compose; cached tuple threads through)
+        V_TT = self.design.covariance(psi, theta, measure, cached_intermediates)
+        V_SS = self.sampling.covariance(psi, theta, measure, cached_intermediates)
+
+        # --- assemble via design_moment_mask outer-product masks
+        # (exhaustive and mutually exclusive: P_TT + P_SS + P_TS == 1) -----
+        t = (self.design_moment_mask > 0.0).astype(V_TT.dtype)  # (M,) design
+        s = 1.0 - t  # (M,) sampled
+        P_TT = jnp.outer(t, t)
+        P_SS = jnp.outer(s, s)
+
+        V = V_TT * P_TT + V_SS * P_SS
+        if self.couple:
+            # + V_TS (+ V_ST): the estimated off-diagonal cross block. Omitted
+            # for couple=False -> block-diagonal V_TT (+) V_SS (#109). The
+            # term is added last so couple=True is bit-identical to the
+            # pre-#109 assembly V_TT*P_TT + V_SS*P_SS + V_cross*P_TS.
+            V = V + self._cross_corners(psi, theta, measure, cached_intermediates)
+        return 0.5 * (V + V.T)  # symmetrise against round-off
+
+    def _cross_corners(
+        self,
+        psi: StructuralModel,
+        theta: ParamsLike,
+        measure: Any,
+        cached_intermediates: (
+            tuple[
+                Float[Array, " M"],
+                Float[Array, "N M"],
+                Float[Array, "N M"],
+                Float[Array, " M"],
+            ]
+            | None
+        ) = None,
+    ) -> Float[Array, "M M"]:
+        r"""Estimated cross block :math:`V_{TS}` placed in the (T,S)/(S,T) corners.
+
+        A cluster-total outer product over **all** coords at the
+        :attr:`sampling` engine's cluster unit, masked to the off-diagonal
+        cross corners by ``P_TS = outer(t,s) + outer(s,t)`` (the TT and SS
+        blocks are zeroed). One shared :math:`N_j` divides every entry, so a
+        cross-pair :math:`(j,k)` is scaled by exactly :math:`1/(N_j N_k)` ---
+        the same scale as :math:`V_{TT}` / :math:`V_{SS}`. The intermediates
+        are unpacked from the cache or self-computed with the same
+        ``safe_x_for_psi`` sanitisation the child engines use, so cached and
+        self-compute agree by construction. Used by :meth:`covariance` (when
+        ``couple``) and exposed via :meth:`cross_block`.
+        """
         mask = measure.mask  # (N, M)
         weights = measure.weights  # (N,)
         if cached_intermediates is not None:
@@ -507,14 +573,6 @@ class DesignAwareCovariance:
             psi_safe = jnp.where(mask > 0.0, psi_batch, 0.0)  # (N, M)
             N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
 
-        # --- delegated blocks (compose; same cached tuple threads through) -
-        V_TT = self.design.covariance(psi, theta, measure, cached_intermediates)
-        V_SS = self.sampling.covariance(psi, theta, measure, cached_intermediates)
-
-        # --- V_TS cross coupling: cluster-total outer product over ALL
-        # coords at the sampling engine's cluster unit. Its (T,S)/(S,T)
-        # corners are the estimated cross block. One shared N_j divides every
-        # block, so cross-pairs are scaled by exactly 1/(N_j N_k). ---------
         contrib = mask * weights[:, None] * psi_safe  # (N, M)  d_ij w_i psi_j
         seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
         cluster_totals = jax.ops.segment_sum(
@@ -523,16 +581,50 @@ class DesignAwareCovariance:
         numer_cross = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
         V_cross = _safe_outer_divide(numer_cross, N_j)  # (M, M)
 
-        # --- assemble via design_moment_mask outer-product masks
-        # (exhaustive and mutually exclusive: P_TT + P_SS + P_TS == 1) -----
-        t = (self.design_moment_mask > 0.0).astype(V_TT.dtype)  # (M,) design
+        t = (self.design_moment_mask > 0.0).astype(V_cross.dtype)  # (M,) design
         s = 1.0 - t  # (M,) sampled
-        P_TT = jnp.outer(t, t)
-        P_SS = jnp.outer(s, s)
         P_TS = jnp.outer(t, s) + jnp.outer(s, t)
+        return V_cross * P_TS
 
-        V = V_TT * P_TT + V_SS * P_SS + V_cross * P_TS
-        return 0.5 * (V + V.T)  # symmetrise against round-off
+    def cross_block(
+        self,
+        psi: StructuralModel,
+        theta: ParamsLike,
+        measure: Any,
+        cached_intermediates: (
+            tuple[
+                Float[Array, " M"],
+                Float[Array, "N M"],
+                Float[Array, "N M"],
+                Float[Array, " M"],
+            ]
+            | None
+        ) = None,
+    ) -> Float[Array, "M M"]:
+        r"""Return the estimated off-diagonal cross block :math:`V_{TS}` alone (#109).
+
+        The :math:`(M, M)` matrix carrying the estimated design/sampling cross
+        coupling in its (T,S) and (S,T) corners and **zeros** on the TT and SS
+        blocks, on the same shared :math:`N_j` Var(mean) scale as
+        :meth:`covariance`. By construction
+
+        .. math::
+            \text{covariance}(\text{couple=True})
+            = \text{covariance}(\text{couple=False}) + \text{cross\_block},
+
+        so :math:`\lVert\text{cross\_block}\rVert / \lVert V_{TT}\oplus
+        V_{SS}\rVert` quantifies the cross-block *materiality* without
+        hand-rolling a block-diagonal wrapper downstream. When ``all_design``
+        there are no sampled coords, so the cross block is exactly zero.
+
+        Parameters and ``cached_intermediates`` semantics match
+        :meth:`covariance`.
+        """
+        if self.all_design:
+            M = int(self.design_moment_mask.shape[0])
+            return jnp.zeros((M, M), dtype=self.design_moment_mask.dtype)
+        cross = self._cross_corners(psi, theta, measure, cached_intermediates)
+        return 0.5 * (cross + cross.T)  # symmetrise against round-off
 
 
 __all__ = ["StratifiedCovariance", "DesignAwareCovariance"]
