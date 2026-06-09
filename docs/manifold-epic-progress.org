@@ -194,15 +194,15 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   parametric bootstrap + finite-diff Jacobian; negative control holds. Full v1 gate 825
   green. *Landed PR #103 @ e1dd155.* Honest deviation: jax =eigvalsh= JVP is finite (not
   NaN) at exact degeneracy — documented as basis-dependent / use a block functional.
-- *Follow-ups for the maintainer (NOT auto-done — flagged at wrap-up):*
-  (a) =src/emu_gmm/manifolds/__init__.py= docstring still says manifold estimation is
-  "preview only / cannot yet be estimated" — now stale, should be updated.
-  (b) =CLAUDE.md= status line (694 tests) + the "Deferred to v2+" framing could be
-  refreshed to reflect the landed manifold epic — left to the maintainer since CLAUDE.md is
-  the architectural index.
-  (c) The =isolation:worktree= implement agent leaked edits into the MAIN checkout in 4 of
-  7 phases (caught + recovered every time by the post-workflow leak-check); a harness quirk
-  worth reporting.
+- *Follow-ups for the maintainer (status as of 2026-06-09 doc-truth pass, #129):*
+  (a) DONE — =src/emu_gmm/manifolds/__init__.py= docstring was refreshed ("gauge-aware
+  end-to-end", PRs #97--#103); the stale "preview only" wording is gone.
+  (b) DONE — =CLAUDE.md= status line and the "Deferred to v2+" framing were refreshed for
+  the landed epic (and the literal test-count snapshot is being retired in favour of
+  "=make quick-check= green"; see #129).
+  (c) Still standing as a harness observation: the =isolation:worktree= implement agent
+  leaked edits into the MAIN checkout in 4 of 7 phases (caught + recovered every time by
+  the post-workflow leak-check); a harness quirk worth reporting upstream.
 
 * Post-epic ergonomics: ParameterSpace (#107) — landed
 - *PR #108 @ a7d6e39.* Declarative parameter-geometry layer, additive over the

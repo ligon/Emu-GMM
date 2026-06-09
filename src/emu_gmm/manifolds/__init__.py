@@ -10,8 +10,10 @@ the user expresses a non-scalar / constrained parameter by wrapping each leaf in
 Estimation is gauge-aware end-to-end: recovery, a calibrated J-statistic, and
 gauge-invariant standard errors on functionals of ``Gamma = A @ A.T`` via
 ``result.eigenvalue_se()`` / ``result.gamma_se()`` / ``result.functional_se(f)``.
-(Epic #12, PRs #97--#103; ``ManifoldSpec`` / ``LeafSpec`` remain
-submodule-internal machinery.)
+(Epic #12, PRs #97--#103. ``ManifoldSpec`` / ``LeafSpec`` are exported
+from ``emu_gmm.manifolds`` for advanced callers but are *not* re-exported
+at the package top level --- they are flatten/inference plumbing, not part
+of the everyday estimation surface.)
 
 This package exposes :class:`ManifoldParam` (the runtime-checkable
 protocol every concrete manifold satisfies), three native manifold

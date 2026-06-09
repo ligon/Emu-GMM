@@ -13,7 +13,7 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 - =EmpiricalMeasure= over a sample with per-coordinate missingness mask and pweighted observations.
 - =AnalyticalMeasure= for closed-form populations (no quadrature library yet --- closed-form integrators only).
 - =CovarianceStrategy= implementations: =SyntheticCovariance=, =IIDCovariance=, =ClusteredCovariance=, =AnalyticalCovariance=.
-- =WeightingStrategy=: =Identity=, =Fixed=, =ContinuouslyUpdated= (default). =Iterated= deferred --- CU subsumes it.
+- =WeightingStrategy=: =Identity=, =Fixed=, =ContinuouslyUpdated= (default). (=Iterated= was deferred at sketch time; it has since landed as =IteratedWeighting= for legacy two-step reproducibility --- see =weighting.py=.)
 - =RegularizationStrategy=: =DiagonalTikhonov= only.
 - =Optimizer= protocol with =optimistix_lm()= default; =scipy_lm()= adapter for the non-JIT-pure fallback.
 - Stateless =estimate(...)= entry point.
@@ -22,7 +22,7 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 ** Deferred to v2+
 - *SMM matching* --- combining =EmpiricalMeasure= and =SyntheticMeasure= in one moment vector, including the \((1+1/S)\) asymptotic-variance inflation. v1 supports each measure independently but does not combine them.
 - =StratifiedCovariance=, =ReplicateWeightCovariance=.
-- =Iterated= weighting (subsumed by CU for v1 purposes).
+- =Iterated= weighting (subsumed by CU for v1 purposes; since landed as =IteratedWeighting=).
 - =EigenvalueFloor= and =NearestPSD= regularisers.
 - The full identification-diagnostics taxonomy (=design.org= Section 5.4) as machine-readable structured reports.
 - Quadrature-based analytical measures.
@@ -154,12 +154,16 @@ class EmpiricalMeasure:
     # by N_j = sum_i d_ij w_i per coordinate.
 
     @classmethod
-    def from_pandas(cls, df, weights=None, mask_columns=None):
-        """Construct from a pandas DataFrame. Column names become the
-        Variables axis labels; index name (if any) becomes the Obs axis
-        label. The polymorphic-input adapter delegates to this."""
+    def from_pandas(cls, df, weights=None, mask=None, *, nan_aware=True):
+        """Construct from a pandas DataFrame. NaN-aware by default: with
+        no explicit mask, the per-coordinate mask is inferred from
+        ~df.isna() and NaN cells in x are replaced by the per-column
+        observed mean (see _internal/nan_safety.py). An explicit mask
+        alongside NaN-laden data raises."""
         ...
 #+END_SRC
+
+/Status note (v2)/: the sketch's promise that DataFrame column names become Variables-axis labels is *not yet wired* --- =from_pandas= currently discards the parsed labels and the estimator generates positional =v_0, v_1, ...= names. Restoring label fidelity end-to-end is issue #132, under the labelled-array-boundary design goal recorded in =design.org= Section 6.
 
 The =estimate(...)= entry point accepts =measure = EmpiricalMeasure(x=df, weights=w_series)= directly when =df= is a =pandas.DataFrame=; the polymorphic-input adapter (=_internal/labels.py=) routes through =from_pandas=.
 
@@ -266,7 +270,7 @@ cached_intermediates = (m, psi_safe, weight_mask, N_j)
   N_j         : Float[Array, "M"]      sum_i d_ij * w_i
 #+END_SRC
 
-When the estimator's =residual_fn= calls =measure.expectation_and_contributions(...)= once per outer iteration and threads the tuple into the matching covariance call, the covariance strategy *skips* its own =vmap(psi)= pass. At the canonical empirical size (N=60k, M=50, float64) this eliminates a ~72 MB transient rebuild and a doubled =psi= evaluation per residual call. Strategies that ignore =cached_intermediates= (=AnalyticalCovariance=, =SyntheticCovariance=) just discard the kwarg.
+When the estimator's =residual_fn= calls =measure.expectation_and_contributions(...)= once per outer iteration and threads the tuple into the matching covariance call, the covariance strategy *skips* its own =vmap(psi)= pass. At the canonical empirical size (N=60k, M=50, float64) this eliminates a ~72 MB transient rebuild and a doubled =psi= evaluation per residual call. Strategies differ in how they treat the kwarg: =SyntheticCovariance= consumes its own 2-tuple cache (from =moments_and_contributions=), while =AnalyticalCovariance= does not accept the kwarg at all --- safe because the estimator probes each strategy's =covariance= signature with =inspect.signature= before passing it.
 
 The 4-tuple shape is a *v1-stable contract* between =EmpiricalMeasure= and the empirical covariance strategies. The architectural commitment that =Measure= and =CovarianceStrategy= are orthogonal is preserved: the cache is not a coupling --- the strategies still work correctly when called without it; the cache only short-circuits a redundant pass. The tuple may be lifted to a typed intermediate dataclass (e.g., =EmpiricalIntermediates(m, psi_safe, weight_mask, N_j)=) when a third strategy adopts the pattern, on the principle that two callers is a coincidence and three is a contract. The named-field upgrade is non-breaking: existing strategies will tuple-unpack the dataclass via =__iter__=.
 
@@ -379,7 +383,10 @@ def scipy_lm(**kw) -> Optimizer:
 These fields are the /authoritative/ values of the criterion and its
 inference quantities --- =J_stat=, =J_dof=, =J_pvalue=, =Sigma_theta=,
 =standard_errors=. Downstream code reads them; it does not recompute
-them. In particular =J_stat= already embeds the per-coordinate \(N_j\)
+them. (One subtlety: =j_test(theta_null=...)= re-anchors the
+regularisation ridge at =theta_null=, so under a /binding/ ridge
+=j_test(result.theta_hat)= can differ from =result.J_stat= --- disclosed
+in =inference/j_test.py=; compare like with like.) In particular =J_stat= already embeds the per-coordinate \(N_j\)
 scaling convention (=design.org= "Scaling convention"): it is
 \(\mathbb{E}_\mu[\psi]'\,V_X^{-1}\,\mathbb{E}_\mu[\psi]\) with no explicit
 \(N\). Re-deriving \(J\) by hand --- e.g. scaling moments by \(\sqrt{N}\)
@@ -469,6 +476,8 @@ The framework distinguishes two kinds of return value:
 The architectural rule: *inference results are pytrees; estimation/diagnostics are leaves*. Following this rule, =vmap= or =tree_map= over any inference helper yields a stacked result without the caller needing to thread =in_axes= / =out_axes= manually through nested dataclasses.
 
 Note on =ClusterBootstrapResult=: the helper itself uses a host-side Python loop over replicates (the per-replicate cluster-resample produces a data-dependent number of rows, awkward to express under =vmap=), so =vmap(cluster_bootstrap)= over seeds is not directly traceable. But the *result* is a valid pytree, and the canonical batching gesture is to call =cluster_bootstrap= once per seed and stack via =tree_map(jnp.stack, *results)=. The =param_names= field rides on the treedef as a =jdc.static_field=, so stacking across calls with identical parameter dataclasses works without further configuration.
+
+One documented exception to the rule: =AdaptiveBootstrapResult= (#91) is deliberately a plain frozen dataclass, not a pytree --- the adaptive driver is host-sequential by design (its stopping rule is data-dependent control flow), so the result never needs to ride through =jit= / =vmap=, and its replicate payload sizes vary by run.
 
 * Section 4: The =estimate()= Entry Point
 
@@ -640,7 +649,7 @@ These are real questions that need answers before code can be written, not archi
 
 2. *Cluster ID representation.* JAX prefers floats. Integer-typed cluster IDs work in =jax.ops.segment_sum= but the static =n_clusters= argument forces recompilation on cardinality changes. Plan: pad cluster IDs to a fixed maximum at construction time and use =n_clusters= as a static upper bound.
 
-3. *Anchor point for \(\tau\).* The design says "first-stage \(\hat\theta_1\) for Fixed/Iterated; pilot evaluation for CU." For v1 with only Identity/Fixed/CU strategies, the policy reduces to: \(\tau\) is selected once at the start of optimization (using either \(\theta_{init}\) for CU, or the Fixed strategy's anchor \(V_0\) for Fixed). Hold fixed thereafter. Document explicitly.
+3. *Anchor point for \(\tau\).* Resolved (and now reflected in =design.org= Section 5): \(\tau\) is selected once from the covariance strategy's \(V\) at \(\theta_{init}\), for *every* weighting strategy (including =Fixed= and the since-landed =IteratedWeighting= --- not the Fixed strategy's own \(V_0\), and not a first-stage \(\hat\theta_1\)). Held fixed thereafter; =build_estimator= hoists the anchor to factory time so repeated fits share one \(\tau\) (see issue #123 for the semantics note).
 
 4. *J-test under regularization.* The weighted-\(\chi^2\) characterisation in =design.org= Section 5 / =mcar-asymptotics.org= Theorem 6 is exact in the limit but computationally heavy. v1 reports the nominal \(\chi^2_{M-K}\) p-value and flags =binding_ridge= when \(\tau > \tau_{threshold}\); computing the adjusted p-value is deferred unless the binding flag fires.
 
