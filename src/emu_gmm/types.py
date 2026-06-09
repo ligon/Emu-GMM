@@ -415,6 +415,50 @@ class ManifoldPoint:
         return _walk_components(self.theta_hat)
 
 
+@jdc.pytree_dataclass
+class FitRecord:
+    """Slim, stackable per-fit summary pytree (#125).
+
+    The atom of repeated estimation: the canonical batching gesture is
+
+    .. code-block:: python
+
+       records = [run(theta0, dgp(jax.random.fold_in(key, r))).record()
+                  for r in range(n_reps)]
+       stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *records)
+
+    after which every field carries a leading replication axis and the
+    Monte Carlo summarizers (bias, MC SD, coverage, size/power, J
+    calibration) are cheap reductions. Registered as a JAX pytree so it
+    also rides ``jit`` / ``vmap`` (the "inference results are pytrees"
+    invariant; api-sketch.org Section 3) --- :class:`EstimationResult`
+    itself deliberately remains a host-side leaf, and this is its
+    derived, traced-world projection.
+
+    ``theta_flat`` / ``se`` are on the **ambient tangent axis** (length
+    ``total_dimension``): for v1 / all-scalar parameters this is the
+    dataclass field order; for manifold parameters it is the
+    manifold-aware ambient flatten that ``Sigma_theta`` is sized by, in
+    which case the raw per-entry values of a gauge-bearing leaf are
+    gauge-arbitrary --- compute invariant functionals via
+    :meth:`EstimationResult.functional_se` instead. ``param_names``
+    rides on the treedef as a static field (the
+    ``ClusterBootstrapResult`` pattern), so stacking across fits with
+    identical parameter structure needs no configuration.
+    """
+
+    theta_flat: Float[Array, " D"]
+    se: Float[Array, " D"]
+    J_stat: Float[Array, ""]
+    J_pvalue: Float[Array, ""]
+    J_pvalue_adjusted: Float[Array, ""]
+    converged: Float[Array, ""]  # 0/1; jnp.stack-able and mean()-able
+    tau_realised: Float[Array, ""]
+    binding_ridge: Float[Array, ""]  # 0/1
+    J_dof: int = jdc.static_field()  # type: ignore[attr-defined]
+    param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
+
+
 @dataclasses.dataclass
 class EstimationResult:
     """The output of :func:`emu_gmm.estimate`.
@@ -918,6 +962,55 @@ class EstimationResult:
             "summary": summary,
         }
 
+    def record(self) -> FitRecord:
+        """The slim, stackable per-fit summary pytree (#125).
+
+        Extracts exactly the fields repeated-estimation consumers need
+        --- ``theta_flat`` (manifold-aware ambient flatten, same axis as
+        ``Sigma_theta``), ``se``, the J triple, ``converged``,
+        ``tau_realised``, ``binding_ridge`` --- as a
+        :class:`FitRecord` pytree ready for
+        ``tree_map(jnp.stack, *records)``. Replaces the hand-rolled
+        ``_internal.params.flatten_params`` extraction every MC harness
+        previously re-invented (which silently broke for manifold
+        parameters; the dispatch here is the same one ``coef_table``
+        uses).
+        """
+        if _is_non_scalar_spec(self.manifold_spec):
+            theta_flat, _treedef, _spec = flatten_params_with_spec(self.theta_hat)
+            param_names = tuple(
+                tangent_basis_names(
+                    self.manifold_spec,
+                    fallback_param_names=tuple(self.labels.param_names),
+                )
+            )
+        else:
+            theta_flat, _treedef = flatten_params(self.theta_hat)
+            param_names = tuple(self.labels.param_names)
+        theta_arr = jnp.asarray(theta_flat)
+        se_arr = jnp.asarray(self.standard_errors.array)
+        if int(se_arr.shape[0]) != int(theta_arr.shape[0]):
+            raise ValueError(
+                "record(): flattened estimate length "
+                f"{int(theta_arr.shape[0])} does not match the SE axis "
+                f"{int(se_arr.shape[0])}; this indicates a manifold-spec "
+                "routing bug (mirrors the coef_table guard)."
+            )
+        return FitRecord(
+            theta_flat=theta_arr,
+            se=se_arr,
+            J_stat=jnp.asarray(self.J_stat),
+            J_pvalue=jnp.asarray(self.J_pvalue),
+            J_pvalue_adjusted=jnp.asarray(self.J_pvalue_adjusted),
+            converged=jnp.asarray(self.converged, dtype=jnp.float64),
+            tau_realised=jnp.asarray(self.diagnostics.tau_realised),
+            binding_ridge=jnp.asarray(
+                self.diagnostics.binding_ridge, dtype=jnp.float64
+            ),
+            J_dof=int(self.J_dof),
+            param_names=param_names,
+        )
+
     def _main_namespace_hazards(self) -> list[str]:
         """Names of provenance objects whose classes/callables live in
         ``__main__`` --- the pickle-portability hazard (#23).
@@ -1037,6 +1130,7 @@ __all__ = [
     "OptimizerInfo",
     "Diagnostics",
     "EstimationResult",
+    "FitRecord",
     "ManifoldPoint",
     "Emu_GMM_DimensionError",
     # Re-exported from emu_gmm._internal.labels so the type that

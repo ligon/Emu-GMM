@@ -96,6 +96,7 @@ from emu_gmm.types import (
     Diagnostics,
     Emu_GMM_DimensionError,
     EstimationResult,
+    FitRecord,
     LabelContext,
     Measure,
     Optimizer,
@@ -161,6 +162,7 @@ __all__ = [
     "JTestResult",
     # Result / diagnostics types
     "EstimationResult",
+    "FitRecord",
     "Diagnostics",
     "OptimizerInfo",
     "LabelContext",

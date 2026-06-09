@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import haliax as ha
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pandas as pd
@@ -481,3 +482,91 @@ class TestPickleConvenience:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             r.to_pickle(path)
+
+
+# ---------------------------------------------------------------------------
+# FitRecord / record() (#125)
+# ---------------------------------------------------------------------------
+
+
+class TestFitRecord:
+    def test_record_matches_result_fields(self):
+        import numpy as np
+
+        r = _make_result()
+        rec = r.record()
+        assert isinstance(rec, t.FitRecord)
+        np.testing.assert_allclose(np.asarray(rec.theta_flat), np.array([0.95, 2.0]))
+        np.testing.assert_array_equal(
+            np.asarray(rec.se), np.asarray(r.standard_errors.array)
+        )
+        assert float(rec.J_stat) == float(r.J_stat)
+        assert float(rec.J_pvalue) == float(r.J_pvalue)
+        assert rec.J_dof == r.J_dof
+        assert float(rec.converged) == 1.0
+        assert float(rec.binding_ridge) == 0.0
+        assert rec.param_names == ("beta", "gamma")
+
+    def test_records_stack_via_tree_map(self):
+        """The canonical batching gesture: tree_map(jnp.stack, *records)
+        gives every traced field a leading replication axis while the
+        static fields (J_dof, param_names) ride the shared treedef."""
+        recs = [_make_result().record() for _ in range(3)]
+        stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *recs)
+        assert stacked.theta_flat.shape == (3, 2)
+        assert stacked.se.shape == (3, 2)
+        assert stacked.J_stat.shape == (3,)
+        assert stacked.converged.shape == (3,)
+        assert stacked.param_names == ("beta", "gamma")  # static, unstacked
+        assert stacked.J_dof == 1
+        # And the stack is jit-traversable (pytree invariant).
+        leaves, treedef = jax.tree_util.tree_flatten(stacked)
+        rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+        assert rebuilt.param_names == ("beta", "gamma")
+
+    def test_record_manifold_ambient_axis(self):
+        """For a manifold parameter the record's axis is the ambient
+        tangent flatten (total_dimension), labelled with positional
+        tangent names -- the same dispatch coef_table uses, which the
+        hand-rolled flatten_params extraction silently broke on."""
+        import dataclasses
+
+        from emu_gmm._internal import labels as labels_mod_
+        from emu_gmm._internal.params import manifold_spec_from_params
+        from emu_gmm.manifolds import PSDFixedRank
+        from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
+
+        @jdc.pytree_dataclass
+        class _MParams:
+            Y: ManifoldLeaf
+            phi: float
+
+        theta = _MParams(
+            Y=ManifoldLeaf(jnp.ones((3, 2)), PSDFixedRank(3, 2)),
+            phi=jnp.asarray(0.7),
+        )
+        D = 7  # 3*2 ambient + 1 scalar
+        Params = axes_mod.params_axis(D)
+        ParamsDual = axes_mod.params_dual_axis(D)
+        sigma = labels_mod_.label_matrix(jnp.eye(D) * 0.01, Params, ParamsDual)
+        base = _make_result()
+        r = dataclasses.replace(
+            base,
+            theta_hat=theta,
+            theta_init=theta,
+            Sigma_theta=sigma,
+            labels=labels_mod_.LabelContext(
+                param_names=("Y", "phi"),
+                moment_names=base.labels.moment_names,
+                variable_names=(),
+            ),
+            manifold_spec=manifold_spec_from_params(theta),
+        )
+        # Invalidate the cached property from the template result.
+        r.__dict__.pop("standard_errors", None)
+        rec = r.record()
+        assert rec.theta_flat.shape == (D,)
+        assert rec.se.shape == (D,)
+        assert len(rec.param_names) == D
+        assert rec.param_names[0].startswith("Y[")
+        assert rec.param_names[-1].startswith("phi")
