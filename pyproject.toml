@@ -1,6 +1,6 @@
 [project]
 name = "emu-gmm"
-version = "0.1.0a0"
+version = "0.1.0"
 description = "Measure-theoretic Generalized Method of Moments estimation; estimation via E_mu."
 readme = "README.org"
 requires-python = ">=3.11,<4.0"
