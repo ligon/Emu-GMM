@@ -83,6 +83,46 @@ def _optimistix_wrap(
     return fn
 
 
+# Memoised ``jax.jit(fn)`` wrappers for the #124 args-path final-objective
+# evaluation, keyed on ``id(fn)`` exactly like ``_OPTIMISTIX_FN_CACHE``.
+# Rationale: after the solve we recompute ``r = fn(theta_opt, args)`` for
+# ``final_objective``; an EAGER call re-traces the kernel's vmap(psi) on
+# every invocation (one stray trace per replicate -- measured by the PR A
+# retrace-count gate), while ``jax.jit`` built fresh per call owns a fresh
+# cache and is no better. One memoised wrapper per kernel identity makes
+# the evaluation hit the same compiled trace across replicates.
+_JITTED_FN_CACHE: dict[int, Any] = {}
+
+
+def _jitted_fn(fn: Callable[..., Any]) -> Callable[..., Any]:
+    key = id(fn)
+    cached = _JITTED_FN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    wrapped = jax.jit(fn)
+    _JITTED_FN_CACHE[key] = wrapped
+    weakref.finalize(fn, _JITTED_FN_CACHE.pop, key, None)
+    return wrapped
+
+
+def _supports_args(optimizer: Any) -> bool:
+    """True iff ``optimizer.__call__`` accepts the optional ``args`` channel.
+
+    The #124 kernel path threads the measure through ``args``;
+    third-party optimisers written to the v1 two-argument protocol are
+    detected here and served by partial application instead (the same
+    signature-probe pattern as the estimator's RiemannianOptimizer
+    dispatch).
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(optimizer.__call__)
+    except (TypeError, ValueError):
+        return False
+    return "args" in sig.parameters
+
+
 # ---------------------------------------------------------------------------
 # Optimistix adapter
 # ---------------------------------------------------------------------------
@@ -103,18 +143,31 @@ class _OptimistixLM:
 
     def __call__(
         self,
-        residual_fn: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+        residual_fn: Callable[..., Float[Array, " M"]],
         theta_init: Float[Array, " K"],
+        *,
+        args: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo]:
         """Solve ``min_theta || residual_fn(theta) ||^2`` via LM.
 
         Parameters
         ----------
         residual_fn
-            Maps a flat 1-D parameter array of length ``K`` to a flat
-            residual vector of length ``M``. Must be JAX-traceable.
+            With ``args is None`` (the v1 contract): maps a flat 1-D
+            parameter array of length ``K`` to a flat residual vector of
+            length ``M``. With ``args`` supplied (#124): a two-argument
+            kernel ``residual_fn(theta, args)`` --- exactly optimistix's
+            own ``fn(y, args)`` convention --- where ``args`` is an
+            arbitrary traced pytree (e.g. an ``EmpiricalMeasure``).
+            Must be JAX-traceable.
         theta_init
             Initial parameter guess, a 1-D JAX array of length ``K``.
+        args
+            Optional traced pytree threaded through optimistix's native
+            ``args`` channel (#124). Because the kernel's *identity* is
+            stable across calls while ``args`` carries the data,
+            same-structure ``args`` values reuse one trace --- the
+            property the repeated-estimation path relies on.
 
         Returns
         -------
@@ -122,23 +175,37 @@ class _OptimistixLM:
             The minimiser estimate.
         info : OptimizerInfo
             ``steps`` from optimistix's ``Solution.stats["num_steps"]``,
-            ``status`` translated from ``Solution.result``, and
-            ``final_objective`` recomputed from ``residual_fn(theta_opt)``.
+            ``status`` translated from ``Solution.result``,
+            ``final_objective`` recomputed at ``theta_opt``, and
+            ``done`` --- the REAL traced convergence flag
+            ``sol.result == RESULTS.successful`` (#78 extension to this
+            backend; previously ``None`` here, forcing the status-string
+            fallback that is unreliable under jit).
         """
         solver: optx.LevenbergMarquardt = optx.LevenbergMarquardt(
             rtol=self.rtol, atol=self.atol
         )
 
-        # ``fn`` is a memoised wrapper around ``residual_fn``: see
-        # :func:`_optimistix_wrap`. Optimistix's internal pjit cache
-        # keys on the wrapper's identity; memoising keeps the cache
-        # warm across calls with the same residual.
-        fn = _optimistix_wrap(residual_fn)
+        if args is None:
+            # v1 path: ``fn`` is a memoised wrapper around the one-arg
+            # ``residual_fn``: see :func:`_optimistix_wrap`. Optimistix's
+            # internal pjit cache keys on the wrapper's identity;
+            # memoising keeps the cache warm across calls with the same
+            # residual closure.
+            fn = _optimistix_wrap(residual_fn)
+        else:
+            # #124 path: the caller's kernel already has optimistix's
+            # two-argument shape; use it DIRECTLY so its identity is the
+            # cache key and fresh same-structure ``args`` hit the
+            # existing trace. (The id-keyed wrapper cache above is
+            # unnecessary here and would add nothing.)
+            fn = residual_fn
 
         sol: optx.Solution = optx.least_squares(
             fn,
             solver,
             theta_init,
+            args=args,
             max_steps=self.max_steps,
             throw=False,
         )
@@ -150,8 +217,19 @@ class _OptimistixLM:
         # contract, not the traced one.
         steps = sol.stats["num_steps"]
         status = _optimistix_status(sol.result)
+        # Traced convergence flag: a 0-d bool, concrete eagerly and a
+        # tracer under jit (where the status string degrades to
+        # "traced"). Equinox's RESULTS enumeration defines == to be
+        # trace-safe.
+        done = sol.result == optx.RESULTS.successful
 
-        r = residual_fn(theta_opt)
+        if args is None:
+            r = residual_fn(theta_opt)
+        else:
+            # Memoised jit so this post-solve evaluation reuses one trace
+            # across replicates instead of re-tracing vmap(psi) eagerly
+            # on every call (see _JITTED_FN_CACHE).
+            r = _jitted_fn(residual_fn)(theta_opt, args)
         final_objective = 0.5 * jnp.sum(r * r)
 
         info = OptimizerInfo(
@@ -159,6 +237,7 @@ class _OptimistixLM:
             final_objective=final_objective,
             status=status,
             backend="optimistix",
+            done=done,
         )
         return theta_opt, info
 
@@ -234,18 +313,27 @@ class _ScipyLM:
 
     def __call__(
         self,
-        residual_fn: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+        residual_fn: Callable[..., Float[Array, " M"]],
         theta_init: Float[Array, " K"],
+        *,
+        args: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo]:
         """Solve ``min_theta || residual_fn(theta) ||^2`` via SciPy LM.
 
         Converts ``theta_init`` to NumPy on entry; wraps ``residual_fn``
         in a JAX <-> NumPy adapter; converts the returned solution back
-        to JAX arrays.
+        to JAX arrays. With ``args`` supplied (#124), ``residual_fn`` is
+        the two-argument kernel and ``args`` is bound by partial
+        application --- the SciPy loop is interpreted Python either way,
+        but a jitted kernel's cache is keyed on the kernel's stable
+        identity, so per-evaluation calls hit the same trace across
+        repeated fits.
         """
 
         def np_residual(x: np.ndarray) -> np.ndarray:
-            return np.asarray(residual_fn(jnp.asarray(x)))
+            if args is None:
+                return np.asarray(residual_fn(jnp.asarray(x)))
+            return np.asarray(residual_fn(jnp.asarray(x), args))
 
         x0 = np.asarray(theta_init)
         kwargs = dict(self.options)
@@ -372,8 +460,10 @@ class _LinearSolver:
 
     def __call__(
         self,
-        residual_fn: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+        residual_fn: Callable[..., Float[Array, " M"]],
         theta_init: Float[Array, " K"],
+        *,
+        args: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo]:
         """Solve ``min_theta || residual_fn(theta) ||^2`` via the fast path.
 
@@ -398,6 +488,17 @@ class _LinearSolver:
             ``backend == "linear"`` with ``steps == 1`` on an accepted
             certificate; otherwise the fallback's own ``info`` verbatim.
         """
+        # #124: with ``args`` supplied, bind it once; the jacfwd / lstsq
+        # algebra below is unchanged. The fallback receives ``args``
+        # natively when it supports the channel (probed by signature),
+        # else the bound closure.
+        if args is None:
+            rf = residual_fn
+        else:
+
+            def rf(th: Float[Array, " K"]) -> Float[Array, " M"]:
+                return residual_fn(th, args)
+
         if not self.verify:
             # Caller asserts the residual is affine: take the one-step
             # Gauss--Newton solution UNCONDITIONALLY -- no certificate, no
@@ -406,10 +507,10 @@ class _LinearSolver:
             # path cannot speed up under vmap). The caller owns correctness;
             # ``final_objective`` still surfaces a misuse (it is not ~0 when
             # the residual was in fact nonlinear).
-            j0 = jax.jacfwd(residual_fn)(theta_init)  # (M, K)
-            r0 = residual_fn(theta_init)  # (M,)
+            j0 = jax.jacfwd(rf)(theta_init)  # (M, K)
+            r0 = rf(theta_init)  # (M,)
             theta_hat = theta_init - jnp.linalg.lstsq(j0, r0, rcond=None)[0]
-            r1 = residual_fn(theta_hat)
+            r1 = rf(theta_hat)
             return theta_hat, OptimizerInfo(
                 steps=1,
                 final_objective=0.5 * jnp.sum(r1 * r1),
@@ -420,8 +521,8 @@ class _LinearSolver:
         # The Gauss--Newton candidate and its first-order optimality
         # certificate. All of this traces cleanly (jacfwd / lstsq / norms);
         # only the concrete accept/reject is eager-only.
-        j0 = jax.jacfwd(residual_fn)(theta_init)  # (M, K)
-        r0 = residual_fn(theta_init)  # (M,)
+        j0 = jax.jacfwd(rf)(theta_init)  # (M, K)
+        r0 = rf(theta_init)  # (M,)
         # One Gauss--Newton / linear least-squares step. Exact for an affine
         # residual in both the just-identified (M == K) and over-identified
         # (M > K) cases.
@@ -429,8 +530,8 @@ class _LinearSolver:
         theta_hat = theta_init + delta
         # Certify: g1 = J1' r1 vanishes for an affine residual; a single
         # Gauss--Newton step leaves it at O(||g0||) for a nonlinear one.
-        j1 = jax.jacfwd(residual_fn)(theta_hat)
-        r1 = residual_fn(theta_hat)
+        j1 = jax.jacfwd(rf)(theta_hat)
+        r1 = rf(theta_hat)
         g1_norm = jnp.linalg.norm(j1.T @ r1)
         g0_norm = jnp.linalg.norm(j0.T @ r0)
         accept = g1_norm <= self.tol * jnp.maximum(g0_norm, 1.0)
@@ -455,7 +556,9 @@ class _LinearSolver:
         if accept_concrete is False:
             # Eager, certificate fails (genuinely nonlinear residual):
             # delegate, surfacing the fallback's own info verbatim.
-            return self.fallback(residual_fn, theta_init)
+            if args is not None and _supports_args(self.fallback):
+                return self.fallback(residual_fn, theta_init, args=args)
+            return self.fallback(rf, theta_init)
 
         # Traced (under jit / lax control flow): the concrete branch is
         # unavailable, so dispatch with ``lax.cond``. Both branches are
@@ -469,7 +572,10 @@ class _LinearSolver:
             return theta_hat, jnp.asarray(1, jnp.int32), final_objective
 
         def _fallback_branch(_: Any) -> tuple[Any, Any, Any]:
-            tf, finfo = self.fallback(residual_fn, theta_init)
+            if args is not None and _supports_args(self.fallback):
+                tf, finfo = self.fallback(residual_fn, theta_init, args=args)
+            else:
+                tf, finfo = self.fallback(rf, theta_init)
             return (
                 tf,
                 jnp.asarray(finfo.steps, jnp.int32),
@@ -540,4 +646,4 @@ def linear_solver(
     return _LinearSolver(fallback=fallback, tol=tol, verify=verify)
 
 
-__all__ = ["optimistix_lm", "scipy_lm", "linear_solver"]
+__all__ = ["optimistix_lm", "scipy_lm", "linear_solver", "_supports_args"]
