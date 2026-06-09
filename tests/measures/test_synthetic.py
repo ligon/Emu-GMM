@@ -223,3 +223,54 @@ class TestPyTreeBehaviour:
         _, def_a = jax.tree_util.tree_flatten(sm_a)
         _, def_b = jax.tree_util.tree_flatten(sm_b)
         assert def_a != def_b
+
+
+# ---------------------------------------------------------------------------
+# with_key (#126): CRN re-keying for replication
+# ---------------------------------------------------------------------------
+
+
+class TestWithKey:
+    def test_rekeyed_measure_draws_differ_original_untouched(self):
+        master = jax.random.PRNGKey(7)
+        sm = SyntheticMeasure(key=master, n_sim=1000, sampler=_standard_normal_sampler)
+        theta = _LinearParams(a=0.0, b=1.0)
+        m0 = sm.expectation(_linear_residual, theta)
+
+        sm1 = sm.with_key(jax.random.fold_in(master, 1))
+        m1 = sm1.expectation(_linear_residual, theta)
+
+        # New stream: different draws (different mean).
+        assert float(jnp.abs(m1[0] - m0[0])) > 0.0
+        # Sampler / n_sim shared; original measure untouched (frozen).
+        assert sm1.sampler is sm.sampler
+        assert sm1.n_sim == sm.n_sim
+        assert bool(jnp.all(sm.key == master))
+        m0_again = sm.expectation(_linear_residual, theta)
+        assert float(m0_again[0]) == float(m0[0])
+
+    def test_rekeying_is_reproducible(self):
+        """fold_in(master, rep) gives the same stream on reconstruction:
+        the documented per-rep key discipline."""
+        master = jax.random.PRNGKey(11)
+        sm = SyntheticMeasure(key=master, n_sim=500, sampler=_standard_normal_sampler)
+        theta = _LinearParams(a=0.3, b=2.0)
+        a = sm.with_key(jax.random.fold_in(master, 3)).expectation(
+            _linear_residual, theta
+        )
+        b = sm.with_key(jax.random.fold_in(master, 3)).expectation(
+            _linear_residual, theta
+        )
+        assert float(a[0]) == float(b[0])
+
+    def test_same_treedef_for_jit_cache_reuse(self):
+        """Re-keying changes a TRACED leaf only: the treedef (static
+        fields) is unchanged, so jit caches keyed on structure survive a
+        re-key -- the property the MC drivers rely on."""
+        sm = SyntheticMeasure(
+            key=jax.random.PRNGKey(0), n_sim=100, sampler=_standard_normal_sampler
+        )
+        sm2 = sm.with_key(jax.random.PRNGKey(99))
+        _, def_a = jax.tree_util.tree_flatten(sm)
+        _, def_b = jax.tree_util.tree_flatten(sm2)
+        assert def_a == def_b

@@ -65,6 +65,36 @@ class SyntheticMeasure:
         """Run the sampler once and return the (n_sim, D) draws."""
         return self.sampler(self.key, theta)
 
+    def with_key(self, key: jax.Array) -> "SyntheticMeasure":
+        """Same sampler / ``n_sim``, new frozen PRNG key (CRN re-draw; #126).
+
+        The public spelling of "same measure, different draw stream" ---
+        the per-replicate move of a repeated-sampling Monte Carlo study,
+        previously written as ``jdc.replace(measure, key=...)`` (reaching
+        for library internals and easy to get subtly wrong).
+
+        Recommended key discipline for studies: derive per-rep keys as
+        ``jax.random.fold_in(master_key, rep)`` so the stream is
+        reproducible from one master key, and reuse the *same* per-rep
+        keys across study arms (e.g. different covariance strategies, or
+        null vs alternative DGPs) so arm comparisons difference out the
+        Monte Carlo noise --- the study-level extension of the Common
+        Random Numbers principle this measure is built on.
+
+        Parameters
+        ----------
+        key : jax.Array
+            The new frozen :func:`jax.random.PRNGKey` (or a key derived
+            via :func:`jax.random.fold_in` / :func:`jax.random.split`).
+
+        Returns
+        -------
+        :class:`SyntheticMeasure`
+            A new measure sharing ``sampler`` and ``n_sim``; ``self`` is
+            unchanged (the dataclass is frozen).
+        """
+        return jdc.replace(self, key=key)
+
     def moments_and_contributions(
         self, psi: StructuralModel, theta: ParamsLike
     ) -> tuple[Float[Array, " M"], Float[Array, "n_sim M"]]:
