@@ -112,3 +112,24 @@ def test_rejects_negative_drop():
     M, _, _ = _spd(8, 5)
     with pytest.raises(ValueError):
         pinv_eigvalrule(M, drop_smallest=-1)
+
+
+def test_rejects_drop_exceeding_dimension():
+    """The documented upper bound ``drop_smallest <= D`` is enforced (#121).
+
+    Before the guard, ``drop_smallest > D`` silently returned an all-zero
+    matrix (empty static slice), masquerading as a valid pseudo-inverse.
+    """
+    M, _, _ = _spd(4, 4)
+    with pytest.raises(ValueError, match="drop_smallest must be <= D = 4"):
+        pinv_eigvalrule(M, drop_smallest=5)
+
+
+def test_drop_equal_to_dimension_is_allowed_all_zero():
+    """``drop_smallest == D`` is inside the documented contract: every
+    direction is gauge, the identified subspace is empty, and the
+    pseudo-inverse on it is the zero matrix."""
+    M, _, _ = _spd(3, 3)
+    out = pinv_eigvalrule(M, drop_smallest=3)
+    assert out.shape == (3, 3)
+    assert bool(jnp.all(out == 0.0))
