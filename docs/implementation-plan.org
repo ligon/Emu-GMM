@@ -373,9 +373,9 @@ v2's identity: *design-aware inference on geometrically honest parameter spaces*
 ** Arc 4 --- Scope discipline (recorded decisions)
 /Exit: the deferred list is a record of choices, not a residue./
 
-- SMM matching :: deferred to v3 as #127 (no consumer pull; the \((1+1/S)\) machinery in =SyntheticCovariance= keeps it cheap to revive).
-- pymanopt backend :: #3 --- recommend closing as /native-only, decided/ (dev-gated cross-check stays).
-- Riemannian TrustRegions :: #9 --- recommend closing (LM verified equivalent on the quotient).
+- SMM matching :: deferred to v3 as #127, owner-confirmed 2026-06-09 (no consumer pull; the \((1+1/S)\) machinery in =SyntheticCovariance= keeps it cheap to revive).
+- pymanopt backend :: #3 --- CLOSED 2026-06-09 as /native-only, decided/ (dev-gated cross-check stays).
+- Riemannian TrustRegions :: #9 --- CLOSED 2026-06-09 (LM verified equivalent on the quotient).
 - Re-deferred to v3 :: =ReplicateWeightCovariance= (BRR / jackknife / bootstrap-weight), the quadrature engine for =AnalyticalMeasure=, =EigenvalueFloor= / Higham nearest-PSD (urgency died when #111 made =DiagonalTikhonov= guarantee PD), and the structured identification-failure taxonomy (design.org Section 5.4).
 
 * Section 14: Out of Scope for This Plan (v3 and beyond)
