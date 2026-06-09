@@ -69,6 +69,7 @@ Gauss--Newton Jacobian in tangent coordinates is the *ambient* Jacobian
 from __future__ import annotations
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -97,6 +98,17 @@ def _is_positive(manifold: Any) -> bool:
 # floor is exactly 0 and the scalar path is bitwise unchanged.
 _GAUGE_FLOOR: float = 1e-6
 
+# #124 (PR B): memoised jitted solve cores for the traced-``args`` path.
+# Keyed on ``(id(residual_fn), self, manifold_spec)`` -- the kernel's
+# identity is the trace key (same pattern as the estimator's
+# factory-stable kernels), ``self`` pins the solver hyperparameters
+# (frozen dataclass, hashable), and ``manifold_spec`` pins the per-leaf
+# plan (frozen dataclass hashing by structural identity, so a caller
+# that rebuilds an equal spec still hits). Held strongly so the trace
+# survives between calls; evicted via ``weakref.finalize`` when the
+# kernel is garbage-collected, mirroring ``_OPTIMISTIX_FN_CACHE``.
+_TRACED_SOLVE_CACHE: dict[tuple[int, Any, Any], Any] = {}
+
 
 @dataclasses.dataclass(frozen=True)
 class _RiemannianLM:
@@ -113,10 +125,28 @@ class _RiemannianLM:
 
     def __call__(
         self,
-        residual_fn: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+        residual_fn: Callable[..., Float[Array, " M"]],
         theta_init: Any,
         manifold_spec: ManifoldSpec,
+        *,
+        args: Any = None,
     ) -> tuple[Any, "OptimizerInfo"]:
+        """Solve the Riemannian LM problem.
+
+        With ``args is None`` (the v1/v2 contract, byte-identical to the
+        pre-#124 behaviour): ``residual_fn`` is a one-argument closure
+        over the flat ambient coordinates, evaluated eagerly with the
+        ``lax.while_loop`` traced per call.
+
+        With ``args`` supplied (#124 PR B): ``residual_fn`` is a
+        two-argument kernel ``residual_fn(theta_flat, args)`` and
+        ``args`` is an arbitrary traced pytree (e.g. a measure). The
+        whole solve -- initial Jacobian, lambda anchor and the
+        ``while_loop`` -- is compiled ONCE per ``(kernel identity,
+        solver hyperparameters, manifold_spec)`` and memoised, so fresh
+        same-structure ``args`` (the repeated-estimation case) are new
+        leaf values on an existing trace: zero retrace.
+        """
         # Local import to avoid an import cycle: emu_gmm.types ->
         # _internal.params -> manifolds.euclidean -> manifolds.__init__
         # -> riemannian_lm. By call time emu_gmm.types is fully loaded.
@@ -252,81 +282,119 @@ class _RiemannianLM:
         def riem_norm(x: Float[Array, " K"], v: Float[Array, " K"]) -> Float[Array, ""]:
             return jnp.sqrt(jnp.sum(metric_diag(x) * v * v))
 
-        def residuals(x: Float[Array, " K"]) -> Float[Array, " M"]:
-            return residual_fn(x)
-
-        # Initial Jacobian + lambda anchor (horizontal Gram scale).
-        r0 = residuals(theta_flat)
-        J0 = jax.jacfwd(residuals)(theta_flat)  # (M, K)
-        Jh0 = project_jacobian(theta_flat, J0)
-        lam0 = 1e-3 * jnp.sqrt(jnp.sum((Jh0.T @ Jh0) ** 2))
-        lam0 = jnp.maximum(lam0, 1e-12)
-        lam0 = jnp.maximum(lam0, lam_floor)
-
         eye = jnp.eye(K)
+        # #124 (PR B): static two-argument dispatch. ``args is None`` is
+        # decided eagerly here, so the legacy one-argument contract is
+        # byte-identical to the pre-#124 behaviour.
+        two_arg = args is not None
 
-        def cond_fun(carry: Any) -> Any:
-            x, lam, step, done = carry
-            del x, lam
-            return jnp.logical_and(step < self.max_steps, jnp.logical_not(done))
+        def _solve(
+            theta0_flat: Float[Array, " K"], args_in: Any
+        ) -> tuple[Any, Any, Any, Any]:
+            """Pure solve core in ``(theta0_flat, args_in)``.
 
-        def body_fun(carry: Any) -> Any:
-            x, lam, step, done = carry
-            del done
-            r = residuals(x)
-            cost = jnp.sum(r * r)
-            J = jax.jacfwd(residuals)(x)  # (M, K) ambient
-            Jh = project_jacobian(x, J)  # (M, K) horizontal
-            g_tan = Jh.T @ r  # (K,) horizontal gradient
-            A = Jh.T @ Jh  # (K, K) horizontal Gram
+            On the legacy path it is called eagerly with ``args_in=None``
+            (the empty pytree) -- the exact pre-#124 op sequence. On the
+            args path one ``jax.jit(_solve)`` per kernel identity is
+            memoised in ``_TRACED_SOLVE_CACHE``, so the residual kernel
+            (and the user's psi inside it) traces once and fresh
+            same-structure ``args`` ride the compiled solve.
+            """
 
-            # LM solve on the horizontal Gram with the gauge floor folded
-            # into lam. The step d is horizontal by construction; project
-            # once more to clean numerical residue (red-team R11).
-            d_raw = jnp.linalg.solve(A + lam * eye, -g_tan)
-            d = project_flat(x, d_raw)
-            x_new = retract(x, d)
-            r_new = residuals(x_new)
-            cost_new = jnp.sum(r_new * r_new)
+            def residuals(x: Float[Array, " K"]) -> Float[Array, " M"]:
+                if two_arg:
+                    return residual_fn(x, args_in)
+                return residual_fn(x)
 
-            improved = cost_new < cost
-            x_out = jnp.where(improved, x_new, x)
-            lam_decreased = jnp.maximum(jnp.maximum(1e-12, lam_floor), 0.5 * lam)
-            lam_out = jnp.where(improved, lam_decreased, 2.0 * lam)
+            # Initial Jacobian + lambda anchor (horizontal Gram scale).
+            r0 = residuals(theta0_flat)
+            J0 = jax.jacfwd(residuals)(theta0_flat)  # (M, K)
+            Jh0 = project_jacobian(theta0_flat, J0)
+            lam0 = 1e-3 * jnp.sqrt(jnp.sum((Jh0.T @ Jh0) ** 2))
+            lam0 = jnp.maximum(lam0, 1e-12)
+            lam0 = jnp.maximum(lam0, lam_floor)
 
-            # Convergence (two complementary criteria, both on the
-            # HORIZONTAL geometry so a gauge-wandering iterate cannot
-            # certify falsely; red-team R9):
-            #   1. ||g_h||_g < atol + rtol * ||r||   (stationarity)
-            #   2. accepted ||d_h||_g < atol + rtol * ||x||_g   (small step)
-            r_acc = jnp.where(improved, r_new, r)
-            r_norm = jnp.sqrt(jnp.sum(r_acc * r_acc))
-            g_norm = riem_norm(x_out, g_tan)
-            grad_ok = g_norm < (self.atol + self.rtol * r_norm)
+            def cond_fun(carry: Any) -> Any:
+                x, lam, step, done = carry
+                del x, lam
+                return jnp.logical_and(step < self.max_steps, jnp.logical_not(done))
 
-            step_norm = riem_norm(x, d)
-            x_norm = riem_norm(x, x)
-            step_ok = jnp.logical_and(
-                improved, step_norm < (self.atol + self.rtol * x_norm)
+            def body_fun(carry: Any) -> Any:
+                x, lam, step, done = carry
+                del done
+                r = residuals(x)
+                cost = jnp.sum(r * r)
+                J = jax.jacfwd(residuals)(x)  # (M, K) ambient
+                Jh = project_jacobian(x, J)  # (M, K) horizontal
+                g_tan = Jh.T @ r  # (K,) horizontal gradient
+                A = Jh.T @ Jh  # (K, K) horizontal Gram
+
+                # LM solve on the horizontal Gram with the gauge floor folded
+                # into lam. The step d is horizontal by construction; project
+                # once more to clean numerical residue (red-team R11).
+                d_raw = jnp.linalg.solve(A + lam * eye, -g_tan)
+                d = project_flat(x, d_raw)
+                x_new = retract(x, d)
+                r_new = residuals(x_new)
+                cost_new = jnp.sum(r_new * r_new)
+
+                improved = cost_new < cost
+                x_out = jnp.where(improved, x_new, x)
+                lam_decreased = jnp.maximum(jnp.maximum(1e-12, lam_floor), 0.5 * lam)
+                lam_out = jnp.where(improved, lam_decreased, 2.0 * lam)
+
+                # Convergence (two complementary criteria, both on the
+                # HORIZONTAL geometry so a gauge-wandering iterate cannot
+                # certify falsely; red-team R9):
+                #   1. ||g_h||_g < atol + rtol * ||r||   (stationarity)
+                #   2. accepted ||d_h||_g < atol + rtol * ||x||_g (small step)
+                r_acc = jnp.where(improved, r_new, r)
+                r_norm = jnp.sqrt(jnp.sum(r_acc * r_acc))
+                g_norm = riem_norm(x_out, g_tan)
+                grad_ok = g_norm < (self.atol + self.rtol * r_norm)
+
+                step_norm = riem_norm(x, d)
+                x_norm = riem_norm(x, x)
+                step_ok = jnp.logical_and(
+                    improved, step_norm < (self.atol + self.rtol * x_norm)
+                )
+
+                converged = jnp.logical_or(grad_ok, step_ok)
+                return (x_out, lam_out, step + 1, converged)
+
+            init_carry = (theta0_flat, lam0, jnp.asarray(0), jnp.asarray(False))
+            x_final, _lam, steps, done = jax.lax.while_loop(
+                cond_fun, body_fun, init_carry
             )
 
-            converged = jnp.logical_or(grad_ok, step_ok)
-            return (x_out, lam_out, step + 1, converged)
+            r_final = residuals(x_final)
+            final_objective = 0.5 * jnp.sum(r_final * r_final)
+            del r0  # only used to seed the jacfwd trace shape
+            return x_final, steps, done, final_objective
 
-        init_carry = (theta_flat, lam0, jnp.asarray(0), jnp.asarray(False))
-        x_final, _lam, steps, done = jax.lax.while_loop(cond_fun, body_fun, init_carry)
+        if not two_arg:
+            # Legacy contract: eager call, while_loop traced per call --
+            # the exact pre-#124 behaviour.
+            x_final, steps, done, final_objective = _solve(theta_flat, None)
+        else:
+            cache_key = (id(residual_fn), self, manifold_spec)
+            solve_jit = _TRACED_SOLVE_CACHE.get(cache_key)
+            if solve_jit is None:
+                solve_jit = jax.jit(_solve)
+                _TRACED_SOLVE_CACHE[cache_key] = solve_jit
+                # Evict when the kernel is GC'd; the key tuple is captured
+                # by value so the finalize does not keep the kernel alive.
+                weakref.finalize(residual_fn, _TRACED_SOLVE_CACHE.pop, cache_key, None)
+            x_final, steps, done, final_objective = solve_jit(theta_flat, args)
 
-        r_final = residuals(x_final)
-        final_objective = 0.5 * jnp.sum(r_final * r_final)
-
-        # Status: under jit these are traced; eagerly they are concrete.
+        # Status: under jit these are traced; eagerly (including after the
+        # memoised jitted solve, whose outputs are concrete) they are
+        # concrete.
         try:
             done_concrete = bool(done)
             status = "converged" if done_concrete else "max_iterations"
         except (jax.errors.TracerBoolConversionError, TypeError):
             status = "traced"
-
-        del r0  # only used to seed the jacfwd trace shape
         # Manifold-aware unflatten so non-scalar leaves are reshaped to
         # their ambient_shape (red-team R25). For all-scalar trees this is
         # byte-identical to the v1 unflatten (every ambient_shape == ()).

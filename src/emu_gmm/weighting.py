@@ -40,8 +40,9 @@ outer loop should follow the same pattern.
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, cast
 
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
@@ -365,6 +366,8 @@ class IteratedWeighting:
         cu_residual_fn: Any,
         apply_ridge: Any,
         optimizer: Optimizer,
+        fixed_kernel: Any = None,
+        chol_kernel: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo, str]:
         """Drive the outer iterated-GMM loop in pure Python.
 
@@ -399,6 +402,25 @@ class IteratedWeighting:
         optimizer
             The user's :class:`~emu_gmm.types.Optimizer`. Each inner
             Fixed-weight solve is delegated to it.
+        fixed_kernel, chol_kernel
+            Optional #124 (PR B) traced-argument kernels supplied by
+            :func:`emu_gmm.build_estimator` when the ported surface
+            applies. ``fixed_kernel(theta_flat, (measure, L0))`` is the
+            Fixed-weight whitened residual with the anchor's Cholesky
+            factor ``L0`` riding as a *traced leaf*;
+            ``chol_kernel(theta_flat, measure)`` is the jitted V-refresh
+            ``chol(ridge(V(theta_k)))``. When both are supplied AND the
+            optimiser exposes the ``args`` channel, every inner solve
+            threads ``args=(measure, L0_k)`` through the single
+            stable-identity ``fixed_kernel`` --- so all outer steps, and
+            repeated fits with fresh same-structure measures, share ONE
+            trace instead of rebuilding a fresh ``Fixed`` closure per
+            outer step (which retraced the optimiser every step).
+            ``None`` (the default, and what an estimator built before
+            PR B passes) preserves the legacy ``make_residual_fn``
+            pathway bit-for-bit; the kwargs are keyword-only with
+            defaults so third-party callers of the OLD signature are
+            unaffected.
 
         Termination
         -----------
@@ -440,18 +462,64 @@ class IteratedWeighting:
         # floor so the absolute test still triggers when |theta_k| -> 0.
         rescale_eps = 1e-12
 
-        for _k in range(int(self.weighting_iterations)):
-            theta_k = params_mod.unflatten_params(theta_k_flat, treedef)
-            # Refresh V at the current theta_k and apply the *anchored* ridge
-            # so the inner Fixed-weight surface uses the same tau the rest of
-            # the framework does. Then freeze a Fixed-weight closure at the
-            # resulting Cholesky anchor for the inner solve.
-            V_k = covariance.covariance(model, theta_k, measure)
-            V_star_k = apply_ridge(V_k)
-            fixed_k = Fixed.from_V0(V_star_k)
-            inner_residual = make_residual_fn(fixed_k)
+        # #124 (PR B): take the traced-argument path only when the
+        # estimator supplied BOTH kernels and the optimiser actually
+        # exposes the ``args`` channel. The capability probe here is
+        # defence in depth -- :func:`emu_gmm.build_estimator` gates on
+        # ``_supports_args`` before passing the kernels -- so a direct
+        # caller handing kernels to a two-argument optimiser falls back
+        # to the legacy closure pathway instead of crashing. Local
+        # import: ``emu_gmm.optimizer`` does not import this module, but
+        # keeping the dependency call-time avoids ordering surprises in
+        # ``emu_gmm/__init__``.
+        from emu_gmm.optimizer import _supports_args
 
-            theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
+        use_args_path = (
+            fixed_kernel is not None
+            and chol_kernel is not None
+            and _supports_args(optimizer)
+        )
+        if use_args_path:
+            # Normalise away the WEAK dtype of the factory-flattened
+            # ``theta_init_flat`` (``~float64``): the optimiser returns
+            # strong-typed arrays, so without this the step-1 trace
+            # signature differs from step 2+ and the kernels retrace
+            # exactly once mid-loop (jit caches key on avals INCLUDING
+            # weak_type). ``convert_element_type`` to the same dtype is
+            # the documented way to drop weak typing; values are
+            # untouched.
+            theta_k_flat = jax.lax.convert_element_type(
+                theta_k_flat, theta_k_flat.dtype
+            )
+
+        for _k in range(int(self.weighting_iterations)):
+            if use_args_path:
+                # V-refresh through the factory's jitted kernel: the
+                # anchor L0_k = chol(ridge(V(theta_k))) comes back as a
+                # concrete array, then rides ``args=(measure, L0_k)``
+                # into the stable-identity Fixed-weight kernel. All
+                # outer steps (and repeated fits with fresh
+                # same-structure measures) share the kernels' traces.
+                L0_k = chol_kernel(theta_k_flat, measure)
+                # ``args=`` is not part of the v1 Optimizer protocol;
+                # ``use_args_path`` has already probed for it (mirrors
+                # the estimator's cast on its traced branch).
+                theta_next_flat, info_k = cast(Any, optimizer)(
+                    fixed_kernel, theta_k_flat, args=(measure, L0_k)
+                )
+            else:
+                theta_k = params_mod.unflatten_params(theta_k_flat, treedef)
+                # Refresh V at the current theta_k and apply the *anchored*
+                # ridge so the inner Fixed-weight surface uses the same tau
+                # the rest of the framework does. Then freeze a Fixed-weight
+                # closure at the resulting Cholesky anchor for the inner
+                # solve.
+                V_k = covariance.covariance(model, theta_k, measure)
+                V_star_k = apply_ridge(V_k)
+                fixed_k = Fixed.from_V0(V_star_k)
+                inner_residual = make_residual_fn(fixed_k)
+
+                theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
             last_info = info_k
             # Inspect inner-solve status. ``"traced"`` is the placeholder
             # returned under jit (concrete status is not available); we
