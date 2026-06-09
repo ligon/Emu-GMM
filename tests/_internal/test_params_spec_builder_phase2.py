@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
@@ -45,7 +46,9 @@ class _ProductParams:
     """A:(5,K) PSDFixedRank matrix leaf + phi:() scalar leaf."""
 
     A: ManifoldLeaf
-    phi: float
+    # The fixtures pass a 0-d jnp array (the v1 scalar-leaf form);
+    # ``float`` alone made mypy reject the constructor call (#122).
+    phi: float | jax.Array
 
 
 def _make_product(K: int = 2, seed: int = 0) -> _ProductParams:

@@ -67,7 +67,7 @@ try:
     EMU_AVAILABLE = True
     EMU_IMPORT_ERROR = None
 except Exception as exc:
-    EmuPSDFixedRank = None
+    EmuPSDFixedRank = None  # type: ignore[assignment,misc]
     EMU_AVAILABLE = False
     EMU_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
@@ -166,8 +166,9 @@ def _call_emu(
     Y: np.ndarray,
 ) -> Any:
     """Invoke the emu_gmm operation, accepting plausible method names."""
+    fn: Callable | None
     if op == "projection":
-        fn: Callable = emu_manifold.projection
+        fn = emu_manifold.projection
         return fn(X, ambient)
     if op == "retraction":
         fn = emu_manifold.retraction

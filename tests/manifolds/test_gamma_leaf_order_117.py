@@ -150,25 +150,30 @@ class TestFieldOrderAgreement:
 # ---------------------------------------------------------------------------
 def _dummy_result(theta_hat) -> EstimationResult:
     """An EstimationResult with only the fields _gamma_leaf touches."""
+    from typing import Any, cast
+
     from emu_gmm._internal.params import manifold_spec_from_params
 
+    # Fields _gamma_leaf never reads are stubbed with None; cast keeps the
+    # plain-dataclass constructor honest for mypy without inventing values.
+    none = cast(Any, None)
     return EstimationResult(
         theta_hat=theta_hat,
         Sigma_theta=None,
         V_X=None,
-        J_stat=None,
+        J_stat=none,
         J_dof=0,
-        J_pvalue=None,
-        J_pvalue_adjusted=None,
+        J_pvalue=none,
+        J_pvalue_adjusted=none,
         converged=True,
         iterations=0,
         theta_init=theta_hat,
-        measure=None,
-        covariance=None,
-        weighting=None,
+        measure=none,
+        covariance=none,
+        weighting=none,
         regularization=None,
-        diagnostics=None,
-        labels=None,
+        diagnostics=none,
+        labels=none,
         manifold_spec=manifold_spec_from_params(theta_hat),
     )
 

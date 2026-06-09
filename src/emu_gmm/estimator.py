@@ -68,6 +68,7 @@ from emu_gmm.diagnostics import (
     regularization_adjusted_pvalue,
 )
 from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.optimizer import RiemannianOptimizer
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.manifolds.spec import ManifoldSpec
 from emu_gmm.optimizer import optimistix_lm
@@ -160,7 +161,7 @@ def _is_riemannian_optimizer(optimizer: Any) -> bool:
 
 def _resolve_optimizer(
     manifold_spec: ManifoldSpec,
-    user_optimizer: Optimizer | None,
+    user_optimizer: Optimizer | RiemannianOptimizer | None,
 ) -> tuple[Any, str]:
     """Resolve the optimiser and the dispatch mode (``"v1"`` / ``"v2"``).
 
@@ -257,7 +258,7 @@ def build_estimator(
     covariance: CovarianceStrategy,
     weighting: WeightingStrategy | None = None,
     regularization: RegularizationStrategy | None = None,
-    optimizer: Optimizer | None = None,
+    optimizer: Optimizer | RiemannianOptimizer | None = None,
     parameters: Any = None,
     theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
@@ -810,7 +811,12 @@ def build_estimator(
             # 2-tuple raises on non-scalar ManifoldLeaf blocks (R19).
             theta_hat_flat, _, _ = params_mod.flatten_params_with_spec(theta_hat_pytree)
         else:
-            theta_hat_flat, optimizer_info = optimizer(residual_fn, theta_init_flat)
+            # dispatch_mode == "v1" guarantees a v1-style Optimizer here;
+            # mypy cannot see the _resolve_optimizer narrowing, so mirror
+            # the v2 branch's cast (#122).
+            theta_hat_flat, optimizer_info = cast(Any, optimizer)(
+                residual_fn, theta_init_flat
+            )
 
         theta_hat = params_mod.unflatten_params(
             theta_hat_flat, treedef, manifold_spec=unflatten_spec
@@ -955,7 +961,7 @@ def estimate(
     covariance: CovarianceStrategy,
     weighting: WeightingStrategy | None = None,
     regularization: RegularizationStrategy | None = None,
-    optimizer: Optimizer | None = None,
+    optimizer: Optimizer | RiemannianOptimizer | None = None,
     parameters: Any = None,
     theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,

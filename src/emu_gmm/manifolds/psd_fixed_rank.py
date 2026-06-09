@@ -69,7 +69,11 @@ class PSDFixedRank:
             raise ValueError(f"PSDFixedRank(n={n}, k={k}): expected 1 <= k <= n")
         self._n: int = int(n)
         self._k: int = int(k)
-        self.ambient_shape: tuple[int, int] = (self._n, self._k)
+        # Annotated at the ManifoldParam protocol's width: protocol
+        # *attribute* members are invariant under mypy, so the narrower
+        # ``tuple[int, int]`` made PSDFixedRank fail isinstance-level
+        # protocol conformance (#122). The value is still always (n, k).
+        self.ambient_shape: tuple[int, ...] = (self._n, self._k)
         self.dimension: int = self._n * self._k
         self.gauge_dim: int = self._k * (self._k - 1) // 2
 
