@@ -449,6 +449,48 @@ class TestArgumentValidation:
         assert float(jnp.max(result.J_boot)) < 1e-5
         assert result.J_observed < 1e-5
 
+    def test_analytical_measure_raises_typed_error(self):
+        """#118: an AnalyticalMeasure (no per-observation contributions)
+        gets a typed TypeError with the api-sketch's promised clear
+        message, not a bare AttributeError from inside the helper."""
+        from emu_gmm.measures.analytical import AnalyticalMeasure
+
+        analytical = AnalyticalMeasure(
+            expectation_fn=lambda psi, theta: jnp.array([theta.a])
+        )
+        _measure, covariance, theta_0 = _build_h0_setup(seed=25, N=20, n_clusters=2)
+        with pytest.raises(TypeError, match="moment_contributions"):
+            moment_wild_bootstrap(
+                _residual_psi,
+                theta_0,
+                analytical,
+                covariance,
+                n_boot=5,
+                key=jax.random.PRNGKey(22),
+            )
+
+    def test_synthetic_measure_raises_typed_error(self):
+        """#118: a SyntheticMeasure has contributions but no mask/weights;
+        the boundary is rejected with a clear message rather than an
+        opaque AttributeError on ``measure.mask``."""
+        from emu_gmm.measures.synthetic import SyntheticMeasure
+
+        synthetic = SyntheticMeasure(
+            key=jax.random.PRNGKey(0),
+            n_sim=16,
+            sampler=lambda key, theta: jax.random.normal(key, (16, 1)),
+        )
+        _measure, covariance, theta_0 = _build_h0_setup(seed=26, N=20, n_clusters=2)
+        with pytest.raises(TypeError, match="mask and weights"):
+            moment_wild_bootstrap(
+                _residual_psi,
+                theta_0,
+                synthetic,
+                covariance,
+                n_boot=5,
+                key=jax.random.PRNGKey(23),
+            )
+
 
 class TestReExport:
     """The public surface is re-exported at the package root."""
