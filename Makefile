@@ -81,16 +81,21 @@ publish:
 # Tags are local to this mirror: pull them from the source repo with
 # `git fetch coder --tags`. `make publish` remains a separate, explicit
 # step.
+# NOTE: the bump runs as a recipe SHELL line, not $(eval $(shell ...)).
+# GNU make expands an entire recipe (including $(shell ...)) before
+# executing its first line, so an eval-style bump fires BEFORE the
+# clean-tree guard and trips it on its own modification. The same
+# landmine exists in ../ManifoldGMM's release target.
 BUMP ?= patch
 GATE ?= check
 release: $(GATE)
 	@git diff --quiet && git diff --cached --quiet || \
 		{ echo "release: working tree not clean; commit or stash first"; exit 1; }
-	$(eval NEW_VER := $(shell $(POETRY) version $(BUMP) -s))
-	git add pyproject.toml
-	git commit -m "Bump version to $(NEW_VER)"
-	git tag -a v$(NEW_VER) -m "emu-gmm v$(NEW_VER)"
-	$(POETRY) build
-	@echo "Tagged v$(NEW_VER) and built dist/ at that version."
-	@echo "Publish (if desired) with 'make publish'; fetch the tag from"
-	@echo "the source repo with 'git fetch coder --tags'."
+	@NEW_VER=$$($(POETRY) version $(BUMP) -s) && \
+	git add pyproject.toml && \
+	git commit -m "Bump version to $$NEW_VER" && \
+	git tag -a v$$NEW_VER -m "emu-gmm v$$NEW_VER" && \
+	$(POETRY) build && \
+	echo "Tagged v$$NEW_VER and built dist/ at that version." && \
+	echo "Publish (if desired) with 'make publish'; fetch the tag from" && \
+	echo "the source repo with 'git fetch coder --tags'."
