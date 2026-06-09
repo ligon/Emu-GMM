@@ -1,0 +1,184 @@
+#+TITLE: Critical Review: emu-gmm Design Document
+#+AUTHOR: Sue (for Ethan Ligon)
+#+DATE: 2026-06-09
+
+Read =docs/design.org= twice and verified the parts that depend on the code
+rather than the prose. Honest critical read, biggest issues first. Substantive
+econometrics is separated from architecture/framing from smaller points, with a
+calibrating note on what is genuinely strong at the end.
+
+* Substantive (econometric) issues
+
+** 1. The marquee application likely violates the one assumption the missing-data machinery rests on
+The whole per-coordinate / available-pairs apparatus is honest that it only
+carries the standard results under *MCAR* (\S5 Open Questions, item 1;
+design.org:351). But the flagship example is the Hansen--Singleton multi-asset
+Euler equation, and the motivating missingness is "asset returns for
+non-holders" (design.org:430). That is the textbook /limited-participation/
+problem, and it is close to the worst case for MCAR: whether household \(i\)
+holds asset \(j\) is correlated with wealth/constraints, which is correlated
+with the SDF, hence with \(\psi_j\) itself. So \(d_{ij}\) is correlated with
+\(\psi_j\) (MNAR), and the per-coordinate mean
+\(\frac{1}{N_j}\sum_i d_{ij} w_i \psi_j\) converges to
+\(\mathbb{E}[\psi_j \mid \text{holds } j]\), not \(\mathbb{E}[\psi_j]\). For a
+non-holder the asset-\(j\) FOC is an /inequality/, so the equality moment does
+not even hold conditionally.
+
+This is not a code bug; it is that the convenience feature (drop per coordinate,
+not per row) *silently changes the estimand exactly in the use case the doc
+leads with*. The MCAR caveat is doing very heavy lifting and is buried in "Open
+Theoretical Questions." Promote it to the front and either (a) pick a flagship
+example where MCAR is defensible, or (b) say plainly that the Euler/non-holder
+case needs a participation correction the framework does not provide.
+
+** 2. The regularized regime is the default under any real missingness, not an edge case
+Available-pairs \(V_X\) is not PSD in finite samples (design.org:127), so
+=DiagonalTikhonov= fires, and a binding \(\tau\) turns the \(J\) limit into a
+generalized \(\chi^2\) handled by Welch--Satterthwaite (design.org:339-341).
+That is all correct and honest. But the implication is under-stated: in the
+target data (CEX with non-holders, hence genuine missingness), the clean
+\(\chi^2_{M-K}\) is the /exception/ and the moment-matched approximation is the
+/rule/. The headline inferential output is, generically, the approximate one.
+State this up front, with some sense of how often \(\tau\) actually binds on
+realistic data, rather than leaving it in \S5.
+
+** 3. Verified code-level asymmetry: the J-stat is adjusted for regularization but the standard errors are not
+Checked the source. =Sigma_theta = (G'(V*)^{-1}G)^{-1}= using the /regularized/
+weighting, via =info_local = Z'Z=, =Z = L^{-1}G=, =L = chol(V*)=
+(estimator.py:703-711). This is inverse-information, *not a sandwich*. It equals
+the true asymptotic variance only when \(\Lambda = V(\hat\theta)^{-1}\) exactly,
+i.e. CU/iterated at convergence with \(\tau = 0\). It is mis-stated whenever:
+
+- \(\tau\) binds (the generic missing-data case from point 2) :: the correct
+  meat is \(G'\Lambda V \Lambda G\) with the /unregularized/ \(V\), and
+  \(\Lambda V \neq I\).
+- weighting is =Identity= (offered "for diagnostic runs," design.org:301) or
+  =Fixed(V0)= / two-step where \(V_0 \neq V(\hat\theta_2)\).
+
+So the same \(\tau\) that triggers the careful Welch--Satterthwaite adjustment
+on \(J\) (estimator.py:725-729) gets /no/ corresponding correction on the SEs,
+even though the unregularized =V_local= is right there in scope at the SE site
+(estimator.py:726). And =CLAUDE.md= / =implementation-plan= call
+\((G'\Lambda G)^{-1}\) "the natural-scale sandwich," which is a misnomer that
+may be masking this. Every first-class analytic SE (=standard_errors=,
+=functional_se=, =gamma_se=, =eigenvalue_se=, =coef_table=) inherits it. The
+cluster bootstrap is the escape hatch, but nothing flags when the analytic
+default is silently invalid. This is the most concrete "fix or document" item.
+
+** 4. CU-as-default sits uneasily with the Gauss-Newton/LM solver, precisely under the alternative the J-test cares about
+Framing \(Q = \lVert y(\theta)\rVert^2\), \(y = L(\theta)^{-1} m(\theta)\) and
+handing it to Levenberg--Marquardt is elegant, and \S4 is right that JAX keeps
+the exact /gradient/ \(2J'y\) including \(\partial L^{-1}/\partial\theta\) (so
+you are not silently dropping \(\nabla_\theta V\)). But LM's /step/ uses the
+Gauss-Newton Hessian \(J'J\), which omits \(2\sum_i y_i \nabla^2 y_i\). That
+term vanishes only as \(y \to 0\), i.e. under correct specification. Under
+overidentification with any misspecification (the regime where the J-test is
+interesting), \(y(\hat\theta)\) is bounded away from 0 and the omitted curvature
+is exactly the CU \(L^{-1}\) curvature \S4 emphasizes. So the solver's curvature
+model is least accurate in the CU-specific term the design is proud of keeping.
+It still converges to a stationary point of the exact \(Q\), but step quality
+and basin behavior can degrade under interesting alternatives. Worth checking
+whether CU should use a genuine trust region on \(Q\) with the full Hessian
+(which \S4 essentially derives) rather than GN.
+
+** 5. Fixed-\(\tau\) anchoring can break the CU solve mid-search
+\(\tau\) is chosen once at \(\theta_\text{init}\) and held fixed "for cross-fit
+comparability" and smoothness (design.org:319). But under CU, \(V_\mu(\theta)\)
+varies over \(\theta\) and can become /more/ nearly-singular than at the anchor,
+especially far from the optimum where CU drives \(V\) toward the moments'
+degeneracies. A \(\tau\) sized for PD-ness at \(\theta_\text{init}\) gives no PD
+guarantee elsewhere, so the optimizer can step into a region where
+\(V^\star(\theta)\) fails Cholesky and the criterion returns NaN. You have
+chosen smoothness over guaranteed-PD-everywhere; that is a legitimate choice,
+but the CU failure mode (NaN mid-solve) is not grappled with, and it interacts
+with points 3 and 4.
+
+* Architecture / framing
+
+** 6. "Variance is orthogonal to integration" is composability, not independence
+True and valuable as a statement about /inputs/: you can swap
+=CovarianceStrategy= without touching the =Measure=, and the
+residual/point-estimate path is genuinely design-invariant (design.org:145, a
+real win). But the /outputs/ under the default CU weighting (and under
+two-step) depend on the covariance strategy: \(\hat\theta\), \(J\), and the SEs
+are all functions of \(V\). The headline sentence reads like a claim of
+statistical orthogonality. Recast it as input-separability / independent
+substitutability and keep the strong claim ("only \(V_X\) changes,
+\(\mathbb{E}_\mu[\psi]\) does not") where it is actually true.
+
+** 7. The "one measure \(\mathbb{E}_\mu\)" thesis has an asterisk on its most important instance
+The flagship =EmpiricalMeasure= is explicitly an \(M\)-tuple of coordinate
+measures, "not a strict measure-theoretic object" (design.org:68, 88). And the
+covariance is irreducibly /joint/: \([V_X]_{jk}\) needs the rows where both
+\(j,k\) are observed, so the per-coordinate-measure picture is clean only on the
+diagonal. The doc hedges this honestly but quietly. For your target reader
+(mathematically literate economists), make the hedge loud and up front, and sell
+the unifying claim as "one polymorphic /operator interface/" rather than "one
+measure," so the elegant frame does not overpromise.
+
+** 8. The doc cannot be used as a v1 contract without cross-referencing three other files
+It interleaves settled v1 architecture, deferred v2/v3
+(=ReplicateWeightCovariance=, SMM matching, Higham/eigen-floor regularizers,
+Davies/Imhof), prospective sketches (=ParameterLaw=), and open theory, with
+inline status tags but no single "what is actually in v1" boundary. Given how
+much you care about separation of concerns, the document itself would benefit
+from that separation: a short v1-contract surface vs roadmap vs theory-debt.
+Right now a reader has to hold all 439 lines plus =CLAUDE.md= plus
+=implementation-plan.org= plus =api-sketch.org= to know what is real.
+
+* Smaller / verify-later
+
+- Notation collision on \(\mathcal{I}\) and \(V\) :: \S1 defines \(V(\theta)\)
+  as the /per-observation/ variance (design.org:23-24) and
+  \(\mathcal{I} = G'\Lambda G\) as the per-observation (Cramer-Rao-analogue)
+  information, but \S5 uses \(V_X\) = variance /of the mean/ (\(O(1/N)\)) and the
+  same \(\mathcal{I}\) symbol becomes the full-sample precision
+  \(\Sigma_\theta^{-1}\). Same letters, factor-of-\(N\) different meanings. The
+  "sample-level convention" note (design.org:25) flags the \(V\) side; the
+  \(\mathcal{I}\) side is not disambiguated and an implementer porting from
+  Hansen/Hayashi will trip.
+- Diagonal-V dispatch is a hard threshold inside the regularizer
+  (design.org:321) :: the \(10^{-12}\) off-diagonal trigger means two
+  nearly-diagonal \(V\)'s straddling the boundary get different equivariance
+  structure and different \(V^\star\). It is chosen once per estimation so the
+  /surface/ stays smooth within a solve, but the map \(V \mapsto V^\star\) jumps
+  /across/ estimations. You argue it only triggers in analytical setups; a
+  weakly-correlated empirical \(V\) could trip it too. Low priority, but it is a
+  discontinuity in an object you otherwise work hard to keep smooth.
+- The worked example sidesteps the headline synthetic capability :: the bundled
+  =SyntheticMeasure= sampler is \(\theta\)-independent (=del theta=,
+  design.org:194), so the differentiable-\(\theta\)-dependent-simulator path (the
+  whole reason for CRN + reparameterization in \S4) is asserted but never
+  exercised by the shipped example. With SMM matching deferred to v2, the "three
+  measures, one model" triptych in v1 is really "empirical estimates, analytical
+  diagnoses, synthetic round-trips." Honest, but the symmetry oversells current
+  capability.
+- \S6 both-sided label fidelity is aspirational, not realized :: it is stated as
+  a design goal, then admits "the v1 implementation drops them" (Variables labels
+  regenerated positionally, design.org:391). Fine to track as an issue; just do
+  not present it as done.
+
+* What is genuinely strong (so the above is calibrated)
+
+The separation of integration from variance, with the residual path provably
+design-invariant, is a real architectural win and the cleanest part of the
+design. The per-pair \(H_{c,jk}\) / \(N_j N_k\) overlap discipline and the
+*signed-spectrum* feasibility test for regularization (design.org:313, reject
+the SVD condition number because it is sign-blind) are subtle, correct, and
+clearly learned the hard way. The named-tensor dual-axis convention and the
+double-=where= NaN-safety reasoning (in-domain mean sentinel, not zero, to avoid
+\(0 \cdot \infty\) cotangents) are careful JAX hygiene most people get wrong.
+The analytical round-trip as an /a posteriori/ identification test is a genuinely
+nice idea. And the scope discipline (=ParameterLaw= explicitly gated, "file an
+issue, do not reinvent the criterion") matches how this should be built.
+
+* If I had to pick three things to act on
+
+1. Fix or explicitly document the SE story (point 3): either sandwich when
+   \(\Lambda \neq V^{-1}\) / \(\tau\) binds, or surface a flag on
+   =EstimationResult= that the analytic SEs are only valid under optimal
+   weighting at \(\tau = 0\) and point to the bootstrap otherwise.
+2. Move the MCAR limitation and the participation/estimand problem (point 1) out
+   of Open Questions and into the framing, and reconsider the flagship example.
+3. Decide the CU + LM + fixed-\(\tau\) interaction (points 4-5) deliberately,
+   since all three compound under the same overID-with-missingness regime.
