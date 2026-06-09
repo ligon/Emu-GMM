@@ -406,7 +406,13 @@ class DesignAwareCovariance:
         the inline :math:`V_{TS}` cross pass. Because :math:`z_T` and
         :math:`z_S` live in different arms, build ``sampling`` with
         **stratum-level** clustering to capture the within-stratum cross-arm
-        term of eq:offdiag.
+        term of eq:offdiag. Its ``dof_correction`` flag is likewise
+        **inherited by the cross pass** (#119, resolved convention): with
+        ``dof_correction=True`` every cross pair :math:`(j, k)` is inflated
+        by the per-pair :math:`G_{jk}/(G_{jk}-1)` counted over the sampling
+        clusters supporting both coordinates, exactly as inside
+        :math:`V_{SS}`. The design FPC, by contrast, stays inside
+        :math:`V_{TT}` only.
     design_moment_mask : (M,) jax array of floats
         ``1.0`` for design-driven (:math:`z_T`) coordinates, ``0.0`` for
         sampled (:math:`z_S`) coordinates. Traced leaf.
@@ -579,6 +585,18 @@ class DesignAwareCovariance:
             contrib, seg, num_segments=self.sampling.n_clusters
         )  # (n_clusters, M)
         numer_cross = jnp.einsum("cj,ck->jk", cluster_totals, cluster_totals)
+        if self.sampling.dof_correction:
+            # Resolved convention (#119): the cross block INHERITS the
+            # sampling engine's per-pair finite-cluster correction
+            # G_jk/(G_jk-1), with G_jk counted over the sampling clusters
+            # holding an observed unit for BOTH coordinates of the cross
+            # pair -- symmetric with the V_SS treatment and consistent
+            # with the per-pair philosophy of CLAUDE.md commitments 9/10.
+            # Same helper, same mask, same cluster unit as the V_SS
+            # delegate, so the corrected assembly stays internally
+            # consistent; dof_correction=False (the default) leaves this
+            # pass bit-for-bit unchanged.
+            numer_cross = numer_cross * self.sampling._finite_cluster_correction(mask)
         V_cross = _safe_outer_divide(numer_cross, N_j)  # (M, M)
 
         t = (self.design_moment_mask > 0.0).astype(V_cross.dtype)  # (M,) design
