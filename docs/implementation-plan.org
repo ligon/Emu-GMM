@@ -339,15 +339,54 @@ Phase 1 is the only true bottleneck. Phases 2/3/4 can be parallelised by separat
 
 ---
 
-* Section 13: Out of Scope for This Plan
+* Section 13: Phase 9 --- v2 Exit Criteria (the four arcs)
 
-Things the API sketch flags but this plan does not schedule:
+/Added 2026-06-09. Issue-level tracking: GitHub issue #131 and the =v2= milestone./
 
-- /v2 SMM matching/ --- combined empirical + synthetic moment vectors, \((1+1/S)\) inflation, gradient threading through both contexts.
-- /v2 design-aware variance/ --- stratified, replicate-weight (BRR, jackknife, bootstrap), finite-population corrections.
-- /v2 regularisation/ --- eigenvalue-floor, Higham nearest-PSD.
-- /v2 diagnostics taxonomy/ --- the structured identification-failure reports per =design.org= Section 5.4.
-- /v2 quadrature/ --- Gauss-Hermite / Gauss-Legendre engines for =AnalyticalMeasure=.
-- /v2 named-tensor surface/ --- Haliax NamedArrays at the user-facing boundary.
+v2's identity: *design-aware inference on geometrically honest parameter spaces*. The two feature pillars --- the #79/#80 stratified / design-aware covariance ladder and the #12 Riemannian-manifold epic --- are landed. v2 ships when the four arcs below close. Sequencing: Arc 1 first (everything stands on it); Arc 2 is the long pole; Arc 3 mostly waits on Arc 2's evidence; Arc 4 is decidable immediately.
 
-These return to the table after v1 ships and a few real estimations have surfaced what actually needs to come next.
+** Arc 1 --- Trustworthy baseline
+/Exit: =make check= green on a clean checkout, and every status claim in CLAUDE.md, design.org, api-sketch.org, and the migration guide is true./
+
+- Restore quick-check :: #122 (one failing tolerance test + nine mypy errors on clean main).
+- Doc-truth batch :: #129 (the 2026-06-09 conformance-review drift list: the =N_j= symbol, the tau-anchor wording, the "available" regularisers, the Variables-label convention, api-sketch staleness, progress-doc follow-ups).
+- Migration guide :: #54, subsuming the behavioral-diff cluster #14/#15/#16/#17/#19/#20/#21/#22.
+
+** Arc 2 --- The validation pillar
+/Exit: a committed, reproducible repeated-sampling report (#130) demonstrating size, coverage, and J-calibration for the full covariance ladder under genuine missingness, produced by a supported driver --- plus a real-data acceptance test on the empirical path (#128)./
+
+- Enablers :: #125 (=EstimationResult.record()=), #126 (=SyntheticMeasure.with_key()=) --- small and unblocked.
+- Execution model :: #124 (measure as a traced argument through the jit boundary; the architectural fix restoring design.org Section 5's pytree-composability intent), or #123 (structural cache) as the patch-level fallback.
+- Driver :: #114, re-shaped per its thread (stacked per-rep records + separate summarizers; =StudyResult= as Context-style sugar).
+- Supporting :: #113 (sample-level reductions), #115 (CPU defaults), #18 (ManifoldGMM byte-parity check).
+- Step zero :: commit the =/tmp= validation harness under =docs/validation/= now (part of #130).
+
+** Arc 3 --- Inference-tail decisions
+/Exit: each item landed, or re-deferred with a recorded reason./
+
+- Weak identification on the quotient :: #41 (the manifold arc's capstone).
+- Theory companion :: #40 (MCAR-on-quotient positive-definiteness note).
+- Reverse-mode through the solver :: #77 (defer-with-loud-caveat acceptable).
+- Davies/Imhof exact generalised chi-squared :: decide on #130's evidence; close as not-needed if Welch--Satterthwaite calibrates.
+- Test gaps from the conformance review :: the =score_cov_fn= K-statistic path; adaptive + wild bootstrap composition.
+
+** Arc 4 --- Scope discipline (recorded decisions)
+/Exit: the deferred list is a record of choices, not a residue./
+
+- SMM matching :: deferred to v3 as #127 (no consumer pull; the \((1+1/S)\) machinery in =SyntheticCovariance= keeps it cheap to revive).
+- pymanopt backend :: #3 --- recommend closing as /native-only, decided/ (dev-gated cross-check stays).
+- Riemannian TrustRegions :: #9 --- recommend closing (LM verified equivalent on the quotient).
+- Re-deferred to v3 :: =ReplicateWeightCovariance= (BRR / jackknife / bootstrap-weight), the quadrature engine for =AnalyticalMeasure=, =EigenvalueFloor= / Higham nearest-PSD (urgency died when #111 made =DiagonalTikhonov= guarantee PD), and the structured identification-failure taxonomy (design.org Section 5.4).
+
+* Section 14: Out of Scope for This Plan (v3 and beyond)
+
+Recorded deferrals --- see Arc 4 above and the GitHub =v3= milestone for rationale:
+
+- /SMM matching/ (#127) --- combined empirical + synthetic moment vectors, \((1+1/S)\) inflation, gradient threading through both contexts.
+- /ReplicateWeightCovariance/ --- BRR, jackknife, bootstrap-weight variants for federal-survey data.
+- /Alternative regularisers/ --- eigenvalue-floor, Higham nearest-PSD (opt-in alternatives to =DiagonalTikhonov=).
+- /Diagnostics taxonomy/ --- the structured identification-failure reports per =design.org= Section 5.4.
+- /Quadrature/ --- Gauss-Hermite / Gauss-Legendre engines for =AnalyticalMeasure=.
+- /High-gauge-fraction regime/ --- \(k/n > 0.7\) for =PSDFixedRank= (caveated, not supported).
+
+These return to the table when a consumer files a pulling issue.
