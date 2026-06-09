@@ -23,7 +23,10 @@ constructs a =GMM= driver around a =MomentRestriction=.
 | =res.theta_array=                                   | =result.theta_hat= (preserves the user's parameter dataclass type)              |
 | =res.criterion_value=                               | =result.J_stat=                                                                 |
 | =res.cov_matrix=                                    | =result.Sigma_theta= (labelled =haliax.NamedArray=)                             |
-| Manifold-aware =Positive(1, 1)= parameter           | Flat \(\mathbb{R}^K\) (Riemannian manifold for params deferred to v2)           |
+| =MomentRestriction(gi_jax=..., data=..., backend='jax')= | =psi(x, theta)= (=StructuralModel=) + =EmpiricalMeasure(x=...)= --- the restriction object dissolves into the (model, measure) pair |
+| v2 =GMM(moment_func=..., dgp=...)= / =EmpiricalDGP= + =ClusteredSampling= | =EmpiricalMeasure= \(\times\) =ClusteredCovariance= --- see /Cluster-robust path/ below |
+| =DGPClusterRobustWeighting= (hand-rolled)           | not needed: =ClusteredCovariance(cluster_ids=...)= + =ContinuouslyUpdated()= reproduces the adaptive cluster-robust \(\Omega(\theta)^{-1}\); the ridge lives in =DiagonalTikhonov= (see /Cluster-robust path/) |
+| Manifold-aware =Positive(1, 1)= parameter           | landed in v2: wrap the leaf, =ManifoldLeaf(value, Positive(1, 1))= --- or keep the v1 flat reparameterisation (see /Manifold parameters/) |
 
 ** Argument-order convention
 
@@ -220,10 +223,31 @@ at masked-out positions cannot poison =V_X=.
 
 | ManifoldGMM call           | Emu-GMM equivalent             |
 |----------------------------+--------------------------------|
-| =weighting='two_step'=     | =IteratedWeighting(weighting_iterations=..., weighting_tol=...)= (legacy port; CU is the v1 default) |
+| =weighting='two_step'=     | =IteratedWeighting(weighting_iterations=..., weighting_tol=...)= (legacy port; CU is the v1 default). For the /exact/ two-stage idiom see the note below. |
 | =weighting='cu'=           | =ContinuouslyUpdated()=        |
 | =weighting='identity'=     | =Identity()=                   |
+| =IdentityWeighting(n_instruments)= | =Identity()= --- no dimension argument; the moment count is inferred from \(\psi\)'s return (issue #21) |
 | =weighting='fixed', W=...= | =Fixed(V0=...)= or =Fixed.from_V0(...)=. *Note: pass V0, not W.* The framework's whitening factor is \(L_0\) with \(L_0 L_0^\top = V_0\), so the analogue of ManifoldGMM's =W= is =jnp.linalg.inv(V0)=. Positional =Fixed(...)= now raises =TypeError= with a porting hint to prevent the silent W-as-L0 misuse. |
+
+** The exact =two_step=True= idiom (issue #15)
+
+ManifoldGMM's =two_step=True= is literally: an =Identity=-weighted first
+stage, then a =Fixed= second stage at the variance evaluated at the
+first-stage estimate. The verbatim port is two =estimate= calls:
+
+#+BEGIN_SRC python
+stage1 = estimate(model=psi, measure=measure, covariance=cov,
+                  weighting=Identity(), theta_init=theta0)
+V1 = cov.covariance(psi, stage1.theta_hat, measure)
+stage2 = estimate(model=psi, measure=measure, covariance=cov,
+                  weighting=Fixed(V0=V1), theta_init=stage1.theta_hat)
+#+END_SRC
+
+=IteratedWeighting(weighting_iterations=2)= is the supported one-call
+alternative, but it is /not/ bitwise the same idiom: its first inner
+stage weights by \(V(\theta_{init})\) rather than by the identity. The
+two converge to the same place when \(V(\theta_{init})\) is a sensible
+anchor; for pinning legacy ManifoldGMM numbers, use the two-call form.
 
 CU and iterated/two-step weighting are *asymptotically equivalent*
 but not identical in finite samples (=CLAUDE.md=, point 4). Emu-GMM v1
@@ -239,14 +263,52 @@ surfaced via =result.diagnostics= rather than raising.
 | ManifoldGMM =GMMResult=        | Emu-GMM =EstimationResult=                          |
 |--------------------------------+-----------------------------------------------------|
 | =result.theta_array=           | =result.theta_hat= (preserves dataclass)            |
-| =result.criterion_value=       | =result.J_stat= (Python float)                      |
+| =result.theta.components()=    | =result.components()= (or =result.theta.components()=) --- per-leaf ambient tuple in field order |
+| =result.criterion_value=       | =result.J_stat= (0-d JAX scalar; =float(...)= at the eager boundary) |
+| =result.data_criterion_value=  | =result.diagnostics.final_objective_data= (penalty excluded) |
+| =result.degrees_of_freedom=    | =result.J_dof=                                      |
+| =result.converged=             | =result.converged=                                  |
+| =result.two_step=              | (no flag --- the strategy itself is echoed as =result.weighting=) |
+| =result.penalty_info=          | =result.diagnostics.final_objective_full= / =final_objective_data= and =diagnostics.cond_info= (=raw= vs =data_only=) |
 | =result.optimizer_report=      | =result.diagnostics.optimizer_info= (dataclass)     |
 | =result.cov_matrix=            | =result.Sigma_theta= (=haliax.NamedArray=)          |
-| =result.moment_cov=            | =result.V_X= (=haliax.NamedArray=)                  |
-| (computed downstream)          | =result.J_dof=, =result.J_pvalue= (computed inline) |
+| =result.tangent_covariance=    | =result.Sigma_theta= --- in v2 already gauge-aware for manifold parameters (see /Manifold parameters/); =result.standard_errors= for the diagonal |
+| =parameter_labels=('sigma',)=  | =result.labels.param_names= (from your dataclass field names); also the =result.coef_table= index |
+| =result.moment_cov=            | =result.V_X= (=haliax.NamedArray=; note this is the /regularised/ \(V^\star\) at \(\hat\theta\)) |
+| (computed downstream)          | =result.J_dof=, =result.J_pvalue=, =result.J_pvalue_adjusted= (computed inline) |
 
 For DataFrame-ready output: =result.to_pandas()= materialises the
-labelled fields.
+labelled fields; =result.coef_table= is the estimate/SE/t/p table.
+
+* Manifold parameters (landed in v2)
+
+The Riemannian-manifold epic (#12) landed, so the v1 advice "use a flat
+reparameterisation" is now one of /two/ supported options:
+
+- Native manifold leaf (the ManifoldGMM-shaped port) :: wrap the
+  constrained leaf: =ManifoldLeaf(jnp.asarray(0.5), Positive(1, 1))=,
+  =ManifoldLeaf(A, PSDFixedRank(n, k))=; mix freely with scalar fields
+  (the product geometry /is/ the pytree). =estimate= auto-routes to
+  =riemannian_lm()=; no =from_pymanopt= adapter exists or is planned
+  (#3: native-only, decided).
+- Flat reparameterisation (the v1 idiom, issue #14) :: estimate
+  =log_sigma= on \(\mathbb{R}\) and transform back. Still fully
+  supported; for a scalar variance this is often simpler, and SEs for
+  \(\sigma\) follow by the delta method (=result.functional_se=).
+
+Inference on manifold parameters is gauge-aware end-to-end
+(issue #20's first half): =Sigma_theta= is the =pinv_eigvalrule=
+sandwich with exactly \(k(k-1)/2\) gauge directions per =PSDFixedRank=
+leaf dropped /by count/, the dropped dimension is surfaced as
+=diagnostics.gauge_nullspace_dim=, and interpretable SEs on the gauge
+invariants come from =result.eigenvalue_se()= / =result.gamma_se()= /
+=result.functional_se(f)= --- /not/ from per-entry =Y= rows of
+=coef_table=, which are gauge-arbitrary. /Caveat (issue #20, open
+half)/: =diagnostics.cond_info['exclude_gauge']= is still the v1 alias
+of ='raw'= --- it is *not* yet the gauge-projected condition number, so
+do not use it for identification analysis of a =PSDFixedRank= run;
+until #20 lands, derive the quotient condition from the kept spectrum
+of the information matrix.
 
 * Post-estimation inference helpers
 
@@ -350,16 +412,26 @@ result = estimate(
 # iterated outer loop only runs inside the estimator driver.
 #+END_SRC
 
-* What this port does *not* cover (yet, in v1)
+* What this port does *not* cover
 
-These ManifoldGMM features have no v1 Emu-GMM equivalent and are
-deferred to v2+ (see =CLAUDE.md= "Deferred to v2+"):
+Updated 2026-06-09 --- most of the original v1 deferral list has since
+landed:
 
-- =Positive(1, 1)= and other Riemannian parameter spaces. Use a flat
-  reparameterisation (e.g. =log_sigma= rather than =sigma=) in v1.
-- =LoggingTrustRegions= optimiser. Use =optimistix_lm()= (default) or
-  =scipy_lm()=.
-- =StratifiedCovariance=, =ReplicateWeightCovariance=.
+- =Positive(1, 1)= / =PSDFixedRank= / =Product= parameter spaces:
+  *landed* (see /Manifold parameters/ above).
+- =StratifiedCovariance=: *landed* (#79), along with
+  =DesignAwareCovariance= (#80) and =SumCovariance= (two-way
+  clustering).
+- =LoggingTrustRegions= optimiser: *will not be ported* (decision #9,
+  closed): =riemannian_lm()= was verified equivalent to a
+  pymanopt-TrustRegions baseline on the quotient, so a TR backend adds
+  a solver, not a capability. Use =optimistix_lm()= /
+  =riemannian_lm()=.
+- =ReplicateWeightCovariance= (BRR / jackknife / bootstrap weights):
+  still deferred --- v3 (=implementation-plan.org= Section 14).
+- =cond_info['exclude_gauge']= as a /gauge-projected/ condition number:
+  open half of issue #20 (see the caveat under /Manifold parameters/).
 
-If your call site exercises one of these features, the migration is
-*not* mechanical --- coordinate with the maintainer before porting.
+If your call site exercises one of the still-deferred features, the
+migration is *not* mechanical --- coordinate with the maintainer (or
+file a pulling issue) before porting.
