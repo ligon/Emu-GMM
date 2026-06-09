@@ -67,6 +67,11 @@ publish:
 
 # Usage: make release BUMP=patch   (or minor, major, prepatch, ...)
 #
+# The pre-release gate defaults to the full `check`. When a full check
+# has JUST passed on the identical tree, skip the redundant ~30-minute
+# re-run with `make release GATE=` (empty gate). The clean-tree guard
+# still applies either way.
+#
 # Order matters (fixed 2026-06-09): gate on the full check, require a
 # clean tree, bump the version FIRST, then commit + annotated tag, and
 # only then build -- so the dist/ artifacts carry the released version.
@@ -77,7 +82,8 @@ publish:
 # `git fetch coder --tags`. `make publish` remains a separate, explicit
 # step.
 BUMP ?= patch
-release: check
+GATE ?= check
+release: $(GATE)
 	@git diff --quiet && git diff --cached --quiet || \
 		{ echo "release: working tree not clean; commit or stash first"; exit 1; }
 	$(eval NEW_VER := $(shell $(POETRY) version $(BUMP) -s))
