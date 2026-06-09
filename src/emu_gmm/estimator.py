@@ -38,13 +38,21 @@ design.org Section 5 pytree-composability story applied to the output
 side of the factory; measured at ~240x on the per-replicate path
 (issue #124, spike report).
 
-The remaining branches (outer-loop weightings such as IteratedWeighting,
-the v2 manifold optimiser, third-party two-argument optimisers) ride the
-legacy closure contract until PR B: the residual closure captures the
-*template* measure instance; same-object calls reuse the optimiser's
-compilation cache, while a different measure object rebuilds the closure
-and the optimiser path traces once more (its internal cache keys on
-closure identity).
+Outer-loop weightings (IteratedWeighting and any third-party strategy
+whose ``outer_loop_driver`` accepts the ``fixed_kernel=`` capability)
+ride the args channel too (PR B): the inner Fixed-weight solves thread
+``args=(measure, L0_k)`` through one factory-stable kernel, so all
+outer steps and repeated fits share a single trace, and the
+post-optimum inference reuses the traced kernel. The remaining branches
+(the v2 manifold optimiser inside :func:`estimate`, third-party
+two-argument optimisers, old-signature outer-loop drivers) ride the
+legacy closure contract: the residual closure captures the *template*
+measure instance; same-object calls reuse the optimiser's compilation
+cache, while a different measure object rebuilds the closure and the
+optimiser path traces once more (its internal cache keys on closure
+identity). (:func:`emu_gmm.manifolds.riemannian_lm.riemannian_lm`
+itself accepts ``args=`` when called directly; the estimator's v2
+dispatch still binds by closure -- PR C territory.)
 
 See ``docs/api-sketch.org`` Section 4 and
 ``docs/implementation-plan.org`` Section 7 for the architectural spec.
@@ -92,7 +100,7 @@ from emu_gmm.types import (
     StructuralModel,
     WeightingStrategy,
 )
-from emu_gmm.weighting import ContinuouslyUpdated
+from emu_gmm.weighting import ContinuouslyUpdated, Fixed
 
 
 def _sample_observation(measure: Measure, theta_init: ParamsLike) -> Any | None:
@@ -361,6 +369,35 @@ def build_estimator(
         and _optimizer_accepts_args
     )
 
+    # #124 PR B (B1): the OUTER-LOOP branch rides the args channel too,
+    # but deliberately NOT through the single-solve gate above -- the
+    # weighting's ``outer_loop_driver`` (not the estimator) owns the
+    # solve sequencing, so the estimator's contribution is to hand the
+    # driver factory-built kernels and let it thread
+    # ``args=(measure, L0_k)`` per inner solve. The gate mirrors
+    # ``_kernel_path_ok`` minus the weighting condition, plus a
+    # signature probe on the driver: a third-party outer-loop strategy
+    # written to the OLD ``outer_loop_driver`` signature simply never
+    # receives the new kwargs and keeps the legacy closure pathway
+    # (back-compat by capability detection, same pattern as
+    # ``_supports_args``).
+    _outer_driver = getattr(weighting, "outer_loop_driver", None)
+    _driver_accepts_kernels = False
+    if _outer_driver is not None:
+        try:
+            _driver_accepts_kernels = (
+                "fixed_kernel" in inspect.signature(_outer_driver).parameters
+            )
+        except (TypeError, ValueError):
+            _driver_accepts_kernels = False
+    _outer_args_ok = (
+        all_scalar
+        and dispatch_mode == "v1"
+        and getattr(weighting, "requires_outer_loop", False)
+        and _optimizer_accepts_args
+        and _driver_accepts_kernels
+    )
+
     # Capture the template measure so subsequent calls can detect
     # identity reuse and short-circuit residual-closure rebuilding.
     template_measure = measure
@@ -544,6 +581,62 @@ def build_estimator(
         measure_arg: Measure,
     ) -> Float[Array, " M"]:
         return _residual_core(theta_flat, measure_arg, weighting)
+
+    # ------------------------------------------------------------------
+    # #124 PR B (B1): factory-level kernels for the outer-loop
+    # (IteratedWeighting) path. Three pieces, all with factory-stable
+    # identities so every outer step and every repeated fit shares one
+    # trace per shape signature:
+    #
+    # (a) The Fixed-weight inner-solve kernel,
+    #     ``args = (measure, L0_k)``. The :class:`Fixed` instance is
+    #     constructed INSIDE the kernel from the traced ``L0`` leaf
+    #     rather than inlining ``forward_solve``: ``Fixed`` is a pytree
+    #     dataclass whose only state is ``L0`` (its ``__init__`` does no
+    #     numerics when given ``L0=``), so building it under trace is
+    #     free, and routing through ``_residual_core`` +
+    #     ``Fixed.whitening_residual`` keeps the single-source-of-truth
+    #     property: the args path and the legacy
+    #     ``make_residual_fn(fixed_k)`` closure are bindings of the SAME
+    #     math (penalty row, cached-intermediates dispatch and all), so
+    #     they agree by construction.
+    def _fixed_residual_kernel(
+        theta_flat: Float[Array, " K"],
+        args: tuple[Measure, Float[Array, "M M"]],
+    ) -> Float[Array, " M"]:
+        measure_arg, L0 = args
+        return _residual_core(theta_flat, measure_arg, Fixed(L0=L0))
+
+    # (b) The V-refresh kernel: ``L0_k = chol(ridge(V(theta_k)))``, the
+    #     anchor for outer step k -- exactly what the legacy driver's
+    #     ``Fixed.from_V0(apply_ridge(V_k))`` computes, jitted once at
+    #     factory. Without it the driver's eager ``covariance``
+    #     call re-executes ``vmap(psi)`` at every outer step.
+    def _anchored_chol_core(
+        theta_flat: Float[Array, " K"],
+        measure_arg: Measure,
+    ) -> Float[Array, "M M"]:
+        theta = params_mod.unflatten_params(
+            theta_flat, treedef, manifold_spec=unflatten_spec
+        )
+        if _cache_attr_name is not None:
+            cached = getattr(measure_arg, _cache_attr_name)(model, theta)
+            V = cast(Any, covariance).covariance(
+                model,
+                theta,
+                measure_arg,
+                cached_intermediates=cached,
+            )
+        else:
+            V = covariance.covariance(model, theta, measure_arg)
+        return cho.cholesky(_apply_anchored(V))
+
+    _anchored_chol_kernel = jax.jit(_anchored_chol_core)
+
+    # (c) The CU-fallback kernel jitted once: the driver evaluates the
+    #     user-facing ``final_objective`` at termination through this,
+    #     so the post-loop evaluation costs no retrace per fit either.
+    _residual_kernel_jit = jax.jit(_residual_kernel)
 
     # Residual closure factory (legacy path: outer-loop weightings, v2
     # manifold dispatch, optimisers without the ``args`` channel).
@@ -798,8 +891,12 @@ def build_estimator(
         use_traced_path = _kernel_path_ok and type(measure_call) is type(
             template_measure
         )
-        if use_traced_path:
-            residual_fn = None  # unused on the kernel path
+        # #124 PR B (B1): the outer-loop args branch shares the
+        # same-class condition (the factory-time cache/label/anchor
+        # decisions assumed the template's class).
+        use_outer_args = _outer_args_ok and type(measure_call) is type(template_measure)
+        if use_traced_path or use_outer_args:
+            residual_fn = None  # unused on the kernel paths
             compute_inference_jit = None
         # Legacy closure path: reuse the pre-built residual / inference
         # closures when the measure identity matches the template. The
@@ -825,8 +922,23 @@ def build_estimator(
             # residual of the strategy (its ``whitening_residual`` is
             # the CU form for IteratedWeighting and equivalent for any
             # other outer-loop strategy). The driver uses it to report
-            # ``final_objective`` consistent with that fallback.
-            cu_residual_fn = residual_fn
+            # ``final_objective`` consistent with that fallback. On the
+            # args branch (#124 PR B) it is served by the factory's
+            # jitted CU kernel -- the eager glue lambda binds the
+            # call-time measure, but the trace lives on the stable
+            # ``_residual_kernel_jit`` so the one post-loop evaluation
+            # costs no retrace per fit.
+            if use_outer_args:
+                cu_residual_fn: Any = lambda tf: _residual_kernel_jit(  # noqa: E731
+                    tf, measure_call
+                )
+                kernel_kwargs: dict[str, Any] = {
+                    "fixed_kernel": _fixed_residual_kernel,
+                    "chol_kernel": _anchored_chol_kernel,
+                }
+            else:
+                cu_residual_fn = residual_fn
+                kernel_kwargs = {}
             (
                 theta_hat_flat,
                 optimizer_info,
@@ -841,6 +953,7 @@ def build_estimator(
                 cu_residual_fn=cu_residual_fn,
                 apply_ridge=_apply_anchored,
                 optimizer=optimizer,
+                **kernel_kwargs,
             )
         elif dispatch_mode == "v2":
             # RiemannianOptimizer owns the flat<->pytree round-trip; it
@@ -888,8 +1001,14 @@ def build_estimator(
             J_pvalue,
             J_pvalue_adjusted,
         ) = (
+            # The outer-loop args branch (#124 PR B) uses the SAME
+            # traced inference kernel as the single-solve path: the
+            # post-optimum block is weighting-agnostic (it evaluates the
+            # factory weighting's CU-fallback residual, matching the
+            # pre-#124 closure behaviour), so the gate is just
+            # same-class measure + the factory-static conditions.
             _inference_kernel_jit(theta_hat_flat, measure_call)
-            if use_traced_path
+            if (use_traced_path or use_outer_args)
             # non-None on every non-traced branch; mypy cannot see the
             # use_traced_path coupling (#124).
             else cast(Any, compute_inference_jit)(theta_hat_flat)
