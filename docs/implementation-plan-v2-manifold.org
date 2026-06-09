@@ -281,7 +281,10 @@ of \(R_{\hat\theta}(v)\) --- /not/ a metric-orthonormal frame. Every
 first-order retraction has unit differential at the optimum
 (\(DR_{\hat\theta}(0)=\mathrm{Id}\)), so the Jacobian in this chart is
 the ambient Jacobian and the reported covariance is the *ambient
-natural-scale sandwich* \((G'\Lambda G)^{-1}\). For a =Positive= leaf
+natural-scale inverse-information* \((G'\Lambda G)^{-1}\) (the
+efficient-GMM form --- /not/ a sandwich; the misnomer was retired per
+the 2026-06-09 design review, and the true robust sandwich for
+non-optimal weighting / binding ridge is issue #133's business). For a =Positive= leaf
 that is \(\operatorname{Var}(\hat\sigma)\), /not/ the log-scale
 \(\operatorname{Var}(\log\hat\sigma)\): a =Positive= leaf reports the
 same asymptotic variance an unconstrained =Euclidean= leaf would, its

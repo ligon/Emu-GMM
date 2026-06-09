@@ -115,8 +115,9 @@ class Positive:
 
         Covariance convention (matches ``../ManifoldGMM``; see
         ``docs/implementation-plan-v2-manifold.org`` §2.4): the reported
-        ``Sigma_theta`` is the ambient / natural-scale sandwich
-        ``(G' Lambda G)^{-1}`` --- i.e. ``Var(sigma_hat)``, NOT the
+        ``Sigma_theta`` is the ambient / natural-scale inverse-information
+        ``(G' Lambda G)^{-1}`` (the efficient-GMM form; not a sandwich --
+        see issue #133 for the robust-sandwich correction) --- i.e. ``Var(sigma_hat)``, NOT the
         log-scale ``Var(log sigma_hat)``. Scaling column ``j`` of ``G`` by
         this differential (``1``) leaves the information matrix at its
         ambient value. The affine-invariant :meth:`inner_product` /
