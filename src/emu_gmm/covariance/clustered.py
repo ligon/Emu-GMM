@@ -137,7 +137,16 @@ class ClusteredCovariance:
         Returns
         -------
         V : (M, M) jax array
-            Symmetric PSD by construction.
+            Symmetric. PSD by construction **only when**
+            ``dof_correction=False`` (the bare cluster-totals form is a sum
+            of outer products under a diagonal congruence). With
+            ``dof_correction=True`` the entrywise (Hadamard) multiply by
+            the per-pair factor matrix :math:`G_{jk}/(G_{jk}-1)` is not a
+            congruence and can leave the result indefinite under unequal
+            support --- the same finite-sample non-PD risk as the centered
+            :class:`StratifiedCovariance` form, handled by the
+            regularisation layer (:class:`DiagonalTikhonov`), not here
+            (issue #120).
 
         Notes
         -----

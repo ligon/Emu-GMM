@@ -109,7 +109,15 @@ class IIDCovariance:
         Returns
         -------
         V : (M, M) jax array
-            Symmetric PSD by construction.
+            Symmetric PSD by construction: the uncentered numerator is a
+            sum of outer products :math:`\\sum_i w_i^2 g_i g_i'`, and the
+            :math:`1/(N_j N_k)` scaling is a diagonal congruence, both of
+            which preserve PSD (possibly singular, hence still not
+            guaranteed *PD* --- the regularisation layer owns strict
+            definiteness). Contrast the *centered*
+            :class:`StratifiedCovariance` form and the per-pair
+            dof-corrected :class:`ClusteredCovariance`, which can be
+            indefinite (issue #120).
         """
         if cached_intermediates is not None:
             _m, psi_safe, weight_mask, N_j = cached_intermediates
