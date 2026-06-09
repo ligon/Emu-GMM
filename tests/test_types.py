@@ -397,3 +397,87 @@ class TestLabelContextPublicReexport:
 
         r = _make_result()
         assert type(r.labels) is emu_gmm.LabelContext
+
+
+# ---------------------------------------------------------------------------
+# Pickle convenience (#23)
+# ---------------------------------------------------------------------------
+
+
+@jdc.pytree_dataclass
+class _RelabelableParams:
+    """Module-level params class whose __module__ a test temporarily
+    rewrites to '__main__' to exercise the portability warning."""
+
+    a: float
+
+
+class TestPickleConvenience:
+    def test_round_trip(self, tmp_path):
+        r = _make_result()
+        path = tmp_path / "result.pkl"
+        r.to_pickle(path)
+        r2 = t.EstimationResult.from_pickle(path)
+        assert isinstance(r2, t.EstimationResult)
+        assert float(r2.theta_hat.beta) == float(r.theta_hat.beta)
+        assert float(r2.theta_hat.gamma) == float(r.theta_hat.gamma)
+        assert float(r2.J_stat) == float(r.J_stat)
+        assert r2.J_dof == r.J_dof
+        import numpy as np
+
+        np.testing.assert_array_equal(
+            np.asarray(r2.Sigma_theta.array), np.asarray(r.Sigma_theta.array)
+        )
+        assert r2.labels.param_names == r.labels.param_names
+
+    def test_from_pickle_rejects_wrong_payload(self, tmp_path):
+        import pickle
+
+        import pytest
+
+        path = tmp_path / "notaresult.pkl"
+        with open(path, "wb") as fh:
+            pickle.dump({"theta": [1.0, 2.0]}, fh)
+        with pytest.raises(TypeError, match="not an EstimationResult"):
+            t.EstimationResult.from_pickle(path)
+
+    def test_main_namespace_warns_at_save_time(self, tmp_path):
+        """A __main__-namespaced parameter class triggers the portability
+        warning at save time (when it is still fixable), not a load-time
+        AttributeError in another process (#23)."""
+        import dataclasses
+        import sys
+
+        import pytest
+
+        main_mod = sys.modules["__main__"]
+        orig_module = _RelabelableParams.__module__
+        try:
+            _RelabelableParams.__module__ = "__main__"
+            # Register on __main__ so the pickle itself still resolves
+            # (the K-Aggregators shim pattern); the warning is the point.
+            main_mod._RelabelableParams = _RelabelableParams
+            r = dataclasses.replace(
+                _make_result(),
+                theta_hat=_RelabelableParams(a=1.0),
+                theta_init=_RelabelableParams(a=0.5),
+            )
+            path = tmp_path / "main_namespaced.pkl"
+            with pytest.warns(UserWarning, match="__main__"):
+                r.to_pickle(path)
+            # And it still loads in THIS process (shim present).
+            r2 = t.EstimationResult.from_pickle(path)
+            assert float(r2.theta_hat.a) == 1.0
+        finally:
+            _RelabelableParams.__module__ = orig_module
+            if hasattr(main_mod, "_RelabelableParams"):
+                delattr(main_mod, "_RelabelableParams")
+
+    def test_importable_classes_do_not_warn(self, tmp_path):
+        import warnings
+
+        r = _make_result()
+        path = tmp_path / "clean.pkl"
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            r.to_pickle(path)

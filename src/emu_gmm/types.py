@@ -918,6 +918,113 @@ class EstimationResult:
             "summary": summary,
         }
 
+    def _main_namespace_hazards(self) -> list[str]:
+        """Names of provenance objects whose classes/callables live in
+        ``__main__`` --- the pickle-portability hazard (#23).
+
+        Pickle stores classes and functions *by reference* (module +
+        qualname). Anything resolved through ``__main__`` unpickles only
+        in a process whose ``__main__`` happens to define the same
+        names --- the K-Aggregators scripts ended up installing shim
+        attributes on ``__main__`` to work around exactly this. The
+        durable fix is to define parameter dataclasses, samplers, and
+        closed-form callables in an importable module.
+        """
+        candidates: list[tuple[str, Any]] = [
+            ("theta_hat", type(self.theta_hat)),
+            ("theta_init", type(self.theta_init)),
+            ("measure", type(self.measure)),
+            ("covariance", type(self.covariance)),
+            ("weighting", type(self.weighting)),
+        ]
+        # Callables carried as static fields on the provenance objects
+        # (SyntheticMeasure.sampler, AnalyticalMeasure.expectation_fn /
+        # jacobian_fn, AnalyticalCovariance.covariance_fn).
+        for owner_name, owner in (
+            ("measure", self.measure),
+            ("covariance", self.covariance),
+        ):
+            for attr in ("sampler", "expectation_fn", "jacobian_fn", "covariance_fn"):
+                fn = getattr(owner, attr, None)
+                if callable(fn):
+                    candidates.append((f"{owner_name}.{attr}", fn))
+        hazards = []
+        for name, obj in candidates:
+            module = getattr(obj, "__module__", None)
+            if module == "__main__":
+                hazards.append(name)
+        return hazards
+
+    def to_pickle(self, path: Any) -> None:
+        """Pickle this result to ``path`` (the K-Aggregators idiom, #23).
+
+        Thin wrapper over :func:`pickle.dump`. Two portability caveats,
+        both inherent to pickle rather than to this method:
+
+        - Classes and callables are stored *by reference*: the user's
+          parameter dataclass (and any sampler / closed-form callables
+          riding the provenance fields) must be importable under the
+          same module path at load time. Objects defined in
+          ``__main__`` (a script / notebook top level) trigger a
+          :class:`UserWarning` here at *save* time --- when you can
+          still move them into an importable module --- rather than a
+          confusing :class:`AttributeError` at load time in another
+          process. Lambdas do not pickle at all and raise immediately.
+        - The provenance fields carry the full measure (data arrays
+          included), so the file scales with the dataset.
+
+        Parameters
+        ----------
+        path : str | os.PathLike
+            Destination file path; opened in binary-write mode.
+        """
+        import pickle
+        import warnings
+
+        hazards = self._main_namespace_hazards()
+        if hazards:
+            warnings.warn(
+                "EstimationResult.to_pickle: the following provenance "
+                f"objects resolve through __main__: {hazards}. Pickle "
+                "stores classes/functions by reference, so this file will "
+                "only load in a process whose __main__ defines the same "
+                "names. Define parameter dataclasses, samplers, and "
+                "closed-form callables in an importable module for a "
+                "portable pickle.",
+                UserWarning,
+                stacklevel=2,
+            )
+        with open(path, "wb") as fh:
+            pickle.dump(self, fh)
+
+    @classmethod
+    def from_pickle(cls, path: Any) -> "EstimationResult":
+        """Load an :class:`EstimationResult` pickled by :meth:`to_pickle`.
+
+        Thin wrapper over :func:`pickle.load` with a type check, so a
+        wrong-file mistake surfaces as a clear :class:`TypeError` rather
+        than an :class:`AttributeError` three lines later. The usual
+        pickle trust caveat applies: only load files you wrote.
+
+        Parameters
+        ----------
+        path : str | os.PathLike
+            Source file path; opened in binary-read mode.
+        """
+        import pickle
+
+        with open(path, "rb") as fh:
+            obj = pickle.load(fh)
+        if not isinstance(obj, cls):
+            raise TypeError(
+                f"EstimationResult.from_pickle: {path!r} contains a "
+                f"{type(obj).__name__}, not an EstimationResult. If this "
+                "is a ManifoldGMM GMMResult pickle, re-estimate with "
+                "emu_gmm (see docs/migration/manifoldgmm-to-emu-gmm.org); "
+                "pickles do not migrate across libraries."
+            )
+        return obj
+
 
 __all__ = [
     "ParamsLike",
