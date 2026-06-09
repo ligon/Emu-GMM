@@ -593,7 +593,10 @@ class EstimationResult:
         """
         from emu_gmm.inference.functional_se import gamma_se as _gse
 
-        _se, cov = _gse(self.components(), jnp.asarray(self.Sigma_theta.array))
+        idx, _ls = self._gamma_leaf()
+        _se, cov = _gse(
+            self.components(), jnp.asarray(self.Sigma_theta.array), index=idx
+        )
         return cov
 
     def gamma_se(self) -> Float[Array, " q"]:
@@ -614,7 +617,10 @@ class EstimationResult:
         """
         from emu_gmm.inference.functional_se import gamma_se as _gse
 
-        se, _cov = _gse(self.components(), jnp.asarray(self.Sigma_theta.array))
+        idx, _ls = self._gamma_leaf()
+        se, _cov = _gse(
+            self.components(), jnp.asarray(self.Sigma_theta.array), index=idx
+        )
         return se
 
     def eigenvalue_se(self, rank: int | None = None) -> Float[Array, " k"]:
@@ -660,32 +666,87 @@ class EstimationResult:
         from emu_gmm.inference.functional_se import eigenvalue_se as _evse
 
         comps = self.components()
+        idx, _ls = self._gamma_leaf()
         if rank is None:
             rank = self._gamma_rank(comps)
-        se, _cov = _evse(comps, jnp.asarray(self.Sigma_theta.array), int(rank))
+        se, _cov = _evse(
+            comps, jnp.asarray(self.Sigma_theta.array), int(rank), index=idx
+        )
         return se
+
+    def _gamma_leaf(self) -> tuple[int, Any | None]:
+        """Locate the ``PSDFixedRank`` factor: ``(component_index, leaf_spec)``.
+
+        The single source of truth for which component the Gamma readouts
+        (:meth:`gamma_se`, :meth:`gamma_covariance`, :meth:`eigenvalue_se`)
+        and the default-``rank`` inference operate on (#117). Previously the
+        readouts hard-coded ``components[0]`` while the rank default scanned
+        the spec for the first 2-D leaf; a dataclass declared ``(phi, A)``
+        got the right rank but the wrong ``Gamma``.
+
+        Rules:
+
+        * spec present: the **unique** leaf whose manifold is a
+          :class:`~emu_gmm.manifolds.psd_fixed_rank.PSDFixedRank` (a 2-D
+          *Euclidean* matrix leaf is not a Gamma factor and is skipped).
+          Zero such leaves, or more than one, is a typed error -- with
+          several factors there is no canonical ``Gamma``; use
+          :meth:`functional_se` with an explicit functional instead.
+        * no spec (a hand-rolled / v1 result): legacy ``components[0]``
+          contract; :func:`_gamma_from_components` validates that the
+          component is 2-D.
+
+        ``leaf_specs`` and :meth:`components` share leaf-walk (dataclass
+        field) order, so the spec index is the component index.
+        """
+        from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
+
+        spec = self.manifold_spec
+        if spec is None:
+            return 0, None
+        psd_indices = [
+            i
+            for i, ls in enumerate(spec.leaf_specs)
+            if isinstance(ls.manifold, PSDFixedRank)
+        ]
+        if not psd_indices:
+            raise TypeError(
+                "Gamma readout: the manifold spec has no PSDFixedRank leaf, "
+                "so Gamma = A @ A.T is undefined for this estimate. The "
+                "gamma_se / gamma_covariance / eigenvalue_se conveniences "
+                "apply only to PSDFixedRank factors; for other functionals "
+                "use result.functional_se(f)."
+            )
+        if len(psd_indices) > 1:
+            raise TypeError(
+                f"Gamma readout: the manifold spec has {len(psd_indices)} "
+                "PSDFixedRank leaves (component indices "
+                f"{psd_indices}); there is no canonical Gamma. Use "
+                "result.functional_se(f) with a functional that selects "
+                "the intended factor explicitly."
+            )
+        idx = psd_indices[0]
+        return idx, spec.leaf_specs[idx]
 
     def _gamma_rank(self, components: tuple[Any, ...]) -> int:
         """Infer the rank ``k`` of the ``PSDFixedRank`` factor ``A``.
 
-        Prefers the manifold spec's first non-scalar leaf rank (the declared
-        ``PSDFixedRank(n, k)``); falls back to the numerically-nonzero
+        Reads the rank off the *same* leaf :meth:`_gamma_leaf` locates for
+        the Gamma readouts (#117); falls back to the numerically-nonzero
         eigenvalue count of ``Gamma_hat`` when no spec is present.
         """
         from emu_gmm.inference.functional_se import count_nonzero_eigenvalues
 
-        spec = self.manifold_spec
-        if spec is not None:
-            for ls in spec.leaf_specs:
-                amb = tuple(int(s) for s in ls.ambient_shape)
-                if len(amb) == 2:
-                    rank_attr = getattr(ls.manifold, "rank", None)
-                    if rank_attr is None:
-                        rank_attr = getattr(ls.manifold, "k", None)
-                    if rank_attr is not None:
-                        return int(rank_attr)
-                    return int(amb[1])  # (n, k) ambient shape -> k columns
-        return count_nonzero_eigenvalues(components)
+        idx, ls = self._gamma_leaf()
+        if ls is not None:
+            rank_attr = getattr(ls.manifold, "rank", None)
+            if rank_attr is None:
+                rank_attr = getattr(ls.manifold, "k", None)
+            if rank_attr is not None:
+                return int(rank_attr)
+            amb = tuple(int(s) for s in ls.ambient_shape)
+            return int(amb[1])  # (n, k) ambient shape -> k columns
+        return count_nonzero_eigenvalues(components, index=idx)
 
     @functools.cached_property
     def coef_table(self) -> pd.DataFrame:
