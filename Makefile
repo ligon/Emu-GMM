@@ -65,10 +65,26 @@ build:
 publish:
 	$(POETRY) publish
 
+# Usage: make release BUMP=patch   (or minor, major, prepatch, ...)
+#
+# Order matters (fixed 2026-06-09): gate on the full check, require a
+# clean tree, bump the version FIRST, then commit + annotated tag, and
+# only then build -- so the dist/ artifacts carry the released version.
+# (The previous target built before bumping, leaving a stale-version
+# artifact under the new tag; the same latent flaw exists in
+# ../ManifoldGMM's Makefile, from which this target was adapted.)
+# Tags are local to this mirror: pull them from the source repo with
+# `git fetch coder --tags`. `make publish` remains a separate, explicit
+# step.
 BUMP ?= patch
-release: build
+release: check
+	@git diff --quiet && git diff --cached --quiet || \
+		{ echo "release: working tree not clean; commit or stash first"; exit 1; }
 	$(eval NEW_VER := $(shell $(POETRY) version $(BUMP) -s))
 	git add pyproject.toml
 	git commit -m "Bump version to $(NEW_VER)"
-	git tag v$(NEW_VER)
-	@echo "Tagged v$(NEW_VER)."
+	git tag -a v$(NEW_VER) -m "emu-gmm v$(NEW_VER)"
+	$(POETRY) build
+	@echo "Tagged v$(NEW_VER) and built dist/ at that version."
+	@echo "Publish (if desired) with 'make publish'; fetch the tag from"
+	@echo "the source repo with 'git fetch coder --tags'."
