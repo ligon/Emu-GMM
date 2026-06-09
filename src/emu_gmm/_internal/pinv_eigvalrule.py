@@ -96,6 +96,22 @@ def pinv_eigvalrule(
         raise ValueError(
             f"pinv_eigvalrule: drop_smallest must be >= 0, got {drop_smallest}"
         )
+    # Enforce the documented upper bound (issue #121). Without this check a
+    # ``drop_smallest > D`` call silently returns an all-zero matrix (the
+    # static slice ``w[drop_smallest:]`` is empty). Unreachable through the
+    # estimator -- the ManifoldSpec invariants force
+    # ``total_gauge_dim <= total_dimension`` -- but the helper is
+    # quasi-public surface and the contract says ``0 <= drop_smallest <= D``.
+    # ``info.shape`` is static at trace time, so the check is jit/vmap-safe
+    # exactly like the non-int guard above.
+    D = int(info.shape[-1])
+    if drop_smallest > D:
+        raise ValueError(
+            f"pinv_eigvalrule: drop_smallest must be <= D = {D} (the size of "
+            f"the information matrix), got {drop_smallest}. Dropping more "
+            "eigenvalues than the matrix has would leave an empty identified "
+            "subspace."
+        )
 
     # ---- v1 bitwise path: no gauge nullspace -> exact inv() (red-team R13).
     if drop_smallest == 0:

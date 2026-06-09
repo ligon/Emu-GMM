@@ -169,7 +169,11 @@ been through four reviewer iterations; the abstractions are deliberate.
     `DesignAwareCovariance` mixed assembly (#80) *composes* $V_{TT}$ (design,
     delegated) + $V_{SS}$ (cluster, delegated) + an inline $V_{TS}$ cross
     coupling — **estimated, not zeroed**, clustered at the caller's `sampling`
-    unit (stratum-level to capture the cross-arm term). The all-design case
+    unit (stratum-level to capture the cross-arm term). The `sampling`
+    strategy's `dof_correction` is *inherited by the cross pass* (#119,
+    resolved): cross pairs get the per-pair $G_{jk}/(G_{jk}-1)$ over the
+    sampling clusters supporting both coordinates, symmetric with $V_{SS}$;
+    the design FPC stays inside $V_{TT}$ only. The all-design case
     reduces **bit-for-bit** to `StratifiedCovariance` via a *shared* (not
     copied) engine. The design-exact-$V_{TT}$ **glue is NOT PSD-by-construction**
     (it can be indefinite like `StratifiedCovariance`; `DiagonalTikhonov`

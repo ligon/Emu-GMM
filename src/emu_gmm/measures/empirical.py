@@ -481,8 +481,14 @@ class EmpiricalMeasure:
         """
         flat_theta, treedef = flatten_params(theta)
 
-        # Pre-sanitise x (see :meth:`expectation` for the rationale).
-        x_safe = jnp.where(jnp.isnan(self.x), 0.0, self.x)
+        # Pre-sanitise x with the per-column observed-mean sentinel
+        # (see :meth:`expectation` for the reverse-mode AD rationale).
+        # A fixed 0.0 sentinel here (the prior behaviour) sits outside
+        # the domain of partial residuals like ``log`` / ``1/x``; the
+        # resulting inf/NaN per-row Jacobian cells are zeroed in the
+        # primal by the output mask below, but reverse-mode AD through
+        # this method still produces ``0 * inf == NaN`` cotangents.
+        x_safe = safe_x_for_psi(self.x)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
             params = unflatten_params(flat, treedef)

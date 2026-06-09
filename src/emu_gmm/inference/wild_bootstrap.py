@@ -295,6 +295,34 @@ def moment_wild_bootstrap(
             f"moment_wild_bootstrap: n_boot must be positive, got {n_boot}"
         )
 
+    # Typed surface checks (#118). The bootstrap needs (i) per-observation
+    # moment contributions and (ii) the empirical mask / weights arrays.
+    # AnalyticalMeasure has neither -- a closed-form expectation has no
+    # per-observation decomposition to resample (api-sketch.org Section 3,
+    # "Extended Protocol Methods"). SyntheticMeasure exposes contributions
+    # but not mask/weights; supporting it would need a unit-weight /
+    # all-ones-mask convention that is not specified for v1. Without these
+    # guards both cases died one line later with a bare AttributeError
+    # from inside the helper.
+    if not hasattr(measure, "moment_contributions"):
+        raise TypeError(
+            "moment_wild_bootstrap requires a measure exposing "
+            "moment_contributions (per-observation moment decomposition); "
+            f"got {type(measure).__name__}. A closed-form AnalyticalMeasure "
+            "has no per-observation decomposition to resample -- bootstrap "
+            "inference is not available against an analytical population "
+            "in v1 (docs/api-sketch.org Section 3)."
+        )
+    if not (hasattr(measure, "mask") and hasattr(measure, "weights")):
+        raise TypeError(
+            "moment_wild_bootstrap requires an EmpiricalMeasure-style "
+            "surface with mask and weights arrays; got "
+            f"{type(measure).__name__}. SyntheticMeasure exposes "
+            "moment_contributions but no mask/weights, and the wild "
+            "bootstrap's cluster perturbation is defined over the observed "
+            "sample, not simulation draws."
+        )
+
     # Per-observation moment contributions g_ij = d_ij * w_i * psi_j(x_i, theta_hat).
     contributions = measure.moment_contributions(model, theta_hat)  # (N, M)
     weight_mask = measure.mask * measure.weights[:, None]  # (N, M)

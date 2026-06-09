@@ -1197,3 +1197,211 @@ def test_design_aware_cross_block_cached_self_parity():
         dac.cross_block(identity_psi, None, measure, cached_intermediates=cached)
     )
     assert np.array_equal(c_self, c_cached)
+
+
+# ---------------------------------------------------------------------------
+# #119: the V_TS cross block INHERITS the sampling engine's per-pair
+# dof_correction (resolved convention), and the mixed assembly is pinned
+# under genuine missingness (the mask=ones blind spot of commitment 9).
+# ---------------------------------------------------------------------------
+def build_mixed_masked(seed=29):
+    """Mixed fixture with RAGGED per-coordinate support.
+
+    Same stratified layout as :func:`build_mixed`, but coordinate
+    observability is knocked out at the unit level with per-coordinate
+    rates, so per-pair overlap counts (both ``N_j N_k`` and the per-pair
+    cluster counts ``G_jk``) genuinely differ across pairs --- the
+    structure a balanced ``mask=ones`` fixture cannot expose.
+    """
+    fx = build_mixed(seed)
+    rng = np.random.default_rng(seed + 1000)
+    n, M = fx["mask"].shape
+    # Coordinate-specific missingness rates; keep enough support that
+    # every pair retains G_jk >= 2 overlap clusters.
+    rates = [0.0, 0.35, 0.2, 0.45]
+    mask = np.ones((n, M))
+    for j, r in enumerate(rates):
+        mask[:, j] = (rng.uniform(size=n) >= r).astype(float)
+    fx["mask"] = mask
+    return fx
+
+
+def _numpy_pair_cluster_counts(mask, psu_ids, n_psu):
+    """Per-pair cluster-overlap counts G_jk and the dof factor matrix."""
+    mask = np.asarray(mask, float)
+    psu = np.rint(np.asarray(psu_ids)).astype(int)
+    M = mask.shape[1]
+    sup = np.zeros((n_psu, M))
+    for i in range(len(psu)):
+        sup[psu[i]] += (mask[i] > 0).astype(float)
+    s = (sup > 0).astype(float)
+    G = s.T @ s
+    factor = np.where(G >= 2.0, G / np.where(G >= 2.0, G - 1.0, 1.0), 1.0)
+    return G, factor
+
+
+def _design_and_sampling_dof(fx):
+    design, _ = _design_and_sampling(fx)
+    sampling = ClusteredCovariance(
+        cluster_ids=jnp.asarray(fx["psu_ids"], jnp.float64),
+        n_clusters=fx["n_psu"],
+        dof_correction=True,
+    )
+    return design, sampling
+
+
+def test_design_aware_VTS_inherits_sampling_dof_correction_full_mask():
+    """#119 resolved convention, balanced case: with mask=ones every pair's
+    G_jk equals the total cluster count, so the inherited correction is the
+    scalar G/(G-1) on the cross corners; V_TT is untouched and V_SS matches
+    the corrected sampling engine."""
+    fx = build_mixed()
+    design, sampling_dof = _design_and_sampling_dof(fx)
+    _, sampling_raw = _design_and_sampling(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+
+    V_dof = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_dof, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+    V_raw = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_raw, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+
+    G = fx["n_psu"]
+    scalar = G / (G - 1.0)
+    # Cross corners inflated by exactly G/(G-1).
+    assert (
+        np.max(
+            np.abs(
+                V_dof[np.ix_(_T_IDX, _S_IDX)] - scalar * V_raw[np.ix_(_T_IDX, _S_IDX)]
+            )
+        )
+        < TOL
+    )
+    # SS block equals the corrected sampling engine's own output.
+    V_samp_dof = np.asarray(sampling_dof.covariance(identity_psi, None, measure))
+    assert (
+        np.max(
+            np.abs(V_dof[np.ix_(_S_IDX, _S_IDX)] - V_samp_dof[np.ix_(_S_IDX, _S_IDX)])
+        )
+        < TOL
+    )
+    # TT (design) block is untouched by the sampling dof flag.
+    assert np.array_equal(V_dof[np.ix_(_T_IDX, _T_IDX)], V_raw[np.ix_(_T_IDX, _T_IDX)])
+
+
+def test_design_aware_VTS_dof_correction_is_per_pair_under_missingness():
+    """#119 under ragged support: the inherited correction is the PER-PAIR
+    G_jk/(G_jk-1) over the sampling clusters supporting both coordinates of
+    each cross pair --- a scalar G/(G-1) would be wrong, and the fixture
+    discriminates (the per-pair factors differ across cross pairs)."""
+    fx = build_mixed_masked()
+    design, sampling_dof = _design_and_sampling_dof(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+
+    cross = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_dof, _DESIGN_MASK
+        ).cross_block(identity_psi, None, measure)
+    )
+    Vc = _numpy_cluster_cross(
+        fx["x"], fx["mask"], fx["weights"], fx["psu_ids"], fx["n_psu"]
+    )
+    G, factor = _numpy_pair_cluster_counts(fx["mask"], fx["psu_ids"], fx["n_psu"])
+    corner = np.ix_(_T_IDX, _S_IDX)
+    # The fixture must genuinely exercise the per-pair structure: at least
+    # two distinct G_jk among the cross pairs, all with usable overlap.
+    assert np.all(G[corner] >= 2.0)
+    assert len(np.unique(G[corner])) > 1
+    assert np.max(np.abs(cross[corner] - (Vc * factor)[corner])) < TOL
+
+
+def test_design_aware_dof_decomposition_identity_holds():
+    """The #109 identity coupled == block-diagonal + cross_block survives the
+    inherited dof correction (both routes share _cross_corners)."""
+    fx = build_mixed_masked()
+    design, sampling_dof = _design_and_sampling_dof(fx)
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    Vc = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_dof, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+    Vb = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_dof, _DESIGN_MASK, couple=False
+        ).covariance(identity_psi, None, measure)
+    )
+    cross = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_dof, _DESIGN_MASK
+        ).cross_block(identity_psi, None, measure)
+    )
+    assert np.max(np.abs(Vc - (Vb + cross))) < TOL
+
+
+def test_design_aware_dof_default_off_is_bitwise_unchanged():
+    """Non-regression: dof_correction=False (the default) leaves the mixed
+    assembly bit-for-bit identical to a sampling engine built without the
+    flag --- the #119 change is invisible unless opted into."""
+    fx = build_mixed_masked()
+    design, sampling_raw = _design_and_sampling(fx)
+    sampling_off = ClusteredCovariance(
+        cluster_ids=jnp.asarray(fx["psu_ids"], jnp.float64),
+        n_clusters=fx["n_psu"],
+        dof_correction=False,
+    )
+    measure = _MeasureStub(fx["x"], fx["mask"], fx["weights"])
+    V_a = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_raw, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+    V_b = np.asarray(
+        DesignAwareCovariance.from_design_mask(
+            design, sampling_off, _DESIGN_MASK
+        ).covariance(identity_psi, None, measure)
+    )
+    assert np.array_equal(V_a, V_b)
+
+
+def test_design_aware_mixed_assembly_under_missingness_matches_numpy():
+    """Close the commitment-9 fixture gap: the FULL mixed assembly under
+    ragged per-coordinate support equals the independent numpy references
+    block by block (TT: centered per-pair Neyman; SS + TS: uncentered
+    cluster cross), all on the shared 1/(N_j N_k) scale."""
+    fx = build_mixed_masked()
+    dac, *_, measure = _mixed_dac_and_measure(fx)
+    V = np.asarray(dac.covariance(identity_psi, None, measure))
+    assert np.isfinite(V).all()
+
+    V_tt_ref = _numpy_vtt(
+        fx["x"],
+        fx["mask"],
+        fx["weights"],
+        fx["psu_ids"],
+        fx["cell_ids"],
+        fx["n_psu"],
+    )
+    V_cross_ref = _numpy_cluster_cross(
+        fx["x"], fx["mask"], fx["weights"], fx["psu_ids"], fx["n_psu"]
+    )
+    assert (
+        np.max(np.abs(V[np.ix_(_T_IDX, _T_IDX)] - V_tt_ref[np.ix_(_T_IDX, _T_IDX)]))
+        < TOL
+    )
+    assert (
+        np.max(np.abs(V[np.ix_(_S_IDX, _S_IDX)] - V_cross_ref[np.ix_(_S_IDX, _S_IDX)]))
+        < TOL
+    )
+    assert (
+        np.max(np.abs(V[np.ix_(_T_IDX, _S_IDX)] - V_cross_ref[np.ix_(_T_IDX, _S_IDX)]))
+        < TOL
+    )
+    # And the per-coordinate N_j really are unequal (the fixture bites).
+    N_j = (fx["mask"] * fx["weights"][:, None]).sum(0)
+    assert len(np.unique(N_j)) > 1

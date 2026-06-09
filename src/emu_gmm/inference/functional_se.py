@@ -195,13 +195,29 @@ def functional_se(
     return se, cov
 
 
-def _gamma_from_components(components: Sequence[Any]) -> Float[Array, "n n"]:
-    """``Gamma = A @ A.T`` from the first (PSDFixedRank) component.
+def _gamma_from_components(
+    components: Sequence[Any], index: int = 0
+) -> Float[Array, "n n"]:
+    """``Gamma = A @ A.T`` from the ``index``-th (PSDFixedRank) component.
 
-    The K-Aggregators contract: the first leaf is the ``PSDFixedRank``
-    factor ``A`` of the cross-price substitution matrix.
+    ``index`` defaults to 0 (the K-Aggregators contract: the first leaf is
+    the ``PSDFixedRank`` factor ``A`` of the cross-price substitution
+    matrix), but callers that know the factor's position -- notably
+    :class:`~emu_gmm.types.EstimationResult`, which locates the unique
+    ``PSDFixedRank`` leaf by scanning the manifold spec (#117) -- pass it
+    explicitly so the Gamma readouts and the rank default agree on the
+    same leaf regardless of dataclass field order.
     """
-    A = jnp.asarray(components[0])
+    A = jnp.asarray(components[index])
+    if A.ndim != 2:
+        raise TypeError(
+            f"Gamma readout: component {index} has shape {tuple(A.shape)}; "
+            "expected the 2-D ambient factor A of a PSDFixedRank leaf "
+            "(Gamma = A @ A.T). If the PSD factor is not the first field "
+            "of your parameter dataclass, use the EstimationResult methods "
+            "(which locate it via the manifold spec) or pass index= "
+            "explicitly."
+        )
     return A @ A.T
 
 
@@ -218,12 +234,13 @@ def vech_indices(n: int) -> tuple[Array, Array]:
     return ii, jj
 
 
-def gamma_vech(components: Sequence[Any]) -> Float[Array, " q"]:
+def gamma_vech(components: Sequence[Any], index: int = 0) -> Float[Array, " q"]:
     """Lower-triangular vectorisation ``vech(Gamma)`` (row-major).
 
-    ``Gamma = A @ A.T`` from the first component; length ``n(n+1)/2``.
+    ``Gamma = A @ A.T`` from the ``index``-th component (default: the
+    first); length ``n(n+1)/2``.
     """
-    G = _gamma_from_components(components)
+    G = _gamma_from_components(components, index)
     n = int(G.shape[0])
     ii, jj = vech_indices(n)
     return G[ii, jj]
@@ -232,18 +249,25 @@ def gamma_vech(components: Sequence[Any]) -> Float[Array, " q"]:
 def gamma_se(
     components: Sequence[Any],
     sigma_theta: Float[Array, "D D"],
+    *,
+    index: int = 0,
 ) -> tuple[Float[Array, " q"], Float[Array, "q q"]]:
     r"""Delta-method SE / covariance of ``vech(Gamma)``, ``Gamma = A @ A.T``.
 
     Returns ``(se, cov)`` for the ``q = n(n+1)/2`` unique lower-triangular
     entries of ``Gamma`` in row-major ``vech`` order (see
     :func:`vech_indices`). Gauge-invariant: ``Gamma`` is unchanged under
-    ``A -> A @ Q`` for ``Q in O(K)``.
+    ``A -> A @ Q`` for ``Q in O(K)``. ``index`` selects which component is
+    the ``PSDFixedRank`` factor (default 0; #117).
     """
-    return functional_se(gamma_vech, components, sigma_theta)
+    return functional_se(
+        lambda comps: gamma_vech(comps, index), components, sigma_theta
+    )
 
 
-def gamma_eigenvalues(components: Sequence[Any], k: int) -> Float[Array, " k"]:
+def gamma_eigenvalues(
+    components: Sequence[Any], k: int, index: int = 0
+) -> Float[Array, " k"]:
     """The ``k`` largest eigenvalues of ``Gamma = A @ A.T`` (ascending).
 
     For a rank-``k`` ``Gamma in R^{n x n}`` these are the ``k`` *nonzero*
@@ -253,7 +277,7 @@ def gamma_eigenvalues(components: Sequence[Any], k: int) -> Float[Array, " k"]:
     (R3/R5/R18/R20/R27). ``eigvalsh`` returns eigenvalues in ascending
     order, so the ``k`` returned values are likewise ascending.
     """
-    G = _gamma_from_components(components)
+    G = _gamma_from_components(components, index)
     ev = jnp.linalg.eigvalsh(G)  # ascending, length n
     n = int(ev.shape[0])
     if k > n:
@@ -267,6 +291,8 @@ def eigenvalue_se(
     components: Sequence[Any],
     sigma_theta: Float[Array, "D D"],
     rank: int,
+    *,
+    index: int = 0,
 ) -> tuple[Float[Array, " k"], Float[Array, "k k"]]:
     r"""Delta-method SE / covariance of the ``rank`` nonzero eigenvalues of
     ``Gamma = A @ A.T`` -- the K-Aggregators primary (R3/R5/R18/R27).
@@ -302,21 +328,24 @@ def eigenvalue_se(
     """
 
     def f(comps: tuple[Any, ...]) -> Float[Array, " k"]:
-        return gamma_eigenvalues(comps, rank)
+        return gamma_eigenvalues(comps, rank, index)
 
     return functional_se(f, components, sigma_theta)
 
 
 def count_nonzero_eigenvalues(
-    components: Sequence[Any], rel_floor: float = _EV_REL_FLOOR
+    components: Sequence[Any],
+    rel_floor: float = _EV_REL_FLOOR,
+    index: int = 0,
 ) -> int:
     """Numerically-nonzero eigenvalue count of ``Gamma = A @ A.T``.
 
     Eigenvalues with ``|lambda| > rel_floor * max|lambda|`` count as
     nonzero. Used by :meth:`EstimationResult.eigenvalue_se` to default the
-    ``rank`` argument when the caller omits it (R20).
+    ``rank`` argument when the caller omits it (R20). ``index`` selects
+    the ``PSDFixedRank`` component (default 0; #117).
     """
-    G = _gamma_from_components(components)
+    G = _gamma_from_components(components, index)
     ev = jnp.linalg.eigvalsh(G)
     mx = float(jnp.max(jnp.abs(ev))) if ev.shape[0] else 0.0
     if mx == 0.0:
