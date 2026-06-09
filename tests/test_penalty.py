@@ -382,12 +382,33 @@ class TestFinalGradientNormWithPenalty:
     """
 
     def test_matches_grad_of_full_objective(self):
-        # Build a tiny linear problem so we can replicate the exact
-        # objective the estimator minimises. The estimator's residual
-        # is r = [y; sqrt(p+1e-30)] (penalty supplied), so
+        # Build a tiny problem so we can replicate the exact objective
+        # the estimator minimises. The estimator's residual is
+        # r = [y; sqrt(p+1e-30)] (penalty supplied), so
         # ||r||^2 = ||y||^2 + p + 1e-30 and the (1/2) grad of this at
         # theta_hat is what should be reported.
+        #
+        # Fixture note (#122): the residual must be DRAW-DEPENDENT at
+        # the optimum. The previous fixture (psi_j = a + b*x_j, no
+        # intercept target) had its penalised optimum at theta_hat ~ 0,
+        # where psi is constant across draws and V(theta_hat) is
+        # EXACTLY the zero matrix -- the whitening is 0/0 and the
+        # gradient norm at that degenerate point moved at the 1e-3
+        # level under solver-version drift (and the penalty's gradient
+        # contribution was ~1e-7 of the norm, so the test barely
+        # discriminated full-vs-data-only at all). The quadratic term
+        # below puts theta_hat at O(1) with V(theta_hat) > 0
+        # well-conditioned; the reconstruction then agrees with the
+        # reported value to ~1e-9 relative.
         x_sample = jnp.array([[0.5, 1.0], [1.5, 2.0], [-0.5, 0.3]])
+
+        def model(x, theta):
+            return jnp.array(
+                [
+                    theta.a + theta.b * x[0] - x[0] * x[0],
+                    theta.a + theta.b * x[1] - x[1] * x[1],
+                ]
+            )
 
         def sampler(key, theta):
             del key, theta
@@ -401,7 +422,7 @@ class TestFinalGradientNormWithPenalty:
 
         pen = TikhonovPenalty(c=jnp.asarray(0.25))
         result = estimate(
-            model=_toy_model,
+            model=model,
             measure=measure,
             covariance=SyntheticCovariance(),
             weighting=ContinuouslyUpdated(),
@@ -412,47 +433,55 @@ class TestFinalGradientNormWithPenalty:
         )
 
         # Reproduce the residual the estimator actually used and take
-        # grad of (1/2) ||r||^2 at theta_hat by hand. Note we *cannot*
-        # call the data-only ||y||^2/2 here because that is what was
-        # explicitly *not* claimed to be reported.
+        # grad of (1/2) ||r||^2 at theta_hat by hand. The anchored
+        # ridge is applied via the SAME apply_fixed_tau path the
+        # estimator uses (it carries the diagonal-V dispatch; a
+        # hand-rolled canonical-only V + tau*diag(V) silently diverges
+        # from the estimator's surface whenever V is near-diagonal).
         from emu_gmm._internal.params import flatten_params, unflatten_params
 
         flat_hat, treedef = flatten_params(result.theta_hat)
         reg = DiagonalTikhonov()
         cov = SyntheticCovariance()
         weight = ContinuouslyUpdated()
-        V0 = cov.covariance(_toy_model, result.theta_init, measure)
+        V0 = cov.covariance(model, result.theta_init, measure)
         _, tau0 = reg.apply(V0)
         tau0 = jnp.asarray(tau0)
 
-        def _apply_anchored(V):
-            return V + tau0 * jnp.diag(jnp.diag(V))
-
-        def full_half_obj(tf):
+        def half_obj(tf, with_penalty):
             theta = unflatten_params(tf, treedef)
-            m = measure.expectation(_toy_model, theta)
-            V = cov.covariance(_toy_model, theta, measure)
-            Vs = _apply_anchored(V)
+            m = measure.expectation(model, theta)
+            V = cov.covariance(model, theta, measure)
+            Vs = reg.apply_fixed_tau(V, tau0)
             y = weight.whitening_residual(m, Vs, theta)
-            p = pen.penalty(theta)
-            extra = jnp.sqrt(p + 1e-30)
-            r = jnp.concatenate([y, jnp.atleast_1d(extra)])
+            if with_penalty:
+                p = pen.penalty(theta)
+                r = jnp.concatenate([y, jnp.atleast_1d(jnp.sqrt(p + 1e-30))])
+            else:
+                r = y
             return 0.5 * jnp.sum(r * r)
 
-        g = jax.grad(full_half_obj)(flat_hat)
-        expected_norm = float(jnp.linalg.norm(g))
+        g_full = jax.grad(lambda tf: half_obj(tf, True))(flat_hat)
+        expected_norm = float(jnp.linalg.norm(g_full))
         reported = float(result.diagnostics.final_gradient_norm)
-        # Same mathematical computation, but the in-framework path goes
-        # through the cached ``expectation_and_contributions`` /
-        # ``moments_and_contributions`` primitive (see
-        # ``estimator._cache_method``) while this reconstruction calls
-        # ``measure.expectation`` directly. The reduction orders are
-        # slightly different, and at a not-perfectly-converged optimum
-        # the residual difference propagates into the reported norm.
-        # Compare at "interpretive equality" tolerance rather than
-        # bit-exact: same shape, same scale, gradient is the gradient
-        # of the same surface.
-        assert reported == pytest.approx(expected_norm, rel=1e-4, abs=1e-6)
+        # The in-framework path goes through the cached
+        # ``moments_and_contributions`` primitive while this
+        # reconstruction calls ``measure.expectation`` directly; the
+        # reduction orders differ at float64 round-off, so compare at a
+        # tight-but-not-bitwise tolerance. (At the well-conditioned
+        # optimum this agreement is ~1e-9 relative; the previous
+        # rel=1e-4 was masking the degenerate-fixture fragility, not
+        # reduction-order noise.)
+        assert reported == pytest.approx(expected_norm, rel=1e-6, abs=1e-12)
+
+        # And the discriminating half of the docstring claim: the
+        # reported norm is the gradient of the FULL objective (with the
+        # penalty row), not of the data-only ||y||^2/2 -- at the
+        # penalised optimum the full gradient is ~0 while the data-only
+        # gradient is O(1).
+        g_data = jax.grad(lambda tf: half_obj(tf, False))(flat_hat)
+        data_only_norm = float(jnp.linalg.norm(g_data))
+        assert data_only_norm > 100.0 * expected_norm
 
     def test_strictly_above_data_only_norm(self):
         # Sanity: a *substantial* penalty makes the full-residual
