@@ -362,6 +362,15 @@ To maintain mathematical legibility without introducing non-compilable runtime b
 
 This ensures that labels, dimension names, and missingness masks are fully integrated into JAX's PyTree layout, allowing structured datasets to pass seamlessly through =jit=, =vmap=, and automatic differentiation boundaries. Pandas-labelled tensors remain available at the I/O boundary (load, save, summarize) via the workspace's =jax-pandas-bridge= utilities; they do not enter the hot path.
 
+** Labelled-Array Boundary as a Design Goal
+
+/Added 2026-06-09 (owner directive)./ First-class handling of labelled arrays on *both* sides of the boundary is a design goal, not a convenience: a user working in =pandas=, =polars=, or the workspace's =DataMat= / =DataVec= containers should be able to hand their objects to =estimate(...)= and get labelled objects back, with the labels they supplied --- never positional fallbacks when real labels were available. The commitments:
+
+- Ingress :: A single adapter registry (today =_internal/labels.py='s =normalise_*= family) dispatches on input type. Supported carriers: plain JAX arrays, =haliax.NamedArray=, =pandas.DataFrame= / =Series= (column names \(\to\) Variables labels, index \(\to\) Obs), =polars.DataFrame=, and =DataMat= / =DataVec=. Third-party carriers are recognised via optional imports --- never new runtime dependencies; an absent backend raises a helpful error only when actually handed such an object.
+- Label fidelity :: Labels supplied at ingress survive to egress. The /Variables/ labels from a DataFrame must thread through =LabelContext= into =EstimationResult= rather than being regenerated positionally (the v1 implementation drops them; tracked as the labelled-boundary issue).
+- Egress :: =haliax.NamedArray= remains the internal carrier; materialisation is backend-parametrised (=result.to_pandas()= today; =to_polars()= / =to_datamat()= or a =to_frame(backend=...)= dispatcher as the registry grows). =coef_table='s direct-pandas exception stands (see below), generalised per backend.
+- Hot path purity :: Adapters are strictly boundary translations. Nothing in =jit= / =vmap= / AD ever sees a dataframe object --- this subsection changes the *coverage* of the boundary, not its location.
+
 ** Axis Specifications and Haliax Integration
 Dimensions are promoted from implicit integer indices to first-class compile-time constants. We define the foundational axis taxonomy for any estimation instance:
 
