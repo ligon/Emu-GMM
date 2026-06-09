@@ -659,6 +659,88 @@ class TestNaNAware:
         assert float(N_j[1]) == pytest.approx(2.0)
 
 
+class TestJacobianContributionsNaNSafe:
+    """``jacobian_contributions`` must use the same observed-mean
+    sentinel as every other ``EmpiricalMeasure`` method.
+
+    Regression guard for the one method that historically used the
+    deprecated fixed ``0.0`` sentinel (``jnp.where(isnan(x), 0.0, x)``)
+    instead of :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`. With
+    a partial residual (``log``, ``1/x``) the zero sentinel puts the
+    masked-cell evaluation outside psi's domain: the per-row Jacobian
+    holds ``+/-inf`` there, the output mask zeroes the *primal*, but
+    reverse-mode AD through the method still multiplies the zero
+    cotangent by the infinite intermediate --- ``0 * inf == NaN`` ---
+    poisoning the gradient. This is the same failure class pinned for
+    ``expectation`` in ``test_expectation_gradient_nan_safe`` and
+    documented in ``docs/design.org`` Section 6 and
+    ``emu_gmm._internal.nan_safety``.
+    """
+
+    def _nan_measure(self):
+        # Column 0 is read through log(); its observed cells are
+        # strictly positive, so the observed-column-mean sentinel is in
+        # log's domain while the legacy 0.0 sentinel is not. Rows 1 and
+        # 3 are missing (NaN) and masked out of the single moment.
+        x = jnp.array([[2.0], [jnp.nan], [4.0], [jnp.nan]])
+        mask = jnp.array([[1.0], [0.0], [1.0], [0.0]])
+        return EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(4))
+
+    @staticmethod
+    def _log_residual(xi, theta):
+        # psi = a * b * log(x0): the parameter product makes the
+        # singular factor log(x0) appear in d(psi)/d(a) = b * log(x0),
+        # so reverse-mode AD of the contributions w.r.t. b crosses the
+        # masked-cell intermediate.
+        return jnp.array([theta.a * theta.b * jnp.log(xi[0])])
+
+    def test_primal_is_finite_and_masked(self):
+        meas = self._nan_measure()
+        D = meas.jacobian_contributions(self._log_residual, _LinearParams(a=0.5, b=2.0))
+        assert D.shape == (4, 1, 2)
+        assert bool(jnp.all(jnp.isfinite(D)))
+        # Masked rows contribute exactly zero.
+        np.testing.assert_allclose(np.asarray(D[1]), 0.0)
+        np.testing.assert_allclose(np.asarray(D[3]), 0.0)
+        # Observed rows carry d psi / d a = b * log(x0).
+        assert float(D[0, 0, 0]) == pytest.approx(2.0 * np.log(2.0), rel=1e-12)
+
+    def test_reverse_mode_gradient_is_finite(self):
+        """grad of a scalar reduction of the contributions is NaN-free.
+
+        Under the legacy 0.0 sentinel this is NaN: the masked cell holds
+        d psi/d a = b * log(0) = -inf, and the vjp w.r.t. b multiplies
+        the (zero) cotangent by log(0) --- 0 * -inf == NaN.
+        """
+        meas = self._nan_measure()
+
+        def total(t_flat):
+            theta = _LinearParams(a=t_flat[0], b=t_flat[1])
+            return jnp.sum(meas.jacobian_contributions(self._log_residual, theta))
+
+        g = jax.grad(total)(jnp.array([0.5, 2.0]))
+        assert bool(jnp.all(jnp.isfinite(g)))
+
+    def test_sum_normalised_recovers_jacobian(self):
+        """sum_i D[i] / N_j reproduces ``jacobian`` on a NaN-laden measure.
+
+        The contributions contract documented in ``docs/api-sketch.org``
+        Section 3 ("Extended Protocol Methods"): the row sum divided by
+        the per-coordinate effective sample size reproduces the
+        aggregated Jacobian. Pinning it here also pins that both
+        methods evaluate psi at the *same* sanitised x.
+        """
+        meas = self._nan_measure()
+        theta = _LinearParams(a=0.5, b=2.0)
+        D = meas.jacobian_contributions(self._log_residual, theta)
+        G = meas.jacobian(self._log_residual, theta)
+        N_j = jnp.sum(meas.mask * meas.weights[:, None], axis=0)  # (M,)
+        G_from_contribs = jnp.sum(D, axis=0) / N_j[:, None]
+        np.testing.assert_allclose(
+            np.asarray(G_from_contribs), np.asarray(G), rtol=1e-12
+        )
+
+
 # ---------------------------------------------------------------------------
 
 
