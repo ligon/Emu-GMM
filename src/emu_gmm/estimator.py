@@ -26,18 +26,25 @@ cost only on the *first* call. :func:`estimate` is now a thin wrapper
 around :func:`build_estimator`; its result is bitwise-equivalent to
 the v1 path for one-shot callers.
 
-Caching contract
-----------------
-The residual closure built inside :func:`build_estimator` captures the
-*template* ``measure`` instance. Subsequent calls of the returned
-callable reuse the same closure --- and therefore the same JAX
-compilation cache entry inside the optimiser --- whenever the
-call-time ``measure`` is the same object (``measure is template``).
-Calls with a different measure object rebuild the closure; if the
-measure's pytree structure is unchanged this still hits JAX's pjit
-cache for the post-optimum inference block, but the optimiser path
-will trace one more time because its internal cache keys on the new
-closure identity.
+Caching contract (#124)
+-----------------------
+On the ported surface (v1 scalar parameters, a standard residual-path
+weighting, an optimiser exposing the ``args`` channel --- the defaults),
+the measure rides through the jit boundary as a TRACED ARGUMENT of a
+factory-built kernel: any call-time measure of the template's class
+shares one trace per shape signature, so fresh same-structure measures
+(the repeated-estimation case) cost no retrace at all. This is the
+design.org Section 5 pytree-composability story applied to the output
+side of the factory; measured at ~240x on the per-replicate path
+(issue #124, spike report).
+
+The remaining branches (outer-loop weightings such as IteratedWeighting,
+the v2 manifold optimiser, third-party two-argument optimisers) ride the
+legacy closure contract until PR B: the residual closure captures the
+*template* measure instance; same-object calls reuse the optimiser's
+compilation cache, while a different measure object rebuilds the closure
+and the optimiser path traces once more (its internal cache keys on
+closure identity).
 
 See ``docs/api-sketch.org`` Section 4 and
 ``docs/implementation-plan.org`` Section 7 for the architectural spec.
@@ -71,7 +78,7 @@ from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.optimizer import RiemannianOptimizer
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.manifolds.spec import ManifoldSpec
-from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.optimizer import _supports_args, optimistix_lm
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -326,6 +333,14 @@ def build_estimator(
     manifold_spec = params_mod.manifold_spec_from_params(theta_init)
     optimizer, dispatch_mode = _resolve_optimizer(manifold_spec, optimizer)
 
+    # #124 kernel-path gate (factory-static). The traced-argument path
+    # serves the ported surface: v1 scalar parameters, a standard
+    # residual-path weighting, and an optimiser exposing the ``args``
+    # channel. Everything else (outer-loop weightings, the v2 manifold
+    # optimiser, third-party 2-arg optimisers) rides the legacy closure
+    # path unchanged until PR B.
+    _optimizer_accepts_args = _supports_args(optimizer)
+
     # The flatten / Jacobian *representation* dispatch is independent of the
     # optimiser *calling-convention* dispatch above (#110). ``dispatch_mode``
     # ("v1"/"v2") picks the optimiser surface; it is "v1" for any all-Euclidean
@@ -338,6 +353,13 @@ def build_estimator(
     # scalar trees and the ambient (``flatten_params_with_spec``) path for any
     # non-scalar leaf, Euclidean or not.
     all_scalar = all(ls.ambient_shape == () for ls in manifold_spec.leaf_specs)
+
+    _kernel_path_ok = (
+        all_scalar
+        and dispatch_mode == "v1"
+        and not getattr(weighting, "requires_outer_loop", False)
+        and _optimizer_accepts_args
+    )
 
     # Capture the template measure so subsequent calls can detect
     # identity reuse and short-circuit residual-closure rebuilding.
@@ -466,74 +488,76 @@ def build_estimator(
     else:
         _cache_attr_name = None
 
-    # Residual closure factory. ``measure_local`` is captured in the
-    # closure so jit / pjit cache identity is preserved on subsequent
-    # calls with the same measure instance.
+    # ------------------------------------------------------------------
+    # The residual CORE (#124): one pure function of
+    # ``(theta_flat, measure, weighting_obj)`` is the single source of
+    # truth for the whitened residual. The traced-argument kernel and
+    # the legacy closure path are both thin bindings of this core, so
+    # the two execution models agree by construction (float-identical;
+    # not bit-for-bit, because the jit boundaries differ).
+    def _residual_core(
+        theta_flat: Float[Array, " K"],
+        measure_arg: Measure,
+        weighting_for_solve: WeightingStrategy,
+    ) -> Float[Array, " M"]:
+        theta = params_mod.unflatten_params(
+            theta_flat, treedef, manifold_spec=unflatten_spec
+        )
+        if _cache_attr_name is not None:
+            # The attr NAME is a factory-time (static) dispatch decision
+            # made against the template measure's type; fetching the
+            # bound method on the traced instance here is what lets a
+            # fresh same-class measure ride the same trace (#124).
+            cached = getattr(measure_arg, _cache_attr_name)(model, theta)
+            m = cached[0]
+            V = cast(Any, covariance).covariance(
+                model,
+                theta,
+                measure_arg,
+                cached_intermediates=cached,
+            )
+        else:
+            m = measure_arg.expectation(model, theta)
+            V = covariance.covariance(model, theta, measure_arg)
+        V_star = _apply_anchored(V)
+        y = weighting_for_solve.whitening_residual(m, V_star, theta)
+        if penalty is None:
+            return y
+        # The objective is ||y||^2 + p(theta); appending sqrt(p)
+        # as a residual row reproduces it exactly under ||.||^2.
+        # p is C^infty and >= 0, but sqrt(p) has a singular
+        # gradient where p = 0. We lift with a tiny floor so the
+        # LM Jacobian is finite at exact zero. The floor (1e-30)
+        # is far below float64 tolerance and dominated by any
+        # nonzero p.
+        p = penalty.penalty(theta)
+        extra = jnp.sqrt(p + 1e-30)
+        return jnp.concatenate([y, jnp.atleast_1d(extra)])
+
+    # The traced-argument kernel: optimistix's own ``fn(y, args)`` shape,
+    # built ONCE at factory time so its identity is the trace-cache key.
+    # ``args`` is the measure; the factory ``weighting`` is closed over
+    # (a pytree constant). Fresh same-structure measures are new leaf
+    # values on an existing trace -- the #124 no-retrace property.
+    def _residual_kernel(
+        theta_flat: Float[Array, " K"],
+        measure_arg: Measure,
+    ) -> Float[Array, " M"]:
+        return _residual_core(theta_flat, measure_arg, weighting)
+
+    # Residual closure factory (legacy path: outer-loop weightings, v2
+    # manifold dispatch, optimisers without the ``args`` channel).
+    # ``measure_local`` is captured in the closure so jit / pjit cache
+    # identity is preserved on subsequent calls with the same measure
+    # instance.
     def _make_residual_fn(
         weighting_for_solve: WeightingStrategy,
         measure_local: Measure,
     ) -> Callable[[Float[Array, " K"]], Float[Array, " M"]]:
-        cache_method = (
-            getattr(measure_local, _cache_attr_name)
-            if _cache_attr_name is not None
-            else None
-        )
-        if penalty is None:
-
-            def residual_fn(
-                theta_flat: Float[Array, " K"],
-            ) -> Float[Array, " M"]:
-                theta = params_mod.unflatten_params(
-                    theta_flat, treedef, manifold_spec=unflatten_spec
-                )
-                if cache_method is not None:
-                    cached = cache_method(model, theta)
-                    m = cached[0]
-                    V = cast(Any, covariance).covariance(
-                        model,
-                        theta,
-                        measure_local,
-                        cached_intermediates=cached,
-                    )
-                else:
-                    m = measure_local.expectation(model, theta)
-                    V = covariance.covariance(model, theta, measure_local)
-                V_star = _apply_anchored(V)
-                y = weighting_for_solve.whitening_residual(m, V_star, theta)
-                return y
-
-        else:
-
-            def residual_fn(
-                theta_flat: Float[Array, " K"],
-            ) -> Float[Array, " M"]:
-                theta = params_mod.unflatten_params(
-                    theta_flat, treedef, manifold_spec=unflatten_spec
-                )
-                if cache_method is not None:
-                    cached = cache_method(model, theta)
-                    m = cached[0]
-                    V = cast(Any, covariance).covariance(
-                        model,
-                        theta,
-                        measure_local,
-                        cached_intermediates=cached,
-                    )
-                else:
-                    m = measure_local.expectation(model, theta)
-                    V = covariance.covariance(model, theta, measure_local)
-                V_star = _apply_anchored(V)
-                y = weighting_for_solve.whitening_residual(m, V_star, theta)
-                # The objective is ||y||^2 + p(theta); appending sqrt(p)
-                # as a residual row reproduces it exactly under ||.||^2.
-                # p is C^infty and >= 0, but sqrt(p) has a singular
-                # gradient where p = 0. We lift with a tiny floor so the
-                # LM Jacobian is finite at exact zero. The floor (1e-30)
-                # is far below float64 tolerance and dominated by any
-                # nonzero p.
-                p = penalty.penalty(theta)
-                extra = jnp.sqrt(p + 1e-30)
-                return jnp.concatenate([y, jnp.atleast_1d(extra)])
+        def residual_fn(
+            theta_flat: Float[Array, " K"],
+        ) -> Float[Array, " M"]:
+            return _residual_core(theta_flat, measure_local, weighting_for_solve)
 
         return residual_fn
 
@@ -556,183 +580,192 @@ def build_estimator(
     half_M_minus_K_overidentified = (M - dim_info) > 0
     J_dof = max(M - dim_info, 0)
 
-    def _make_compute_inference_jit(
-        measure_local: Measure,
-        residual_fn_local: Callable[[Float[Array, " K"]], Float[Array, " M"]],
-    ) -> Callable[[Float[Array, " K"]], tuple[Any, ...]]:
-        cache_method = (
-            getattr(measure_local, _cache_attr_name)
-            if _cache_attr_name is not None
-            else None
+    # Post-optimum inference CORE (#124): pure in (theta_flat, measure),
+    # the single implementation behind both the traced-argument kernel
+    # (jitted once at factory; fresh same-structure measures share the
+    # trace) and the legacy per-measure closure wrapper below.
+    def _inference_core(
+        # theta_flat has length total_ambient_dim == total_dimension
+        # (the ambient tangent dim D), which equals the field count K
+        # only for v1 / all-scalar trees.
+        theta_flat: Float[Array, " D"],
+        measure_arg: Measure,
+    ) -> tuple[
+        Float[Array, "D D"],  # Sigma_theta_arr
+        Float[Array, "M M"],  # V_star_hat
+        Float[Array, ""],  # J_stat
+        Float[Array, ""],  # kappa_V
+        Float[Array, ""],  # tau_hat
+        Float[Array, "D D"],  # info_matrix
+        Float[Array, " M"],  # m_hat
+        Float[Array, "M M"],  # L_hat
+        Float[Array, " M"],  # y_hat
+        Float[Array, "M D"],  # G_hat
+        Float[Array, "M M"],  # V_hat
+        Float[Array, ""],  # cholesky_pivot_min
+        Float[Array, ""],  # final_gradient_norm
+        Float[Array, ""],  # J_pvalue
+        Float[Array, ""],  # J_pvalue_adjusted
+    ]:
+        theta_local = params_mod.unflatten_params(
+            theta_flat, treedef, manifold_spec=unflatten_spec
+        )
+        if _cache_attr_name is not None:
+            cached = getattr(measure_arg, _cache_attr_name)(model, theta_local)
+            m_local = cached[0]
+            V_local = cast(Any, covariance).covariance(
+                model,
+                theta_local,
+                measure_arg,
+                cached_intermediates=cached,
+            )
+        else:
+            m_local = measure_arg.expectation(model, theta_local)
+            V_local = covariance.covariance(model, theta_local, measure_arg)
+        V_star_local = _apply_anchored(V_local)
+        L_local = cho.cholesky(V_star_local)
+        y_local = weighting.whitening_residual(m_local, V_star_local, theta_local)
+        J_local = jnp.sum(y_local * y_local)
+        # G = d m / d theta_flat at the FIXED theta_hat (commitment 5 /
+        # delta method; AD of the MOMENT function, never through the
+        # solver). For the v1 path this is exactly ``measure.jacobian``
+        # (which itself ``jacfwd``s the unflatten->expectation closure),
+        # kept verbatim so v1 stays bitwise. For any non-scalar tree
+        # ``measure.jacobian`` would route through the v1 scalar-only
+        # flatten and raise on a non-scalar ManifoldLeaf block, so we
+        # AD a manifold-aware unflatten->expectation closure inline; the
+        # result is the same (M, total_dimension) ambient Jacobian.
+        # Keyed on ``all_scalar`` (not ``dispatch_mode``) so a non-scalar
+        # Euclidean tree takes the inline AD path too (#110).
+        if not all_scalar:
+
+            def _moment_of_flat(tf: Float[Array, " K"]) -> Float[Array, " M"]:
+                th = params_mod.unflatten_params(
+                    tf, treedef, manifold_spec=unflatten_spec
+                )
+                return jnp.asarray(measure_arg.expectation(model, th))
+
+            G_local = jax.jacfwd(_moment_of_flat)(theta_flat)
+        else:
+            G_local_raw = measure_arg.jacobian(model, theta_local)
+            if hasattr(G_local_raw, "array"):
+                G_local_raw = G_local_raw.array
+            G_local = jnp.asarray(G_local_raw)
+        # Per-leaf G_riem assembly (Phase 4 / BUG-A / R4/R7). Iterate
+        # over the manifold spec's leaves -- NOT range(K) over field
+        # count -- slicing each leaf's ambient column block
+        # ``G_local[:, offset:offset+size]``, scaling by the leaf's
+        # retraction differential (the unit Convention-B differential
+        # at v=0 for every native retraction, so this is the identity),
+        # and applying the leaf's HORIZONTAL projection (a Lyapunov
+        # solve for PSDFixedRank; identity for Euclidean / Positive) so
+        # the gauge / vertical directions carry no information. ALL
+        # ambient columns flow through -> G_riem is (M, total_dimension)
+        # with no silent column drop. For v1 / all-scalar trees each
+        # block is one column, the differential is 1, and the
+        # projection is the identity, so G_riem == G_local bitwise.
+        riem_blocks = []
+        for ls in manifold_spec.leaf_specs:
+            size = int(np.prod(ls.ambient_shape)) if ls.ambient_shape != () else 1
+            block = G_local[:, ls.offset : ls.offset + size]  # (M, size)
+            diff = ls.manifold.retraction_differential(
+                theta_flat[ls.offset : ls.offset + size]
+            )
+            block = jnp.asarray(diff) * block
+            if ls.ambient_shape == () or ls.manifold.gauge_dim == 0:
+                # Scalar / Euclidean / Positive leaf: horizontal
+                # projection is the identity (bitwise v1 path).
+                riem_blocks.append(block)
+            else:
+                # Non-scalar gauge-bearing leaf (PSDFixedRank): reshape
+                # the point block to ambient_shape and project each
+                # of the M Jacobian rows row-by-row onto the horizontal
+                # subspace, then ravel back to (M, size).
+                pt = jnp.reshape(
+                    theta_flat[ls.offset : ls.offset + size], ls.ambient_shape
+                )
+                manifold = ls.manifold
+                shape = ls.ambient_shape
+
+                def _proj_row(
+                    row: Float[Array, " size"],
+                    _pt: Any = pt,
+                    _m: Any = manifold,
+                    _shape: Any = shape,
+                    _size: int = size,
+                ) -> Float[Array, " size"]:
+                    row_m = jnp.reshape(row, _shape)
+                    proj = _m.projection(_pt, row_m)
+                    return jnp.reshape(proj, (_size,))
+
+                riem_blocks.append(jax.vmap(_proj_row)(block))
+        G_riem = jnp.concatenate(riem_blocks, axis=1)  # (M, total_dimension)
+        Z_local = jax.scipy.linalg.solve_triangular(L_local, G_riem, lower=True)
+        info_local = Z_local.T @ Z_local
+        # Gauge-aware pseudo-inverse (Phase 4 / BUG-B / R6/R8): drop the
+        # ``total_gauge_dim`` smallest eigenvalues BY COUNT. For
+        # ``total_gauge_dim == 0`` (v1 / Euclidean / Positive) this is
+        # exactly ``inv()`` (bitwise v1 non-regression).
+        Sigma_local = pinv_eigvalrule(
+            info_local, drop_smallest=manifold_spec.total_gauge_dim
+        )
+        kappa_local = jnp.linalg.cond(V_star_local)
+        pivot_min_local = jnp.min(jnp.diag(L_local))
+
+        def _half(tf: Float[Array, " K"]) -> Float[Array, ""]:
+            # The factory weighting's residual -- for IteratedWeighting
+            # this is its CU fallback, matching the pre-#124 behaviour
+            # (the closure path passed a factory-weighting residual_fn).
+            r = _residual_core(tf, measure_arg, weighting)
+            return 0.5 * jnp.sum(r * r)
+
+        grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
+        if half_M_minus_K_overidentified:
+            J_pv = jax.scipy.stats.chi2.sf(J_local, J_dof)
+            J_pv_adj_binding = regularization_adjusted_pvalue(
+                J_local, V_local, V_star_local, G_local
+            )
+            binding_flag = jnp.asarray(_binding_ridge(regularization, tau_anchor))
+            J_pv_adj = jnp.where(binding_flag, J_pv_adj_binding, J_pv)
+        else:
+            J_pv = jnp.asarray(jnp.nan)
+            J_pv_adj = jnp.asarray(jnp.nan)
+        return (
+            Sigma_local,
+            V_star_local,
+            J_local,
+            kappa_local,
+            tau_anchor,
+            info_local,
+            jnp.asarray(m_local),
+            L_local,
+            y_local,
+            G_local,
+            V_local,
+            pivot_min_local,
+            grad_norm_local,
+            J_pv,
+            J_pv_adj,
         )
 
-        def _compute_inference(
-            # theta_flat has length total_ambient_dim == total_dimension
-            # (the ambient tangent dim D), which equals the field count K
-            # only for v1 / all-scalar trees.
-            theta_flat: Float[Array, " D"],
-        ) -> tuple[
-            Float[Array, "D D"],  # Sigma_theta_arr
-            Float[Array, "M M"],  # V_star_hat
-            Float[Array, ""],  # J_stat
-            Float[Array, ""],  # kappa_V
-            Float[Array, ""],  # tau_hat
-            Float[Array, "D D"],  # info_matrix
-            Float[Array, " M"],  # m_hat
-            Float[Array, "M M"],  # L_hat
-            Float[Array, " M"],  # y_hat
-            Float[Array, "M D"],  # G_hat
-            Float[Array, "M M"],  # V_hat
-            Float[Array, ""],  # cholesky_pivot_min
-            Float[Array, ""],  # final_gradient_norm
-            Float[Array, ""],  # J_pvalue
-            Float[Array, ""],  # J_pvalue_adjusted
-        ]:
-            theta_local = params_mod.unflatten_params(
-                theta_flat, treedef, manifold_spec=unflatten_spec
-            )
-            if cache_method is not None:
-                cached = cache_method(model, theta_local)
-                m_local = cached[0]
-                V_local = cast(Any, covariance).covariance(
-                    model,
-                    theta_local,
-                    measure_local,
-                    cached_intermediates=cached,
-                )
-            else:
-                m_local = measure_local.expectation(model, theta_local)
-                V_local = covariance.covariance(model, theta_local, measure_local)
-            V_star_local = _apply_anchored(V_local)
-            L_local = cho.cholesky(V_star_local)
-            y_local = weighting.whitening_residual(m_local, V_star_local, theta_local)
-            J_local = jnp.sum(y_local * y_local)
-            # G = d m / d theta_flat at the FIXED theta_hat (commitment 5 /
-            # delta method; AD of the MOMENT function, never through the
-            # solver). For the v1 path this is exactly ``measure.jacobian``
-            # (which itself ``jacfwd``s the unflatten->expectation closure),
-            # kept verbatim so v1 stays bitwise. For any non-scalar tree
-            # ``measure.jacobian`` would route through the v1 scalar-only
-            # flatten and raise on a non-scalar ManifoldLeaf block, so we
-            # AD a manifold-aware unflatten->expectation closure inline; the
-            # result is the same (M, total_dimension) ambient Jacobian.
-            # Keyed on ``all_scalar`` (not ``dispatch_mode``) so a non-scalar
-            # Euclidean tree takes the inline AD path too (#110).
-            if not all_scalar:
+    # The traced-argument inference kernel (#124): jitted ONCE at factory
+    # time over (theta_flat, measure); fresh same-structure measures are
+    # new leaf values on the existing trace.
+    _inference_kernel_jit = jax.jit(_inference_core)
 
-                def _moment_of_flat(tf: Float[Array, " K"]) -> Float[Array, " M"]:
-                    th = params_mod.unflatten_params(
-                        tf, treedef, manifold_spec=unflatten_spec
-                    )
-                    return jnp.asarray(measure_local.expectation(model, th))
+    def _make_compute_inference_jit(
+        measure_local: Measure,
+    ) -> Callable[[Float[Array, " K"]], tuple[Any, ...]]:
+        """Legacy per-measure closure over the shared inference core."""
 
-                G_local = jax.jacfwd(_moment_of_flat)(theta_flat)
-            else:
-                G_local_raw = measure_local.jacobian(model, theta_local)
-                if hasattr(G_local_raw, "array"):
-                    G_local_raw = G_local_raw.array
-                G_local = jnp.asarray(G_local_raw)
-            # Per-leaf G_riem assembly (Phase 4 / BUG-A / R4/R7). Iterate
-            # over the manifold spec's leaves -- NOT range(K) over field
-            # count -- slicing each leaf's ambient column block
-            # ``G_local[:, offset:offset+size]``, scaling by the leaf's
-            # retraction differential (the unit Convention-B differential
-            # at v=0 for every native retraction, so this is the identity),
-            # and applying the leaf's HORIZONTAL projection (a Lyapunov
-            # solve for PSDFixedRank; identity for Euclidean / Positive) so
-            # the gauge / vertical directions carry no information. ALL
-            # ambient columns flow through -> G_riem is (M, total_dimension)
-            # with no silent column drop. For v1 / all-scalar trees each
-            # block is one column, the differential is 1, and the
-            # projection is the identity, so G_riem == G_local bitwise.
-            riem_blocks = []
-            for ls in manifold_spec.leaf_specs:
-                size = int(np.prod(ls.ambient_shape)) if ls.ambient_shape != () else 1
-                block = G_local[:, ls.offset : ls.offset + size]  # (M, size)
-                diff = ls.manifold.retraction_differential(
-                    theta_flat[ls.offset : ls.offset + size]
-                )
-                block = jnp.asarray(diff) * block
-                if ls.ambient_shape == () or ls.manifold.gauge_dim == 0:
-                    # Scalar / Euclidean / Positive leaf: horizontal
-                    # projection is the identity (bitwise v1 path).
-                    riem_blocks.append(block)
-                else:
-                    # Non-scalar gauge-bearing leaf (PSDFixedRank): reshape
-                    # the point block to ambient_shape and project each
-                    # of the M Jacobian rows row-by-row onto the horizontal
-                    # subspace, then ravel back to (M, size).
-                    pt = jnp.reshape(
-                        theta_flat[ls.offset : ls.offset + size], ls.ambient_shape
-                    )
-                    manifold = ls.manifold
-                    shape = ls.ambient_shape
-
-                    def _proj_row(
-                        row: Float[Array, " size"],
-                        _pt: Any = pt,
-                        _m: Any = manifold,
-                        _shape: Any = shape,
-                        _size: int = size,
-                    ) -> Float[Array, " size"]:
-                        row_m = jnp.reshape(row, _shape)
-                        proj = _m.projection(_pt, row_m)
-                        return jnp.reshape(proj, (_size,))
-
-                    riem_blocks.append(jax.vmap(_proj_row)(block))
-            G_riem = jnp.concatenate(riem_blocks, axis=1)  # (M, total_dimension)
-            Z_local = jax.scipy.linalg.solve_triangular(L_local, G_riem, lower=True)
-            info_local = Z_local.T @ Z_local
-            # Gauge-aware pseudo-inverse (Phase 4 / BUG-B / R6/R8): drop the
-            # ``total_gauge_dim`` smallest eigenvalues BY COUNT. For
-            # ``total_gauge_dim == 0`` (v1 / Euclidean / Positive) this is
-            # exactly ``inv()`` (bitwise v1 non-regression).
-            Sigma_local = pinv_eigvalrule(
-                info_local, drop_smallest=manifold_spec.total_gauge_dim
-            )
-            kappa_local = jnp.linalg.cond(V_star_local)
-            pivot_min_local = jnp.min(jnp.diag(L_local))
-
-            def _half(tf: Float[Array, " K"]) -> Float[Array, ""]:
-                r = residual_fn_local(tf)
-                return 0.5 * jnp.sum(r * r)
-
-            grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
-            if half_M_minus_K_overidentified:
-                J_pv = jax.scipy.stats.chi2.sf(J_local, J_dof)
-                J_pv_adj_binding = regularization_adjusted_pvalue(
-                    J_local, V_local, V_star_local, G_local
-                )
-                binding_flag = jnp.asarray(_binding_ridge(regularization, tau_anchor))
-                J_pv_adj = jnp.where(binding_flag, J_pv_adj_binding, J_pv)
-            else:
-                J_pv = jnp.asarray(jnp.nan)
-                J_pv_adj = jnp.asarray(jnp.nan)
-            return (
-                Sigma_local,
-                V_star_local,
-                J_local,
-                kappa_local,
-                tau_anchor,
-                info_local,
-                jnp.asarray(m_local),
-                L_local,
-                y_local,
-                G_local,
-                V_local,
-                pivot_min_local,
-                grad_norm_local,
-                J_pv,
-                J_pv_adj,
-            )
+        def _compute_inference(theta_flat: Float[Array, " D"]) -> tuple[Any, ...]:
+            return _inference_core(theta_flat, measure_local)
 
         return jax.jit(_compute_inference)
 
     # Pre-build the inference closure for the template measure so
-    # subsequent same-measure calls hit the jit cache.
-    _compute_inference_jit_template = _make_compute_inference_jit(
-        template_measure, _residual_fn_template
-    )
+    # subsequent same-measure calls on the legacy path hit the jit cache.
+    _compute_inference_jit_template = _make_compute_inference_jit(template_measure)
 
     def _run(
         theta_init_call: ParamsLike,
@@ -757,18 +790,28 @@ def build_estimator(
             theta_init_flat, _, _ = params_mod.flatten_params_with_spec(theta_init_call)
         else:
             theta_init_flat, _ = params_mod.flatten_params(theta_init_call)
-        # Reuse the pre-built residual / inference closures when the
-        # measure identity matches the template. The pjit cache inside
-        # optimistix keys on the residual_fn closure identity, so this
-        # is what delivers the second-call no-retrace property.
-        if measure_call is template_measure:
+        # #124 dispatch: the traced-argument kernel path serves any
+        # measure of the template's class (same-class is what the
+        # factory-time cache/label/anchor decisions assumed) -- fresh
+        # same-structure measures are new leaf values on the existing
+        # trace, and different shapes retrace once per shape signature.
+        use_traced_path = _kernel_path_ok and type(measure_call) is type(
+            template_measure
+        )
+        if use_traced_path:
+            residual_fn = None  # unused on the kernel path
+            compute_inference_jit = None
+        # Legacy closure path: reuse the pre-built residual / inference
+        # closures when the measure identity matches the template. The
+        # pjit cache inside optimistix keys on the residual_fn closure
+        # identity, so this is what delivers the second-call no-retrace
+        # property on this path.
+        elif measure_call is template_measure:
             residual_fn = _residual_fn_template
             compute_inference_jit = _compute_inference_jit_template
         else:
             residual_fn = _make_residual_fn(weighting, measure_call)
-            compute_inference_jit = _make_compute_inference_jit(
-                measure_call, residual_fn
-            )
+            compute_inference_jit = _make_compute_inference_jit(measure_call)
 
         iterated_status: str | None = None
         # Dispatch by the WeightingStrategy protocol's optional
@@ -810,6 +853,12 @@ def build_estimator(
             # Manifold-aware flatten of the recovered pytree: the v1
             # 2-tuple raises on non-scalar ManifoldLeaf blocks (R19).
             theta_hat_flat, _, _ = params_mod.flatten_params_with_spec(theta_hat_pytree)
+        elif use_traced_path:
+            # #124: the measure rides optimistix's native ``args``
+            # channel; the kernel's stable identity is the trace key.
+            theta_hat_flat, optimizer_info = cast(Any, optimizer)(
+                _residual_kernel, theta_init_flat, args=measure_call
+            )
         else:
             # dispatch_mode == "v1" guarantees a v1-style Optimizer here;
             # mypy cannot see the _resolve_optimizer narrowing, so mirror
@@ -838,7 +887,13 @@ def build_estimator(
             final_gradient_norm,
             J_pvalue,
             J_pvalue_adjusted,
-        ) = compute_inference_jit(theta_hat_flat)
+        ) = (
+            _inference_kernel_jit(theta_hat_flat, measure_call)
+            if use_traced_path
+            # non-None on every non-traced branch; mypy cannot see the
+            # use_traced_path coupling (#124).
+            else cast(Any, compute_inference_jit)(theta_hat_flat)
+        )
 
         # Param axes are sized by the ambient tangent dimension
         # ``total_dimension`` (Phase 4 / BUG-D / R14/R17), matching the
