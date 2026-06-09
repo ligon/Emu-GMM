@@ -18,8 +18,12 @@ via `RiemannianLM`, with gauge-aware `Sigma_theta` and gauge-invariant standard
 errors on functionals of `Gamma = A @ A.T` (`result.eigenvalue_se()`,
 `result.gamma_se()`, `result.functional_se(f)`). The manifold types
 (`PSDFixedRank`, `Euclidean`, `Product`, `Positive`, `ManifoldLeaf`) are
-re-exported at the top level alongside the Measure/Covariance menus. 839 tests
-pass; `make quick-check` is clean (ruff + black + mypy + pytest). All three
+re-exported at the top level alongside the Measure/Covariance menus. The green
+gate is `make check` (ruff + black + mypy + the full pytest suite) — restored
+clean 2026-06-09 (#122); run `make quick-check` before every commit and do not
+quote literal test counts here (they go stale; the suite is the count). The v2
+roadmap and exit criteria live in `docs/implementation-plan.org` Section 13 and
+GitHub issue #131. All three
 measure paths (synthetic, analytical, empirical) run end-to-end against the
 bundled multi-asset Euler example in `src/emu_gmm/examples/euler.py`. The
 runnable demo at `examples/run_euler.py` exercises all three contexts and prints
@@ -198,12 +202,14 @@ been through four reviewer iterations; the abstractions are deliberate.
   `Euclidean` / `PSDFixedRank` / `Product` / `Positive` + `RiemannianLM`, the
   manifold-aware flatten/spec path, gauge-aware `Sigma_theta` (`pinv_eigvalrule`
   dropping the `K(K-1)/2` gauge directions by count), and gauge-invariant
-  Gamma-functional SEs (#42). Still deferred: a Riemannian TrustRegions solver
-  (#9 — LM suffices and was verified equivalent on the quotient), a pymanopt
-  backend (#3 — native constructors only; pymanopt is a dev-only gated
-  cross-check), and the high-gauge-fraction `k/n > 0.7` regime (surfaced as a
-  caveat, not supported). Validated against a pymanopt-TrustRegions baseline on
-  the quotient.
+  Gamma-functional SEs (#42). Decided and closed 2026-06-09: a Riemannian
+  TrustRegions solver will not be added (#9 — LM suffices and was verified
+  equivalent on the quotient) and there is no pymanopt backend (#3 — native
+  constructors only; pymanopt is a dev-only gated cross-check). The
+  high-gauge-fraction `k/n > 0.7` regime remains surfaced as a caveat, not
+  supported. Validated against a pymanopt-TrustRegions baseline on the
+  quotient. Still open from the epic: the gauge-projected condition number
+  (`cond_info['exclude_gauge']` is the v1 raw alias; #20).
 - **`ReplicateWeightCovariance`**: rest of the design-awareness ladder
   (BRR, jackknife, bootstrap variants; `docs/design.org` Section 2).
 - **`EigenvalueFloor`, `NearestPSD` (Higham 1988) regularisers**:
