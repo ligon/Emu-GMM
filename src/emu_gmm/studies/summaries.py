@@ -82,6 +82,12 @@ class BiasSD:
     param_names: tuple[str, ...]
     n_used: int
     n_excluded: int
+    #: Per-coordinate count of used reps with a FINITE analytic SE; a
+    #: NaN SE is an event (e.g. indefinite sandwich meat, #138), counted
+    #: here rather than silently absorbed (#140 convention).
+    n_valid_se: np.ndarray = dataclasses.field(
+        default_factory=lambda: np.zeros(0, dtype=int)
+    )
 
 
 def bias_sd(records: MCRecords | FitRecord, theta0: Any) -> BiasSD:
@@ -98,26 +104,43 @@ def bias_sd(records: MCRecords | FitRecord, theta0: Any) -> BiasSD:
     names = tuple(rec.param_names)
     if n_used == 0:
         nan = _nan_vec(d)
-        return BiasSD(nan, nan, nan, nan, names, 0, n_excluded)
+        return BiasSD(nan, nan, nan, nan, names, 0, n_excluded, np.zeros(d, dtype=int))
     theta = np.asarray(rec.theta_flat)[mask]
     se = np.asarray(rec.se)[mask]
     bias = theta.mean(axis=0) - t0
     mc_sd = theta.std(axis=0, ddof=1) if n_used >= 2 else _nan_vec(d)
-    mean_se = se.mean(axis=0)
+    # NaN SEs are an EVENT (e.g. an indefinite sandwich meat under a
+    # binding ridge, #138), not a value: exclude them from the mean and
+    # COUNT them per coordinate (audit M1/L2; #140 convention). A naive
+    # se.mean() NaN-poisons the column silently.
+    se_valid = np.isfinite(se)
+    n_valid_se = se_valid.sum(axis=0).astype(int)
+    with np.errstate(invalid="ignore"):
+        mean_se = np.where(
+            n_valid_se > 0,
+            np.nansum(np.where(se_valid, se, 0.0), axis=0) / np.maximum(n_valid_se, 1),
+            np.nan,
+        )
     with np.errstate(divide="ignore", invalid="ignore"):
         se_ratio = mean_se / mc_sd
-    return BiasSD(bias, mc_sd, mean_se, se_ratio, names, n_used, n_excluded)
+    return BiasSD(bias, mc_sd, mean_se, se_ratio, names, n_used, n_excluded, n_valid_se)
 
 
 @dataclasses.dataclass(frozen=True)
 class Coverage:
     """Per-coordinate Wald confidence-interval coverage."""
 
-    coverage: np.ndarray  # fraction of used reps with theta0 in the CI
+    coverage: np.ndarray  # fraction of VALID-SE used reps with theta0 in the CI
     level: float
     param_names: tuple[str, ...]
     n_used: int
     n_excluded: int
+    #: Per-coordinate count of used reps whose SE was finite (the
+    #: coverage denominator). A NaN-SE rep is neither "covered" nor
+    #: "not covered" -- it is counted here (audit M1; #140).
+    n_valid_se: np.ndarray = dataclasses.field(
+        default_factory=lambda: np.zeros(0, dtype=int)
+    )
 
 
 def coverage(
@@ -137,12 +160,22 @@ def coverage(
     t0 = _as_flat_theta0(theta0, d)
     names = tuple(rec.param_names)
     if n_used == 0:
-        return Coverage(_nan_vec(d), level, names, 0, n_excluded)
+        return Coverage(
+            _nan_vec(d), level, names, 0, n_excluded, np.zeros(d, dtype=int)
+        )
     theta = np.asarray(rec.theta_flat)[mask]
     se = np.asarray(rec.se)[mask]
     z = float(scipy.stats.norm.ppf(0.5 + level / 2.0))
-    covered = np.abs(theta - t0[None, :]) <= z * se
-    return Coverage(covered.mean(axis=0), level, names, n_used, n_excluded)
+    # NaN SEs: numpy comparisons coerce NaN to False, which would count
+    # the rep as "not covered" inside the denominator and bias coverage
+    # DOWN silently (audit M1). Exclude-and-count instead (#140).
+    se_valid = np.isfinite(se)
+    n_valid_se = se_valid.sum(axis=0).astype(int)
+    with np.errstate(invalid="ignore"):
+        covered = np.abs(theta - t0[None, :]) <= z * se
+    hit_counts = np.where(se_valid, covered, False).sum(axis=0)
+    cov = np.where(n_valid_se > 0, hit_counts / np.maximum(n_valid_se, 1), np.nan)
+    return Coverage(cov, level, names, n_used, n_excluded, n_valid_se)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,6 +187,12 @@ class SizePower:
     reject_adjusted: np.ndarray  # from J_pvalue_adjusted (ridge-aware)
     n_used: int
     n_excluded: int
+    #: Used reps with a finite J_pvalue / J_pvalue_adjusted (the
+    #: rejection denominators). Just-identified models emit NaN
+    #: p-values BY CONSTRUCTION; without this accounting they would
+    #: read as a fabricated 0% rejection rate (audit L2; #140).
+    n_valid_nominal: int = 0
+    n_valid_adjusted: int = 0
 
 
 def size_power(
@@ -173,12 +212,23 @@ def size_power(
     alphas = tuple(float(a) for a in alpha)
     if n_used == 0:
         nan = np.full((len(alphas),), np.nan)
-        return SizePower(alphas, nan, nan.copy(), 0, n_excluded)
+        return SizePower(alphas, nan, nan.copy(), 0, n_excluded, 0, 0)
     p_nom = np.asarray(rec.J_pvalue)[mask]
     p_adj = np.asarray(rec.J_pvalue_adjusted)[mask]
-    reject_nom = np.array([(p_nom < a).mean() for a in alphas])
-    reject_adj = np.array([(p_adj < a).mean() for a in alphas])
-    return SizePower(alphas, reject_nom, reject_adj, n_used, n_excluded)
+
+    def _rates(p: np.ndarray) -> tuple[np.ndarray, int]:
+        valid = np.isfinite(p)
+        n_valid = int(valid.sum())
+        if n_valid == 0:
+            return np.full((len(alphas),), np.nan), 0
+        pv = p[valid]
+        return np.array([(pv < a).mean() for a in alphas]), n_valid
+
+    reject_nom, n_valid_nom = _rates(p_nom)
+    reject_adj, n_valid_adj = _rates(p_adj)
+    return SizePower(
+        alphas, reject_nom, reject_adj, n_used, n_excluded, n_valid_nom, n_valid_adj
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +281,8 @@ class JCalibration:
     J_dof: int
     n_used: int
     n_excluded: int
+    #: Used reps with a finite J_pvalue (the ECDF denominator; #140).
+    n_valid: int = 0
 
 
 def j_calibration(records: MCRecords | FitRecord) -> JCalibration:
@@ -246,9 +298,19 @@ def j_calibration(records: MCRecords | FitRecord) -> JCalibration:
     dof = int(rec.J_dof)
     if n_used == 0:
         nan = np.full_like(deciles, np.nan)
-        return JCalibration(deciles, nan, nan.copy(), float("nan"), dof, 0, n_excluded)
+        return JCalibration(
+            deciles, nan, nan.copy(), float("nan"), dof, 0, n_excluded, 0
+        )
     p = np.asarray(rec.J_pvalue)[mask]
-    ecdf = np.array([(p <= d).mean() for d in deciles])
+    valid = np.isfinite(p)
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        nan = np.full_like(deciles, np.nan)
+        return JCalibration(
+            deciles, nan, nan.copy(), float("nan"), dof, n_used, n_excluded, 0
+        )
+    pv = p[valid]
+    ecdf = np.array([(pv <= d).mean() for d in deciles])
     deviation = ecdf - deciles
     return JCalibration(
         deciles,
@@ -258,6 +320,7 @@ def j_calibration(records: MCRecords | FitRecord) -> JCalibration:
         dof,
         n_used,
         n_excluded,
+        n_valid,
     )
 
 

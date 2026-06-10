@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import jax_dataclasses as jdc
 import numpy as np
 import pytest
 from emu_gmm import IIDCovariance, build_estimator, estimate
@@ -247,51 +246,100 @@ class TestFallbacks:
 class TestKernelPathSemantics:
     def test_template_measure_itself_rides_traced_path(self):
         """The identity case is served by the same kernel (one code
-        path); values match the legacy closure run bit-for-bit is NOT
-        promised -- float-identical is."""
+        path) -- pinned PATH-SENSITIVELY via an args-channel spy
+        (audit L5: the previous determinism-only assertion held on
+        either path)."""
+
+        class _Spy:
+            def __init__(self):
+                self.inner = optimistix_lm()
+                self.args_calls = 0
+
+            def __call__(self, residual_fn, theta_init, *, args=None):
+                if args is not None:
+                    self.args_calls += 1
+                    return self.inner(residual_fn, theta_init, args=args)
+                return self.inner(residual_fn, theta_init)
+
         m = _measure(seed=0)
+        spy = _Spy()
         run = build_estimator(
             euler_residual,
             measure=m,
             covariance=IIDCovariance(),
+            optimizer=spy,
             parameters=_theta0(),
         )
         r1 = run(_theta0(), m)
         r2 = run(_theta0(), m)
+        assert spy.args_calls == 2  # identity case rides the kernel
         # Deterministic: same measure, same kernel, same trace.
         assert float(r1.theta_hat.beta) == float(r2.theta_hat.beta)
         assert float(r1.J_stat) == float(r2.J_stat)
 
     def test_different_measure_class_routes_legacy(self):
-        """A measure of a different class than the template must not
-        ride the kernel (factory-time dispatch assumed the template's
-        type); it routes down the legacy path and still works."""
-        from emu_gmm.covariance import SyntheticCovariance
-        from emu_gmm.measures import SyntheticMeasure
+        """A measure of a DIFFERENT CLASS than the template must not ride
+        the kernel (factory-time dispatch -- cache attr name, label
+        probing, tau anchor -- assumed the template's type); it routes
+        down the legacy closure path and still estimates correctly.
 
-        @jdc.pytree_dataclass
-        class _P:
-            a: float
+        Audit M3: the original version of this test passed
+        ``template.with_key(...)`` -- the SAME class -- and asserted only
+        ``theta_hat is not None``, so it could not fail. This version
+        constructs a genuinely different class (an EmpiricalMeasure
+        subclass) and asserts PATH-SENSITIVELY via an optimizer spy that
+        records whether the args channel was used."""
 
-        def psi(x, theta):
-            return jnp.array([theta.a + x[0], theta.a * x[0] - x[1]])
+        class _SpyOptimizer:
+            """args-capable optimizer recording which channel each call used."""
 
-        def sampler(key, theta):
-            del theta
-            return jax.random.normal(key, (500, 2))
+            def __init__(self):
+                self.inner = optimistix_lm()
+                self.args_calls = 0
+                self.legacy_calls = 0
 
-        template = SyntheticMeasure(
-            key=jax.random.PRNGKey(0), n_sim=500, sampler=sampler
-        )
+            def __call__(self, residual_fn, theta_init, *, args=None):
+                if args is None:
+                    self.legacy_calls += 1
+                    return self.inner(residual_fn, theta_init)
+                self.args_calls += 1
+                return self.inner(residual_fn, theta_init, args=args)
+
+        class _SubclassMeasure(EmpiricalMeasure):
+            """Same surface, different class: must NOT ride the kernel."""
+
+        # jdc pytree registration is per-class; register the subclass
+        # so it round-trips like its parent.
+        import jax_dataclasses as _jdc
+
+        _SubclassMeasure = _jdc.pytree_dataclass(_SubclassMeasure)
+
+        spy = _SpyOptimizer()
         run = build_estimator(
-            psi,
-            measure=template,
-            covariance=SyntheticCovariance(),
-            parameters=_P(a=0.1),
+            euler_residual,
+            measure=_measure(seed=0),
+            covariance=IIDCovariance(),
+            optimizer=spy,
+            parameters=_theta0(),
         )
-        fresh = template.with_key(jax.random.PRNGKey(5))
-        res = run(_P(a=0.1), fresh)
-        assert res.theta_hat is not None
+        # Same class: kernel path (args channel used).
+        res_same = run(_theta0(), _measure(seed=1))
+        assert spy.args_calls == 1 and spy.legacy_calls == 0
+        assert bool(res_same.converged)
+
+        # Different class: legacy path (no args), and the estimate is
+        # still correct (same data => same theta_hat as the kernel path
+        # would produce on the parent class, to float-identical tol).
+        x = euler_data(seed=1, n=N)
+        sub = _SubclassMeasure(x=x, mask=jnp.ones((N, 3)), weights=jnp.ones(N))
+        res_sub = run(_theta0(), sub)
+        assert spy.legacy_calls == 1, "different-class measure rode the kernel"
+        assert bool(res_sub.converged)
+        np.testing.assert_allclose(
+            float(res_sub.theta_hat.beta),
+            float(res_same.theta_hat.beta),
+            rtol=1e-10,
+        )
 
 
 def test_optimizer_info_pytree_with_done():
@@ -324,3 +372,50 @@ def test_recovery_quality_on_traced_path(seed):
     # N=800 sampling noise on gamma is wide; this is a sanity bound,
     # not a calibration claim (the MC studies own calibration).
     assert abs(float(res.theta_hat.gamma) - 2.0) < 1.2
+
+
+class TestSupportsArgsProbe:
+    """Audit L3: the probe must check Parameter.kind, not just the name."""
+
+    def test_var_positional_args_is_not_args_capable(self):
+        from emu_gmm.optimizer import _supports_args
+
+        class _StarArgs:
+            def __call__(self, residual_fn, theta_init, *args):
+                return optimistix_lm()(residual_fn, theta_init)
+
+        assert not _supports_args(_StarArgs())
+
+    def test_keyword_forms_are_args_capable(self):
+        from emu_gmm.optimizer import _supports_args
+
+        class _Kw:
+            def __call__(self, residual_fn, theta_init, *, args=None): ...
+
+        class _PosKw:
+            def __call__(self, residual_fn, theta_init, args=None): ...
+
+        assert _supports_args(_Kw())
+        assert _supports_args(_PosKw())
+
+    def test_star_args_optimizer_estimates_via_legacy_path(self):
+        """End-to-end: a v1-valid *args optimizer is served by the
+        closure path and produces a correct estimate (pre-fix this
+        crashed with a deep TypeError on the kernel path)."""
+
+        class _StarArgs:
+            def __init__(self):
+                self.inner = optimistix_lm()
+
+            def __call__(self, residual_fn, theta_init, *args):
+                assert not args  # legacy path passes exactly two
+                return self.inner(residual_fn, theta_init)
+
+        res = estimate(
+            euler_residual,
+            _measure(seed=6),
+            covariance=IIDCovariance(),
+            optimizer=_StarArgs(),
+            parameters=_theta0(),
+        )
+        assert bool(res.converged)

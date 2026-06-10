@@ -175,6 +175,16 @@ class TestRNG:
         assert len(seen_a) == len(seen_b) == 3
         for xa, xb in zip(seen_a, seen_b, strict=False):
             np.testing.assert_array_equal(xa, xb)
+        # Audit L4: the two-arm comparison above is satisfied by ANY
+        # deterministic key schedule (it compares an arm to itself).
+        # Pin the DOCUMENTED schedule itself: rep r sees exactly
+        # dgp(fold_in(key, r)) -- a refactor to e.g. split() must fail
+        # here, because (key, r) reproducibility is the advertised
+        # public contract.
+        base = _make_dgp()
+        for r in range(3):
+            expected = np.asarray(base(jax.random.fold_in(key, r)).x)
+            np.testing.assert_array_equal(seen_a[r], expected)
 
 
 class TestNonConvergence:

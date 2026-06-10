@@ -179,6 +179,20 @@ class Optimizer(Protocol):
 
     Solves ``min_theta || residual_fn(theta) ||^2`` from a starting
     point. Implementations live in :mod:`emu_gmm.optimizer`.
+
+    Optional ``args`` channel (#124)
+    --------------------------------
+    The built-in optimisers additionally accept a keyword-only
+    ``args=None``: when supplied, ``residual_fn`` is a TWO-argument
+    kernel ``residual_fn(theta, args)`` and ``args`` is an arbitrary
+    traced pytree (the estimator threads the measure through it so
+    fresh same-structure data reuses one trace). Third-party
+    optimisers may ignore this channel entirely: the estimator probes
+    for a keyword-capable ``args`` parameter (``inspect.Parameter.kind``
+    aware) and serves two-argument optimisers via the legacy closure
+    path. An optimiser that *declares* ``args`` must actually pass it
+    through to ``residual_fn`` -- declaring and dropping it would
+    evaluate the kernel without data and fail loudly.
     """
 
     def __call__(

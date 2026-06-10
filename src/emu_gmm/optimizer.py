@@ -48,11 +48,14 @@ from emu_gmm.types import OptimizerInfo
 # rebuilding ``fn`` on each call would miss the cache every time even
 # when ``residual_fn`` itself is unchanged.
 #
-# We hold the wrapper *strongly* (so it survives between optimiser
-# invocations) and register a :class:`weakref.finalize` on the
-# user-supplied ``residual_fn`` to evict the cache entry when the
-# residual closure is garbage-collected. This avoids unbounded growth
-# in long-running processes that build many factories.
+# CAVEAT (audit L1, issue #139): the cached wrapper CLOSES OVER the
+# keyed ``residual_fn``, so the weakref.finalize eviction below can
+# never fire -- the cache is effectively append-only (one immortal
+# entry per factory). Accidentally, that immortality also eliminates
+# the id()-reuse-after-GC hazard this keying scheme would otherwise
+# have. Pure resource growth, bounded by the number of factories built
+# in the process; eviction redesign is tracked in #139 (a naive
+# weak-value fix would re-open the id-reuse hazard).
 _OPTIMISTIX_FN_CACHE: dict[int, Any] = {}
 
 
@@ -84,7 +87,9 @@ def _optimistix_wrap(
 
 
 # Memoised ``jax.jit(fn)`` wrappers for the #124 args-path final-objective
-# evaluation, keyed on ``id(fn)`` exactly like ``_OPTIMISTIX_FN_CACHE``.
+# evaluation, keyed on ``id(fn)`` exactly like ``_OPTIMISTIX_FN_CACHE``
+# (and sharing its append-only caveat -- see #139; the jitted wrapper
+# retains ``fn``, so the finalizer below is likewise dead code).
 # Rationale: after the solve we recompute ``r = fn(theta_opt, args)`` for
 # ``final_objective``; an EAGER call re-traces the kernel's vmap(psi) on
 # every invocation (one stray trace per replicate -- measured by the PR A
@@ -120,7 +125,19 @@ def _supports_args(optimizer: Any) -> bool:
         sig = inspect.signature(optimizer.__call__)
     except (TypeError, ValueError):
         return False
-    return "args" in sig.parameters
+    p = sig.parameters.get("args")
+    if p is None:
+        return False
+    # Audit L3: a name-only check misroutes a v1-valid
+    # ``def __call__(self, residual_fn, theta_init, *args)`` onto the
+    # kernel path (VAR_POSITIONAL "args" cannot receive a keyword) and
+    # the call crashes deep inside the solve. Require a parameter that
+    # can actually accept ``args=...`` as a keyword.
+    return p.kind in (
+        inspect.Parameter.KEYWORD_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.VAR_KEYWORD,
+    )
 
 
 # ---------------------------------------------------------------------------

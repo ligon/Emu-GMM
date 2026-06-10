@@ -105,8 +105,11 @@ _GAUGE_FLOOR: float = 1e-6
 # (frozen dataclass, hashable), and ``manifold_spec`` pins the per-leaf
 # plan (frozen dataclass hashing by structural identity, so a caller
 # that rebuilds an equal spec still hits). Held strongly so the trace
-# survives between calls; evicted via ``weakref.finalize`` when the
-# kernel is garbage-collected, mirroring ``_OPTIMISTIX_FN_CACHE``.
+# survives between calls. CAVEAT (audit L1, #139): the cached jitted
+# solve retains the kernel, so the ``weakref.finalize`` eviction is
+# dead code and the cache is append-only -- one immortal entry per
+# (kernel, solver, spec) triple, mirroring ``_OPTIMISTIX_FN_CACHE``'s
+# caveat; redesign tracked in #139.
 _TRACED_SOLVE_CACHE: dict[tuple[int, Any, Any], Any] = {}
 
 

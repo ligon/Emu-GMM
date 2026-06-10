@@ -205,3 +205,105 @@ class TestAcceptsWrapperOrBareRecord:
         # already exercises the bare-FitRecord path. Spot-check coverage.
         out = coverage(rec, theta0=[1.0, 2.0])
         np.testing.assert_allclose(out.coverage, [1.0, 1.0])
+
+
+# ---------------------------------------------------------------------------
+# Audit M1/L2 (#140 convention): NaN diagnostics are events, counted not
+# absorbed.
+# ---------------------------------------------------------------------------
+
+
+def _records_with(theta, se, p_nom=None, p_adj=None, converged=None):
+    import jax.numpy as jnp
+    from emu_gmm.types import FitRecord
+
+    n = len(theta)
+    theta = jnp.asarray(theta)
+    se = jnp.asarray(se)
+    ones = jnp.ones(n)
+    return FitRecord(
+        theta_flat=theta,
+        se=se,
+        J_stat=jnp.zeros(n),
+        J_pvalue=jnp.asarray(p_nom if p_nom is not None else 0.5 * ones),
+        J_pvalue_adjusted=jnp.asarray(p_adj if p_adj is not None else 0.5 * ones),
+        converged=jnp.asarray(converged if converged is not None else ones),
+        tau_realised=jnp.zeros(n),
+        binding_ridge=jnp.zeros(n),
+        J_dof=1,
+        param_names=("a",),
+    )
+
+
+class TestNaNIsAnEvent:
+    def test_coverage_excludes_and_counts_nan_se(self):
+        import numpy as np
+        from emu_gmm.studies import coverage
+
+        # 4 reps: two valid SEs covering truth, one valid SE missing it,
+        # one NaN SE. Old behavior: NaN counted as "not covered" over
+        # n_used=4 -> 0.5. Correct: 2/3 over the valid denominator.
+        rec = _records_with(
+            theta=[[0.0], [0.0], [5.0], [0.0]],
+            se=[[1.0], [1.0], [1.0], [float("nan")]],
+        )
+        c = coverage(rec, np.array([0.0]), level=0.95)
+        assert c.n_used == 4
+        np.testing.assert_array_equal(c.n_valid_se, [3])
+        np.testing.assert_allclose(c.coverage, [2.0 / 3.0])
+
+    def test_bias_sd_mean_se_excludes_and_counts_nan(self):
+        import numpy as np
+        from emu_gmm.studies import bias_sd
+
+        rec = _records_with(
+            theta=[[1.0], [3.0], [2.0]],
+            se=[[2.0], [float("nan")], [4.0]],
+        )
+        b = bias_sd(rec, np.array([2.0]))
+        np.testing.assert_array_equal(b.n_valid_se, [2])
+        np.testing.assert_allclose(b.mean_se, [3.0])  # not NaN-poisoned
+
+    def test_size_power_nan_pvalues_not_fabricated_zero_size(self):
+        import numpy as np
+        from emu_gmm.studies import size_power
+
+        # Just-identified models emit NaN p-values BY CONSTRUCTION.
+        # Old behavior: NaN < alpha is False -> fabricated 0% rejection
+        # over the full denominator. Correct: NaN rates, zero valid.
+        nan = float("nan")
+        rec = _records_with(
+            theta=[[0.0]] * 3, se=[[1.0]] * 3, p_nom=[nan] * 3, p_adj=[nan] * 3
+        )
+        s = size_power(rec, alpha=(0.05,))
+        assert s.n_valid_nominal == 0 and s.n_valid_adjusted == 0
+        assert np.isnan(s.reject_nominal).all()
+        assert np.isnan(s.reject_adjusted).all()
+
+    def test_size_power_mixed_nan_uses_valid_denominator(self):
+        import numpy as np
+        from emu_gmm.studies import size_power
+
+        nan = float("nan")
+        rec = _records_with(
+            theta=[[0.0]] * 4,
+            se=[[1.0]] * 4,
+            p_nom=[0.01, 0.5, nan, 0.5],
+            p_adj=[0.01, 0.01, 0.5, nan],
+        )
+        s = size_power(rec, alpha=(0.05,))
+        assert s.n_valid_nominal == 3 and s.n_valid_adjusted == 3
+        np.testing.assert_allclose(s.reject_nominal, [1.0 / 3.0])
+        np.testing.assert_allclose(s.reject_adjusted, [2.0 / 3.0])
+
+    def test_j_calibration_counts_valid(self):
+        import numpy as np
+        from emu_gmm.studies import j_calibration
+
+        nan = float("nan")
+        rec = _records_with(
+            theta=[[0.0]] * 4, se=[[1.0]] * 4, p_nom=[0.1, 0.9, nan, 0.5]
+        )
+        j = j_calibration(rec)
+        assert j.n_valid == 3
+        assert np.isfinite(j.ecdf).all()
