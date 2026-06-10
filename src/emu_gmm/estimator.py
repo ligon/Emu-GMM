@@ -699,6 +699,7 @@ def build_estimator(
         Float[Array, ""],  # final_gradient_norm
         Float[Array, ""],  # J_pvalue
         Float[Array, ""],  # J_pvalue_adjusted
+        Float[Array, ""],  # sigma_meat_indefinite (0/1; #138)
     ]:
         theta_local = params_mod.unflatten_params(
             theta_flat, treedef, manifold_spec=unflatten_spec
@@ -843,6 +844,11 @@ def build_estimator(
         )
         Sigma_local = bread_pinv @ meat_local @ bread_pinv
         Sigma_local = 0.5 * (Sigma_local + Sigma_local.T)
+        # #138 diagnose-loudly policy: an indefinite meat (raw V
+        # indefinite in the binding-ridge regime) can push diag(Sigma)
+        # negative; standard_errors maps that to NaN BY DESIGN. Surface
+        # the event as a traced flag rather than silently emitting NaN.
+        sigma_meat_indefinite_local = jnp.any(jnp.diag(Sigma_local) < 0.0)
         kappa_local = jnp.linalg.cond(V_star_local)
         pivot_min_local = jnp.min(jnp.diag(L_local))
 
@@ -880,6 +886,7 @@ def build_estimator(
             grad_norm_local,
             J_pv,
             J_pv_adj,
+            sigma_meat_indefinite_local,
         )
 
     # The traced-argument inference kernel (#124): jitted ONCE at factory
@@ -1041,6 +1048,7 @@ def build_estimator(
             final_gradient_norm,
             J_pvalue,
             J_pvalue_adjusted,
+            sigma_meat_indefinite,
         ) = (
             # The outer-loop args branch (#124 PR B) uses the SAME
             # traced inference kernel as the single-solve path: the
@@ -1069,6 +1077,27 @@ def build_estimator(
         V_X = labels_mod.label_matrix(V_star_hat, Moments, MomentsDual)
 
         binding_ridge = _binding_ridge(regularization, tau_hat)
+
+        # #138: warn LOUDLY at the eager boundary when the sandwich meat
+        # was indefinite (NaN SEs ahead). Under jit/vmap the flag is a
+        # tracer; it still rides Diagnostics for traced consumers.
+        try:
+            if bool(sigma_meat_indefinite):
+                import warnings as _warnings
+
+                _warnings.warn(
+                    "Sigma_theta has negative diagonal entries: the raw "
+                    "V(theta_hat) used as the sandwich meat is indefinite "
+                    "(the binding-ridge regime; #111/#133/#138). The "
+                    "affected standard errors are NaN by design -- use "
+                    "cluster_bootstrap / moment_wild_bootstrap for "
+                    "inference here, and treat the analytic SEs as "
+                    "unavailable rather than zero.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        except (jax.errors.TracerBoolConversionError, TypeError):
+            pass
 
         if penalty is None:
             final_objective_data = J_stat
@@ -1114,6 +1143,7 @@ def build_estimator(
             cond_info=cond_info,
             optimizer_health=optimizer_health,
             gauge_nullspace_dim=manifold_spec.total_gauge_dim,
+            sigma_meat_indefinite=sigma_meat_indefinite,
         )
 
         # #78: prefer the optimiser's REAL traced ``done`` flag when the

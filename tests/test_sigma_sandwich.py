@@ -211,3 +211,76 @@ def test_fitrecord_se_carries_the_sandwich(seed):
         np.asarray(res.record().se),
         np.sqrt(np.diag(np.asarray(res.Sigma_theta.array))),
     )
+
+
+class TestIndefiniteMeatDiagnosis:
+    """#138 (diagnose-loudly policy) + the binding-regime test owed from
+    #133's spec: when the raw V(theta_hat) is indefinite, the sandwich
+    meat can be indefinite, diag(Sigma) goes negative, SEs are NaN BY
+    DESIGN, and the event is surfaced loudly rather than silently.
+
+    Fixture: M=2, K=1 with G aligned to V's NEGATIVE eigenvector.
+    V = [[1, 1.2], [1.2, 1]] has eigenpairs (2.2, (1,1)) and
+    (-0.2, (1,-1)); the analytical moment m(a) = (a-1, 1-a) gives
+    G = (1, -1)' exactly along the negative direction, so
+    meat = G' Lambda* V Lambda* G < 0 while the RIDGED V* used for the
+    solve is PD (the regulariser does its #111 job; the meat honestly
+    reports that V itself is not a covariance matrix).
+    """
+
+    @staticmethod
+    def _setup():
+        import jax_dataclasses as jdc
+        from emu_gmm import AnalyticalCovariance, AnalyticalMeasure
+
+        @jdc.pytree_dataclass
+        class _P:
+            a: float
+
+        V_indef = jnp.array([[1.0, 1.2], [1.2, 1.0]])  # eigs 2.2, -0.2
+
+        measure = AnalyticalMeasure(
+            expectation_fn=lambda model, th: jnp.array([th.a - 1.0, 1.0 - th.a])
+        )
+        cov = AnalyticalCovariance(covariance_fn=lambda model, th: V_indef)
+        return _P, measure, cov, V_indef
+
+    def test_flag_fires_and_ses_are_nan(self):
+        import warnings
+
+        _P, measure, cov, V_indef = self._setup()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = estimate(
+                lambda x, th: jnp.zeros(2),  # psi unused by analytical paths
+                measure,
+                covariance=cov,
+                parameters=_P(a=0.3),
+            )
+        # The ridge bound (V was indefinite, tau > 0 to restore PD).
+        assert float(res.diagnostics.tau_realised) > 0.0
+        # The diagnose-loudly contract: flag + NaN SE + UserWarning.
+        assert bool(res.diagnostics.sigma_meat_indefinite)
+        assert np.isnan(np.asarray(res.standard_errors.array)).any()
+        assert any(
+            "indefinite" in str(w.message) for w in caught
+        ), "no loud warning emitted"
+        # And the FitRecord carries the NaN SE for the summarizers'
+        # n_valid_se accounting (#140) -- the chain is consistent.
+        assert np.isnan(np.asarray(res.record().se)).any()
+
+    def test_flag_silent_on_healthy_problems(self):
+        import warnings
+
+        m = _measure(seed=3)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = estimate(
+                euler_residual,
+                m,
+                covariance=IIDCovariance(),
+                parameters=_theta0(),
+            )
+        assert not bool(res.diagnostics.sigma_meat_indefinite)
+        assert not np.isnan(np.asarray(res.standard_errors.array)).any()
+        assert not any("indefinite" in str(w.message) for w in caught)

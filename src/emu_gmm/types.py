@@ -363,6 +363,16 @@ class Diagnostics:
     # ``pinv_eigvalrule``, so users can distinguish these *expected* gauge
     # zeros from genuine near-zero (weakly-identified) directions.
     gauge_nullspace_dim: int = 0
+    #: #138 (diagnose-loudly policy): True when the weighting-aware
+    #: sandwich produced a NEGATIVE diagonal entry in ``Sigma_theta`` --
+    #: i.e. the unregularized meat ``G' Lambda V Lambda G`` was
+    #: indefinite, which happens when the raw ``V(theta_hat)`` is itself
+    #: indefinite (the binding-ridge regime, #111/#133). The affected
+    #: ``standard_errors`` entries are NaN BY DESIGN (the honest answer
+    #: when V is not a covariance matrix); use the bootstrap for SEs in
+    #: this regime, and see the studies summarizers' ``n_valid_se``
+    #: accounting (#140). Traced 0-d bool under jit, Python bool eagerly.
+    sigma_meat_indefinite: Any = False
 
 
 def _is_non_scalar_spec(manifold_spec: Any) -> bool:
