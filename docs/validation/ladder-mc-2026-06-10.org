@@ -97,12 +97,22 @@ flagged for the full run to quantify.]
 
 ** Study 2 --- StratifiedCovariance across PSU counts, fpc, H boundary
 
-Claims: (a) within-cell-centered stratified V calibrated under the
-fixed-stratum-profile DGP where uncentered PSU clustering is
-conservative (pools strata means); (b) fpc=True under-covers by the
-assignment fraction under a superpopulation DGP (documented estimand
-mismatch, factor ~ sqrt(1/2)); (c) calibration degrades near the
-H_{c,jk} < 2 boundary at G_c = 2 (quantified, fed to #134).
+Claims (PRE-REGISTERED before the full runs; adversarial-review fixes
+4 and 7): (a) within-cell-centered stratified V calibrated at
+G in {5, 20} under the fixed-stratum-profile DGP where uncentered PSU
+clustering is conservative (pools strata means); (b) the fpc arm is a
+GUARANTEED-FAIL estimand-mismatch check with quantitative reproduction
+targets --- all PSUs assigned makes =_fpc_factor= exactly 0.5 in every
+cell, so the full run must reproduce: CRN-paired SE ratio 0.7071
+vs fpc=False, b1 coverage ~0.834, J rej@5% ~0.224; deviation from
+these targets indicts =_fpc_factor=, not the DGP. (c) The G=2 /
+p_w=0.5 arm sits at the H_{c,jk} < 2 boundary in ~75% of cells:
+predicted E[V_ww] ~ 0.5 x truth (boundary cells zeroed while their
+units count in N_w), so the row MUST over-reject J --- the predicted
+~2x truncation is the reproduction target; the realised boundary share
+is printed by the mask-only CRN readout, all-zero-V_ww-row reps
+(~0.003/rep) counted as a named event. The G2hi (p_w=0.85) arm is the
+minority-boundary rung where calibration claims stay meaningful.
 
 : .venv/bin/python scripts/validation/ladder_mc.py --study stratified --n-reps 500 --out docs/validation/data
 
@@ -110,14 +120,24 @@ H_{c,jk} < 2 boundary at G_c = 2 (quantified, fed to #134).
 [FULL-RUN TABLE]
 #+END_EXAMPLE
 
-** Study 3 --- DesignAware: V_TS materiality in distribution (per-rep anchored)
+** Study 3 --- DesignAware: coupling + #119 dof inheritance (per-rep anchored)
 
-Claims: V_TS is material in this family (||V_TS||/||V|| ~ 0.4 at
-truth); the couple=True vs couple=False contrast in J and b1 coverage
-quantifies it in distribution. Pilot flag for the full run: coupled
-b1 SE/SD ~ 0.49 (under-coverage) vs uncoupled ~ 1.65 (conservative)
---- if it persists at 500 reps this is a finding about the finite-
-sample cross-block, not the fixture.
+RESCOPED claims (adversarial-review fix 3): under the fixed demeaned
+v_strat profile all per-rep randomness is independent across PSUs, so
+the true cross-ARM component of V_TS is exactly zero in this fixture;
+the couple=True/False contrast exercises the MECHANICAL same-unit
+coupling only (m_T a sub-sum of m_const; Var(b1) inflates ~3x under
+couple=False). A genuine cross-arm-shock fixture is recorded follow-up
+work. Added arms: (i) sigma_strat=0 contamination check --- if the
+coupled arm's b1 coverage normalizes without the stratum profile, the
+pilot's under-coverage (SE/SD ~0.49) is profile contamination of the
+uncentered V_SS/V_TS blocks glued to centered V_TT; (ii) the #119
+dof-inheritance ablation (sampling dof_correction on/off) in a
+few-cluster sampling regime (G=12) read via CRN-paired flips, since at
+G~100 the per-pair correction is a deterministic ~1.01 no-op. The
+review REJECTED switching the sampling engine to stratum-level
+clustering under this DGP (uncentered stratum totals would pick up the
+fixed profile means; no cross-arm term exists for it to capture).
 
 : .venv/bin/python scripts/validation/ladder_mc.py --study design_aware --n-reps 500 --out docs/validation/data
 
@@ -125,11 +145,17 @@ sample cross-block, not the fixture.
 [FULL-RUN TABLE]
 #+END_EXAMPLE
 
-** Study 4 --- Misspecified alternatives: J power + CU/LM robustness (#9 column)
+** Study 4 --- Misspecified alternatives: J power + CU/LM robustness (flat-path canary)
 
-Claims: J power rises along delta in {0, 0.1, 0.3}; CU+LM convergence
-and step counts degrade gracefully (no reopen of #9) or not (reopen).
-All arms start far (theta_init = (0,0)), null arm as CRN baseline.
+Claims (rescoped per adversarial-review fix 8): J power rises along
+delta in {0, 0.1, 0.3}; CU+LM convergence and step counts degrade
+gracefully or not. All arms start far (theta_init = (0,0)), null arm
+as CRN baseline. SCOPE: this is the owner-approved robustness column
+on the FLAT (Euclidean) path --- CU's V(theta) channel makes even
+affine psi a genuine ratio-of-quadratics with far-start failure modes,
+so the step-count table is a valid graded discriminator --- but it is
+NOT by itself evidence to reopen or close #9, which was decided on
+direct PSDFixedRank-quotient verification this fixture cannot probe.
 
 : .venv/bin/python scripts/validation/ladder_mc.py --study misspec_power --n-reps 500 --out docs/validation/data
 : .venv/bin/python scripts/validation/ladder_mc.py --study misspec_steps --n-reps 500
@@ -138,15 +164,21 @@ All arms start far (theta_init = (0,0)), null arm as CRN baseline.
 [FULL-RUN TABLES]
 #+END_EXAMPLE
 
-** Study 5 --- Regularised-J calibration + the near-boundary regime (per-rep anchored)
+** Study 5 --- Regularised-J calibration where the ridge ACTUALLY binds (per-rep anchored)
 
-Claims: (a) where the ridge binds (the design-aware binding subset and
-this study's near-boundary arms), J_pvalue_adjusted calibrates where
-the nominal J_pvalue does not --- the Davies/Imhof decision evidence
-(Welch-Satterthwaite suffices iff the adjusted column's J-KS is small);
-(b) pilot flag: the near-boundary stratified V degrades (J over-
-rejection, under-coverage) WITHOUT tripping the signed-spectrum
-feasibility test --- quantify and feed #134.
+Re-engineered after the review's blocker fix 1 (the prior spec
+provably never tripped the feasibility test --- measured anchors at
+kappa ~1e2 vs target 1e10, leaving checklist item 4 empty). Binding is
+now engineered via the near-collinear fifth moment r * z5,
+z5 = x + eps*eta, with eps swept {3e-2, 1e-2, 3e-3} so the measured
+binding frequency spans low-to-high; a no-eps baseline pins the
+no-binding contrast. Claims: (a) the item-4 reading --- among BINDING
+reps, J_pvalue_adjusted's ECDF/KS calibrates where the nominal does
+not (Welch-Satterthwaite suffices; else Davies/Imhof) --- is GATED on
+the measured binding frequency (the jadj readout refuses arms with ~0
+binding events); (b) the near-boundary stratified V degrades (J
+over-rejection, under-coverage) WITHOUT tripping the feasibility test
+(the noeps arm) --- quantified and fed to #134.
 
 : .venv/bin/python scripts/validation/ladder_mc.py --study ridge_binding --n-reps 500 --out docs/validation/data
 
@@ -165,8 +197,56 @@ anchored where it matters. [Assembled from the per-study CSVs.]
 
 * Appendix: adversarial design review
 
-[Synthesis of the 5-lens adversarial workflow: surviving findings,
-dispositions, and the considered-and-rejected record.]
+The harness draft went through a 41-agent adversarial workflow
+(5 lens finders -> dedup -> 2-skeptic refutation per finding ->
+synthesis): 44 raw findings, 17 after dedup, 8 survived. Verdict:
+"sound at the skeleton level; proceed to full runs after the fixes" --
+no package bugs found; every defect harness- or report-level.
+
+** Surviving findings (all applied before the full runs)
+
+1. /Blocker/ --- the ridge-binding study never bound (verified against
+   the seed stream: anchors feasible at kappa ~1e2 vs target 1e10);
+   item 4 was empty. -> near-collinear z5 moment with eps sweep, gated
+   jadj readout, docstring re-synced (the drift was how the property
+   was silently lost).
+2. The few-cluster regime was absent (min 40 PSUs anywhere; the G=100
+   dof pair is a deterministic 100/99 no-op). -> fewG12 sub-study +
+   CRN-paired flip readout; G=100 pair relabelled scale-regime.
+3. The #119 dof-inheritance ablation had no arm; the V_TS materiality
+   claim over-reached (cross-arm component exactly zero under the
+   fixed profile). -> design_aware_nodof arm at G=12; claims rescoped;
+   sigma_strat=0 contamination-check arm added.
+4. The G=2 H-boundary arm was indistinguishable from a bookkeeping
+   bug. -> pre-registered ~2x V_ww truncation target, mask-only CRN
+   boundary-share readout, named all-zero-row event, G2hi minority-
+   boundary rung.
+5. The #140 n_valid denominators never reached the printed rates. ->
+   validity cell + loud warning in org rows; sidecar counts; package
+   half filed as #143 (FitRecord lacks sigma_meat_indefinite).
+6. The provenance sidecar did not pin the DGP (spec/SHA/versions/PRNG
+   impl) and misspec_steps evidence lived only in stdout. -> full
+   environment + per-arm spec/validity provenance; org fragment and
+   step CSVs written to the out dir.
+7. The fpc arm was a guaranteed-fail without pre-registration. ->
+   quantitative reproduction targets (SE ratio 0.7071, b1 coverage
+   ~0.834, J rej ~0.224) pre-registered in docstring + this report.
+8. /Minor/ --- the #9 framing over-claimed (flat-path fixture cannot
+   probe the quotient decision). -> rescoped to the flat-path canary.
+
+** Considered-and-rejected (killed by the skeptic panel)
+
+Notable kills, recorded so they are not re-litigated: the factory-
+anchor finding (real, already routed around via per-rep anchoring and
+filed as #142); "stratum effects redrawn per rep" (false -- the fixed
+demeaned profile was already the fix); "FitRecord drops iterations
+blocks the #9 column" (false as a blocker -- misspec_steps collects
+them inline); switching the design-aware sampling engine to stratum
+level (refuted by both skeptics: uncentered stratum totals would pick
+up the fixed profile means, ~10x worse); J=0.000 under-rejection "the
+harness never prints the evidence" (false -- the J-KS column exists;
+the question itself is deferred to the full runs); a CU-only weighting
+gap (real but scope-conformant; optional control arm noted in fix 8).
 
 * Reproducibility
 
