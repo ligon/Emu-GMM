@@ -1,0 +1,133 @@
+{
+  "artifact": "seasonality_euler_extract.npz",
+  "sha256": "bfed1c0293b6d3d01dc9434bd394bb74bdebe38607c903c3a2fba47286ad0786",
+  "generated": "2026-06-10",
+  "generator": "scripts/freeze_seasonality_extract.py",
+  "source": {
+    "repo": "Seasonality (sibling repo; private data tree)",
+    "entry_point": "src/euler_data.py::euler_observation(stock_indicator=2)",
+    "commit": "c5a3f4a63a4c42404e2f838533cbc03057959c6e",
+    "branch": "euler-mc-harness",
+    "dirty": "no"
+  },
+  "command": "<seasonality>/.venv/bin/python scripts/freeze_seasonality_extract.py --seasonality <seasonality> --out tests/data --stock-indicator 2",
+  "notes": [
+    "Derived columns only (transformed m/delta/R/z); the (i, t) row MultiIndex (household identifiers) is deliberately not included. Owner approved in-repo storage 2026-06-10 (Emu-GMM issue #128).",
+    "Numerical content of m/delta/R byte-matches Seasonality src/analysis_data.py::analysis_data(stock_indicator=2); see the euler_data.py module docstring.",
+    "The npz byte stream is not reproducible across regenerations (zip metadata); verify regenerations via the array-level column checksums below, not the file hash."
+  ],
+  "shapes": {
+    "observation": [
+      3422,
+      19
+    ],
+    "n_strata": 30,
+    "n_psu": 189,
+    "n_t": 8,
+    "crops": [
+      "beans",
+      "gcorn",
+      "groundnut",
+      "maize",
+      "millet",
+      "rice"
+    ]
+  },
+  "column_checksums": {
+    "m": {
+      "n_finite": 3422,
+      "nan_aware_sum": 23661.04308766027,
+      "nan_aware_abs_sum": 23661.04308766027
+    },
+    "m_lag2": {
+      "n_finite": 2114,
+      "nan_aware_sum": 14540.810370522886,
+      "nan_aware_abs_sum": 14540.810370522886
+    },
+    "q_lag1": {
+      "n_finite": 867,
+      "nan_aware_sum": 145110.0,
+      "nan_aware_abs_sum": 145110.0
+    },
+    "cash": {
+      "n_finite": 3422,
+      "nan_aware_sum": 1107.0,
+      "nan_aware_abs_sum": 1107.0
+    },
+    "kind": {
+      "n_finite": 3422,
+      "nan_aware_sum": 1130.0,
+      "nan_aware_abs_sum": 1130.0
+    },
+    "loan": {
+      "n_finite": 3422,
+      "nan_aware_sum": 2237.0,
+      "nan_aware_abs_sum": 2237.0
+    },
+    "delta_beans": {
+      "n_finite": 3422,
+      "nan_aware_sum": 2127.0,
+      "nan_aware_abs_sum": 2127.0
+    },
+    "delta_gcorn": {
+      "n_finite": 3422,
+      "nan_aware_sum": 1571.0,
+      "nan_aware_abs_sum": 1571.0
+    },
+    "delta_groundnut": {
+      "n_finite": 3422,
+      "nan_aware_sum": 258.0,
+      "nan_aware_abs_sum": 258.0
+    },
+    "delta_maize": {
+      "n_finite": 3422,
+      "nan_aware_sum": 2934.0,
+      "nan_aware_abs_sum": 2934.0
+    },
+    "delta_millet": {
+      "n_finite": 3422,
+      "nan_aware_sum": 2193.0,
+      "nan_aware_abs_sum": 2193.0
+    },
+    "delta_rice": {
+      "n_finite": 3422,
+      "nan_aware_sum": 711.0,
+      "nan_aware_abs_sum": 711.0
+    },
+    "R_beans": {
+      "n_finite": 3422,
+      "nan_aware_sum": 3452.479212142215,
+      "nan_aware_abs_sum": 3452.479212142215
+    },
+    "R_gcorn": {
+      "n_finite": 3422,
+      "nan_aware_sum": 3430.6573378243165,
+      "nan_aware_abs_sum": 3430.6573378243165
+    },
+    "R_groundnut": {
+      "n_finite": 3422,
+      "nan_aware_sum": 3540.713017208336,
+      "nan_aware_abs_sum": 3540.713017208336
+    },
+    "R_maize": {
+      "n_finite": 3422,
+      "nan_aware_sum": 3416.948400679268,
+      "nan_aware_abs_sum": 3416.948400679268
+    },
+    "R_millet": {
+      "n_finite": 3422,
+      "nan_aware_sum": 3352.8344798335406,
+      "nan_aware_abs_sum": 3352.8344798335406
+    },
+    "R_rice": {
+      "n_finite": 3422,
+      "nan_aware_sum": 3636.625719916288,
+      "nan_aware_abs_sum": 3636.625719916288
+    },
+    "t_code": {
+      "n_finite": 3422,
+      "nan_aware_sum": 14960.0,
+      "nan_aware_abs_sum": 14960.0
+    }
+  }
+}

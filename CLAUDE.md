@@ -56,9 +56,13 @@ been through four reviewer iterations; the abstractions are deliberate.
 - `src/emu_gmm/examples/euler.py` — shared model and DGP for the Hansen-
   Singleton-style multi-asset Euler example used by all three acceptance
   tests and by `examples/run_euler.py`.
-- `tests/` — mirrors `src/emu_gmm/` structure. Three acceptance tests
+- `tests/` — mirrors `src/emu_gmm/` structure. Four acceptance tests
   (`test_estimator.py`, `test_estimator_analytical.py`,
-  `test_estimator_empirical.py`) drive the full pipeline.
+  `test_estimator_empirical.py`, and the real-data
+  `test_estimator_realdata.py`) drive the full pipeline. The real-data
+  one runs against the frozen Seasonality Euler extract in
+  `tests/data/` (provenance sidecar + `scripts/freeze_seasonality_extract.py`;
+  issue #128) and cross-validates the consumer's published estimates.
 - `examples/run_euler.py` — top-level runnable demo; not a test.
 
 ## Conventions
@@ -220,8 +224,10 @@ been through four reviewer iterations; the abstractions are deliberate.
 - **Quadrature engine for `AnalyticalMeasure`**: user currently supplies
   closed-form `expectation_fn`; v2 might add Gauss-Hermite / Gauss-Legendre
   helpers.
-- **Real-data acceptance test on the empirical path**: deferred until
-  actual data lands. Phase 7 covers the synthetic-data unit-test version.
+- **Real-data acceptance test on the empirical path**: DONE 2026-06-10
+  (#128) — `tests/test_estimator_realdata.py` against the frozen
+  Seasonality Euler extract (`tests/data/seasonality_euler_extract.npz`,
+  owner-approved derived columns with provenance sidecar).
 
 ## Sibling repos worth knowing about
 
