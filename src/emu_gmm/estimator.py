@@ -863,7 +863,11 @@ def build_estimator(
         if half_M_minus_K_overidentified:
             J_pv = jax.scipy.stats.chi2.sf(J_local, J_dof)
             J_pv_adj_binding = regularization_adjusted_pvalue(
-                J_local, V_local, V_star_local, G_local
+                J_local,
+                V_local,
+                V_star_local,
+                G_local,
+                gauge_nullspace_dim=manifold_spec.total_gauge_dim,
             )
             binding_flag = jnp.asarray(_binding_ridge(regularization, tau_anchor))
             J_pv_adj = jnp.where(binding_flag, J_pv_adj_binding, J_pv)

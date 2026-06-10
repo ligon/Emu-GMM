@@ -28,6 +28,7 @@ import jax.scipy.stats
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import labels as labels_mod
+from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.types import Diagnostics, OptimizerInfo
 
 
@@ -126,6 +127,7 @@ def regularization_adjusted_pvalue(
     V: Float[Array, "M M"],
     V_star: Float[Array, "M M"],
     G: Float[Array, "M K"],
+    gauge_nullspace_dim: int = 0,
 ) -> Float[Array, ""]:
     """Regularisation-adjusted J-test p-value (weighted-chi^2 limit).
 
@@ -172,7 +174,21 @@ def regularization_adjusted_pvalue(
         used by the weighting strategy.
     G : (M, K) array
         Moment Jacobian :math:`E_\\mu[\\nabla_\\theta \\psi]` at
-        :math:`\\hat\\theta`.
+        :math:`\\hat\\theta`. For manifold parameters this is the
+        AMBIENT Jacobian; gauge invariance of the moment makes the
+        gauge directions an exact nullspace of ``G``, accounted for via
+        ``gauge_nullspace_dim``.
+    gauge_nullspace_dim : static int, optional
+        Exact dimension of ``G``'s gauge nullspace
+        (``manifold_spec.total_gauge_dim``); ``0`` for v1 / scalar
+        parameters. #137: the projector formerly used a plain
+        ``inv(G~'G~)``, which is SINGULAR for gauge-bearing manifolds
+        (PSDFixedRank) and returned silently wrong, plausible-looking
+        p-values. The Gram inverse now drops exactly this many smallest
+        eigenvalues BY COUNT (:func:`pinv_eigvalrule`, the same rule the
+        Sigma_theta bread uses); ``P = I - G~ (G~'G~)^+ G~'`` is the
+        correct orthogonal projector onto ``col(G~)``'s complement at
+        any rank.
 
     Returns
     -------
@@ -185,6 +201,14 @@ def regularization_adjusted_pvalue(
     Traceable under ``jit`` and ``vmap``: the eigendecomposition is
     via :func:`jax.numpy.linalg.eigh` and the chi-squared survival
     function via :func:`jax.scipy.stats.chi2.sf`. Both accept tracers.
+
+    *Whitening assumption (#137):* the derivation hardcodes the
+    EFFICIENT whitening ``L_star = chol(V_star)`` --- i.e. it adjusts
+    the J of a CU / Iterated solve. Under ``Identity`` / ``Fixed``
+    weighting the realised ``J = ||y||^2`` lives in a different metric
+    and has no chi-squared limit to adjust in the first place (the same
+    caveat as the nominal ``J_pvalue``); treat both p-values as
+    unavailable there rather than approximate.
     """
     M, K = G.shape
     # Cholesky-whiten V into the L_star coordinates.
@@ -203,7 +227,14 @@ def regularization_adjusted_pvalue(
     # Orthogonal projector onto the orthogonal complement of col(~G).
     # P = I_M - ~G (~G' ~G)^{-1} ~G'.
     GtG = G_tilde.T @ G_tilde
-    GtG_inv = jnp.linalg.inv(GtG)
+    # #137: a plain inv() here is singular for gauge-bearing manifolds
+    # (the gauge directions are an exact nullspace of G). Drop exactly
+    # ``gauge_nullspace_dim`` smallest eigenvalues BY COUNT -- the same
+    # rule as the Sigma_theta bread three call sites away; for
+    # gauge_nullspace_dim == 0 this is bitwise inv() (the v1 path).
+    # P = I - G~ (G~'G~)^+ G~' is the orthogonal projector onto
+    # col(G~)'s complement at any rank (Moore-Penrose property).
+    GtG_inv = pinv_eigvalrule(GtG, drop_smallest=int(gauge_nullspace_dim))
     P = jnp.eye(M) - G_tilde @ GtG_inv @ G_tilde.T
 
     # Eigenvalues of P ~V P. Of the M eigenvalues, K are exactly zero

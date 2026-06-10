@@ -445,3 +445,90 @@ class TestEstimateCondInfoAndOptimizerHealth:
         assert jnp.isfinite(jnp.asarray(health["grad_norm"]))
         # And it should be small at the optimum.
         assert float(health["grad_norm"]) < 1e-4
+
+
+from emu_gmm.diagnostics import regularization_adjusted_pvalue  # noqa: E402
+
+
+class TestAdjustedPvalueGaugeAware:
+    """#137: the projector's Gram inverse must be gauge-aware.
+
+    The old plain inv(G~'G~) was singular for gauge-bearing manifolds
+    and returned silently wrong, plausible-looking p-values. Pins:
+    (1) v1 / full-rank G: bitwise-unchanged (drop 0 short-circuits to
+        inv); (2) rank-deficient G (one exact gauge direction): matches
+        an independent numpy eigendecomposition reference, and differs
+        materially from what the old inv-based formula produced.
+    """
+
+    @staticmethod
+    def _reference(J, V, V_star, G, gauge_dim):
+        import numpy as np
+        import scipy.stats as st
+
+        L = np.linalg.cholesky(np.asarray(V_star))
+        Gt = np.linalg.solve(L, np.asarray(G))
+        Vt = np.linalg.solve(L, np.linalg.solve(L, np.asarray(V)).T).T
+        Vt = 0.5 * (Vt + Vt.T)
+        # Moore-Penrose projector at the true rank.
+        P = np.eye(G.shape[0]) - Gt @ np.linalg.pinv(Gt.T @ Gt) @ Gt.T
+        w = np.linalg.eigvalsh(0.5 * (P @ Vt @ P + (P @ Vt @ P).T))
+        w = np.where(w > 0, w, 0.0)
+        s1, s2 = w.sum(), (w**2).sum()
+        c, v = s2 / s1, s1**2 / s2
+        return float(st.chi2.sf(float(J) / c, v))
+
+    def _fixture(self, gauge_dim):
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        M, D = 6, 3
+        A = rng.standard_normal((M, M))
+        V = A @ A.T / M  # PD
+        V_star = V + 0.05 * np.diag(np.diag(V))  # binding-ridge V*
+        G = rng.standard_normal((M, D))
+        if gauge_dim:
+            # an EXACT nullspace direction: last column = first - second
+            G[:, 2] = G[:, 0] - G[:, 1]
+            # rotate so the nullspace is not axis-aligned (generic case)
+            Q, _ = np.linalg.qr(rng.standard_normal((D, D)))
+            G = G @ Q
+        return jnp.asarray(V), jnp.asarray(V_star), jnp.asarray(G)
+
+    def test_full_rank_unchanged(self):
+        import numpy as np
+
+        V, V_star, G = self._fixture(gauge_dim=0)
+        J = jnp.asarray(3.7)
+        p_new = regularization_adjusted_pvalue(J, V, V_star, G)
+        ref = self._reference(J, V, V_star, G, 0)
+        np.testing.assert_allclose(float(p_new), ref, rtol=1e-10)
+
+    def test_gauge_deficient_matches_reference_and_old_was_wrong(self):
+        import numpy as np
+
+        V, V_star, G = self._fixture(gauge_dim=1)
+        J = jnp.asarray(3.7)
+        p_new = float(
+            regularization_adjusted_pvalue(J, V, V_star, G, gauge_nullspace_dim=1)
+        )
+        ref = self._reference(J, V, V_star, G, 1)
+        np.testing.assert_allclose(p_new, ref, rtol=1e-8)
+        # The OLD formula (plain inv on the singular Gram matrix):
+        # reproduce it and confirm it disagreed materially -- the audit's
+        # silently-wrong-but-plausible failure mode.
+        L = np.linalg.cholesky(np.asarray(V_star))
+        Gt = np.linalg.solve(L, np.asarray(G))
+        Vt = np.linalg.solve(L, np.linalg.solve(L, np.asarray(V)).T).T
+        with np.errstate(all="ignore"):
+            P_old = np.eye(6) - Gt @ np.linalg.inv(Gt.T @ Gt) @ Gt.T
+            w = np.linalg.eigvalsh(0.5 * (P_old @ Vt @ P_old + (P_old @ Vt @ P_old).T))
+        # Either the old path NaN'd outright, or produced a finite but
+        # wrong p; both count as the defect.
+        if np.isfinite(w).all():
+            w = np.where(w > 0, w, 0.0)
+            import scipy.stats as st
+
+            s1, s2 = w.sum(), (w**2).sum()
+            p_old = float(st.chi2.sf(3.7 / (s2 / s1), s1**2 / s2))
+            assert abs(p_old - p_new) > 1e-3, (p_old, p_new)
