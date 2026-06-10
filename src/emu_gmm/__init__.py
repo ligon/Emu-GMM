@@ -64,11 +64,13 @@ from emu_gmm.inference import (
     BootstrapSE,
     ClusterBootstrapResult,
     JTestResult,
+    KConfidenceSet,
     KStatisticResult,
     WildBootstrapResult,
     adaptive_bootstrap,
     cluster_bootstrap,
     j_test,
+    k_confidence_set,
     k_statistic,
     moment_wild_bootstrap,
 )
@@ -124,7 +126,9 @@ __all__ = [
     "estimate",
     "build_estimator",
     # Inference
+    "k_confidence_set",
     "k_statistic",
+    "KConfidenceSet",
     "KStatisticResult",
     # Measures
     "SyntheticMeasure",

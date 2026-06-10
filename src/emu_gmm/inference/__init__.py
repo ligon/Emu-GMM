@@ -11,6 +11,11 @@ Currently exposed:
   (Econometrica 2005) :math:`K`-, :math:`S`-, :math:`J`-statistic
   decomposition. See :mod:`emu_gmm.inference.k_statistic` for the
   full derivation.
+- :func:`k_confidence_set` and :class:`KConfidenceSet` --- the
+  identification-robust confidence set by grid inversion of the
+  K-statistic (or J/S for Anderson--Rubin-style sets), with explicit
+  empty / interval / disconnected / open-edge topology. See
+  :mod:`emu_gmm.inference.confidence_set`.
 - :func:`j_test` and :class:`JTestResult` --- zero-parameter test of
   over-identifying restrictions. Returns ``J = m' V^{-1} m ~ chi^2_M``
   evaluated at a user-supplied ``theta_null``, without invoking the
@@ -47,6 +52,7 @@ from emu_gmm.inference.cluster_bootstrap import (
     ClusterBootstrapResult,
     cluster_bootstrap,
 )
+from emu_gmm.inference.confidence_set import KConfidenceSet, k_confidence_set
 from emu_gmm.inference.functional_se import (
     eigenvalue_se,
     functional_se,
@@ -69,6 +75,7 @@ __all__ = [
     "BootstrapSE",
     "ClusterBootstrapResult",
     "JTestResult",
+    "KConfidenceSet",
     "KStatisticResult",
     "WildBootstrapResult",
     "adaptive_bootstrap",
@@ -79,6 +86,7 @@ __all__ = [
     "gamma_se",
     "gamma_vech",
     "j_test",
+    "k_confidence_set",
     "k_statistic",
     "moment_wild_bootstrap",
     "vech_indices",
