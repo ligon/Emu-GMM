@@ -1,0 +1,66 @@
+#+TITLE: Handoff: state of the v2 roadmap (#131) as of 2026-06-10
+#+AUTHOR: Sue (Claude Fable 5)
+
+* Where to start a fresh session
+Read GitHub issue #131 (the release-tracking issue; arcs + checkboxes are
+current) and =docs/implementation-plan.org= Section 13. This note is the
+narrative bridge; the tracker is the source of truth.
+
+* What happened on 2026-06-09/10 (two sessions' worth in one)
+- /Design-conformance review/ of the whole codebase -> issues #117--#121,
+  all fixed and merged; pre-existing baseline rot fixed (#122).
+- /Arc 1 (trustworthy baseline)/: complete. Tagged *v0.1.0*.
+- /Arc 2 execution model/: the #124 migration landed as three gated PRs
+  (traced-measure kernel; outer-loop + RiemannianLM args; the
+  =emu_gmm.studies= MC driver, #114). Fresh same-structure fits:
+  ~1.2 s -> ~5 ms, one trace total. #123 subsumed.
+- /External design review/ (archived at
+  =docs/reviews/design-review-2026-06-09.org=): dispositions all
+  owner-approved. The headline fix: *Sigma_theta is now the
+  weighting-aware sandwich with unregularized meat* (#133), with a
+  failing-before MC coverage pin. Framing batch (#135) landed; #136
+  (v1-contract boundary section) still open.
+- /Adversarial change-audit/ (53-agent workflow; script at
+  =scripts/workflows/adversarial-change-audit.js=, committed; a live
+  copy also sits in the gitignored =.claude/workflows/=): verdict release-sound;
+  hardening batch landed (NaN-as-event summarizers, de-vacuumed tests,
+  kind-aware =_supports_args=). Tagged *v0.2.0*.
+- Post-tag: #138 (diagnose-loudly indefinite-meat policy + the
+  binding-regime fixture) and #137 (gauge-aware projector in
+  =regularization_adjusted_pvalue=) fixed; #137's full gate was the
+  last thing running as this note was written.
+
+* Open board (the fresh session's queue), in suggested order
+1. *#130 --- the MC validation studies.* The Arc-2 exit criterion and the
+   long pole. All tooling exists (=emu_gmm.studies=, =FitRecord=,
+   =with_key=, tau_binding summarizer). Design lessons already learned,
+   recorded in #130's comments: fixtures must be /engineered to
+   discriminate/ (the Euler DGP is ~99.996% efficient for Identity
+   weighting; a degenerate optimum once made a test unfalsifiable).
+   Two added columns: tau-binding frequency; CU+LM robustness under
+   misspecified alternatives (the evidence that would reopen #9).
+2. *#128 --- Seasonality real-data acceptance test.* Decided: freeze a
+   derived extract of =../Seasonality/src/euler_data.py::euler_observation()=
+   into =tests/data/= with provenance. ONE PENDING OWNER CONFIRMATION:
+   that the derived columns may live in this repo.
+3. *#134* (emergency PD floor; reuse #138's indefinite fixture in
+   =tests/test_sigma_sandwich.py=), *#136* (v1-contract section),
+   *#139/#140* (cache eviction; NaN-convention -> design.org).
+4. Deferrable tail: #41, #40, #77, #20 (code half), #113, #115, #132
+   (polars/DataMat half), #18.
+
+* Operational notes that save time
+- Gates: every merge ran =pytest -m "not slow"= pinned
+  =taskset -c 0-31= with the EXIT code echoed into the log (pipes and
+  background tasks both swallow pytest's status otherwise --- this bit
+  twice). Last all-green: 964 passed (post-#138).
+- Worktree agents: after one completes, the shell's persistent cwd may
+  sit INSIDE the agent worktree; anchor with =cd /home/coder/mirrors/Emu-GMM=
+  before git/poetry. =pgrep -f pytest= self-matches; poetry spawns
+  =bin/pytest= not =python -m pytest= --- use a bracket pattern.
+- Release: =make release BUMP=... GATE==' skips the redundant gate when
+  one just passed; clean-tree guard still applies. Tags: v0.1.0, v0.2.0.
+- The human pulls via =git fetch coder --tags= from the source repo;
+  this mirror cannot push to GitHub, so =Closes #N= trailers never
+  auto-fire --- close issues with =gh issue close= explicitly (two were
+  missed this way and swept up later).
