@@ -1,0 +1,179 @@
+#+TITLE: Ladder MC validation: size, coverage, and J-calibration under genuine missingness (#130)
+#+AUTHOR: Sue (Claude Fable 5)
+#+DATE: 2026-06-10
+
+* Scope
+
+The Arc-2 exit criterion (issue #130): repeated-sampling evidence of
+size, Wald coverage, and J-calibration for the covariance ladder ---
+=IIDCovariance= -> =ClusteredCovariance= -> =StratifiedCovariance= ->
+=DesignAwareCovariance= --- under genuine per-coordinate missingness,
+produced by the supported =emu_gmm.studies= driver. Companion to the
+algebra-level tests that landed with #79/#80/#109/#111/#119; this
+report adds the distributional half. Two owner-approved columns ride
+along: tau-binding frequency, and CU+LM robustness under misspecified
+alternatives (the #9 reopen-decision evidence).
+
+Harness: =scripts/validation/ladder_mc.py= (DGP family, study registry,
+runnable commands recorded per study below). Adversarial design review:
+the harness draft went through a 5-lens adversarial workflow
+(falsifiability, DGP-vs-estimand correctness, CRN protocol, numerics,
+checklist coverage) with 2-skeptic refutation before the full runs;
+surviving findings and their dispositions are in the appendix.
+
+* The DGP family (fixture-engineering notes)
+
+See the harness module docstring for the full spec. Headlines:
+
+- Stratified PSU-randomized experiment: S strata x 2 arms x G_c PSUs of
+  m units; T assigned at PSU level within stratum.
+- Intracluster correlation rho at PSU level (the IID-vs-clustered
+  discriminator); FIXED demeaned stratum profile sigma_strat (the
+  centered-vs-uncentered discriminator --- see the DesignSpec docstring
+  for why a per-replicate stratum *random* effect would be a fixture
+  bug, caught in piloting).
+- M = 4 moments r*(1, T, x, w), K = 2, J_dof = 2; the x and w moments
+  observable per PSU with probabilities (p_x, p_w) --- genuine unequal
+  N_j, pair-specific overlap, and H_{c,jk} < 2 boundary cells at small
+  G_c.
+- Misspecification knob delta violates only E[r w] = 0.
+- Calibration arms start at the truth and the affected studies anchor
+  the ridge PER REPLICATE (see "Protocol findings" below and emu-gmm
+  #142); the misspec study starts far (theta_init = (0,0)) by design.
+
+* Protocol findings surfaced by piloting
+
+These were found while engineering the fixtures (30-50 rep pilots) and
+shaped the harness; recorded because they are evidence in their own
+right:
+
+- *Factory-shared ridge anchor* (-> emu-gmm #142): =build_estimator=
+  freezes tau_anchor (and binding_ridge) on the template draw, so
+  driver-replicated studies inherit replicate 0's anchor: the
+  tau-binding column degenerates to {0,1} per arm, one unlucky template
+  poisons an arm (pilot: coupled design-aware, tau-bind 1.000, 57%
+  non-convergence from a far start), one lucky template masks per-rep
+  pathology. Studies 3 and 5 therefore anchor per replicate (bare
+  =estimate()= per rep).
+- *Anchor-at-far-init*: anchoring V(theta_init) at (0,0) anchors on a
+  wildly mis-scaled V; with the coupled design-aware assembly the
+  anchor went indefinite and tau bound for the whole arm. Calibration
+  arms start at truth (documented choice); optimization robustness is
+  study 4's job.
+- *Per-replicate stratum random effects are a fixture bug* (not a
+  package bug): no within-cell-centered or PSU-clustered estimator
+  targets between-stratum variance of non-contrast moments; pilot
+  intercept coverage 0.17-0.73 across ALL arms. Fixed demeaned
+  profiles restore exact moment conditions (and the intended
+  centered-vs-uncentered discrimination).
+- *Exactly-singular V is unrepairable by DiagonalTikhonov*: a fully
+  unsupported moment row (all H_{c,jk} < 2 for some j) zeroes
+  diag(V)_jj, so tau*diag(V) cannot lift it; reps die instead of
+  binding. The binding study's observability is tuned (p_w = 0.7,
+  12 cells) to make this a ~2e-4 event; the near-boundary regime is
+  the interesting one.
+
+* Studies
+
+Each study block records: the discrimination claim, the runnable
+command, the result table (n_reps = 500 unless noted; MC SE of a 5%
+rate at 500 reps is ~1%), and the reading.
+
+** Study 1 --- J size + Wald coverage: IID vs Clustered (genuine missingness)
+
+Claim: under rho = 0.5 with 20-unit PSUs, IIDCovariance must detectably
+over-reject and under-cover (DEFF ~ 10); ClusteredCovariance (+/- dof
+correction) must calibrate; the rho = 0 control shows both calibrated.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study size_iid_vs_cluster --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+[FULL-RUN TABLE]
+#+END_EXAMPLE
+
+Reading: [pending full runs; pilot (50 reps): IID 38% J size / 44%
+coverage / SEs ~3x small; clustered calibrated except J under-rejection
+flagged for the full run to quantify.]
+
+** Study 2 --- StratifiedCovariance across PSU counts, fpc, H boundary
+
+Claims: (a) within-cell-centered stratified V calibrated under the
+fixed-stratum-profile DGP where uncentered PSU clustering is
+conservative (pools strata means); (b) fpc=True under-covers by the
+assignment fraction under a superpopulation DGP (documented estimand
+mismatch, factor ~ sqrt(1/2)); (c) calibration degrades near the
+H_{c,jk} < 2 boundary at G_c = 2 (quantified, fed to #134).
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study stratified --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+[FULL-RUN TABLE]
+#+END_EXAMPLE
+
+** Study 3 --- DesignAware: V_TS materiality in distribution (per-rep anchored)
+
+Claims: V_TS is material in this family (||V_TS||/||V|| ~ 0.4 at
+truth); the couple=True vs couple=False contrast in J and b1 coverage
+quantifies it in distribution. Pilot flag for the full run: coupled
+b1 SE/SD ~ 0.49 (under-coverage) vs uncoupled ~ 1.65 (conservative)
+--- if it persists at 500 reps this is a finding about the finite-
+sample cross-block, not the fixture.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study design_aware --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+[FULL-RUN TABLE]
+#+END_EXAMPLE
+
+** Study 4 --- Misspecified alternatives: J power + CU/LM robustness (#9 column)
+
+Claims: J power rises along delta in {0, 0.1, 0.3}; CU+LM convergence
+and step counts degrade gracefully (no reopen of #9) or not (reopen).
+All arms start far (theta_init = (0,0)), null arm as CRN baseline.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study misspec_power --n-reps 500 --out docs/validation/data
+: .venv/bin/python scripts/validation/ladder_mc.py --study misspec_steps --n-reps 500
+
+#+BEGIN_EXAMPLE
+[FULL-RUN TABLES]
+#+END_EXAMPLE
+
+** Study 5 --- Regularised-J calibration + the near-boundary regime (per-rep anchored)
+
+Claims: (a) where the ridge binds (the design-aware binding subset and
+this study's near-boundary arms), J_pvalue_adjusted calibrates where
+the nominal J_pvalue does not --- the Davies/Imhof decision evidence
+(Welch-Satterthwaite suffices iff the adjusted column's J-KS is small);
+(b) pilot flag: the near-boundary stratified V degrades (J over-
+rejection, under-coverage) WITHOUT tripping the signed-spectrum
+feasibility test --- quantify and feed #134.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study ridge_binding --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+[FULL-RUN TABLE]
+#+END_EXAMPLE
+
+** Tau-binding column (cross-study)
+
+binding_ridge frequency and realised-tau quantiles per arm, per-rep
+anchored where it matters. [Assembled from the per-study CSVs.]
+
+* Verdict
+
+[Pending full runs.]
+
+* Appendix: adversarial design review
+
+[Synthesis of the 5-lens adversarial workflow: surviving findings,
+dispositions, and the considered-and-rejected record.]
+
+* Reproducibility
+
+- Seeds: master seed 20260610 per study; replicate r uses
+  jax.random.fold_in(PRNGKey(seed), r) (the documented driver
+  contract); the stratum profile uses fixed seed 777 in make_design.
+- Environment: emu-gmm at the commit recorded in the data sidecars;
+  float64; CPU.
+- Per-replicate records: docs/validation/data/*.csv with JSON sidecars
+  carrying study, seed, arms, command, and runtime.
