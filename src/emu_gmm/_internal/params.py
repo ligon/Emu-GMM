@@ -532,8 +532,46 @@ def manifold_spec_from_params(params: Any) -> ManifoldSpec:
     return spec
 
 
+def flatten_params_for_ad(
+    params: Any,
+) -> tuple[Float[Array, " D"], jax.tree_util.PyTreeDef, ManifoldSpec | None]:
+    """Flatten ``params`` for an AD closure: v1 verbatim or manifold-aware.
+
+    The measures' AD methods (``jacobian`` / ``jacobian_contributions``)
+    historically routed through the v1 scalar-only :func:`flatten_params`
+    and raised on any non-scalar leaf — which made them (and everything
+    built on them, notably the Kleibergen K-statistic) unusable for
+    manifold parameter trees (issue #41). This helper dispatches exactly
+    like ``estimate()`` does (estimator.py ``all_scalar``, keyed on
+    leaf *shape*, not manifold type — #110):
+
+    - **all leaves 0-d** -> the v1 :func:`flatten_params` 2-tuple plus
+      ``spec=None``. A downstream
+      ``unflatten_params(flat, treedef, manifold_spec=None)`` is bitwise
+      the v1 reconstruction (red-team R4/R10), so existing scalar-tree
+      callers are unchanged.
+    - **any non-scalar leaf** -> the manifold-aware 3-tuple
+      :func:`flatten_params_with_spec`; pass the returned spec to
+      :func:`unflatten_params` so each ambient block reshapes back into
+      its (possibly :class:`ManifoldLeaf`-wrapped) leaf.
+
+    Returns
+    -------
+    ``(flat, treedef, manifold_spec_or_None)`` — feed the third element
+    straight into ``unflatten_params``'s ``manifold_spec`` argument.
+    """
+    spec = manifold_spec_from_params(params)
+    all_scalar = all(ls.ambient_shape == () for ls in spec.leaf_specs)
+    if all_scalar:
+        flat, treedef = flatten_params(params)
+        return flat, treedef, None
+    flat, treedef, spec_full = flatten_params_with_spec(params)
+    return flat, treedef, spec_full
+
+
 __all__ = [
     "flatten_params",
+    "flatten_params_for_ad",
     "flatten_params_with_spec",
     "unflatten_params",
     "param_names",

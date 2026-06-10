@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
-from emu_gmm._internal.params import flatten_params, unflatten_params
+from emu_gmm._internal.params import flatten_params_for_ad, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
 
 
@@ -153,15 +153,17 @@ class SyntheticMeasure:
     def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
         """Jacobian of ``expectation`` with respect to ``theta``.
 
-        Computed by routing ``theta`` through ``flatten_params`` and
+        Computed by routing ``theta`` through
+        :func:`~emu_gmm._internal.params.flatten_params_for_ad` and
         applying ``jax.jacfwd`` to a closure of the flattened argument.
         The result has the canonical ``(M, K)`` shape, with ``K`` equal
-        to the number of leaves in ``theta``.
+        to the number of leaves for all-scalar trees and the total
+        ambient dimension for manifold trees (#41).
         """
-        flat_theta, treedef = flatten_params(theta)
+        flat_theta, treedef, mspec = flatten_params_for_ad(theta)
 
         def fn(flat):
-            params = unflatten_params(flat, treedef)
+            params = unflatten_params(flat, treedef, manifold_spec=mspec)
             return self.expectation(psi, params)
 
         return jax.jacfwd(fn)(flat_theta)
@@ -205,7 +207,7 @@ class SyntheticMeasure:
         dependence at the held draws; pair it with a user-supplied
         ``score_cov_fn`` to inference if the sampler-dependence matters.
         """
-        flat_theta, treedef = flatten_params(theta)
+        flat_theta, treedef, mspec = flatten_params_for_ad(theta)
         # Materialise draws at the current theta and freeze them; the
         # per-draw Jacobian then differentiates psi alone, mirroring the
         # empirical case where x is observation data and not a function
@@ -213,7 +215,7 @@ class SyntheticMeasure:
         x_batch = self._draws(theta)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
-            params = unflatten_params(flat, treedef)
+            params = unflatten_params(flat, treedef, manifold_spec=mspec)
             return _to_plain(psi(x, params))
 
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:

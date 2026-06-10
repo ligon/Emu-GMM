@@ -71,7 +71,7 @@ from jaxtyping import Array, Float
 
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal.nan_safety import safe_x_for_psi
-from emu_gmm._internal.params import flatten_params, unflatten_params
+from emu_gmm._internal.params import flatten_params_for_ad, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
 
 
@@ -414,15 +414,22 @@ class EmpiricalMeasure:
         against NaN gradients at masked-out cells: rows for which
         ``mask[i, j] == 0`` contribute zero to the moment-``j`` Jacobian
         regardless of what ``jacfwd`` produces there.
+
+        Manifold parameter trees (non-scalar :class:`ManifoldLeaf`
+        blocks) are flattened to their AMBIENT coordinates via
+        :func:`emu_gmm._internal.params.flatten_params_for_ad`, so ``K``
+        is the total ambient dimension and gauge directions appear as an
+        exact nullspace of the result (consumed gauge-aware by the
+        K-statistic, #41). All-scalar trees take the v1 flatten verbatim.
         """
-        flat_theta, treedef = flatten_params(theta)
+        flat_theta, treedef, mspec = flatten_params_for_ad(theta)
 
         # Pre-sanitise x with the per-column observed-mean sentinel
         # (see :meth:`expectation` for the reverse-mode AD rationale).
         x_safe = safe_x_for_psi(self.x)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
-            params = unflatten_params(flat, treedef)
+            params = unflatten_params(flat, treedef, manifold_spec=mspec)
             return _to_plain(psi(x, params))
 
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
@@ -477,9 +484,10 @@ class EmpiricalMeasure:
         -------
         D : (N, M, K) jax array
             ``D[i, j, k] = d_ij * w_i * (d psi_j / d theta_k)(x_i, theta)``.
-            No ``1 / N_j`` normalisation is applied.
+            No ``1 / N_j`` normalisation is applied. ``K`` is the total
+            ambient dimension for manifold trees (see :meth:`jacobian`).
         """
-        flat_theta, treedef = flatten_params(theta)
+        flat_theta, treedef, mspec = flatten_params_for_ad(theta)
 
         # Pre-sanitise x with the per-column observed-mean sentinel
         # (see :meth:`expectation` for the reverse-mode AD rationale).
@@ -491,7 +499,7 @@ class EmpiricalMeasure:
         x_safe = safe_x_for_psi(self.x)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
-            params = unflatten_params(flat, treedef)
+            params = unflatten_params(flat, treedef, manifold_spec=mspec)
             return _to_plain(psi(x, params))
 
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:

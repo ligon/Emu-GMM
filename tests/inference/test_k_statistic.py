@@ -105,7 +105,11 @@ class TestJustIdentified:
     def _run(self, theta_0, m_at_theta):
         measure = _two_moment_expectation_factory(m_at_theta)
         cov = _identity_cov_factory(2)
-        return k_statistic(theta_0, measure, cov, model=_noop_model)
+        # AnalyticalMeasure has no per-observation contributions; the
+        # strong-ID limit must be opted into explicitly since #41.
+        return k_statistic(
+            theta_0, measure, cov, model=_noop_model, strong_id_fallback=True
+        )
 
     def test_returns_k_statistic_result(self):
         r = self._run(_TwoParams(a=1.0, b=2.0), m_at_theta=(0.0, 0.0))
@@ -145,7 +149,10 @@ class TestOverIdentifiedAtTruth:
         theta_0 = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
         measure = AnalyticalMeasure(expectation_fn=euler_analytical_expectation)
         cov = _identity_cov_factory(N_ASSETS)
-        return k_statistic(theta_0, measure, cov, model=euler_residual)
+        # AnalyticalMeasure -> explicit strong-ID opt-in (#41).
+        return k_statistic(
+            theta_0, measure, cov, model=euler_residual, strong_id_fallback=True
+        )
 
     def test_J_is_zero(self):
         r = self._run()
@@ -261,7 +268,9 @@ class TestChi2DistributionalSanity:
         theta_0 = _LinearScoreParams(a=0.0, b=0.0)
         m_real = jax.random.normal(jax.random.PRNGKey(99), (self.M,))
         measure = _gaussian_moment_measure(m_real)
-        res = k_statistic(theta_0, measure, cov, model=_noop_model)
+        res = k_statistic(
+            theta_0, measure, cov, model=_noop_model, strong_id_fallback=True
+        )
         K_kernel, S_kernel = _kernel_KS_from_m(m_real)
         assert float(res.K) == pytest.approx(float(K_kernel), abs=1e-12)
         assert float(res.S) == pytest.approx(float(S_kernel), abs=1e-12)
@@ -298,7 +307,9 @@ class TestChi2DistributionalSanity:
             subkey = jax.random.fold_in(key, r)
             m_real = jax.random.normal(subkey, (self.M,))
             measure = _gaussian_moment_measure(m_real)
-            res = k_statistic(theta_0, measure, cov, model=_noop_model)
+            res = k_statistic(
+                theta_0, measure, cov, model=_noop_model, strong_id_fallback=True
+            )
             assert float(res.J) == pytest.approx(float(res.K) + float(res.S), abs=1e-10)
 
 
@@ -328,7 +339,9 @@ class TestAcceptsEstimationResult:
             theta_init=EulerParams(beta=0.9, gamma=1.5),
         )
 
-        ks_at_hat = k_statistic(result, measure, cov, model=euler_residual)
+        ks_at_hat = k_statistic(
+            result, measure, cov, model=euler_residual, strong_id_fallback=True
+        )
         # Convergence to the truth -> m_hat ~ 0 -> J ~ 0 -> K, S ~ 0.
         assert float(ks_at_hat.J) < 1e-8
 
@@ -746,3 +759,155 @@ class TestSingletonClustersMatchIID:
             assert float(res_clu.J) == pytest.approx(
                 float(res_iid.J), rel=1e-9, abs=1e-12
             )
+
+
+# ---------------------------------------------------------------------------
+# (i) Issue #41 hardening: the strong-ID fallback is loud, score_cov_fn is
+# validated and takes precedence, and the design sandwiches are refused
+# until a matched cross-covariance form exists.
+# ---------------------------------------------------------------------------
+
+
+class TestStrongIdFallbackIsLoud:
+    """No contributions + no score_cov_fn must raise, not silently degrade.
+
+    Before #41 a caller wiring an AnalyticalMeasure through k_statistic
+    silently got the raw-G (non-robust) statistic — the exact footgun
+    the Seasonality consumer flagged. The fallback is now an explicit
+    opt-in.
+    """
+
+    def test_raises_without_opt_in(self):
+        measure = _two_moment_expectation_factory((0.1, 0.2))
+        cov = _identity_cov_factory(2)
+        with pytest.raises(ValueError, match="strong_id_fallback"):
+            k_statistic(_TwoParams(a=0.3, b=-0.7), measure, cov, model=_noop_model)
+
+    def test_opt_in_equals_zero_score_cov(self):
+        """The fallback is exactly the Sigma_jm = 0 statistic."""
+        measure = _two_moment_expectation_factory((0.1, 0.2))
+        cov = _identity_cov_factory(2)
+        theta_0 = _TwoParams(a=0.3, b=-0.7)
+        via_flag = k_statistic(
+            theta_0, measure, cov, model=_noop_model, strong_id_fallback=True
+        )
+        via_zeros = k_statistic(
+            theta_0,
+            measure,
+            cov,
+            model=_noop_model,
+            score_cov_fn=lambda model, theta: jnp.zeros((2, 2, 2)),
+        )
+        assert float(via_flag.K) == pytest.approx(float(via_zeros.K), abs=0.0)
+        assert float(via_flag.S) == pytest.approx(float(via_zeros.S), abs=0.0)
+
+
+class TestScoreCovFnPath:
+    """The level-1 dispatch: user-supplied Sigma_{G,m} (conformance-review gap)."""
+
+    def test_wrong_shape_raises(self):
+        measure = _two_moment_expectation_factory((0.1, 0.2))
+        cov = _identity_cov_factory(2)
+        with pytest.raises(ValueError, match="score_cov_fn returned shape"):
+            k_statistic(
+                _TwoParams(a=0.3, b=-0.7),
+                measure,
+                cov,
+                model=_noop_model,
+                # (p, M) instead of (p, M, M).
+                score_cov_fn=lambda model, theta: jnp.zeros((2, 2)),
+            )
+
+    def test_takes_precedence_over_contributions(self):
+        """With contributions available, an explicit score_cov_fn wins.
+
+        At an offset theta_0 (m != 0) the Sigma_jm correction is
+        non-trivial, so the zero-Sigma statistic must differ from the
+        contributions-route statistic; and supplying the contributions
+        route's own Sigma_jm through score_cov_fn must reproduce the
+        default bitwise.
+        """
+        from emu_gmm.inference.k_statistic import (
+            _N_j_from_measure,
+            _sigma_jm_iid_from_contributions,
+            _to_plain,
+        )
+
+        measure, _clu_cov, theta_true = _simulate_clustered_dataset(
+            seed=7, n_clusters=40, cluster_size=5, rho=0.0
+        )
+        cov = IIDCovariance()
+        theta_offset = _OneParam(theta=theta_true + 0.3)
+
+        res_default = k_statistic(theta_offset, measure, cov, model=_linear_psi)
+        res_zero = k_statistic(
+            theta_offset,
+            measure,
+            cov,
+            model=_linear_psi,
+            score_cov_fn=lambda model, theta: jnp.zeros((1, 3, 3)),
+        )
+        assert float(res_zero.K) != pytest.approx(float(res_default.K), rel=1e-6)
+
+        def exact_sigma(model, theta):
+            g = _to_plain(measure.moment_contributions(model, theta))
+            D = _to_plain(measure.jacobian_contributions(model, theta))
+            return _sigma_jm_iid_from_contributions(g, D, _N_j_from_measure(measure))
+
+        res_exact = k_statistic(
+            theta_offset, measure, cov, model=_linear_psi, score_cov_fn=exact_sigma
+        )
+        assert float(res_exact.K) == pytest.approx(float(res_default.K), abs=0.0)
+        assert float(res_exact.S) == pytest.approx(float(res_default.S), abs=0.0)
+
+
+class TestDesignSandwichRefused:
+    """StratifiedCovariance / DesignAwareCovariance have no matched
+    Sigma_{G,m} form yet; silently using the IID form mis-scales the
+    orthogonalisation (#41, surfaced by the Seasonality consumer). The
+    dispatch must refuse with actionable guidance.
+    """
+
+    def _measure(self):
+        measure, _cov, theta_true = _simulate_clustered_dataset(
+            seed=11, n_clusters=20, cluster_size=4, rho=0.0
+        )
+        return measure, _OneParam(theta=theta_true)
+
+    def test_stratified_refused(self):
+        from emu_gmm.covariance import StratifiedCovariance
+
+        measure, theta_0 = self._measure()
+        n = int(measure.x.shape[0])
+        design = StratifiedCovariance(
+            psu_ids=jnp.zeros(n),
+            cell_ids=jnp.zeros(n),
+            stratum_ids=jnp.zeros(n),
+            n_psu=1,
+            n_cells=1,
+            n_strata=1,
+        )
+        with pytest.raises(ValueError, match="score_cov_fn"):
+            k_statistic(theta_0, measure, design, model=_linear_psi, V=jnp.eye(3))
+
+    def test_design_aware_refused(self):
+        from emu_gmm.covariance import DesignAwareCovariance, StratifiedCovariance
+
+        measure, theta_0 = self._measure()
+        n = int(measure.x.shape[0])
+        design = StratifiedCovariance(
+            psu_ids=jnp.zeros(n),
+            cell_ids=jnp.zeros(n),
+            stratum_ids=jnp.zeros(n),
+            n_psu=1,
+            n_cells=1,
+            n_strata=1,
+        )
+        sampling = ClusteredCovariance(cluster_ids=jnp.zeros(n), n_clusters=1)
+        mixed = DesignAwareCovariance.from_design_mask(
+            design=design,
+            sampling=sampling,
+            design_moment_mask=jnp.ones(3),
+        )
+        with pytest.raises(ValueError, match="score_cov_fn"):
+            k_statistic(theta_0, measure, mixed, model=_linear_psi, V=jnp.eye(3))
