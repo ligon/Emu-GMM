@@ -793,15 +793,56 @@ def build_estimator(
 
                 riem_blocks.append(jax.vmap(_proj_row)(block))
         G_riem = jnp.concatenate(riem_blocks, axis=1)  # (M, total_dimension)
-        Z_local = jax.scipy.linalg.solve_triangular(L_local, G_riem, lower=True)
-        info_local = Z_local.T @ Z_local
-        # Gauge-aware pseudo-inverse (Phase 4 / BUG-B / R6/R8): drop the
-        # ``total_gauge_dim`` smallest eigenvalues BY COUNT. For
-        # ``total_gauge_dim == 0`` (v1 / Euclidean / Positive) this is
-        # exactly ``inv()`` (bitwise v1 non-regression).
-        Sigma_local = pinv_eigvalrule(
+
+        # ------------------------------------------------------------------
+        # Sigma_theta as the weighting-aware SANDWICH (#133, from the
+        # 2026-06-09 design review, point 3). The pre-#133 formula
+        # ``pinv(G' (V*)^{-1} G)`` is inverse-information under the
+        # EFFICIENT weighting; it mis-states the variance whenever the
+        # weighting actually used is not (V*)^{-1} at theta_hat
+        # (Identity / Fixed(V0)) or the ridge binds (V* != V). The
+        # general form is
+        #
+        #   Sigma = B^+ (G' Lambda V Lambda G) B^+,   B = G' Lambda G,
+        #
+        # with Lambda the weighting ACTUALLY used and the UNREGULARIZED
+        # V as the meat. The whitening protocol is itself the generic
+        # Lambda-applicator: every strategy's whitening_residual is
+        # linear in m (y = L_w^{-1} m), so vmapping it over columns
+        # yields L_w^{-1} G and L_w^{-1} V L_w^{-T} without any new
+        # protocol surface. When Lambda = V^{-1} exactly (CU at
+        # convergence with tau = 0) the meat collapses to the bread and
+        # the sandwich to B^{-1} -- float-identical to the pre-#133
+        # value, not bitwise (C = L^{-1} V L^{-T} == I only in exact
+        # arithmetic).
+        def _whiten_cols(mat: Float[Array, "M X"]) -> Float[Array, "M X"]:
+            return jax.vmap(
+                lambda col: weighting.whitening_residual(
+                    col, V_star_local, theta_local
+                ),
+                in_axes=1,
+                out_axes=1,
+            )(mat)
+
+        Zw_local = _whiten_cols(G_riem)  # (M, D): L_w^{-1} G
+        info_local = Zw_local.T @ Zw_local  # bread: G' Lambda G
+        # Meat core: C = L_w^{-1} V_local L_w^{-T} (V symmetric, so
+        # whiten the columns, then the columns of the transpose).
+        C_half = _whiten_cols(jnp.asarray(V_local))  # L_w^{-1} V
+        C_local = _whiten_cols(C_half.T)  # L_w^{-1} V L_w^{-T}
+        meat_local = Zw_local.T @ C_local @ Zw_local  # G' Lambda V Lambda G
+        meat_local = 0.5 * (meat_local + meat_local.T)
+        # Gauge-aware pseudo-inverse of the BREAD (Phase 4 / BUG-B /
+        # R6/R8): drop ``total_gauge_dim`` smallest eigenvalues BY
+        # COUNT. The gauge nullspace passes through the sandwich
+        # unchanged: G_riem annihilates the gauge directions, so bread
+        # and meat carry them as exact nullspace and B^+ pins them to
+        # zero on both sides.
+        bread_pinv = pinv_eigvalrule(
             info_local, drop_smallest=manifold_spec.total_gauge_dim
         )
+        Sigma_local = bread_pinv @ meat_local @ bread_pinv
+        Sigma_local = 0.5 * (Sigma_local + Sigma_local.T)
         kappa_local = jnp.linalg.cond(V_star_local)
         pivot_min_local = jnp.min(jnp.diag(L_local))
 
