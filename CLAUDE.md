@@ -286,7 +286,14 @@ bootstrap helpers — is **owned by the package** and read off
 
 ## Running on this box — the 64-core JIT-mmap hazard
 
-This host has 64 logical CPUs. JAX/XLA sizes its JIT thread pool to the CPU
+This host has 64 logical CPUs — **but check before assuming**: sandboxed
+sessions may see far fewer (`cat /proc/self/status | grep Cpus_allowed_list`;
+a 2026-06-10 session saw only CPUs 0-6 with ~14 GB RAM). `taskset -c` to
+cores outside the allowed set fails with EINVAL; ranges that merely
+overlap it are silently intersected, so a "pin to 0-31" succeeds while
+actually pinning to 0-6.
+
+JAX/XLA sizes its JIT thread pool to the (affinity-visible) CPU
 count and `mmap`s executable pages per worker; running several *uncapped*
 JAX processes at once (multiple `make quick-check` invocations, or a
 multi-agent workflow where each agent runs pytest) oversubscribes the cores
@@ -320,6 +327,26 @@ single-thread caps only as a last resort.
   exits. (Cost a hung agent once.) Match the concrete process,
   e.g. `pgrep -f "bin/python -m pytest"`, and exclude your own PID — or just
   pin with `taskset` and skip the wait entirely.
+- **The self-match hazard applies to `pkill` too, with worse consequences**
+  (recurred 2026-06-10 despite the warning above): `pkill -f ladder_mc` in a
+  compound command killed its own shell mid-command (exit 144), silently
+  skipping everything after it. Use bracket patterns (`pgrep -f
+  "[l]adder_mc"`) — and note the bracket trick fails if the LITERAL bracket
+  pattern appears elsewhere in your own command line (an `ls
+  /tmp/run_ladder_full.sh` in the same compound command re-creates the
+  match). Kill by concrete PID, and verify state via files (logs, output
+  artifacts), not process greps.
 - A backgrounded run whose shell wrapper exits can leave the `pytest` child
   alive — check `ps` before relaunching; "completed" on a piped background
   command does not mean the child died.
+- **Jobs longer than ~10 minutes:** detach them (`setsid nohup script >
+  log 2>&1 < /dev/null &`) and watch the log, rather than trusting a
+  harness background task to outlive its timeout. (Empirically two ~20-min
+  gates survived a 10-min nominal timeout, but the contract says they
+  shouldn't — don't build multi-hour MC runs on that accident.)
+- **Repeated bare `estimate()` calls leak ~14 MB/call** via JAX's global
+  caches (fresh closures per call → write-only traces; OOM-killed a 300-rep
+  MC study at 9.4 GB, see #139's merge-verification thread). In any loop
+  that rebuilds closures per iteration, call `jax.clear_caches()` per
+  iteration — it costs nothing there precisely because nothing is re-hit.
+  The `build_estimator` + `replicate` factory path does not leak.
