@@ -28,7 +28,6 @@ architectural context.
 from __future__ import annotations
 
 import dataclasses
-import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -39,24 +38,24 @@ import optimistix as optx
 import scipy.optimize as so
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.fn_cache import FunctionKeyedCache
 from emu_gmm.types import OptimizerInfo
 
-# Module-level cache mapping a user ``residual_fn`` (by ``id``) to its
-# optimistix ``fn(y, args)`` wrapper. Caching the wrapper is what gives
+# Per-function cache mapping a user ``residual_fn`` to its optimistix
+# ``fn(y, args)`` wrapper. Caching the wrapper is what gives
 # :func:`build_estimator` its second-call no-retrace property:
 # optimistix's internal pjit cache keys on the wrapper's identity, so
 # rebuilding ``fn`` on each call would miss the cache every time even
 # when ``residual_fn`` itself is unchanged.
 #
-# CAVEAT (audit L1, issue #139): the cached wrapper CLOSES OVER the
-# keyed ``residual_fn``, so the weakref.finalize eviction below can
-# never fire -- the cache is effectively append-only (one immortal
-# entry per factory). Accidentally, that immortality also eliminates
-# the id()-reuse-after-GC hazard this keying scheme would otherwise
-# have. Pure resource growth, bounded by the number of factories built
-# in the process; eviction redesign is tracked in #139 (a naive
-# weak-value fix would re-open the id-reuse hazard).
-_OPTIMISTIX_FN_CACHE: dict[int, Any] = {}
+# #139: the wrapper closes over ``residual_fn``, so the original
+# id()-keyed module dict could never evict (the weakref.finalize was
+# dead code -- the cached value kept the key alive; append-only cache).
+# The wrapper now rides as an attribute ON ``residual_fn`` itself, so it
+# dies with the function it is derived from, and object-identity keying
+# forecloses the id-recycling stale-hit hazard the old design risked.
+# See ``_internal/fn_cache.py`` for the full design rationale.
+_OPTIMISTIX_FN_CACHE = FunctionKeyedCache("_emu_gmm_optimistix_fn")
 
 
 def _optimistix_wrap(
@@ -68,45 +67,34 @@ def _optimistix_wrap(
     wrapper that ignores ``args`` and forwards to the user's
     one-argument residual. Building the wrapper afresh on every solver
     invocation defeats optimistix's pjit cache (the cache keys on
-    closure identity); memoising on ``id(residual_fn)`` keeps the
+    closure identity); memoising per ``residual_fn`` object keeps the
     wrapper identity stable so the second call hits the cache.
     """
-    key = id(residual_fn)
-    cached = _OPTIMISTIX_FN_CACHE.get(key)
-    if cached is not None:
-        return cached
 
-    def fn(y: Float[Array, " K"], args: Any) -> Float[Array, " M"]:
-        return residual_fn(y)
+    def build() -> Callable[[Float[Array, " K"], Any], Float[Array, " M"]]:
+        def fn(y: Float[Array, " K"], args: Any) -> Float[Array, " M"]:
+            return residual_fn(y)
 
-    _OPTIMISTIX_FN_CACHE[key] = fn
-    # Evict when ``residual_fn`` is GC'd. ``id()`` is captured by value
-    # so the finalize closure does not keep ``residual_fn`` alive.
-    weakref.finalize(residual_fn, _OPTIMISTIX_FN_CACHE.pop, key, None)
-    return fn
+        return fn
+
+    return _OPTIMISTIX_FN_CACHE.get_or_build(residual_fn, build)
 
 
 # Memoised ``jax.jit(fn)`` wrappers for the #124 args-path final-objective
-# evaluation, keyed on ``id(fn)`` exactly like ``_OPTIMISTIX_FN_CACHE``
-# (and sharing its append-only caveat -- see #139; the jitted wrapper
-# retains ``fn``, so the finalizer below is likewise dead code).
+# evaluation, keyed per ``fn`` object exactly like ``_OPTIMISTIX_FN_CACHE``
+# (and sharing its #139 redesign -- the jitted wrapper retains ``fn``, so
+# the old id()-keyed dict was likewise append-only).
 # Rationale: after the solve we recompute ``r = fn(theta_opt, args)`` for
 # ``final_objective``; an EAGER call re-traces the kernel's vmap(psi) on
 # every invocation (one stray trace per replicate -- measured by the PR A
 # retrace-count gate), while ``jax.jit`` built fresh per call owns a fresh
 # cache and is no better. One memoised wrapper per kernel identity makes
 # the evaluation hit the same compiled trace across replicates.
-_JITTED_FN_CACHE: dict[int, Any] = {}
+_JITTED_FN_CACHE = FunctionKeyedCache("_emu_gmm_jitted_fn")
 
 
 def _jitted_fn(fn: Callable[..., Any]) -> Callable[..., Any]:
-    key = id(fn)
-    cached = _JITTED_FN_CACHE.get(key)
-    if cached is not None:
-        return cached
-    wrapped = jax.jit(fn)
-    _JITTED_FN_CACHE[key] = wrapped
-    weakref.finalize(fn, _JITTED_FN_CACHE.pop, key, None)
+    wrapped: Callable[..., Any] = _JITTED_FN_CACHE.get_or_build(fn, lambda: jax.jit(fn))
     return wrapped
 
 

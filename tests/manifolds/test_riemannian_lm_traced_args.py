@@ -22,6 +22,9 @@ PRNG key so ``with_key`` genuinely yields fresh draws.
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
@@ -189,6 +192,31 @@ class TestArgsPathNoRetrace:
         g2 = np.asarray(_gamma(th2))
         assert np.max(np.abs(g1 - g2)) > 0.0
         np.testing.assert_allclose(g1, g2, atol=0.1)
+
+
+class TestTracedSolveEviction:
+    def test_kernel_collectible_after_drop(self):
+        """#139 regression: the memoised jitted solve must die with the
+        kernel. Under the old id()-keyed ``_TRACED_SOLVE_CACHE`` the
+        cached ``jax.jit(_solve)`` closed over the kernel, so the
+        finalize eviction could never fire and every kernel handed to
+        the args path was immortal; this test fails under that design."""
+        base, Y0, _ = _make_measure(data_seed=1244)
+        theta0 = _theta0(Y0)
+        spec = params_mod.manifold_spec_from_params(theta0)
+        _, treedef, _ = params_mod.flatten_params_with_spec(theta0)
+        kernel = _make_kernel(_psi, spec, treedef)
+        rlm = riemannian_lm(max_steps=400)
+
+        _, info = rlm(kernel, theta0, spec, args=base)
+        assert bool(info.done)
+
+        ref = weakref.ref(kernel)
+        del kernel
+        gc.collect()
+        assert (
+            ref() is None
+        ), "kernel immortal: _TRACED_SOLVE_CACHE entry not evicted (#139)"
 
 
 class TestLegacyContractUntouched:

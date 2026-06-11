@@ -85,7 +85,6 @@ mode; that machinery is the #77 work item.
 from __future__ import annotations
 
 import dataclasses
-import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -95,6 +94,7 @@ import numpy as np
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import params as params_mod
+from emu_gmm._internal.fn_cache import FunctionKeyedCache
 from emu_gmm.manifolds.positive import Positive
 from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
 
@@ -115,18 +115,20 @@ def _is_positive(manifold: Any) -> bool:
 _GAUGE_FLOOR: float = 1e-6
 
 # #124 (PR B): memoised jitted solve cores for the traced-``args`` path.
-# Keyed on ``(id(residual_fn), self, manifold_spec)`` -- the kernel's
-# identity is the trace key (same pattern as the estimator's
-# factory-stable kernels), ``self`` pins the solver hyperparameters
-# (frozen dataclass, hashable), and ``manifold_spec`` pins the per-leaf
-# plan (frozen dataclass hashing by structural identity, so a caller
-# that rebuilds an equal spec still hits). Held strongly so the trace
-# survives between calls. CAVEAT (audit L1, #139): the cached jitted
-# solve retains the kernel, so the ``weakref.finalize`` eviction is
-# dead code and the cache is append-only -- one immortal entry per
-# (kernel, solver, spec) triple, mirroring ``_OPTIMISTIX_FN_CACHE``'s
-# caveat; redesign tracked in #139.
-_TRACED_SOLVE_CACHE: dict[tuple[int, Any, Any], Any] = {}
+# Keyed per kernel OBJECT with secondary key ``(self, manifold_spec)`` --
+# the kernel's identity is the trace key (same pattern as the
+# estimator's factory-stable kernels), ``self`` pins the solver
+# hyperparameters (frozen dataclass, hashable), and ``manifold_spec``
+# pins the per-leaf plan (frozen dataclass hashing by structural
+# identity, so a caller that rebuilds an equal spec still hits).
+# #139: the jitted solve closes over the kernel, so the original
+# id()-keyed module dict could never evict (its weakref.finalize was
+# dead code; append-only cache, one immortal entry per (kernel, solver,
+# spec) triple). The per-kernel table now rides as an attribute ON the
+# kernel itself, so the traces survive exactly as long as the kernel
+# does and object-identity keying forecloses the id-recycling stale-hit
+# hazard. See ``_internal/fn_cache.py`` for the full design rationale.
+_TRACED_SOLVE_CACHE = FunctionKeyedCache("_emu_gmm_traced_solve")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -396,14 +398,12 @@ class _RiemannianLM:
             # the exact pre-#124 behaviour.
             x_final, steps, done, final_objective = _solve(theta_flat, None)
         else:
-            cache_key = (id(residual_fn), self, manifold_spec)
-            solve_jit = _TRACED_SOLVE_CACHE.get(cache_key)
-            if solve_jit is None:
-                solve_jit = jax.jit(_solve)
-                _TRACED_SOLVE_CACHE[cache_key] = solve_jit
-                # Evict when the kernel is GC'd; the key tuple is captured
-                # by value so the finalize does not keep the kernel alive.
-                weakref.finalize(residual_fn, _TRACED_SOLVE_CACHE.pop, cache_key, None)
+            # Memoised on the kernel object itself (#139): the trace dies
+            # with the kernel, and same-(solver, spec) calls on a live
+            # kernel reuse one compiled solve.
+            solve_jit = _TRACED_SOLVE_CACHE.get_or_build(
+                residual_fn, lambda: jax.jit(_solve), key=(self, manifold_spec)
+            )
             x_final, steps, done, final_objective = solve_jit(theta_flat, args)
 
         # Status: under jit these are traced; eagerly (including after the

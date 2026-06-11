@@ -10,11 +10,14 @@ The far-from-optimum start ``(-1.2, 1.0)`` is the textbook hard case.
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 import jax
 import jax.numpy as jnp
 import pytest
 from emu_gmm import types as t
-from emu_gmm.optimizer import optimistix_lm, scipy_lm
+from emu_gmm.optimizer import _jitted_fn, _optimistix_wrap, optimistix_lm, scipy_lm
 
 # ---------------------------------------------------------------------------
 
@@ -119,3 +122,60 @@ class TestScipyLM:
         opt = scipy_lm()
         x_opt, _ = opt(_rosenbrock_residual, _X_INIT)
         assert isinstance(x_opt, jnp.ndarray)
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestFnCacheEviction:
+    """#139 regression: the memoised wrappers must not outlive the keyed
+    function. The old id()-keyed module dicts registered a
+    ``weakref.finalize`` eviction that could never fire (the cached
+    value strongly referenced the keyed function), so every transient
+    ``residual_fn`` -- one per bare ``estimate()`` call on the default
+    path -- left an immortal entry. These tests fail under that design.
+    """
+
+    @staticmethod
+    def _make_kernel():
+        scale = jnp.asarray(2.0)
+
+        def residual_fn(x):
+            return x * scale
+
+        return residual_fn
+
+    def test_optimistix_wrapper_memoised_then_evicted(self):
+        kernel = self._make_kernel()
+        w1 = _optimistix_wrap(kernel)
+        w2 = _optimistix_wrap(kernel)
+        assert w1 is w2  # second-call no-retrace property preserved
+        ref = weakref.ref(kernel)
+        del kernel, w1, w2
+        gc.collect()
+        assert (
+            ref() is None
+        ), "residual_fn immortal: _OPTIMISTIX_FN_CACHE entry not evicted (#139)"
+
+    def test_jitted_fn_memoised_then_evicted(self):
+        def make_two_arg():
+            scale = jnp.asarray(3.0)
+
+            def kernel(theta, args):
+                return theta * scale + args
+
+            return kernel
+
+        kernel = make_two_arg()
+        j1 = _jitted_fn(kernel)
+        j2 = _jitted_fn(kernel)
+        assert j1 is j2
+        # Execute once: JAX's compiled-trace caches must not pin it either.
+        out = j1(jnp.ones(3), jnp.zeros(3))
+        out.block_until_ready()
+        ref = weakref.ref(kernel)
+        del kernel, j1, j2, out
+        gc.collect()
+        assert (
+            ref() is None
+        ), "kernel immortal: _JITTED_FN_CACHE entry not evicted (#139)"
