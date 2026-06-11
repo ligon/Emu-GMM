@@ -1122,8 +1122,20 @@ def build_estimator(
             penalty_hessian = jax.hessian(_p_flat)(theta_hat_flat)
 
         N_j_arr = _effective_n_per_moment(measure_call, theta_hat, M)
+        # #20: ``exclude_gauge`` is the quotient condition number -- the
+        # gauge zeros (``total_gauge_dim`` of them, exact by
+        # construction) are dropped BY COUNT, the same rule as the
+        # pinv_eigvalrule Sigma_theta bread above. Note the diagnostic
+        # rebuilds the info matrix from the AMBIENT Jacobian ``G_hat``
+        # with Lambda = (V*)^{-1}: for a gauge-invariant model the
+        # ambient G annihilates the vertical directions too, so its
+        # spectrum carries the same ``total_gauge_dim`` near-zeros as
+        # the horizontal-projected bread.
         cond_info = compute_cond_info(
-            G_hat, V_star_hat, penalty_hessian=penalty_hessian
+            G_hat,
+            V_star_hat,
+            penalty_hessian=penalty_hessian,
+            gauge_nullspace_dim=manifold_spec.total_gauge_dim,
         )
 
         optimizer_health = build_optimizer_health(

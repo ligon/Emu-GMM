@@ -144,9 +144,12 @@ class TestComputeCondInfo:
     """Unit tests for :func:`compute_cond_info`.
 
     The function returns a dict with three keys (``raw`` / ``data_only``
-    / ``exclude_gauge``). In v1 all three equal ``cond(G' V^{-1} G)``;
-    once issue #7 (penalty hook) and the v2 manifold epic land, the
-    latter two will diverge from ``raw``.
+    / ``exclude_gauge``). On the v1 / flat-parameter path (no penalty,
+    ``gauge_nullspace_dim == 0``, the default) all three equal
+    ``cond(G' V^{-1} G)``: ``data_only`` diverges from ``raw`` only
+    under an in-objective penalty (issue #7) and ``exclude_gauge``
+    only for a gauge-bearing manifold tree (issue #20; see
+    ``tests/manifolds/test_cond_info_gauge.py``).
     """
 
     def test_returns_three_keys(self):

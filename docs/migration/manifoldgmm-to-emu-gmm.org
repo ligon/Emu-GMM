@@ -297,18 +297,22 @@ reparameterisation" is now one of /two/ supported options:
   \(\sigma\) follow by the delta method (=result.functional_se=).
 
 Inference on manifold parameters is gauge-aware end-to-end
-(issue #20's first half): =Sigma_theta= is the =pinv_eigvalrule=
-sandwich with exactly \(k(k-1)/2\) gauge directions per =PSDFixedRank=
-leaf dropped /by count/, the dropped dimension is surfaced as
-=diagnostics.gauge_nullspace_dim=, and interpretable SEs on the gauge
-invariants come from =result.eigenvalue_se()= / =result.gamma_se()= /
-=result.functional_se(f)= --- /not/ from per-entry =Y= rows of
-=coef_table=, which are gauge-arbitrary. /Caveat (issue #20, open
-half)/: =diagnostics.cond_info['exclude_gauge']= is still the v1 alias
-of ='raw'= --- it is *not* yet the gauge-projected condition number, so
-do not use it for identification analysis of a =PSDFixedRank= run;
-until #20 lands, derive the quotient condition from the kept spectrum
-of the information matrix.
+(issue #20, both halves landed): =Sigma_theta= is the
+=pinv_eigvalrule= sandwich with exactly \(k(k-1)/2\) gauge directions
+per =PSDFixedRank= leaf dropped /by count/, the dropped dimension is
+surfaced as =diagnostics.gauge_nullspace_dim=, and interpretable SEs
+on the gauge invariants come from =result.eigenvalue_se()= /
+=result.gamma_se()= / =result.functional_se(f)= --- /not/ from
+per-entry =Y= rows of =coef_table=, which are gauge-arbitrary.
+=diagnostics.cond_info['exclude_gauge']= is the gauge-aware /quotient/
+condition number: cond over the information-matrix spectrum excluding
+the =gauge_nullspace_dim= smallest eigenvalues by count (the same
+drop-by-count rule as =pinv_eigvalrule=). Use it --- not ='raw'=,
+which carries the structural gauge zeros and is huge/inf by
+construction for \(k \ge 2\) --- for identification analysis of a
+=PSDFixedRank= run; any /additional/ near-zero eigenvalues beyond the
+dropped count still blow =exclude_gauge= up, which is exactly the
+structural-rank-deficiency signal to test for.
 
 * Post-estimation inference helpers
 
@@ -430,7 +434,8 @@ landed:
 - =ReplicateWeightCovariance= (BRR / jackknife / bootstrap weights):
   still deferred --- v3 (=implementation-plan.org= Section 14).
 - =cond_info['exclude_gauge']= as a /gauge-projected/ condition number:
-  open half of issue #20 (see the caveat under /Manifold parameters/).
+  *landed* (#20, drop-by-count quotient condition; see /Manifold
+  parameters/ above).
 
 If your call site exercises one of the still-deferred features, the
 migration is *not* mechanical --- coordinate with the maintainer (or

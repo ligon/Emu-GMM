@@ -331,10 +331,17 @@ class Diagnostics:
     #     identifier (delta-method variance is built from the data
     #     Hessian alone) and what you want when the penalty is a
     #     stabiliser rather than a prior.
-    #   - ``'exclude_gauge'``: alias to ``'raw'`` for v1. Once the v2
-    #     manifold support lands, this will project out the
-    #     K*(K-1)/2 PSDFixedRank gauge nullspace before computing the
-    #     condition number.
+    #   - ``'exclude_gauge'``: the gauge-aware QUOTIENT condition
+    #     number (#20). For a gauge-bearing tree (PSDFixedRank(n, K):
+    #     gauge_dim = K(K-1)/2) the information matrix carries exactly
+    #     ``gauge_nullspace_dim`` spectrally-zero directions by
+    #     construction, so ``'raw'`` is meaningless for K >= 2; this
+    #     entry is cond over the spectrum EXCLUDING the gauge_dim
+    #     smallest eigenvalues BY COUNT (the pinv_eigvalrule rule).
+    #     Additional near-zeros beyond the dropped count blow it up
+    #     too -- genuine structural rank-deficiency stays visible.
+    #     For gauge_nullspace_dim == 0 (v1 / all-Euclidean) it is the
+    #     bitwise alias of ``'raw'``, as before.
     cond_info: dict[str, float] = dataclasses.field(default_factory=dict)
 
     # Lightweight optimiser-health summary at termination. Keys:

@@ -8,7 +8,9 @@ the end of an estimation. This module provides:
   the per-moment fields in labelled :class:`haliax.NamedArray` instances.
 - :func:`compute_cond_info`: build the Hessian condition trio
   (``raw`` / ``data_only`` / ``exclude_gauge``) at theta_hat from
-  ``G`` and ``V*``. See CLAUDE.md commitment 5 and issue #10.
+  ``G`` and ``V*``; ``exclude_gauge`` is the gauge-aware quotient
+  condition number (drop ``gauge_nullspace_dim`` smallest eigenvalues
+  by count; issue #20). See CLAUDE.md commitment 5 and issue #10.
 - :func:`build_optimizer_health`: assemble the optimiser-health summary
   dict from an :class:`OptimizerInfo` and a final gradient norm.
 - :func:`log_to_stdout`: a simple console logger usable as a per-step
@@ -265,6 +267,7 @@ def compute_cond_info(
     G: Float[Array, "M K"],
     V_star: Float[Array, "M M"],
     penalty_hessian: Float[Array, "K K"] | None = None,
+    gauge_nullspace_dim: int = 0,
 ) -> dict[str, float]:
     """Condition number of the information matrix :math:`G' \\Lambda G`.
 
@@ -289,11 +292,23 @@ def compute_cond_info(
       quantity (delta-method variance is built from the data Hessian
       alone) and the correct identifier proxy when the penalty is a
       stabiliser rather than a prior.
-    - ``'exclude_gauge'``: alias to ``'raw'`` for v1. The v2 manifold
-      epic will reinterpret this as the condition of the information
-      matrix projected onto the orthogonal complement of the gauge
-      nullspace; for the flat-parameter v1 the gauge group is trivial
-      and the two coincide.
+    - ``'exclude_gauge'``: the *quotient* condition number (issue #20,
+      surfaced by the K-Aggregators consumer). For a gauge-bearing
+      manifold parameter (``PSDFixedRank(n, K)``:
+      ``gauge_dim = K(K-1)/2``) the information matrix has exactly
+      ``gauge_nullspace_dim`` spectrally-zero directions BY
+      CONSTRUCTION, so the full-spectrum ``'raw'`` is meaningless for
+      ``K >= 2``. This entry drops the ``gauge_nullspace_dim`` smallest
+      eigenvalues of the (symmetrised) full information matrix **by
+      count** -- the same drop-by-count rule as
+      :func:`~emu_gmm._internal.pinv_eigvalrule.pinv_eigvalrule` and
+      the #137/#41 projectors -- and reports ``max/min`` over the
+      remaining spectrum. Any *additional* near-zero eigenvalues beyond
+      the dropped count then blow this number up too: that is genuine
+      structural rank-deficiency, exactly the signal the consumer's
+      identification analysis tests for. When
+      ``gauge_nullspace_dim == 0`` (every v1 / all-Euclidean tree) this
+      is the bitwise alias of ``'raw'``, as before.
 
     Parameters
     ----------
@@ -312,12 +327,37 @@ def compute_cond_info(
         whose Hessian at the optimum (ignoring higher-order residual
         curvature, the standard Gauss-Newton view) is
         :math:`G' \\Lambda G + \\tfrac{1}{2} H_p`.
+    gauge_nullspace_dim : int, optional
+        A **static Python int** (NOT a JAX array / tracer): the number
+        of exact gauge-nullspace directions of the information matrix,
+        i.e. the manifold spec's ``total_gauge_dim``
+        (``K(K-1)/2`` per ``PSDFixedRank(n, K)`` leaf). Must satisfy
+        ``0 <= gauge_nullspace_dim < K``. The estimator passes
+        ``manifold_spec.total_gauge_dim``; the default ``0`` keeps the
+        v1 flat-parameter behaviour bitwise (``'exclude_gauge'``
+        aliases ``'raw'``).
 
     Returns
     -------
     dict[str, float]
         ``{'raw': ..., 'data_only': ..., 'exclude_gauge': ...}``.
     """
+    # Static-int guards, mirroring pinv_eigvalrule (the count is a trace-
+    # time constant: the eigenvalue slice below must have static shape).
+    if not isinstance(gauge_nullspace_dim, int) or isinstance(
+        gauge_nullspace_dim, bool
+    ):
+        raise TypeError(
+            "compute_cond_info: gauge_nullspace_dim must be a static "
+            f"Python int (vmap/jit-safe), got "
+            f"{type(gauge_nullspace_dim).__name__}. Pass "
+            "manifold_spec.total_gauge_dim directly."
+        )
+    if gauge_nullspace_dim < 0:
+        raise ValueError(
+            "compute_cond_info: gauge_nullspace_dim must be >= 0, got "
+            f"{gauge_nullspace_dim}"
+        )
     G_arr = jnp.asarray(G)
     V_arr = jnp.asarray(V_star)
     # Information matrix via Cholesky of V*. Match estimator.py's
@@ -350,13 +390,54 @@ def compute_cond_info(
     except (TypeError, ValueError):
         raw = raw_arr
 
-    # ``exclude_gauge`` aliases to ``raw`` for v1: the flat-parameter
-    # path has no manifold gauge nullspace. v2 manifold epic will
-    # distinguish them.
+    # ``exclude_gauge`` (#20): the quotient condition number. With no
+    # gauge nullspace (every v1 / all-Euclidean tree) it stays the
+    # bitwise alias of ``raw``; with ``gauge_nullspace_dim > 0`` it is
+    # the condition over the spectrum EXCLUDING the gauge_dim smallest
+    # eigenvalues BY COUNT (the pinv_eigvalrule / #137 / #41 rule: the
+    # gauge zeros are a property of the quotient, known exactly at trace
+    # time, never a magnitude threshold).
+    if gauge_nullspace_dim == 0:
+        exclude_gauge: Any = raw
+    else:
+        K_dim = int(info_matrix_full.shape[-1])
+        if gauge_nullspace_dim >= K_dim:
+            raise ValueError(
+                "compute_cond_info: gauge_nullspace_dim must be < K = "
+                f"{K_dim} (the size of the information matrix), got "
+                f"{gauge_nullspace_dim}. Dropping the whole spectrum "
+                "would leave an empty identified subspace."
+            )
+        # eigvalsh on the symmetrised matrix (neutralise the rounding
+        # asymmetry of Z'Z); ascending order, so the gauge zeros are the
+        # FIRST ``gauge_nullspace_dim`` entries and the static slice
+        # keeps the identified block.
+        info_sym = 0.5 * (info_matrix_full + info_matrix_full.T)
+        eigs = jnp.linalg.eigvalsh(info_sym)
+        eigs_keep = eigs[gauge_nullspace_dim:]
+        w_min = eigs_keep[0]
+        w_max = eigs_keep[-1]
+        # Guard on the SIGNED minimum (commitment 3's convention): a
+        # non-positive smallest kept eigenvalue means the identified
+        # block is numerically singular / indefinite -- the quotient
+        # condition number is +inf, a visible event (the #140
+        # NaN-is-an-event convention: never absorb it into a finite
+        # number). This matches jnp.linalg.cond's inf-for-singular
+        # convention used by ``raw`` / ``data_only``.
+        quotient_arr = jnp.where(
+            w_min > 0.0,
+            w_max / jnp.where(w_min > 0.0, w_min, 1.0),
+            jnp.inf,
+        )
+        try:
+            exclude_gauge = float(quotient_arr)
+        except (TypeError, ValueError):
+            exclude_gauge = quotient_arr
+
     return {
         "raw": raw,
         "data_only": data_only,
-        "exclude_gauge": raw,
+        "exclude_gauge": exclude_gauge,
     }
 
 

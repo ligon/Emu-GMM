@@ -212,8 +212,12 @@ been through four reviewer iterations; the abstractions are deliberate.
   constructors only; pymanopt is a dev-only gated cross-check). The
   high-gauge-fraction `k/n > 0.7` regime remains surfaced as a caveat, not
   supported. Validated against a pymanopt-TrustRegions baseline on the
-  quotient. Still open from the epic: the gauge-projected condition number
-  (`cond_info['exclude_gauge']` is the v1 raw alias; #20).
+  quotient. The epic's last open item landed with #20:
+  `cond_info['exclude_gauge']` is the gauge-aware quotient condition number
+  (drop `total_gauge_dim` smallest eigenvalues by count, same rule as
+  `pinv_eigvalrule`; extra near-zeros beyond the dropped count still blow it
+  up — that is the structural-rank-deficiency signal consumers test for).
+  For `total_gauge_dim == 0` it remains the bitwise alias of `raw`.
 - **`ReplicateWeightCovariance`**: rest of the design-awareness ladder
   (BRR, jackknife, bootstrap variants; `docs/design.org` Section 2).
 - **`EigenvalueFloor`, `NearestPSD` (Higham 1988) regularisers**:
