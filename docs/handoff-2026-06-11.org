@@ -97,3 +97,22 @@ convergence 97-99%).
   agents touched the same comment line (trivial union).
 - The =mc-130= worktree is at =.claude/worktrees/mc-130=; per-rep
   studies' CSVs land in =docs/validation/data/=.
+
+* Coda: SHIPPED (2026-06-11, morning)
+- Owner ran the release gate green on python 3.13 (a stronger statement
+  than the overnight 3.11 validation); v0.3.0 tagged.
+- The v0.3.0 PyPI publish was rejected: direct git-URL dependency
+  (haliax) is forbidden in published metadata. Two fixes landed:
+  the Makefile now invokes gate tools as =python -m= (a foreign conda
+  mypy had produced 472 phantom errors on the owner's machine), and
+  the haliax dependency moved to the PyPI dev wheel
+  =>=1.4.dev452,<1.5= -- verified to be the EXACT validated git
+  revision (poetry's stamp: =1.4.dev452 280f49f=); lock regenerated
+  (Poetry 2 gotcha: =lock= preserves resolutions by default, use
+  =--regenerate=); gate 1056/0 against the synced env.
+- *v0.3.1 published to PyPI.* #130 and #131 closed; all four arcs
+  complete. Upstream request for a stable haliax 1.4 filed
+  (stanford-crfm/haliax#228 -- note it redirected to
+  marin-community/haliax; the project has moved orgs).
+- v2.1 queue at session end: #141, #144, #145-fix, plus the six
+  recorded re-deferrals.
