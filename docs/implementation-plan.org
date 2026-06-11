@@ -368,7 +368,7 @@ v2's identity: *design-aware inference on geometrically honest parameter spaces*
 - Weak identification on the quotient :: #41 (the manifold arc's capstone). /CLOSED 2026-06-10: gauge-aware quotient K + loud dispatch (68bd1b4) and the =k_confidence_set= inverter (1e0477b); the design-matched cross-covariance follow-up split to #141 (v2.1)./
 - Theory companion :: #40 (MCAR-on-quotient positive-definiteness note). /RE-DEFERRED to v2.1, 2026-06-10: pure theory documentation; the quotient machinery it underwrites is empirically validated (manifold acceptance suites; the #41 probe)./
 - Reverse-mode through the solver :: #77 (defer-with-loud-caveat acceptable). /RE-DEFERRED to v2.1, 2026-06-10 WITH the loud caveat landed (RiemannianLM module docstring records the lax.while_loop limitation and the implicit-differentiation work item)./
-- Davies/Imhof exact generalised chi-squared :: decide on #130's evidence; close as not-needed if Welch--Satterthwaite calibrates. /Decision pending the #130 binding-arm adjusted-p calibration --- the engineered evidence now exists (the design-aware binding regime)./
+- Davies/Imhof exact generalised chi-squared :: decide on #130's evidence; close as not-needed if Welch--Satterthwaite calibrates. /CLOSED AS NOT NEEDED, owner decision 2026-06-11: W-S calibrates exactly where the fixed-tau limit applies (KS 0.211 nominal -> 0.085 adjusted over the full law in the engineered binding regime); residual miscalibration traces to #145's covariance defect, not the reference distribution./
 - Test gaps from the conformance review :: the =score_cov_fn= K-statistic path /(closed with #41 PR (a))/; adaptive + wild bootstrap composition /(still open)/.
 
 ** Arc 4 --- Scope discipline (recorded decisions)

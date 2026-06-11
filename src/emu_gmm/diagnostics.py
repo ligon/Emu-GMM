@@ -142,15 +142,20 @@ def regularization_adjusted_pvalue(
     of the column space of :math:`G(\\theta_0)`. When :math:`\\tau = 0`
     the weights coincide at 1, recovering :math:`\\chi^2_{M-K}`.
 
-    For v1, the weighted-chi^2 survival function is approximated via the
+    The weighted-chi^2 survival function is approximated via the
     Welch--Satterthwaite scheme [cite:@satterthwaite1946]: match the
     first two moments of :math:`\\sum_i w_i Z_i^2` (mean :math:`\\sum w_i`,
     variance :math:`2 \\sum w_i^2`) to a scaled chi-squared
     :math:`c \\cdot \\chi^2_v` with :math:`c = \\sum w_i^2 / \\sum w_i`
-    and :math:`v = (\\sum w_i)^2 / \\sum w_i^2`. This is the standard
-    approximation in the linear-model literature; Davies' / Imhof's
-    exact CDF would be more accurate but requires non-trivial code that
-    falls outside v1's scope.
+    and :math:`v = (\\sum w_i)^2 / \\sum w_i^2`. Davies' / Imhof's exact
+    CDF was considered and CLOSED AS NOT NEEDED (owner decision
+    2026-06-11, on the #130 validation evidence): in the engineered
+    fixed-tau binding regime --- the case this function exists for ---
+    the W-S approximation brings the J p-value from a failing
+    uniformity KS of 0.211 (nominal) to a passing 0.085 over the full
+    law; the residual miscalibrated cases trace to a mis-centered
+    covariance (#145), which no reference-distribution exactness can
+    repair. See docs/validation/ladder-mc-2026-06-10.org (study 5).
 
     Concretely, working in the whitened coordinates
     :math:`\\tilde y = L_\\star^{-1} m` with
