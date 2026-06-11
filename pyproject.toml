@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
   "jax>=0.4.25",
   "jaxtyping>=0.2.30",
-  "haliax @ git+https://github.com/stanford-crfm/haliax.git",
+  "haliax>=1.4.dev452,<1.5",
   "jax_dataclasses>=1.6.1",
   "optimistix>=0.0.7",
   "numpy>=1.26",
@@ -33,9 +33,17 @@ packages = [{ include = "emu_gmm", from = "src" }]
 python = ">=3.11,<4.0"
 jax = ">=0.4.25"
 jaxtyping = ">=0.2.30"
-# Pin to GitHub master: PyPI haliax 1.3 imports jax._src.tree_util.BuiltInKeyEntry
-# which current JAX no longer exposes. GitHub master is compatible.
-haliax = { git = "https://github.com/stanford-crfm/haliax.git" }
+# PyPI's stable haliax 1.3 imports jax._src.tree_util.BuiltInKeyEntry, which
+# current JAX no longer exposes; upstream main is compatible but PyPI forbids
+# direct (git URL) dependencies in published metadata (the v0.3.0 publish
+# rejection). haliax auto-publishes dev wheels from main: 1.4.dev452 is built
+# from 280f49fb (2025-11-08) -- the EXACT revision the previous git pin had
+# locked and the whole v2 validation ran against. The pre-release specifier
+# is deliberate and PEP 440-explicit (it enables pre-release resolution for
+# this requirement); the <1.5 ceiling guards API drift, and a future stable
+# 1.4 satisfies the range. Suite re-validated against the PyPI wheel before
+# this change landed.
+haliax = { version = ">=1.4.dev452,<1.5", allow-prereleases = true }
 jax_dataclasses = ">=1.6.1"
 optimistix = ">=0.0.7"
 numpy = ">=1.26"

@@ -91,9 +91,15 @@ been through four reviewer iterations; the abstractions are deliberate.
 - **Lint/format** via `ruff` and `black`. Pre-commit hooks via
   `pre-commit install`. `pyproject.toml` ignores `F722`, `F821`, `UP037`
   globally — those are jaxtyping shape-string false positives.
-- **haliax pinned to GitHub master** (not PyPI). PyPI haliax 1.3 imports
+- **haliax pinned to the PyPI dev pre-release** (`>=1.4.dev452,<1.5`),
+  NOT the git URL and NOT stable 1.3. Stable 1.3 imports
   `jax._src.tree_util.BuiltInKeyEntry` which current JAX no longer
-  exposes; the git version is compatible. Documented in `pyproject.toml`.
+  exposes; the old git pin was the workaround but PyPI rejects direct
+  URL deps in published metadata (the v0.3.0 publish failure). haliax
+  auto-publishes dev wheels from main, and 1.4.dev452 is built from the
+  exact revision (280f49f) the v2 validation ran against — poetry's own
+  version stamp confirmed the identity. Rationale documented in
+  `pyproject.toml`; revisit when upstream cuts a stable 1.4.
 - **Float64 is the default precision.** See "Architectural commitments"
   point 7. Float32 silently degrades both convergence (optimistix LM
   can't certify) and accuracy (theta_hat drifts at the third digit).
