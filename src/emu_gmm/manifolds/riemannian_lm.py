@@ -64,6 +64,22 @@ every first-order retraction has unit differential at ``v = 0``
 same as Euclidean's ``x + v`` and PSDFixedRank's ``Y + V``. So the
 Gauss--Newton Jacobian in tangent coordinates is the *ambient* Jacobian
 (``step_scale == 1``).
+
+REVERSE-MODE AD IS NOT SUPPORTED THROUGH THIS SOLVER (#77)
+----------------------------------------------------------
+The solve loop is a :func:`jax.lax.while_loop`, which has **no reverse
+differentiation rule**: ``jax.grad`` / ``jax.jacrev`` of any function
+that calls this solver (e.g. hyperparameter gradients of
+``theta_hat(data)``, differentiable-pipeline embeddings) raises JAX's
+``Reverse-mode differentiation does not work for lax.while_loop``
+error. This is a recorded deferral (re-deferred to v2.1, 2026-06-10),
+not an oversight: nothing in the package differentiates THROUGH the
+solver --- all post-fit inference uses the direct-form information
+matrix :math:`G'\Lambda G` at the fixed optimum (CLAUDE.md commitment
+5) and forward-mode :func:`jax.jacfwd` for moment Jacobians. Callers
+needing solver-through gradients should use implicit differentiation
+at the optimum (the stationarity conditions), not unrolled reverse
+mode; that machinery is the #77 work item.
 """
 
 from __future__ import annotations

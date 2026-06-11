@@ -355,20 +355,21 @@ v2's identity: *design-aware inference on geometrically honest parameter spaces*
 ** Arc 2 --- The validation pillar
 /Exit: a committed, reproducible repeated-sampling report (#130) demonstrating size, coverage, and J-calibration for the full covariance ladder under genuine missingness, produced by a supported driver --- plus a real-data acceptance test on the empirical path (#128)./
 
-- Enablers :: #125 (=EstimationResult.record()=), #126 (=SyntheticMeasure.with_key()=) --- small and unblocked.
-- Execution model :: #124 (measure as a traced argument through the jit boundary; the architectural fix restoring design.org Section 5's pytree-composability intent), or #123 (structural cache) as the patch-level fallback.
-- Driver :: #114, re-shaped per its thread (stacked per-rep records + separate summarizers; =StudyResult= as Context-style sugar).
-- Supporting :: #113 (sample-level reductions), #115 (CPU defaults), #18 (ManifoldGMM byte-parity check).
-- Step zero :: commit the =/tmp= validation harness under =docs/validation/= now (part of #130).
+- Enablers :: #125 (=EstimationResult.record()=), #126 (=SyntheticMeasure.with_key()=) --- small and unblocked. /Landed 2026-06-09./
+- Execution model :: #124 (measure as a traced argument through the jit boundary; the architectural fix restoring design.org Section 5's pytree-composability intent), or #123 (structural cache) as the patch-level fallback. /#124 landed 2026-06-09; #123 subsumed./
+- Driver :: #114, re-shaped per its thread (stacked per-rep records + separate summarizers; =StudyResult= as Context-style sugar). /Landed 2026-06-09./
+- Supporting :: #113 (sample-level reductions), #115 (CPU defaults), #18 (ManifoldGMM byte-parity check) --- all three RE-DEFERRED to the =v2.1= milestone 2026-06-10 with recorded reasons on the issues (consumer-proven workaround documented in two repos; #139's retention fix changes the memory baseline first; consumer-level parity delivered by the #128 real-data reproduction).
+- Step zero :: commit the =/tmp= validation harness under =docs/validation/= now (part of #130). /Done 2026-05-31./
+- Labelled-array boundary :: #132 --- the v2 deliverable (the design-goal section in design.org Section 6) landed; the implementation (pandas label fidelity, polars/DataMat adapters, backend-parametrised egress) RE-DEFERRED to v2.1, 2026-06-10, revives on consumer pull.
 
 ** Arc 3 --- Inference-tail decisions
 /Exit: each item landed, or re-deferred with a recorded reason./
 
-- Weak identification on the quotient :: #41 (the manifold arc's capstone).
-- Theory companion :: #40 (MCAR-on-quotient positive-definiteness note).
-- Reverse-mode through the solver :: #77 (defer-with-loud-caveat acceptable).
-- Davies/Imhof exact generalised chi-squared :: decide on #130's evidence; close as not-needed if Welch--Satterthwaite calibrates.
-- Test gaps from the conformance review :: the =score_cov_fn= K-statistic path; adaptive + wild bootstrap composition.
+- Weak identification on the quotient :: #41 (the manifold arc's capstone). /CLOSED 2026-06-10: gauge-aware quotient K + loud dispatch (68bd1b4) and the =k_confidence_set= inverter (1e0477b); the design-matched cross-covariance follow-up split to #141 (v2.1)./
+- Theory companion :: #40 (MCAR-on-quotient positive-definiteness note). /RE-DEFERRED to v2.1, 2026-06-10: pure theory documentation; the quotient machinery it underwrites is empirically validated (manifold acceptance suites; the #41 probe)./
+- Reverse-mode through the solver :: #77 (defer-with-loud-caveat acceptable). /RE-DEFERRED to v2.1, 2026-06-10 WITH the loud caveat landed (RiemannianLM module docstring records the lax.while_loop limitation and the implicit-differentiation work item)./
+- Davies/Imhof exact generalised chi-squared :: decide on #130's evidence; close as not-needed if Welch--Satterthwaite calibrates. /Decision pending the #130 binding-arm adjusted-p calibration --- the engineered evidence now exists (the design-aware binding regime)./
+- Test gaps from the conformance review :: the =score_cov_fn= K-statistic path /(closed with #41 PR (a))/; adaptive + wild bootstrap composition /(still open)/.
 
 ** Arc 4 --- Scope discipline (recorded decisions)
 /Exit: the deferred list is a record of choices, not a residue./
