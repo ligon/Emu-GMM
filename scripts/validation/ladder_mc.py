@@ -486,9 +486,14 @@ def run_arm_per_rep_anchor(
         # Bare estimate() builds fresh closures per call, so JAX's global
         # caches accumulate write-only traces (~14 MB/call measured; the
         # un-mitigated leak OOM-killed this study's first full run at
-        # 9.4 GB -- #139 merge-verification thread). Clearing costs
-        # nothing here precisely because nothing is ever re-hit.
-        jax.clear_caches()
+        # 9.4 GB -- #139 merge-verification thread). But clear_caches()
+        # ALSO drops XLA's low-level kernel compilations, which ARE
+        # re-hit across reps: clearing every rep tripled wall-clock
+        # (~7.4 s/rep vs ~2.6; measured on the second full run's
+        # design_aware study). Clear every 25 reps: memory swing
+        # ~25 x 14 MB = 350 MB, recompilation amortized to ~6%.
+        if (r_i + 1) % 25 == 0:
+            jax.clear_caches()
     stacked = jtu.tree_map(lambda *xs: jnp.stack(xs), *recs)
     records = MCRecords(records=stacked, key=jnp.asarray(key), n_reps=n_reps)
     study = StudyResult(
