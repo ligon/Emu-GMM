@@ -401,7 +401,37 @@ gap (real but scope-conformant; optional control arm noted in fix 8).
 - Seeds: master seed 20260610 per study; replicate r uses
   jax.random.fold_in(PRNGKey(seed), r) (the documented driver
   contract); the stratum profile uses fixed seed 777 in make_design.
-- Environment: emu-gmm at the commit recorded in the data sidecars;
-  float64; CPU.
+- Environment: emu-gmm at the commit recorded in each study's JSON
+  sidecar (git SHA + dirty flag, package/jax/numpy versions, PRNG
+  impl); float64; CPU. jax PRNG output is version-sensitive, so the
+  committed records are reproducible only against those pins.
 - Per-replicate records: docs/validation/data/*.csv with JSON sidecars
-  carrying study, seed, arms, command, and runtime.
+  carrying study, seed, per-arm DesignSpec/theta_init/anchor-mode/
+  validity counts, the regenerating command, and runtime.
+- Bit-stability check: the four factory-anchored studies were run
+  twice (before and after an intervening package merge that does not
+  touch their statistics) and reproduced bit-identically -- the CRN
+  contract observed end-to-end.
+
+** Run-protocol incidents (recorded; they are findings, not noise)
+
+1. The first full run's =design_aware= study was OOM-killed at 9.4 GB:
+   the then-unfixed #139 append-only caches retained ~14 MB per bare
+   =estimate()= call on the per-rep-anchoring path. Fixed in-package
+   (#139), mitigated in-harness.
+2. The mitigation (=jax.clear_caches()= per replicate) traded the leak
+   for a ~3-5x wall-clock recompilation tax (XLA kernel compilations
+   ARE re-hit across reps even though closure traces are not):
+   measured ~12 s/rep at N = 2000 vs the ~2.6 s/rep pilot rate. The
+   second run's =design_aware= study ran under per-rep clearing
+   (correct, slow: ~6 h); =ridge_binding= and the shipped harness use
+   every-25 clearing (~350 MB swing, few-percent overhead). Clearing
+   frequency has zero numerical effect; the studies' statistics are
+   unaffected.
+3. design_aware's sidecar records the worktree commit current at its
+   END (the every-25 commit landed mid-study); the code it RAN was the
+   per-rep-clearing revision one commit earlier. Timing-only drift;
+   noted here so the sidecar is read correctly.
+4. The per-rep-anchored studies run n_reps = 300 (not 500): MC SE on a
+   5% rate is 1.3%, and the binding-event counts (>= 80 per binding
+   arm) clear the jadj gate comfortably; the factory studies run 500.
