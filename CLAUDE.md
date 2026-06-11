@@ -185,7 +185,14 @@ been through four reviewer iterations; the abstractions are deliberate.
     reduces **bit-for-bit** to `StratifiedCovariance` via a *shared* (not
     copied) engine. The design-exact-$V_{TT}$ **glue is NOT PSD-by-construction**
     (it can be indefinite like `StratifiedCovariance`; `DiagonalTikhonov`
-    repairs it — don't over-claim PSD). Stratified reduces to
+    repairs it — don't over-claim PSD). **Known caveat (#145, #130 MC
+    evidence): fixed stratum-mean heterogeneity contaminates the coupled
+    assembly** — $V_{TT}$ centers within cells but $V_{SS}$/$V_{TS}$ are
+    uncentered, so the composed `couple=True` V under-covers the randomized
+    contrast (b1 coverage 0.66, binding 39% in the validation fixture)
+    while plain `StratifiedCovariance` stays calibrated; prefer it (or
+    `couple=False`) under stratum heterogeneity until the v2.1 centering
+    pass. Stratified reduces to
     `ClusteredCovariance` only *in expectation* (centered vs uncentered), not
     bit-for-bit. The $V_{TS}$ cross block is **ablatable in-framework** (#109):
     `from_design_mask(..., couple=False)` returns the block-diagonal

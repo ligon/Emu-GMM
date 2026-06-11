@@ -393,6 +393,22 @@ class DesignAwareCovariance:
         *coupled* composition a plain additive sum cannot express (the cross
         corner is non-zero).
 
+    .. warning::
+        **Fixed stratum-mean heterogeneity contaminates the coupled
+        assembly** (#145; #130 MC evidence). :math:`V_{TT}` centers within
+        ``(stratum x arm)`` cells, but :math:`V_{SS}` and the :math:`V_{TS}`
+        cross pass are **uncentered** cluster-total forms: fixed
+        stratum-level mean shifts in the moments enter their cross-products.
+        In the validation study (fixed demeaned stratum profile, the
+        textbook reason one stratifies), ``couple=True`` under-covered the
+        randomized contrast badly (b1 coverage 0.66 at nominal 0.95;
+        tau-binding on 39% of datasets) while plain
+        :class:`StratifiedCovariance` was calibrated and ``couple=False``
+        conservative. Until the v2.1 centering pass lands, under suspected
+        stratum heterogeneity prefer :class:`StratifiedCovariance` for
+        design contrasts, or ``couple=False`` for a conservative composed
+        assembly --- and inspect the contribution via :meth:`cross_block`.
+
     Parameters
     ----------
     design : StratifiedCovariance
