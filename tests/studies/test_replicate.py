@@ -1,11 +1,14 @@
 """Layer-1 driver contracts (#114): shapes, CRN, reproducibility,
-non-convergence accounting, and the inherited no-retrace property."""
+non-convergence accounting, the inherited no-retrace property, and the
+per-replicate ridge-anchoring mode (#142)."""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import numpy as np
+import pytest
 from emu_gmm import IIDCovariance, build_estimator
 from emu_gmm.examples.euler import (
     BETA_TRUE,
@@ -263,3 +266,251 @@ class TestNoRetrace:
             return counting.calls
 
         assert study_psi_calls(5) == study_psi_calls(2)
+
+
+# ---------------------------------------------------------------------------
+# #142 fixtures: a rigged covariance whose definiteness is controlled by a
+# poison flag planted in the data (column 2), so the ridge-anchor regime is a
+# property of each DATASET, not of the model or strategy configuration.
+# ---------------------------------------------------------------------------
+
+N_LOC = 64
+
+
+@jdc.pytree_dataclass
+class _Loc:
+    mu: jax.Array
+
+
+def _loc_model(x, theta):
+    """Two location moments for one parameter (M=2, K=1, J_dof=1)."""
+    return jnp.array([x[0] - theta.mu, x[1] - theta.mu])
+
+
+@jdc.pytree_dataclass
+class _PoisonableCovariance:
+    """V keyed on the dataset's poison column ``x[:, 2]``.
+
+    flag 0 -> identity (clean: DiagonalTikhonov takes tau = 0);
+    flag 1 -> [[1, 2], [2, 1]], eigenvalues {-1, 3}: indefinite, so the
+    regulariser must bisect to tau ~ 1 >> tau_threshold (= 0.01) and the
+    anchor BINDS. Definiteness is the dataset's property -- exactly the
+    #142 field regime (an indefinite rep-0 V poisoning a whole arm).
+    """
+
+    def covariance(self, psi, theta, measure):
+        off = 2.0 * measure.x[0, 2]
+        return jnp.array([[1.0, off], [off, 1.0]])
+
+
+def _poison_measure(key: jax.Array, flag) -> EmpiricalMeasure:
+    x01 = 1.0 + 0.1 * jax.random.normal(key, (N_LOC, 2))
+    col = jnp.full((N_LOC, 1), flag)
+    x = jnp.concatenate([x01, col], axis=1)
+    return EmpiricalMeasure(x=x, mask=jnp.ones((N_LOC, 2)), weights=jnp.ones(N_LOC))
+
+
+def _random_poison_dgp():
+    """dgp whose poison flag is a fair coin in the rep key."""
+
+    def dgp(key: jax.Array) -> EmpiricalMeasure:
+        kx, kf = jax.random.split(key)
+        flag = (jax.random.uniform(kf) < 0.5).astype(jnp.float64)
+        return _poison_measure(kx, flag)
+
+    return dgp
+
+
+def _clean_dgp():
+    """dgp drawing the same x as :func:`_random_poison_dgp` but never poisoned."""
+
+    def dgp(key: jax.Array) -> EmpiricalMeasure:
+        kx, _ = jax.random.split(key)
+        return _poison_measure(kx, jnp.asarray(0.0))
+
+    return dgp
+
+
+def _expected_flags(key: jax.Array, n_reps: int) -> list[bool]:
+    """Replay the documented CRN schedule: rep r's flag from fold_in(key, r)."""
+    out = []
+    for r in range(n_reps):
+        _, kf = jax.random.split(jax.random.fold_in(key, r))
+        out.append(bool(jax.random.uniform(kf) < 0.5))
+    return out
+
+
+def _make_loc_run(template_flag: float):
+    return build_estimator(
+        _loc_model,
+        measure=_poison_measure(jax.random.PRNGKey(123), template_flag),
+        covariance=_PoisonableCovariance(),
+        parameters=_Loc(mu=jnp.asarray(1.0)),
+    )
+
+
+def _loc_theta0() -> _Loc:
+    return _Loc(mu=jnp.asarray(1.0))
+
+
+class TestAnchorPerRep:
+    """#142: ``replicate(anchor_per_rep=True)`` -- per-dataset anchoring."""
+
+    def test_binding_ridge_varies_per_rep_only_under_flag(self):
+        """The headline #142 contract. On the factory path every rep
+        inherits the TEMPLATE's frozen anchor (constant binding column:
+        an unlucky template poisons the arm, a lucky one masks per-rep
+        pathology); under ``anchor_per_rep=True`` binding tracks each
+        replicate's OWN V -- the column varies and equals the replayed
+        per-rep poison schedule exactly."""
+        n_reps = 4
+        key = jax.random.PRNGKey(6)  # chosen: flags [F, T, T, F] -- mixed
+        flags = _expected_flags(key, n_reps)
+        assert 0 < sum(flags) < n_reps  # fixture sanity: both regimes occur
+        dgp = _random_poison_dgp()
+        theta0 = _loc_theta0()
+
+        # Unlucky template (poisoned, indefinite V): the anchor binds.
+        run_poisoned = _make_loc_run(1.0)
+        factory = replicate(
+            run_poisoned, dgp, n_reps=n_reps, key=key, theta_init=theta0
+        )
+        per_rep = replicate(
+            run_poisoned,
+            dgp,
+            n_reps=n_reps,
+            key=key,
+            theta_init=theta0,
+            anchor_per_rep=True,
+        )
+
+        # Factory path: rep-0-anchor inheritance -> constant 1 (and one
+        # shared tau for the whole arm).
+        np.testing.assert_array_equal(
+            np.asarray(factory.records.binding_ridge), np.ones(n_reps)
+        )
+        assert float(np.ptp(np.asarray(factory.records.tau_realised))) == 0.0
+        # Per-rep path: binding is each dataset's own regime.
+        np.testing.assert_array_equal(
+            np.asarray(per_rep.records.binding_ridge),
+            np.asarray(flags, dtype=float),
+        )
+        b = np.asarray(per_rep.records.binding_ridge)
+        assert 0.0 < b.mean() < 1.0  # VARIES across reps -- the point of #142
+        assert float(np.ptp(np.asarray(per_rep.records.tau_realised))) > 0.0
+
+        # Lucky template (clean V): the factory path records binding
+        # 0.000 across the SAME poisoned draws -- pathology masked.
+        run_clean = _make_loc_run(0.0)
+        factory_clean = replicate(
+            run_clean, dgp, n_reps=n_reps, key=key, theta_init=theta0
+        )
+        np.testing.assert_array_equal(
+            np.asarray(factory_clean.records.binding_ridge), np.zeros(n_reps)
+        )
+
+    def test_records_same_structure_and_shapes(self):
+        key = jax.random.PRNGKey(0)
+        dgp = _clean_dgp()
+        run = _make_loc_run(0.0)
+        theta0 = _loc_theta0()
+        a = replicate(run, dgp, n_reps=2, key=key, theta_init=theta0)
+        b = replicate(
+            run, dgp, n_reps=2, key=key, theta_init=theta0, anchor_per_rep=True
+        )
+        assert isinstance(b, MCRecords)
+        assert jax.tree_util.tree_structure(a) == jax.tree_util.tree_structure(b)
+        for la, lb in zip(
+            jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b), strict=True
+        ):
+            assert jnp.shape(la) == jnp.shape(lb)
+        assert b.records.theta_flat.shape == (2, 1)
+        assert b.records.J_dof == a.records.J_dof == 1
+        assert b.param_names == a.param_names == ("mu",)
+
+    def test_crn_schedule_and_theta_equal_when_never_binding(self):
+        """The CRN contract is mode-invariant: rep r draws
+        dgp(fold_in(key, r)) on the per-rep path too, and with a clean
+        template and clean reps (tau = 0 everywhere) the two modes
+        differ in NOTHING -- per-rep theta is identical, so any
+        divergence between the modes can only come from anchoring."""
+        key = jax.random.PRNGKey(5)
+        theta0 = _loc_theta0()
+        base = _clean_dgp()
+        seen: list[np.ndarray] = []
+
+        def recording_dgp(k: jax.Array) -> EmpiricalMeasure:
+            m = base(k)
+            seen.append(np.asarray(m.x))
+            return m
+
+        run = _make_loc_run(0.0)
+        a = replicate(run, base, n_reps=3, key=key, theta_init=theta0)
+        b = replicate(
+            run,
+            recording_dgp,
+            n_reps=3,
+            key=key,
+            theta_init=theta0,
+            anchor_per_rep=True,
+        )
+        # Pin the documented schedule on the per-rep path.
+        assert len(seen) == 3
+        for r in range(3):
+            np.testing.assert_array_equal(
+                seen[r], np.asarray(base(jax.random.fold_in(key, r)).x)
+            )
+        # The ridge never binds on either path ...
+        np.testing.assert_array_equal(np.asarray(a.records.binding_ridge), np.zeros(3))
+        np.testing.assert_array_equal(np.asarray(b.records.binding_ridge), np.zeros(3))
+        # ... so theta agrees rep-for-rep across the modes.
+        np.testing.assert_allclose(
+            np.asarray(a.records.theta_flat),
+            np.asarray(b.records.theta_flat),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_specless_callable_raises_before_any_work(self):
+        """anchor_per_rep=True needs build_estimator's attached factory
+        spec; a hand-rolled run callable fails LOUDLY, up front (neither
+        the dgp nor the callable is ever invoked)."""
+
+        def handrolled(theta_init, measure):
+            raise AssertionError("run must not be invoked")
+
+        def dgp(key):
+            raise AssertionError("dgp must not be drawn")
+
+        with pytest.raises(ValueError, match="build_estimator"):
+            replicate(
+                handrolled,
+                dgp,
+                n_reps=2,
+                key=jax.random.PRNGKey(0),
+                theta_init=_loc_theta0(),
+                anchor_per_rep=True,
+            )
+
+    def test_monte_carlo_study_threads_the_flag(self):
+        """monte_carlo_study(anchor_per_rep=True) reaches replicate: the
+        stacked binding column matches the per-rep poison schedule (it
+        would be constant 1.0 on the factory path)."""
+        from emu_gmm.studies import monte_carlo_study
+
+        n_reps = 4
+        key = jax.random.PRNGKey(6)
+        flags = _expected_flags(key, n_reps)
+        study = monte_carlo_study(
+            _make_loc_run(1.0),
+            _random_poison_dgp(),
+            n_reps=n_reps,
+            key=key,
+            theta_init=_loc_theta0(),
+            theta0=_loc_theta0(),
+            anchor_per_rep=True,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(study.records.records.binding_ridge),
+            np.asarray(flags, dtype=float),
+        )

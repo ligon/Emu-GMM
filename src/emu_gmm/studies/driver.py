@@ -126,6 +126,7 @@ def replicate(
     n_reps: int,
     key: jax.Array,
     theta_init: Any,
+    anchor_per_rep: bool = False,
 ) -> MCRecords:
     """Run ``n_reps`` independent draw-and-estimate replicates.
 
@@ -160,6 +161,42 @@ def replicate(
         public contract (see the module docstring on CRN).
     theta_init
         Starting point passed to ``run`` for every replicate.
+    anchor_per_rep
+        Default ``False``: the fast factory path. ``run`` is invoked
+        as-is for every replicate, so the regularisation anchor
+        ``tau_anchor`` that :func:`~emu_gmm.build_estimator` froze on
+        its TEMPLATE measure (the anchor-once-then-freeze policy;
+        CLAUDE.md commitment 3) is shared by every replicate ---
+        ``FitRecord.binding_ridge`` is then constant across reps, an
+        unlucky template draw can poison a whole arm, and a lucky one
+        can mask per-rep pathology (#142).
+
+        ``True``: each replicate runs the bare
+        :func:`~emu_gmm.estimator.estimate` path, so the
+        anchor-once-then-freeze policy applies **per dataset** (per-fit
+        == per-dataset semantics). Use it whenever ``tau_anchor > 0``
+        matters --- in particular whenever the tau-binding column is a
+        study deliverable (the #130 harness's
+        ``run_arm_per_rep_anchor`` is the prior art and can migrate to
+        this flag). Requires ``run`` to be a
+        :func:`~emu_gmm.build_estimator` factory: the driver reads the
+        construction kwargs off ``run._emu_gmm_factory_spec`` (attached
+        by the factory) rather than duplicating ``build_estimator``'s
+        kwarg surface; a hand-rolled ``run`` callable raises
+        :class:`ValueError`. Cost: the slow path --- every replicate
+        pays the full closure-build + retrace, ~seconds/rep instead of
+        ~ms/rep. The driver calls ``jax.clear_caches()`` every 25
+        replicates on this path: bare ``estimate()`` builds fresh
+        closures per call, so JAX's global caches accumulate write-only
+        traces (~14 MB/call measured; the unmitigated leak OOM-killed a
+        300-rep study at 9.4 GB --- the #139 merge-verification
+        thread) --- but clearing also drops XLA's re-hit kernel
+        compilations, so per-replicate clearing costs ~3-5x wall-clock;
+        every-25 bounds the swing at ~350 MB with a few percent
+        recompilation overhead. The CRN contract is unchanged:
+        replicate ``r`` draws
+        with ``fold_in(key, r)`` on both paths, so the two modes see
+        identical datasets and differ only in anchoring.
 
     Returns
     -------
@@ -170,11 +207,58 @@ def replicate(
     """
     if n_reps < 1:
         raise ValueError(f"replicate(): n_reps must be >= 1, got {n_reps}")
+    fit_per_rep: Callable[[Measure], EstimationResult] | None = None
+    if anchor_per_rep:
+        spec = getattr(run, "_emu_gmm_factory_spec", None)
+        if spec is None:
+            raise ValueError(
+                "replicate(anchor_per_rep=True) requires `run` to be a "
+                "factory built by emu_gmm.build_estimator: the per-rep "
+                "anchoring path rebuilds a bare estimate() per replicate "
+                "from the construction kwargs the factory attaches to its "
+                "returned callable (run._emu_gmm_factory_spec), and the "
+                "supplied callable does not carry them. Build `run` with "
+                "build_estimator(...), or drop anchor_per_rep."
+            )
+        # Local import: emu_gmm/__init__ imports this module while wiring
+        # the public API, so a module-level import of the estimator would
+        # be load-order sensitive (the _resolve_parameters precedent).
+        from emu_gmm.estimator import estimate
+
+        def _fit_fresh_anchor(measure: Measure) -> EstimationResult:
+            return estimate(
+                spec["model"],
+                measure,
+                covariance=spec["covariance"],
+                weighting=spec["weighting"],
+                regularization=spec["regularization"],
+                optimizer=spec["optimizer"],
+                parameters=theta_init,
+                moment_names=spec["moment_names"],
+                penalty=spec["penalty"],
+            )
+
+        fit_per_rep = _fit_fresh_anchor
+
     records: list[FitRecord] = []
     for r in range(n_reps):
         rep_key = jax.random.fold_in(key, r)
-        result = run(theta_init, dgp(rep_key))
-        records.append(result.record())
+        if fit_per_rep is not None:
+            result = fit_per_rep(dgp(rep_key))
+            records.append(result.record())
+            # Bare estimate() builds fresh closures per call, so JAX's
+            # global caches accumulate write-only traces (~14 MB/call
+            # measured; the unmitigated leak OOM-killed a 300-rep study
+            # at 9.4 GB -- the #139 merge-verification thread). But
+            # clearing ALSO drops XLA's re-hit kernel compilations:
+            # per-rep clearing measured ~3-5x wall-clock (#139 thread,
+            # the #130 re-run). Clear every 25 reps: ~350 MB swing,
+            # recompilation amortized to a few percent.
+            if (r + 1) % 25 == 0:
+                jax.clear_caches()
+        else:
+            result = run(theta_init, dgp(rep_key))
+            records.append(result.record())
     stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *records)
     return MCRecords(records=stacked, key=jnp.asarray(key), n_reps=n_reps)
 

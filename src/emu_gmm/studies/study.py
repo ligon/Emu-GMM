@@ -72,6 +72,7 @@ def monte_carlo_study(
     theta0: Any,
     level: float = 0.95,
     alpha: tuple[float, ...] = (0.01, 0.05, 0.10),
+    anchor_per_rep: bool = False,
 ) -> StudyResult:
     """Run a study and compute the standard summary battery.
 
@@ -81,8 +82,16 @@ def monte_carlo_study(
 
     Parameters
     ----------
-    run, dgp, n_reps, key, theta_init
-        Passed through to :func:`replicate`.
+    run, dgp, n_reps, key, theta_init, anchor_per_rep
+        Passed through to :func:`replicate`. Set
+        ``anchor_per_rep=True`` (slow path; requires ``run`` to be a
+        :func:`~emu_gmm.build_estimator` factory) whenever the
+        regularisation anchor matters --- on the default factory path
+        every replicate inherits the template measure's frozen
+        ``tau_anchor``, so the :func:`~emu_gmm.studies.tau_binding`
+        column degenerates to a constant 0/1 per study (#142). See
+        :func:`replicate` for the full contract, cost, and the per-rep
+        ``jax.clear_caches()`` memory note.
     theta0
         The DGP truth, as a length-D array or the user's parameter
         pytree; used by :func:`bias_sd` and :func:`coverage`. (Distinct
@@ -92,7 +101,14 @@ def monte_carlo_study(
     alpha
         Rejection levels for :func:`size_power`.
     """
-    records = replicate(run, dgp, n_reps=n_reps, key=key, theta_init=theta_init)
+    records = replicate(
+        run,
+        dgp,
+        n_reps=n_reps,
+        key=key,
+        theta_init=theta_init,
+        anchor_per_rep=anchor_per_rep,
+    )
     return StudyResult(
         records=records,
         bias_sd=bias_sd(records, theta0),

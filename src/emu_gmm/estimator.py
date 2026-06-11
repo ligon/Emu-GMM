@@ -320,7 +320,16 @@ def build_estimator(
 
     Returns
     -------
-    Callable taking ``(theta_init, measure) -> EstimationResult``.
+    Callable taking ``(theta_init, measure) -> EstimationResult``. The
+    callable carries its construction kwargs as the function attribute
+    ``_emu_gmm_factory_spec`` (a dict with keys ``model``,
+    ``covariance``, ``weighting``, ``regularization``, ``optimizer``,
+    ``penalty``, ``moment_names``, holding the *resolved* strategies ---
+    defaults applied, optimiser dispatched). This is what lets
+    :func:`emu_gmm.studies.replicate` rebuild a per-dataset estimator
+    when asked for per-replicate ridge anchoring
+    (``anchor_per_rep=True``; #142) without duplicating this factory's
+    kwarg surface at the driver.
     """
     # Resolve the polymorphic starting point (pure Python, pre-tracing): a
     # ParameterSpace class -> .point(); a ManifoldPoint view -> its raw
@@ -1212,6 +1221,24 @@ def build_estimator(
             manifold_spec=unflatten_spec,
         )
 
+    # #142: expose the construction kwargs on the returned callable so
+    # emu_gmm.studies.replicate(anchor_per_rep=True) can run the bare
+    # estimate() path per replicate -- the anchor-once-then-freeze tau
+    # policy (commitment 3) is per-FIT semantics, and this factory
+    # freezes the TEMPLATE measure's anchor (tau_anchor above) across
+    # every subsequent call. An additive function attribute (the #139
+    # fix's function-attribute pattern); the values are the RESOLVED
+    # strategies (defaults applied, optimiser dispatched), so a per-rep
+    # rebuild reproduces this factory's configuration exactly.
+    _run._emu_gmm_factory_spec = {  # type: ignore[attr-defined]
+        "model": model,
+        "covariance": covariance,
+        "weighting": weighting,
+        "regularization": regularization,
+        "optimizer": optimizer,
+        "penalty": penalty,
+        "moment_names": moment_names,
+    }
     return _run
 
 
