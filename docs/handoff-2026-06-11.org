@@ -1,0 +1,99 @@
+#+TITLE: Handoff: the v2 push of 2026-06-10/11 (overnight session)
+#+AUTHOR: Sue (Claude Fable 5)
+
+* Where to start
+GitHub #131 (tracker; current as of this note) and
+=docs/validation/ladder-mc-2026-06-10.org= (the Arc-2 exit artifact).
+This note is the narrative bridge for one very long session.
+
+* Closed this session
+#128 (real-data acceptance test; frozen Seasonality extract, consumer
+estimates reproduced exactly) -- #41 (BOTH halves: gauge-aware quotient
+K-statistic + loud dispatch, 68bd1b4; =k_confidence_set= inverter,
+1e0477b) -- #136, #139, #140, #143, #20 (worktree-agent fleet; one
+combined gate 1051 passed) -- #142 (per-rep anchor API, born AND closed
+this session from #130 field evidence).
+
+* Filed this session
+#141 (design-matched cross-covariance, v2.1) -- #142/#143 (closed, see
+above) -- #144 (EstimatorLaw design pass, v2.1 -- the owner design
+discussion is recorded in design.org's revised prospective-sketch
+section; worth reading, it settled name/codomain/conditioning/algebra)
+-- #145 (DesignAware stratum-heterogeneity contamination; v2 doc-caveat
+half LANDED, v2.1 centering fix pending). Cross-repo:
+TaimakaSeasonality#26 (private-import heads-up).
+
+* Re-deferred with recorded reasons (v2.1 milestone, owner concurrence)
+#77 (loud caveat landed in the RiemannianLM docstring), #40, #18,
+#113, #115, #132.
+
+* The #130 story (read the report's protocol sections; they earn it)
+Harness: =scripts/validation/ladder_mc.py= on worktree branch =mc-130=.
+Two hardening rounds: self-piloting (3 fixture bugs) then a 41-agent
+adversarial workflow (44 -> 17 -> 8 surviving findings, all applied;
+the considered-and-rejected list is in the report appendix). The runs
+themselves produced two package-level findings (#142, #145) and an
+operational saga (OOM via #139's leak; the clear_caches recompile tax)
+recorded in the report's run-protocol-incidents section and CLAUDE.md.
+
+Full-run results: every pre-registered target reproduced (fpc ratios
+0.706-0.713 vs predicted 0.7071; H-boundary share 0.747 vs 0.75; the
+~2x V_ww truncation visible as SE/SD ~ 0.71). Headlines: IID-under-
+clustering fails catastrophically at both scales (discrimination
+delivered); clustered J shows mild tail-conservatism (rej ~2.2-2.4% at
+nominal 5%, ECDF otherwise uniform); few-cluster regime (G=12) honest
+and large (SEs ~35% small); stratified calibrated at G=20, degrading
+monotonically toward the H<2 boundary; #145 (see above) with a
+sigma_strat=0 control pinning attribution; LM robust under
+misspecification (the #9 column: median iters 15 -> 63 along delta,
+convergence 97-99%).
+
+* Completed overnight (the morning state)
+- [X] All six studies done; =ridge_binding= ran 67 min under the
+  amortized clearing (4.5x faster than design_aware's per-rep
+  clearing -- the recompile-tax diagnosis confirmed in production).
+- [X] Report COMPLETE: all tables + readings, tau-binding column,
+  verdict, decision briefs, adversarial-review appendix, run-protocol
+  incidents. Merged to main as 60e47b2 with harness + data.
+- [X] #131 ticked (#130 box annotated "pending owner sign-off");
+  #130 commented with the summary; left OPEN for the owner.
+- [ ] FULL release gate (slow suite included) -- running at the time
+  of writing; result appended to this note's git history (the
+  finalizing commit message carries it).
+
+* The decisive overnight numbers
+- Welch--Satterthwaite: KS 0.211 (nominal, failing) -> 0.085
+  (adjusted, passing) over the full law in the engineered fixed-tau
+  regime -- the Davies/Imhof brief recommends close-as-not-needed.
+- The most-damaging miscalibration in the suite (J rej 0.314,
+  =strat_eps3e-2=) occurs with binding == 0 on every rep: the
+  feasible-but-degraded regime is invisible to any infeasibility-keyed
+  floor -- the #134 brief recommends close-with-reason.
+- #145 attribution pinned: sigma_strat=0 control normalizes the
+  coupled design-aware arm completely (0.930 coverage, zero binding).
+
+* Decisions waiting on the owner (briefs at the bottom of the report)
+1. *#134* (emergency PD floor): the evidence says the floor's real
+   target is rare-but-real (exactly-singular zero-diagonal V rows,
+   ~0.3-3% of reps in boundary designs; design-aware mid-solve
+   failures ~10%), while the dangerous regime (degraded-but-PD V) is
+   invisible to ANY floor. Brief recommends: minimal opt-in floor or
+   close-with-reason; either is defensible.
+2. *Davies/Imhof*: among binding reps the Welch-Satterthwaite adjusted
+   p-value shows no calibration advantage over nominal (KS 0.126 vs
+   0.117, n=106, neither rejects); in conservative tails it moves
+   rejection toward nominal. Brief recommends: close as not-needed.
+3. *The tag*: version numbering for the v2 release (v0.3.0 vs 1.0.0)
+   and whether #130 sign-off precedes it.
+
+* Operational notes that save time
+- This sandbox: 7 CPUs (0-6), ~14 GB. See CLAUDE.md "Running on this
+  box" -- updated this session with the pkill self-match recurrence,
+  the detach-don't-trust-timeouts rule, and the clear_caches guidance.
+- gh needs =-R ligon/emu-gmm=; plain =gh issue view= hits a
+  projectCards bug -- use =--json=.
+- Worktree fleet pattern worked well: one agent per small issue,
+  serial cherry-pick, ONE combined gate. Conflicts only where two
+  agents touched the same comment line (trivial union).
+- The =mc-130= worktree is at =.claude/worktrees/mc-130=; per-rep
+  studies' CSVs land in =docs/validation/data/=.
