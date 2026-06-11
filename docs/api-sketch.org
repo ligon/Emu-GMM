@@ -7,6 +7,8 @@
 
 This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run a structural-GMM estimation end-to-end --- against a synthetic generator, a closed-form analytical population, or real empirical data --- through a single operator interface.
 
+/Scope note (v2)/: this document is retained as the v1 design record; the framework has since grown past it (manifold parameter geometry, the stratified / design-aware covariance ladder, the inference-helper menu, =build_estimator=). The current implemented menu is tabulated in =docs/design.org= under "Contract surface (implemented)", which supersedes this sketch wherever the two disagree. Parenthetical /since landed/ notes below mark only the places where the v1 text would otherwise read as outright false today.
+
 ** In Scope (v1)
 - =StructuralModel= as a callable; user-supplied plain function or =@jdc.pytree_dataclass=.
 - =SyntheticMeasure= over a frozen PRNG-key batch with a user-supplied sampler. Sampler may or may not depend on \(\theta\).
@@ -21,7 +23,7 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 
 ** Deferred to v2+
 - *SMM matching* --- combining =EmpiricalMeasure= and =SyntheticMeasure= in one moment vector, including the \((1+1/S)\) asymptotic-variance inflation. v1 supports each measure independently but does not combine them.
-- =StratifiedCovariance=, =ReplicateWeightCovariance=.
+- =StratifiedCovariance= (since landed, alongside =DesignAwareCovariance= --- see =covariance/stratified.py=), =ReplicateWeightCovariance= (still deferred).
 - =Iterated= weighting (subsumed by CU for v1 purposes; since landed as =IteratedWeighting=).
 - =EigenvalueFloor= and =NearestPSD= regularisers.
 - The full identification-diagnostics taxonomy (=design.org= Section 5.4) as machine-readable structured reports.
@@ -252,7 +254,7 @@ def expectation_and_contributions(
 *** Duck-typing in inference helpers
 The inference helpers in =src/emu_gmm/inference/= probe for these methods via =hasattr= and fall back as follows:
 
-- =k_statistic= --- if =score_cov_fn= is supplied, uses it directly; else if =moment_contributions= and =jacobian_contributions= both exist, computes \(\widetilde D\) per Kleibergen 2005; else falls back to \(\widetilde D \equiv G\) (the strong-identification limit; *not* weak-identification-robust).
+- =k_statistic= --- if =score_cov_fn= is supplied, uses it directly; else if =moment_contributions= and =jacobian_contributions= both exist, computes \(\widetilde D\) per Kleibergen 2005; else *raises* unless the caller opts in via =strong_id_fallback=True=, which sets \(\widetilde D \equiv G\) (the strong-identification limit; *not* weak-identification-robust --- the original silent fallback was made loud by #41).
 - =moment_wild_bootstrap= --- *requires* =moment_contributions=. No fallback; calling against an =AnalyticalMeasure= raises.
 - =cluster_bootstrap= --- operates on raw data and re-solves the estimator per replicate, so it requires only the standard =Measure= surface. It is gated separately by needing observation-level access to =x=, =mask=, =weights= --- the =EmpiricalMeasure= surface.
 
@@ -651,7 +653,7 @@ These are real questions that need answers before code can be written, not archi
 
 3. *Anchor point for \(\tau\).* Resolved (and now reflected in =design.org= Section 5): \(\tau\) is selected once from the covariance strategy's \(V\) at \(\theta_{init}\), for *every* weighting strategy (including =Fixed= and the since-landed =IteratedWeighting= --- not the Fixed strategy's own \(V_0\), and not a first-stage \(\hat\theta_1\)). Held fixed thereafter; =build_estimator= hoists the anchor to factory time so repeated fits share one \(\tau\) (see issue #123 for the semantics note).
 
-4. *J-test under regularization.* The weighted-\(\chi^2\) characterisation in =design.org= Section 5 / =mcar-asymptotics.org= Theorem 6 is exact in the limit but computationally heavy. v1 reports the nominal \(\chi^2_{M-K}\) p-value and flags =binding_ridge= when \(\tau > \tau_{threshold}\); computing the adjusted p-value is deferred unless the binding flag fires.
+4. *J-test under regularization.* The weighted-\(\chi^2\) characterisation in =design.org= Section 5 / =mcar-asymptotics.org= Theorem 6 is exact in the limit but computationally heavy. v1 reports the nominal \(\chi^2_{M-K}\) p-value and flags =binding_ridge= when \(\tau > \tau_{threshold}\); computing the adjusted p-value was deferred at sketch time. (Since landed: =regularization_adjusted_pvalue= in =diagnostics.py= computes a Welch--Satterthwaite approximation to the weighted-\(\chi^2\) survival function, and =EstimationResult= carries =J_pvalue_adjusted=.)
 
 5. *Static vs traced fields on dataclasses.* The patterns above use =jdc.static_field()= for hyperparameters (e.g., =n_clusters=, =kappa_target=). Confirm these are appropriately static --- recompilation when they change is intended.
 
@@ -673,4 +675,4 @@ These are real questions that need answers before code can be written, not archi
    6. =measures/analytical.py= + =covariance/analytical.py= --- identification round-trip path.
    7. =measures/empirical.py= + =covariance/iid.py= --- empirical estimation surface (ready for real data).
    8. =covariance/clustered.py= --- cluster-robust empirical path.
-3. Tests: the Euler example above runs end-to-end as a synthetic-context acceptance test; the analytical round-trip is a second acceptance test. Empirical-side machinery has unit tests against synthetic data fed via =EmpiricalMeasure=, but no acceptance test until real data lands.
+3. Tests: the Euler example above runs end-to-end as a synthetic-context acceptance test; the analytical round-trip is a second acceptance test. Empirical-side machinery has unit tests against synthetic data fed via =EmpiricalMeasure=, but no acceptance test until real data lands. (Since landed: real data arrived and =tests/test_estimator_realdata.py= is the empirical-path real-data acceptance test, #128.)

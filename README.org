@@ -9,7 +9,7 @@ The most important architectural commitment is that variance construction is ort
 
 * Status
 
-v1 implementation complete (v0.1.0a0): 226 tests pass, =make quick-check= clean. The three measure paths (synthetic, analytical, empirical) all run end-to-end against the bundled multi-asset Euler example. The architecture and theoretical scope are pinned in =docs/=.
+v2 (v0.2.0): the v1 pipeline plus Riemannian-manifold parameter geometry and the stratified / design-aware covariance ladder. The implemented menu --- everything importable and composable today --- is tabulated in =docs/design.org= under "Contract surface (implemented)", the single source of truth for status claims; the green gate is =make check= (ruff + black + mypy + the full pytest suite). The three measure paths (synthetic, analytical, empirical) all run end-to-end against the bundled multi-asset Euler example, and the empirical path additionally has a real-data acceptance test (=tests/test_estimator_realdata.py=). The architecture and theoretical scope are pinned in =docs/=.
 
 * Quickstart
 
@@ -56,9 +56,9 @@ The same =euler_residual= drives the analytical and empirical variants of the de
   at the level you need to wire an application to =estimate()= --- what
   code you write (the moment function, the parameter container, the
   measure/covariance choice) and what the framework hands back.
-- =docs/design.org= --- architecture specification (four review rounds; stable).
-- =docs/api-sketch.org= --- v1 API surface; module layout, types, worked example.
-- =docs/implementation-plan.org= --- phased task list (Phases 1-7 complete).
+- =docs/design.org= --- architecture specification (four review rounds; stable). Its "Contract surface (implemented)" section is the single source of truth for the implemented menu.
+- =docs/api-sketch.org= --- the v1 API surface, retained as the v1 design record; superseded on status by =design.org='s contract-surface section.
+- =docs/implementation-plan.org= --- phased task list (Phases 1-7 complete, Phase 8 polish underway; the v2 roadmap is Section 13).
 - =docs/mcar-asymptotics.org= --- companion theoretical note; consistency, asymptotic normality, PD properties of the pairwise-overlap estimator under MCAR.
 - =docs/refs.bib= --- project-local bibliography (entries not in =~/bibtex/main.bib=).
 
@@ -93,13 +93,20 @@ docs/                      design specs and theoretical notes
 src/emu_gmm/
     __init__.py            public API re-exports
     types.py               protocols + EstimationResult / Diagnostics
-    estimator.py           the estimate() entry point
+    estimator.py           estimate() / build_estimator() entry points
     measures/              SyntheticMeasure, AnalyticalMeasure, EmpiricalMeasure
-    covariance/            SyntheticCovariance, AnalyticalCovariance,
-                           IIDCovariance, ClusteredCovariance
-    weighting.py           Identity, Fixed, ContinuouslyUpdated
+    covariance/            the CovarianceStrategy ladder (iid, clustered,
+                           stratified / design-aware, sum, analytical, synthetic)
+    weighting.py           Identity, Fixed, IteratedWeighting, ContinuouslyUpdated
     regularization.py      DiagonalTikhonov
-    optimizer.py           optimistix_lm, scipy_lm
+    penalty.py             TikhonovPenalty
+    optimizer.py           optimistix_lm, scipy_lm, linear_solver
+    manifolds/             parameter geometry (Euclidean, Positive, PSDFixedRank,
+                           Product, ManifoldLeaf) + riemannian_lm
+    parameter_space.py     ParameterSpace / on field-to-manifold declarations
+    inference/             j_test, k_statistic, k_confidence_set, bootstraps
+    numerics/              ridge_inverse
+    studies/               Monte Carlo driver (subpackage-only; not re-exported)
     diagnostics.py         build_diagnostics, log_to_stdout
     examples/              shared example models (euler.py)
     _internal/             axes, params, cholesky, labels (private)
@@ -112,30 +119,16 @@ poetry.lock                pinned dependencies (committed)
 
 * Public API
 
-The user-facing imports::
-
-#+begin_src python
-from emu_gmm import (
-    # Entry point
-    estimate,
-    # Measures
-    SyntheticMeasure, AnalyticalMeasure, EmpiricalMeasure,
-    # Covariance strategies
-    SyntheticCovariance, AnalyticalCovariance,
-    IIDCovariance, ClusteredCovariance,
-    # Weighting strategies
-    Identity, Fixed, ContinuouslyUpdated,
-    # Regularization
-    DiagonalTikhonov,
-    # Optimisers
-    optimistix_lm, scipy_lm,
-    # Result types
-    EstimationResult, Diagnostics, OptimizerInfo,
-    # Protocols (for typing your own implementations)
-    Measure, CovarianceStrategy, WeightingStrategy,
-    RegularizationStrategy, Optimizer, StructuralModel,
-)
-#+end_src
+Everything user-facing is re-exported at the package top level
+(=from emu_gmm import ...=), with one deliberate exception: the Monte
+Carlo =studies= subpackage is subpackage-only (import from
+=emu_gmm.studies= directly). The implemented menu --- entry points,
+measures, covariance strategies, weighting, regularization, penalty,
+optimisers, manifold geometry, inference helpers, and result types ---
+is tabulated, one line of semantics and a module pointer per row, in
+=docs/design.org= under "Contract surface (implemented)". That table is
+the single source of truth this README defers to;
+=sorted(emu_gmm.__all__)= is the export list it tracks.
 
 * Using emu-gmm correctly (and reporting problems)
 
