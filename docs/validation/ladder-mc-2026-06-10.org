@@ -216,11 +216,52 @@ review REJECTED switching the sampling engine to stratum-level
 clustering under this DGP (uncentered stratum totals would pick up the
 fixed profile means; no cross-arm term exists for it to capture).
 
-: .venv/bin/python scripts/validation/ladder_mc.py --study design_aware --n-reps 500 --out docs/validation/data
+: .venv/bin/python scripts/validation/ladder_mc.py --study design_aware --n-reps 300 --out docs/validation/data
 
 #+BEGIN_EXAMPLE
-[FULL-RUN TABLE]
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| design_aware              | 270/300 | 175se/270J ! | 0.096 | 0.100 | 0.033 | 0.877 / 0.663 | -0.0033 / -0.0045 |  4633.410 /  236.780 | 0.393 | 3461s |
+| design_aware_uncoupled    | 297/300 | 297se/297J   | 0.037 | 0.037 | 0.043 | 1.000 / 1.000 | +0.0078 / -0.0138 |     1.723 /    1.636 | 0.000 | 3465s |
+| stratified                | 297/300 | 297se/297J   | 0.057 | 0.057 | 0.021 | 0.923 / 0.946 | +0.0033 / -0.0095 |     0.910 /    0.934 | 0.000 | 3679s |
+| nostrat/design_aware      | 298/300 | 298se/298J   | 0.013 | 0.013 | 0.023 | 0.919 / 0.930 | +0.0048 / -0.0116 |     0.904 /    0.922 | 0.000 | 3862s |
+| fewG12/design_aware       | 262/300 | 223se/262J ! | 0.000 | 0.015 | 0.094 | 0.766 / 0.798 | -0.0136 / +0.0032 | 14484.824 / 5290.434 | 0.340 | 3638s |
+| fewG12/design_aware_nodof | 263/300 | 235se/263J ! | 0.004 | 0.027 | 0.096 | 0.776 / 0.796 | -0.0307 / +0.0122 | 23409.409 / 5078.133 | 0.278 | 3856s |
+|paired fewG12-#119 | n=209 | b1-cover flips +4/-10 (dof gains/loses) | mean dJ -0.1255 |
+|jadj design_aware  | binding 106/270 | KS nom/adj (all): 0.033/0.037 | KS nom/adj (binding): 0.117/0.126 |
 #+END_EXAMPLE
+
+Reading (n_reps = 300, per-rep anchored; MC SE on a 5% rate ~ 1.3%):
+
+- *The headline finding -- stratum-heterogeneity contamination,
+  attribution pinned by the control arm* (-> issue #145; doc caveat
+  landed in the class docstring + CLAUDE.md commitment 10). Under the
+  fixed stratum profile, couple=True under-covers the randomized
+  contrast badly (b1 0.663) with tau binding on 39% of datasets and
+  NaN-SE events on ~a third of used reps (the ! validity markers);
+  couple=False is conservative (1.000, SE/SD ~1.6); V_TT alone
+  (stratified) is calibrated (0.946). The sigma_strat = 0 control
+  normalizes the coupled arm completely (0.930, binding 0.000,
+  298/300) -- the contamination IS the fixed stratum profile entering
+  the uncentered V_SS / V_TS cross-products glued to the centered
+  V_TT.
+- *SE/SD columns on the binding arms are dominated by binding-rep SE
+  explosions* -- read them via the validity cells and the per-rep
+  records (the #140 discipline), not at face value.
+- *#119 dof-inheritance ablation*: direction consistent (mean paired
+  dJ -0.13: the inherited correction enlarges V), magnitude small at
+  G = 12, and the paired flips are two-sided (+4/-10) because the
+  per-pair correction enters the CU weighting and moves theta_hat --
+  the same weighting-channel effect as study 1's dof pair. No
+  evidence the inheritance choice is mis-signed; its finite-sample
+  effect is modest.
+- *Adjusted-p evidence (feeds the Davies/Imhof decision)*: among the
+  106 binding reps, KS(nominal) = 0.117 vs KS(adjusted) = 0.126 --
+  neither rejects uniformity at the 5% KS critical value (~0.132 at
+  n = 106), and the adjusted column shows no advantage; in the
+  conservative fewG12 tails the adjusted rejection moves toward
+  nominal (0.015/0.027 vs 0.000/0.004). See study 5 for the
+  completion of this evidence.
 
 ** Study 4 --- Misspecified alternatives: J power + CU/LM robustness (flat-path canary)
 
