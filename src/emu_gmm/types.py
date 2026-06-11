@@ -372,6 +372,9 @@ class Diagnostics:
     #: when V is not a covariance matrix); use the bootstrap for SEs in
     #: this regime, and see the studies summarizers' ``n_valid_se``
     #: accounting (#140). Traced 0-d bool under jit, Python bool eagerly.
+    #: Recorded per-rep as the stackable 0/1 float
+    #: ``FitRecord.sigma_meat_indefinite`` (#143), so the event is
+    #: auditable in committed MC records.
     sigma_meat_indefinite: Any = False
 
 
@@ -469,6 +472,13 @@ class FitRecord:
     rides on the treedef as a static field (the
     ``ClusterBootstrapResult`` pattern), so stacking across fits with
     identical parameter structure needs no configuration.
+
+    ``sigma_meat_indefinite`` is the #138 diagnose-loudly event as a
+    stackable 0/1 float (the ``binding_ridge`` pattern): ``1.0`` when
+    the sandwich meat was indefinite at this fit, i.e. the rep whose
+    ``se`` entries are NaN BY DESIGN. Carrying it here (#143) makes the
+    NaN-SE event auditable in committed MC records rather than only on
+    the live ``EstimationResult.diagnostics``.
     """
 
     theta_flat: Float[Array, " D"]
@@ -479,6 +489,7 @@ class FitRecord:
     converged: Float[Array, ""]  # 0/1; jnp.stack-able and mean()-able
     tau_realised: Float[Array, ""]
     binding_ridge: Float[Array, ""]  # 0/1
+    sigma_meat_indefinite: Float[Array, ""]  # 0/1; the #138 NaN-SE event
     J_dof: int = jdc.static_field()  # type: ignore[attr-defined]
     param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
 
@@ -992,7 +1003,8 @@ class EstimationResult:
         Extracts exactly the fields repeated-estimation consumers need
         --- ``theta_flat`` (manifold-aware ambient flatten, same axis as
         ``Sigma_theta``), ``se``, the J triple, ``converged``,
-        ``tau_realised``, ``binding_ridge`` --- as a
+        ``tau_realised``, ``binding_ridge``, ``sigma_meat_indefinite``
+        (the #138 NaN-SE event; #143) --- as a
         :class:`FitRecord` pytree ready for
         ``tree_map(jnp.stack, *records)``. Replaces the hand-rolled
         ``_internal.params.flatten_params`` extraction every MC harness
@@ -1030,6 +1042,9 @@ class EstimationResult:
             tau_realised=jnp.asarray(self.diagnostics.tau_realised),
             binding_ridge=jnp.asarray(
                 self.diagnostics.binding_ridge, dtype=jnp.float64
+            ),
+            sigma_meat_indefinite=jnp.asarray(
+                self.diagnostics.sigma_meat_indefinite, dtype=jnp.float64
             ),
             J_dof=int(self.J_dof),
             param_names=param_names,

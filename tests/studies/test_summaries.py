@@ -48,6 +48,7 @@ def _records(
         converged=vec(converged, ones),
         tau_realised=vec(tau, 0.0 * ones),
         binding_ridge=vec(binding, 0.0 * ones),
+        sigma_meat_indefinite=0.0 * ones,
         J_dof=J_dof,
         param_names=param_names,
     )
@@ -230,6 +231,7 @@ def _records_with(theta, se, p_nom=None, p_adj=None, converged=None):
         converged=jnp.asarray(converged if converged is not None else ones),
         tau_realised=jnp.zeros(n),
         binding_ridge=jnp.zeros(n),
+        sigma_meat_indefinite=jnp.zeros(n),
         J_dof=1,
         param_names=("a",),
     )

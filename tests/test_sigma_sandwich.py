@@ -266,8 +266,12 @@ class TestIndefiniteMeatDiagnosis:
             "indefinite" in str(w.message) for w in caught
         ), "no loud warning emitted"
         # And the FitRecord carries the NaN SE for the summarizers'
-        # n_valid_se accounting (#140) -- the chain is consistent.
-        assert np.isnan(np.asarray(res.record().se)).any()
+        # n_valid_se accounting (#140) -- the chain is consistent --
+        # plus the 0/1 event flag itself, so committed MC records stay
+        # auditable (#143).
+        rec = res.record()
+        assert np.isnan(np.asarray(rec.se)).any()
+        assert float(rec.sigma_meat_indefinite) == 1.0
 
     def test_flag_silent_on_healthy_problems(self):
         import warnings
@@ -284,3 +288,4 @@ class TestIndefiniteMeatDiagnosis:
         assert not bool(res.diagnostics.sigma_meat_indefinite)
         assert not np.isnan(np.asarray(res.standard_errors.array)).any()
         assert not any("indefinite" in str(w.message) for w in caught)
+        assert float(res.record().sigma_meat_indefinite) == 0.0  # #143

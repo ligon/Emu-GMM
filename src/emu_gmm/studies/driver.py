@@ -95,7 +95,8 @@ class MCRecords:
         """One row per replicate; host-side materialization.
 
         Columns: ``theta_<name>`` / ``se_<name>`` per parameter, the J
-        triple, ``converged``, ``tau_realised``, ``binding_ridge``.
+        triple, ``converged``, ``tau_realised``, ``binding_ridge``,
+        ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143).
         Pandas stays outside the compiled boundary --- this is the only
         pandas touchpoint in the studies module.
         """
@@ -112,6 +113,7 @@ class MCRecords:
         data["converged"] = np.asarray(rec.converged)
         data["tau_realised"] = np.asarray(rec.tau_realised)
         data["binding_ridge"] = np.asarray(rec.binding_ridge)
+        data["sigma_meat_indefinite"] = np.asarray(rec.sigma_meat_indefinite)
         df = pd.DataFrame(data)
         df.index.name = "rep"
         return df

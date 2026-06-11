@@ -505,7 +505,29 @@ class TestFitRecord:
         assert rec.J_dof == r.J_dof
         assert float(rec.converged) == 1.0
         assert float(rec.binding_ridge) == 0.0
+        assert float(rec.sigma_meat_indefinite) == 0.0
         assert rec.param_names == ("beta", "gamma")
+
+    def test_record_carries_sigma_meat_indefinite_flag(self):
+        """A fit whose diagnostics raised the #138 indefinite-meat event
+        records it as the stackable 0/1 float (#143), exactly like
+        ``binding_ridge``."""
+        import dataclasses
+
+        base = _make_result()
+        r = dataclasses.replace(
+            base,
+            diagnostics=dataclasses.replace(
+                base.diagnostics, sigma_meat_indefinite=jnp.asarray(True)
+            ),
+        )
+        rec = r.record()
+        assert float(rec.sigma_meat_indefinite) == 1.0
+        assert rec.sigma_meat_indefinite.dtype == jnp.float64
+        # Stackable and mean()-able alongside an un-flagged fit.
+        stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), rec, base.record())
+        assert stacked.sigma_meat_indefinite.shape == (2,)
+        assert float(stacked.sigma_meat_indefinite.mean()) == 0.5
 
     def test_records_stack_via_tree_map(self):
         """The canonical batching gesture: tree_map(jnp.stack, *records)

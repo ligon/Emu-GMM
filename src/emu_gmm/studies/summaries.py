@@ -251,6 +251,13 @@ def tau_binding(
     The empirical answer to "is the regularized regime the rule or the
     exception under realistic missingness" (#130, review point 2):
     ``binding_ridge`` frequency plus quantiles of the realised tau.
+
+    The downstream #138 event --- the sandwich meat going indefinite,
+    NaN'ing the affected SEs by design --- rides the records as the 0/1
+    ``sigma_meat_indefinite`` field (#143; also a ``to_pandas`` column),
+    so its frequency is ``records.records.sigma_meat_indefinite.mean()``;
+    the per-summary ``n_valid_se`` counts (#140) already account for the
+    resulting NaN SEs here.
     """
     rec = _stacked(records)
     mask, n_used, n_excluded = _used(rec)
