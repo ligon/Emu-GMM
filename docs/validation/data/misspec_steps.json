@@ -1,0 +1,21 @@
+{
+  "study": "misspec_steps",
+  "n_reps": 500,
+  "seed": 20260610,
+  "environment": {
+    "git_commit": "36386566b484c4edb18b0991dc2717fb71f882e2",
+    "git_dirty": "no",
+    "emu_gmm_version": "0.1.0a0",
+    "jax_version": "0.10.1",
+    "numpy_version": "2.4.6",
+    "jax_default_prng_impl": "threefry2x32",
+    "beta_true": {
+      "beta0": 0.5,
+      "beta1": 1.0
+    },
+    "stratum_profile_seed": 777
+  },
+  "arms": {},
+  "command": "python scripts/validation/ladder_mc.py --study misspec_steps --n-reps 500 --seed 20260610 --out docs/validation/data",
+  "seconds": 47.1
+}

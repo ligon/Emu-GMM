@@ -1,0 +1,5 @@
+
+* misspec_steps  (n_reps=500, seed=20260610)
+
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-

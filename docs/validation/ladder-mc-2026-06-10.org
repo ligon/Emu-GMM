@@ -328,20 +328,136 @@ binding events); (b) the near-boundary stratified V degrades (J
 over-rejection, under-coverage) WITHOUT tripping the feasibility test
 (the noeps arm) --- quantified and fed to #134.
 
-: .venv/bin/python scripts/validation/ladder_mc.py --study ridge_binding --n-reps 500 --out docs/validation/data
+: .venv/bin/python scripts/validation/ladder_mc.py --study ridge_binding --n-reps 300 --out docs/validation/data
 
 #+BEGIN_EXAMPLE
-[FULL-RUN TABLE]
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| da_fewG12         | 262/300 | 223se/262J ! | 0.000 | 0.015 | 0.094 | 0.766 / 0.798 | -0.0136 / +0.0032 | 14484.824 / 5290.434 | 0.340 | 827s |
+| da_fewG12_eps1e-2 | 244/300 | 205se/244J ! | 0.000 | 0.008 | 0.211 | 0.750 / 0.795 | +0.0041 / -0.0031 | 13450.137 /  925.813 | 0.357 | 863s |
+| da_G5             | 270/300 | 175se/270J ! | 0.096 | 0.100 | 0.033 | 0.877 / 0.663 | -0.0033 / -0.0045 |  4633.410 /  236.780 | 0.393 | 869s |
+| strat_eps3e-2     | 287/300 | 287se/287J   | 0.314 | 0.314 | 0.319 | 0.676 / 0.732 | -0.0182 / +0.0174 |     0.526 /    0.541 | 0.000 | 746s |
+| noeps_strat       | 294/300 | 294se/294J   | 0.221 | 0.221 | 0.269 | 0.762 / 0.796 | -0.0052 / +0.0112 |     0.616 /    0.689 | 0.000 | 735s |
+|jadj da_fewG12         | binding  89/262 | KS nom/adj (all): 0.094/0.136 | KS nom/adj (binding): 0.163/0.209 |
+|jadj da_fewG12_eps1e-2 | binding  87/244 | KS nom/adj (all): 0.211/0.085 | KS nom/adj (binding): 0.378/0.182 |
+|jadj da_G5             | binding 106/270 | KS nom/adj (all): 0.033/0.037 | KS nom/adj (binding): 0.117/0.126 |
+|jadj strat_eps3e-2     | binding   0/287 | (no binding events; contrast not readable) |
+|jadj noeps_strat       | binding   0/294 | (no binding events; contrast not readable) |
 #+END_EXAMPLE
 
-** Tau-binding column (cross-study)
+Reading -- the two claims adjudicated, plus the night's second headline:
 
-binding_ridge frequency and realised-tau quantiles per arm, per-rep
-anchored where it matters. [Assembled from the per-study CSVs.]
+- *Welch--Satterthwaite works exactly where Theorem 6 says it should.*
+  In the near-collinearity arm (=da_fewG12_eps1e-2= -- binding driven
+  by an engineered small eigenvalue, the fixed-tau regime
+  mcar-asymptotics Theorem 6 describes), the nominal J p-value badly
+  fails uniformity over the full law (KS 0.211, critical ~0.087 at
+  n = 244) while the ADJUSTED p-value passes (KS 0.085). Binding-subset
+  ECDFs are selected subsamples (conditional uniformity is not the
+  null), so the full-law contrast is the decisive cell. In the
+  #145-contaminated arms the adjustment neither helps nor should: the
+  COVARIANCE is mis-centered there, and no reference-distribution
+  correction can repair a wrong V.
+- *The dangerous regime is the feasible-but-degraded one, not the
+  binding one* (the #134-decisive finding): =strat_eps3e-2= over-
+  rejects J at 0.314 with binding_ridge == 0 on every rep -- the
+  near-collinear-but-PD V sails through the signed-spectrum
+  feasibility test while badly miscalibrated, WORSE than the
+  H-boundary degradation alone (=noeps_strat=, 0.221). Any emergency
+  floor keyed to infeasibility is blind to this regime by
+  construction.
+- The amortized cache-clearing ran these arms ~4.5x faster than
+  design_aware's per-rep clearing (746-869 s vs ~3500-3900 s per arm),
+  confirming the recompile-tax diagnosis in production.
+
+** Tau-binding column (cross-study; owner-approved column (a))
+
+Per-dataset binding frequency (per-rep anchored where it matters; the
+factory-anchored arms' zeros are exact under their shared healthy
+anchors):
+
+| regime | arms | binding frequency |
+|-
+| IID / Clustered, all designs           | studies 1, 4       | 0.000 everywhere |
+| Stratified, incl. H-boundary and eps   | studies 2, 5       | 0.000 everywhere |
+| DesignAware coupled (the #145 glue)    | studies 3, 5       | 0.28 -- 0.39 |
+| DesignAware uncoupled / nostrat control| study 3            | 0.000 |
+
+The empirical answer to "is the regularized regime the rule or the
+exception under realistic missingness": *the exception, categorically*
+--- EXCEPT under the coupled design-aware assembly, where it is a
+30-40% per-dataset event and is itself a symptom of the #145
+contamination (the sigma_strat = 0 control binds never). Realised-tau
+distributions ride in the per-rep CSVs.
 
 * Verdict
 
-[Pending full runs.]
+The ladder validates where its assumptions hold, fails honestly and
+diagnosably where they do not, and the validation surfaced two real
+defects (both now filed and one doc-mitigated) --- which is what a
+validation pillar is for.
+
+1. *Calibration delivered*: IIDCovariance under independence;
+   ClusteredCovariance at moderate-to-large G (with a mild,
+   quantified tail-conservatism of the J: rej ~2.2-2.4% at nominal
+   5%, ECDF otherwise uniform); StratifiedCovariance at G >= 5 under
+   exactly the estimand its centering targets, with every
+   pre-registered guaranteed-fail row (fpc, H-boundary) reproducing
+   its predicted magnitudes.
+2. *Discrimination delivered*: the wrong-strategy arms fail by 7-45
+   sigma at every scale tested; a study in which nothing could fail
+   validates nothing, and no study here is of that kind (the
+   adversarial review's falsifiability lens signed off on the final
+   arm set).
+3. *Honest failure regimes, quantified*: few-cluster (G ~ 12)
+   cluster-robust SEs run ~35% small; the H_{c,jk} < 2 boundary
+   degrades the stratified V in proportion to the boundary share;
+   the feasible-but-degraded near-collinear V is the worst J
+   miscalibration in the suite (rej 0.31) and is INVISIBLE to the
+   feasibility test -- prefer conservative estimators or bootstrap
+   inference in all three regimes.
+4. *Defects surfaced by the validation*: #142 (factory-shared anchor;
+   API landed same-session) and #145 (coupled-assembly contamination
+   under stratum heterogeneity; doc caveat landed, centering fix is
+   v2.1). The tau-binding column and the SE-explosion accounting only
+   exist because of per-rep anchoring (#142) and the #140 validity
+   discipline -- the protocol findings were load-bearing.
+5. *The owner-approved columns*: (a) tau-binding: above. (b) CU+LM
+   robustness: convergence degrades gracefully under misspecification
+   (0.994 -> 0.970) while median step counts quadruple; no evidence
+   motivating a trust-region option on the flat path (#9's quotient
+   half untouched by design).
+
+* Decision briefs (owner decisions; evidence above)
+
+** #134 --- emergency PD floor for CU mid-solve Cholesky failure
+
+The floor's actual targets, measured: exactly-singular zero-diagonal
+V rows (~0.3% of reps at the G=2/p_w=0.5 boundary --- the mask-only
+readout's named event) and the mid-solve failures inside the coupled
+design-aware arms (10-19% exclusions, concentrated in the #145
+pathology). Against: (i) the regime doing the most inferential damage
+(feasible-but-degraded, J rej 0.31) is invisible to ANY
+infeasibility-keyed floor by construction; (ii) the reps a floor would
+rescue are exactly those whose V is least trustworthy --- the floor
+converts loud, counted failures (#138/#140 discipline) into quiet fits
+with dubious inference; (iii) the largest consumer of failures (#145)
+is a covariance defect with its own fix path. /Recommendation: close
+with reason --- the diagnose-loudly policy is the better contract, the
+floor is cheap to revive if a consumer demands point estimates under
+pathological V, and the evidence shows it would not address the
+regime that matters./
+
+** Davies/Imhof exact generalised chi-squared (Arc-3's last decision)
+
+In the regime Theorem 6 actually describes (fixed-tau binding from
+near-collinearity), Welch--Satterthwaite brings the J p-value from a
+failing KS 0.211 to a passing 0.085 over the full law. The cases where
+the adjusted p-value stays miscalibrated are the #145-contaminated
+arms, where the covariance itself is wrong and exactness of the
+reference distribution is beside the point. /Recommendation: close as
+not-needed --- W-S calibrates where the limit theory applies; Davies/
+Imhof would buy exactness in a regime exhibiting no deficit./
 
 * Appendix: adversarial design review
 

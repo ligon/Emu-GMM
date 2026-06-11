@@ -1,0 +1,157 @@
+{
+  "study": "ridge_binding",
+  "n_reps": 300,
+  "seed": 20260610,
+  "environment": {
+    "git_commit": "3b17c0c0ac89906bab4864f8fa9faa3506842d85",
+    "git_dirty": "no",
+    "emu_gmm_version": "0.1.0a0",
+    "jax_version": "0.10.1",
+    "numpy_version": "2.4.6",
+    "jax_default_prng_impl": "threefry2x32",
+    "beta_true": {
+      "beta0": 0.5,
+      "beta1": 1.0
+    },
+    "stratum_profile_seed": 777
+  },
+  "arms": {
+    "da_fewG12": {
+      "spec": {
+        "n_strata": 3,
+        "psu_per_cell": 2,
+        "psu_size": 50,
+        "rho": 0.5,
+        "sigma_strat": 0.0,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 262,
+        "n_excluded": 38,
+        "n_valid_se_min": 223,
+        "n_valid_J_nominal": 262,
+        "n_valid_J_adjusted": 262
+      },
+      "seconds": 826.7
+    },
+    "da_fewG12_eps1e-2": {
+      "spec": {
+        "n_strata": 3,
+        "psu_per_cell": 2,
+        "psu_size": 50,
+        "rho": 0.5,
+        "sigma_strat": 0.0,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": 0.01
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 244,
+        "n_excluded": 56,
+        "n_valid_se_min": 205,
+        "n_valid_J_nominal": 244,
+        "n_valid_J_adjusted": 244
+      },
+      "seconds": 863.3
+    },
+    "da_G5": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 270,
+        "n_excluded": 30,
+        "n_valid_se_min": 175,
+        "n_valid_J_nominal": 270,
+        "n_valid_J_adjusted": 270
+      },
+      "seconds": 869.0
+    },
+    "strat_eps3e-2": {
+      "spec": {
+        "n_strata": 6,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.7,
+        "p_w": 0.7,
+        "delta": 0.0,
+        "collinear_eps": 0.03
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 287,
+        "n_excluded": 13,
+        "n_valid_se_min": 287,
+        "n_valid_J_nominal": 287,
+        "n_valid_J_adjusted": 287
+      },
+      "seconds": 745.9
+    },
+    "noeps_strat": {
+      "spec": {
+        "n_strata": 6,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.7,
+        "p_w": 0.7,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 294,
+        "n_excluded": 6,
+        "n_valid_se_min": 294,
+        "n_valid_J_nominal": 294,
+        "n_valid_J_adjusted": 294
+      },
+      "seconds": 735.5
+    }
+  },
+  "command": "python scripts/validation/ladder_mc.py --study ridge_binding --n-reps 300 --seed 20260610 --out docs/validation/data",
+  "seconds": 4042.0
+}

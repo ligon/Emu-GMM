@@ -1,0 +1,184 @@
+{
+  "study": "design_aware",
+  "n_reps": 300,
+  "seed": 20260610,
+  "environment": {
+    "git_commit": "0e4a6f8b43b43eaac9d9114a80ddf5153893679b",
+    "git_dirty": "no",
+    "emu_gmm_version": "0.1.0a0",
+    "jax_version": "0.10.1",
+    "numpy_version": "2.4.6",
+    "jax_default_prng_impl": "threefry2x32",
+    "beta_true": {
+      "beta0": 0.5,
+      "beta1": 1.0
+    },
+    "stratum_profile_seed": 777
+  },
+  "arms": {
+    "design_aware": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 270,
+        "n_excluded": 30,
+        "n_valid_se_min": 175,
+        "n_valid_J_nominal": 270,
+        "n_valid_J_adjusted": 270
+      },
+      "seconds": 3461.4
+    },
+    "design_aware_uncoupled": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 297,
+        "n_excluded": 3,
+        "n_valid_se_min": 297,
+        "n_valid_J_nominal": 297,
+        "n_valid_J_adjusted": 297
+      },
+      "seconds": 3465.4
+    },
+    "stratified": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 297,
+        "n_excluded": 3,
+        "n_valid_se_min": 297,
+        "n_valid_J_nominal": 297,
+        "n_valid_J_adjusted": 297
+      },
+      "seconds": 3679.2
+    },
+    "nostrat/design_aware": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.0,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 298,
+        "n_excluded": 2,
+        "n_valid_se_min": 298,
+        "n_valid_J_nominal": 298,
+        "n_valid_J_adjusted": 298
+      },
+      "seconds": 3861.9
+    },
+    "fewG12/design_aware": {
+      "spec": {
+        "n_strata": 3,
+        "psu_per_cell": 2,
+        "psu_size": 50,
+        "rho": 0.5,
+        "sigma_strat": 0.0,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 262,
+        "n_excluded": 38,
+        "n_valid_se_min": 223,
+        "n_valid_J_nominal": 262,
+        "n_valid_J_adjusted": 262
+      },
+      "seconds": 3638.2
+    },
+    "fewG12/design_aware_nodof": {
+      "spec": {
+        "n_strata": 3,
+        "psu_per_cell": 2,
+        "psu_size": 50,
+        "rho": 0.5,
+        "sigma_strat": 0.0,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "per-rep",
+      "validity": {
+        "n_used": 263,
+        "n_excluded": 37,
+        "n_valid_se_min": 235,
+        "n_valid_J_nominal": 263,
+        "n_valid_J_adjusted": 263
+      },
+      "seconds": 3856.1
+    }
+  },
+  "command": "python scripts/validation/ladder_mc.py --study design_aware --n-reps 300 --seed 20260610 --out docs/validation/data",
+  "seconds": 21964.5
+}
