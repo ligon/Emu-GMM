@@ -483,6 +483,12 @@ def run_arm_per_rep_anchor(
             moment_names=moment_names,
         )
         recs.append(res.record())
+        # Bare estimate() builds fresh closures per call, so JAX's global
+        # caches accumulate write-only traces (~14 MB/call measured; the
+        # un-mitigated leak OOM-killed this study's first full run at
+        # 9.4 GB -- #139 merge-verification thread). Clearing costs
+        # nothing here precisely because nothing is ever re-hit.
+        jax.clear_caches()
     stacked = jtu.tree_map(lambda *xs: jnp.stack(xs), *recs)
     records = MCRecords(records=stacked, key=jnp.asarray(key), n_reps=n_reps)
     study = StudyResult(

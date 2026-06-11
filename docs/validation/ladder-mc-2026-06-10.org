@@ -88,12 +88,47 @@ correction) must calibrate; the rho = 0 control shows both calibrated.
 : .venv/bin/python scripts/validation/ladder_mc.py --study size_iid_vs_cluster --n-reps 500 --out docs/validation/data
 
 #+BEGIN_EXAMPLE
-[FULL-RUN TABLE]
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| rho0.5/iid             | 496/500 | 496se/496J | 0.466 | 0.466 | 0.465 | 0.411 / 0.415 | -0.0015 / -0.0071 | 0.294 / 0.297 | 0.000 | 12s |
+| rho0.5/cluster_psu     | 496/500 | 496se/496J | 0.024 | 0.024 | 0.017 | 0.921 / 0.927 | -0.0015 / -0.0075 | 0.914 / 0.925 | 0.000 |  9s |
+| rho0.5/cluster_psu_dof | 494/500 | 494se/494J | 0.022 | 0.022 | 0.016 | 0.919 / 0.927 | -0.0001 / -0.0085 | 0.911 / 0.925 | 0.000 | 10s |
+| rho0/iid               | 493/500 | 493se/493J | 0.043 | 0.043 | 0.033 | 0.972 / 0.937 | -0.0014 / +0.0006 | 1.035 / 0.959 | 0.000 | 11s |
+| rho0/cluster_psu       | 492/500 | 492se/492J | 0.047 | 0.047 | 0.010 | 0.953 / 0.925 | -0.0014 / +0.0003 | 1.000 / 0.924 | 0.000 | 10s |
+| fewG12/iid             | 490/500 | 490se/490J | 0.704 | 0.704 | 0.663 | 0.263 / 0.288 | -0.0059 / -0.0007 | 0.179 / 0.190 | 0.000 | 10s |
+| fewG12/cluster_psu     | 480/500 | 480se/480J | 0.000 | 0.000 | 0.140 | 0.792 / 0.810 | -0.0271 / +0.0075 | 0.641 / 0.675 | 0.000 | 12s |
+| fewG12/cluster_psu_dof | 462/500 | 462se/462J | 0.000 | 0.000 | 0.094 | 0.797 / 0.799 | -0.0061 / -0.0141 | 0.646 / 0.685 | 0.000 | 11s |
+|paired fewG12 | n=454 | b1-cover flips +7/-11 (dof gains/loses) | mean dJ -0.1778 |
+|paired G100   | n=490 | b1-cover flips +1/-0  (dof gains/loses) | mean dJ -0.0302 |
 #+END_EXAMPLE
 
-Reading: [pending full runs; pilot (50 reps): IID 38% J size / 44%
-coverage / SEs ~3x small; clustered calibrated except J under-rejection
-flagged for the full run to quantify.]
+Reading (MC SE on a 5% rate ~ 0.010; on 95% coverage ~ 0.010):
+
+- *Discrimination delivered.* The wrong arm fails spectacularly at
+  both scales: rho0.5/iid rejects J at 0.466 and covers at 0.41
+  (SE/SD 0.29 == the DEFF ~ 10 prediction); fewG12/iid rejects at
+  0.704 with coverage 0.26. The rho=0 control calibrates both
+  strategies (0.043/0.047) -- the contrast is the clustering, not the
+  estimator.
+- *Clustered inference at G=100 under genuine missingness:* coverage
+  0.921/0.927 (~3 SE below nominal; SE/SD ~ 0.92 -- the familiar
+  small-G downward SE bias, mild at this scale), J shows
+  TAIL-SPECIFIC conservatism: rej 0.022-0.024 at nominal 5% (3.7 SE
+  low) while the p-value ECDF is otherwise uniform (J-KS 0.017). The
+  pilots' 0/80 was this conservatism, quantified.
+- *Few-cluster regime (checklist item 1):* at G=12 the failure mode is
+  honest and large -- SE/SD ~ 0.64-0.69 (SEs ~ 35% small), coverage
+  ~ 0.80, J effectively never rejects (rej 0.000, KS 0.09-0.14).
+  Practitioners in this regime need the wild-cluster bootstrap, not
+  the asymptotic J.
+- *dof_correction (pre-registered):* G=100 pair confirmed a no-op
+  (flips +1/-0; mean dJ -0.03). At G=12 the paired contrast SURPRISED:
+  flips are two-sided (+7/-11) because the per-pair G_jk/(G_jk-1)
+  correction enters the CU *weighting* and moves theta_hat itself --
+  the dof knob is not a pure CI-widening under CUE. The review's
+  one-directional sign-test premise was wrong; the readout caveat is
+  revised accordingly (post-run docstring fix, noted in Reproducibility).
+  Net effect at G=12 remains small (coverage 0.792 vs 0.797).
 
 ** Study 2 --- StratifiedCovariance across PSU counts, fpc, H boundary
 
@@ -117,8 +152,50 @@ minority-boundary rung where calibration claims stay meaningful.
 : .venv/bin/python scripts/validation/ladder_mc.py --study stratified --n-reps 500 --out docs/validation/data
 
 #+BEGIN_EXAMPLE
-[FULL-RUN TABLE]
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| G2/stratified       | 494/500 | 494se/494J | 0.245 | 0.245 | 0.241 | 0.814 / 0.832 | +0.0013 / +0.0017 | 0.711 / 0.716 | 0.000 | 12s |
+| G2/stratified_fpc   | 495/500 | 495se/495J | 0.455 | 0.455 | 0.454 | 0.693 / 0.685 | +0.0014 / -0.0005 | 0.507 / 0.511 | 0.000 | 10s |
+| G2/cluster_psu_dof  | 493/500 | 493se/493J | 0.028 | 0.028 | 0.040 | 0.974 / 0.957 | -0.0114 / +0.0249 | 1.138 / 1.145 | 0.000 |  8s |
+| G5/stratified       | 495/500 | 495se/495J | 0.079 | 0.079 | 0.041 | 0.925 / 0.943 | -0.0018 / -0.0064 | 0.918 / 0.944 | 0.000 | 11s |
+| G5/stratified_fpc   | 494/500 | 494se/494J | 0.257 | 0.257 | 0.271 | 0.787 / 0.783 | -0.0020 / -0.0059 | 0.648 / 0.664 | 0.000 |  9s |
+| G5/cluster_psu_dof  | 499/500 | 499se/499J | 0.052 | 0.052 | 0.013 | 0.986 / 0.992 | +0.0017 / -0.0104 | 1.251 / 1.279 | 0.000 | 10s |
+| G20/stratified      | 496/500 | 496se/496J | 0.060 | 0.060 | 0.035 | 0.956 / 0.958 | -0.0028 / +0.0011 | 0.992 / 1.001 | 0.000 | 14s |
+| G20/stratified_fpc  | 493/500 | 493se/493J | 0.239 | 0.239 | 0.278 | 0.815 / 0.834 | -0.0031 / +0.0012 | 0.704 / 0.708 | 0.000 | 15s |
+| G20/cluster_psu_dof | 497/500 | 497se/497J | 0.056 | 0.056 | 0.030 | 0.998 / 0.996 | -0.0029 / +0.0010 | 1.362 / 1.374 | 0.000 | 13s |
+| G2hi/stratified     | 493/500 | 493se/493J | 0.120 | 0.120 | 0.110 | 0.872 / 0.878 | -0.0011 / +0.0086 | 0.784 / 0.826 | 0.000 |  9s |
+| G2hi/cluster_psu_dof| 494/500 | 494se/494J | 0.047 | 0.047 | 0.006 | 0.964 / 0.962 | -0.0088 / +0.0172 | 1.106 / 1.128 | 0.000 | 10s |
+|H-boundary G2/p_w0.5  | mean share H_ww<2: 0.747 | all-zero-V_ww-row reps: 3/500 |
+|H-boundary G5/p_w0.5  | mean share H_ww<2: 0.186 | all-zero-V_ww-row reps: 0/500 |
+|H-boundary G20/p_w0.5 | mean share H_ww<2: 0.000 | all-zero-V_ww-row reps: 0/500 |
+|H-boundary G2/p_w0.85 | mean share H_ww<2: 0.275 | all-zero-V_ww-row reps: 0/500 |
 #+END_EXAMPLE
+
+Reading -- ALL FOUR pre-registered targets reproduced:
+
+- *fpc targets hit at every scale.* CRN SE ratio fpc/no-fpc: 0.713 /
+  0.706 / 0.710 at G in {2, 5, 20} vs the predicted 0.7071; b1
+  coverage at G20 exactly the predicted 0.834; J rej 0.239 vs
+  predicted 0.224 (1.5 MC SE). =_fpc_factor= is exonerated: the
+  estimand-mismatch row failed by precisely its predicted magnitudes.
+- *H-boundary targets hit.* Measured boundary share 0.747 (predicted
+  0.75); all-zero-V_ww-row events 3/500 (predicted ~1.6, Poisson-
+  consistent); the predicted ~2x V_ww truncation appears as SE/SD ~
+  0.71 ~ sqrt(0.5) at G2. The degradation gradient is monotone in the
+  boundary share: J rej 0.245 (share 0.75) -> 0.120 (0.28) -> 0.079
+  (0.19) -> 0.060 (0.00).
+- *Calibration claim delivered at G20*: stratified coverage
+  0.956/0.958, SE/SD 0.99/1.00, J 0.060 -- while uncentered PSU
+  clustering is conservative (coverage 0.998, SE/SD 1.37), the
+  centered-vs-uncentered discrimination. At G5 the stratified arm
+  shows the onset of few-PSU degradation (0.925/0.943, J 0.079).
+- *Practitioner headline*: at the H boundary (G_c = 2 with heavy
+  per-moment missingness) the design-exact estimator's sharpness costs
+  validity (anticonservative J and coverage) while plain
+  dof-corrected PSU clustering stays safely conservative -- below ~5
+  PSUs/cell prefer the conservative estimator or a bootstrap. Feeds
+  #134's evidence base: this degradation occurs with binding_ridge ==
+  0 everywhere -- the feasibility test does not see it.
 
 ** Study 3 --- DesignAware: coupling + #119 dof inheritance (per-rep anchored)
 
@@ -158,11 +235,41 @@ NOT by itself evidence to reopen or close #9, which was decided on
 direct PSDFixedRank-quotient verification this fixture cannot probe.
 
 : .venv/bin/python scripts/validation/ladder_mc.py --study misspec_power --n-reps 500 --out docs/validation/data
-: .venv/bin/python scripts/validation/ladder_mc.py --study misspec_steps --n-reps 500
+: .venv/bin/python scripts/validation/ladder_mc.py --study misspec_steps --n-reps 500 --out docs/validation/data
 
 #+BEGIN_EXAMPLE
-[FULL-RUN TABLES]
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| delta0.0/cluster_psu | 497/500 | 497se/497J | 0.024 | 0.024 | 0.017 | 0.918 / 0.926 | -0.0007 / -0.0085 | 0.906 / 0.923 | 0.000 | 13s |
+| delta0.1/cluster_psu | 492/500 | 492se/492J | 0.390 | 0.390 | 0.475 | 0.894 / 0.915 | -0.0024 / -0.0044 | 0.858 / 0.889 | 0.000 | 11s |
+| delta0.3/cluster_psu | 485/500 | 485se/485J | 1.000 | 1.000 | 0.900 | 0.798 / 0.792 | +0.0004 / -0.0072 | 0.631 / 0.642 | 0.000 | 22s |
+
+| arm      | conv  | iters p50/p90/max |
+|-
+| delta0.0 | 0.994 | 15/29/200  |
+| delta0.1 | 0.984 | 21/46/200  |
+| delta0.3 | 0.970 | 63/123/200 |
 #+END_EXAMPLE
+
+Reading:
+
+- *Power curve clean*: size 0.024 (the same tail-conservatism as
+  study 1, CRN-matched arm), power 0.390 at delta = 0.1 and 1.000 at
+  delta = 0.3.
+- *Pseudo-true stays centered, Wald inference does not*: at
+  delta = 0.3 bias is negligible (+0.000 / -0.007 -- the unviolated
+  moments pin theta) yet coverage drops to ~0.79 via SE/SD ~ 0.63:
+  under misspecification the sandwich SEs lose validity even though
+  the point estimate barely moves. A rejected J invalidates the Wald
+  intervals even when theta_hat looks reasonable.
+- *CU+LM robustness (the flat-path canary)*: convergence degrades
+  gracefully (0.994 -> 0.984 -> 0.970 from the far (0,0) start) while
+  median step counts quadruple (15 -> 63) and the p90 hits 123 with a
+  200-step ceiling visible in the max column. LM strains exactly
+  where the omitted CU curvature term is largest, but it does not
+  fail. On the flat path there is no evidence motivating a
+  full-Hessian trust region; the quotient half of the #9 question is
+  out of this fixture's scope by design.
 
 ** Study 5 --- Regularised-J calibration where the ridge ACTUALLY binds (per-rep anchored)
 
