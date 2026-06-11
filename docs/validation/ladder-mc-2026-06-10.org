@@ -1,0 +1,553 @@
+#+TITLE: Ladder MC validation: size, coverage, and J-calibration under genuine missingness (#130)
+#+AUTHOR: Sue (Claude Fable 5)
+#+DATE: 2026-06-10
+
+* Scope
+
+The Arc-2 exit criterion (issue #130): repeated-sampling evidence of
+size, Wald coverage, and J-calibration for the covariance ladder ---
+=IIDCovariance= -> =ClusteredCovariance= -> =StratifiedCovariance= ->
+=DesignAwareCovariance= --- under genuine per-coordinate missingness,
+produced by the supported =emu_gmm.studies= driver. Companion to the
+algebra-level tests that landed with #79/#80/#109/#111/#119; this
+report adds the distributional half. Two owner-approved columns ride
+along: tau-binding frequency, and CU+LM robustness under misspecified
+alternatives (the #9 reopen-decision evidence).
+
+Harness: =scripts/validation/ladder_mc.py= (DGP family, study registry,
+runnable commands recorded per study below). Adversarial design review:
+the harness draft went through a 5-lens adversarial workflow
+(falsifiability, DGP-vs-estimand correctness, CRN protocol, numerics,
+checklist coverage) with 2-skeptic refutation before the full runs;
+surviving findings and their dispositions are in the appendix.
+
+* The DGP family (fixture-engineering notes)
+
+See the harness module docstring for the full spec. Headlines:
+
+- Stratified PSU-randomized experiment: S strata x 2 arms x G_c PSUs of
+  m units; T assigned at PSU level within stratum.
+- Intracluster correlation rho at PSU level (the IID-vs-clustered
+  discriminator); FIXED demeaned stratum profile sigma_strat (the
+  centered-vs-uncentered discriminator --- see the DesignSpec docstring
+  for why a per-replicate stratum *random* effect would be a fixture
+  bug, caught in piloting).
+- M = 4 moments r*(1, T, x, w), K = 2, J_dof = 2; the x and w moments
+  observable per PSU with probabilities (p_x, p_w) --- genuine unequal
+  N_j, pair-specific overlap, and H_{c,jk} < 2 boundary cells at small
+  G_c.
+- Misspecification knob delta violates only E[r w] = 0.
+- Calibration arms start at the truth and the affected studies anchor
+  the ridge PER REPLICATE (see "Protocol findings" below and emu-gmm
+  #142); the misspec study starts far (theta_init = (0,0)) by design.
+
+* Protocol findings surfaced by piloting
+
+These were found while engineering the fixtures (30-50 rep pilots) and
+shaped the harness; recorded because they are evidence in their own
+right:
+
+- *Factory-shared ridge anchor* (-> emu-gmm #142): =build_estimator=
+  freezes tau_anchor (and binding_ridge) on the template draw, so
+  driver-replicated studies inherit replicate 0's anchor: the
+  tau-binding column degenerates to {0,1} per arm, one unlucky template
+  poisons an arm (pilot: coupled design-aware, tau-bind 1.000, 57%
+  non-convergence from a far start), one lucky template masks per-rep
+  pathology. Studies 3 and 5 therefore anchor per replicate (bare
+  =estimate()= per rep).
+- *Anchor-at-far-init*: anchoring V(theta_init) at (0,0) anchors on a
+  wildly mis-scaled V; with the coupled design-aware assembly the
+  anchor went indefinite and tau bound for the whole arm. Calibration
+  arms start at truth (documented choice); optimization robustness is
+  study 4's job.
+- *Per-replicate stratum random effects are a fixture bug* (not a
+  package bug): no within-cell-centered or PSU-clustered estimator
+  targets between-stratum variance of non-contrast moments; pilot
+  intercept coverage 0.17-0.73 across ALL arms. Fixed demeaned
+  profiles restore exact moment conditions (and the intended
+  centered-vs-uncentered discrimination).
+- *Exactly-singular V is unrepairable by DiagonalTikhonov*: a fully
+  unsupported moment row (all H_{c,jk} < 2 for some j) zeroes
+  diag(V)_jj, so tau*diag(V) cannot lift it; reps die instead of
+  binding. The binding study's observability is tuned (p_w = 0.7,
+  12 cells) to make this a ~2e-4 event; the near-boundary regime is
+  the interesting one.
+
+* Studies
+
+Each study block records: the discrimination claim, the runnable
+command, the result table (n_reps = 500 unless noted; MC SE of a 5%
+rate at 500 reps is ~1%), and the reading.
+
+** Study 1 --- J size + Wald coverage: IID vs Clustered (genuine missingness)
+
+Claim: under rho = 0.5 with 20-unit PSUs, IIDCovariance must detectably
+over-reject and under-cover (DEFF ~ 10); ClusteredCovariance (+/- dof
+correction) must calibrate; the rho = 0 control shows both calibrated.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study size_iid_vs_cluster --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| rho0.5/iid             | 496/500 | 496se/496J | 0.466 | 0.466 | 0.465 | 0.411 / 0.415 | -0.0015 / -0.0071 | 0.294 / 0.297 | 0.000 | 12s |
+| rho0.5/cluster_psu     | 496/500 | 496se/496J | 0.024 | 0.024 | 0.017 | 0.921 / 0.927 | -0.0015 / -0.0075 | 0.914 / 0.925 | 0.000 |  9s |
+| rho0.5/cluster_psu_dof | 494/500 | 494se/494J | 0.022 | 0.022 | 0.016 | 0.919 / 0.927 | -0.0001 / -0.0085 | 0.911 / 0.925 | 0.000 | 10s |
+| rho0/iid               | 493/500 | 493se/493J | 0.043 | 0.043 | 0.033 | 0.972 / 0.937 | -0.0014 / +0.0006 | 1.035 / 0.959 | 0.000 | 11s |
+| rho0/cluster_psu       | 492/500 | 492se/492J | 0.047 | 0.047 | 0.010 | 0.953 / 0.925 | -0.0014 / +0.0003 | 1.000 / 0.924 | 0.000 | 10s |
+| fewG12/iid             | 490/500 | 490se/490J | 0.704 | 0.704 | 0.663 | 0.263 / 0.288 | -0.0059 / -0.0007 | 0.179 / 0.190 | 0.000 | 10s |
+| fewG12/cluster_psu     | 480/500 | 480se/480J | 0.000 | 0.000 | 0.140 | 0.792 / 0.810 | -0.0271 / +0.0075 | 0.641 / 0.675 | 0.000 | 12s |
+| fewG12/cluster_psu_dof | 462/500 | 462se/462J | 0.000 | 0.000 | 0.094 | 0.797 / 0.799 | -0.0061 / -0.0141 | 0.646 / 0.685 | 0.000 | 11s |
+|paired fewG12 | n=454 | b1-cover flips +7/-11 (dof gains/loses) | mean dJ -0.1778 |
+|paired G100   | n=490 | b1-cover flips +1/-0  (dof gains/loses) | mean dJ -0.0302 |
+#+END_EXAMPLE
+
+Reading (MC SE on a 5% rate ~ 0.010; on 95% coverage ~ 0.010):
+
+- *Discrimination delivered.* The wrong arm fails spectacularly at
+  both scales: rho0.5/iid rejects J at 0.466 and covers at 0.41
+  (SE/SD 0.29 == the DEFF ~ 10 prediction); fewG12/iid rejects at
+  0.704 with coverage 0.26. The rho=0 control calibrates both
+  strategies (0.043/0.047) -- the contrast is the clustering, not the
+  estimator.
+- *Clustered inference at G=100 under genuine missingness:* coverage
+  0.921/0.927 (~3 SE below nominal; SE/SD ~ 0.92 -- the familiar
+  small-G downward SE bias, mild at this scale), J shows
+  TAIL-SPECIFIC conservatism: rej 0.022-0.024 at nominal 5% (3.7 SE
+  low) while the p-value ECDF is otherwise uniform (J-KS 0.017). The
+  pilots' 0/80 was this conservatism, quantified.
+- *Few-cluster regime (checklist item 1):* at G=12 the failure mode is
+  honest and large -- SE/SD ~ 0.64-0.69 (SEs ~ 35% small), coverage
+  ~ 0.80, J effectively never rejects (rej 0.000, KS 0.09-0.14).
+  Practitioners in this regime need the wild-cluster bootstrap, not
+  the asymptotic J.
+- *dof_correction (pre-registered):* G=100 pair confirmed a no-op
+  (flips +1/-0; mean dJ -0.03). At G=12 the paired contrast SURPRISED:
+  flips are two-sided (+7/-11) because the per-pair G_jk/(G_jk-1)
+  correction enters the CU *weighting* and moves theta_hat itself --
+  the dof knob is not a pure CI-widening under CUE. The review's
+  one-directional sign-test premise was wrong; the readout caveat is
+  revised accordingly (post-run docstring fix, noted in Reproducibility).
+  Net effect at G=12 remains small (coverage 0.792 vs 0.797).
+
+** Study 2 --- StratifiedCovariance across PSU counts, fpc, H boundary
+
+Claims (PRE-REGISTERED before the full runs; adversarial-review fixes
+4 and 7): (a) within-cell-centered stratified V calibrated at
+G in {5, 20} under the fixed-stratum-profile DGP where uncentered PSU
+clustering is conservative (pools strata means); (b) the fpc arm is a
+GUARANTEED-FAIL estimand-mismatch check with quantitative reproduction
+targets --- all PSUs assigned makes =_fpc_factor= exactly 0.5 in every
+cell, so the full run must reproduce: CRN-paired SE ratio 0.7071
+vs fpc=False, b1 coverage ~0.834, J rej@5% ~0.224; deviation from
+these targets indicts =_fpc_factor=, not the DGP. (c) The G=2 /
+p_w=0.5 arm sits at the H_{c,jk} < 2 boundary in ~75% of cells:
+predicted E[V_ww] ~ 0.5 x truth (boundary cells zeroed while their
+units count in N_w), so the row MUST over-reject J --- the predicted
+~2x truncation is the reproduction target; the realised boundary share
+is printed by the mask-only CRN readout, all-zero-V_ww-row reps
+(~0.003/rep) counted as a named event. The G2hi (p_w=0.85) arm is the
+minority-boundary rung where calibration claims stay meaningful.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study stratified --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| G2/stratified       | 494/500 | 494se/494J | 0.245 | 0.245 | 0.241 | 0.814 / 0.832 | +0.0013 / +0.0017 | 0.711 / 0.716 | 0.000 | 12s |
+| G2/stratified_fpc   | 495/500 | 495se/495J | 0.455 | 0.455 | 0.454 | 0.693 / 0.685 | +0.0014 / -0.0005 | 0.507 / 0.511 | 0.000 | 10s |
+| G2/cluster_psu_dof  | 493/500 | 493se/493J | 0.028 | 0.028 | 0.040 | 0.974 / 0.957 | -0.0114 / +0.0249 | 1.138 / 1.145 | 0.000 |  8s |
+| G5/stratified       | 495/500 | 495se/495J | 0.079 | 0.079 | 0.041 | 0.925 / 0.943 | -0.0018 / -0.0064 | 0.918 / 0.944 | 0.000 | 11s |
+| G5/stratified_fpc   | 494/500 | 494se/494J | 0.257 | 0.257 | 0.271 | 0.787 / 0.783 | -0.0020 / -0.0059 | 0.648 / 0.664 | 0.000 |  9s |
+| G5/cluster_psu_dof  | 499/500 | 499se/499J | 0.052 | 0.052 | 0.013 | 0.986 / 0.992 | +0.0017 / -0.0104 | 1.251 / 1.279 | 0.000 | 10s |
+| G20/stratified      | 496/500 | 496se/496J | 0.060 | 0.060 | 0.035 | 0.956 / 0.958 | -0.0028 / +0.0011 | 0.992 / 1.001 | 0.000 | 14s |
+| G20/stratified_fpc  | 493/500 | 493se/493J | 0.239 | 0.239 | 0.278 | 0.815 / 0.834 | -0.0031 / +0.0012 | 0.704 / 0.708 | 0.000 | 15s |
+| G20/cluster_psu_dof | 497/500 | 497se/497J | 0.056 | 0.056 | 0.030 | 0.998 / 0.996 | -0.0029 / +0.0010 | 1.362 / 1.374 | 0.000 | 13s |
+| G2hi/stratified     | 493/500 | 493se/493J | 0.120 | 0.120 | 0.110 | 0.872 / 0.878 | -0.0011 / +0.0086 | 0.784 / 0.826 | 0.000 |  9s |
+| G2hi/cluster_psu_dof| 494/500 | 494se/494J | 0.047 | 0.047 | 0.006 | 0.964 / 0.962 | -0.0088 / +0.0172 | 1.106 / 1.128 | 0.000 | 10s |
+|H-boundary G2/p_w0.5  | mean share H_ww<2: 0.747 | all-zero-V_ww-row reps: 3/500 |
+|H-boundary G5/p_w0.5  | mean share H_ww<2: 0.186 | all-zero-V_ww-row reps: 0/500 |
+|H-boundary G20/p_w0.5 | mean share H_ww<2: 0.000 | all-zero-V_ww-row reps: 0/500 |
+|H-boundary G2/p_w0.85 | mean share H_ww<2: 0.275 | all-zero-V_ww-row reps: 0/500 |
+#+END_EXAMPLE
+
+Reading -- ALL FOUR pre-registered targets reproduced:
+
+- *fpc targets hit at every scale.* CRN SE ratio fpc/no-fpc: 0.713 /
+  0.706 / 0.710 at G in {2, 5, 20} vs the predicted 0.7071; b1
+  coverage at G20 exactly the predicted 0.834; J rej 0.239 vs
+  predicted 0.224 (1.5 MC SE). =_fpc_factor= is exonerated: the
+  estimand-mismatch row failed by precisely its predicted magnitudes.
+- *H-boundary targets hit.* Measured boundary share 0.747 (predicted
+  0.75); all-zero-V_ww-row events 3/500 (predicted ~1.6, Poisson-
+  consistent); the predicted ~2x V_ww truncation appears as SE/SD ~
+  0.71 ~ sqrt(0.5) at G2. The degradation gradient is monotone in the
+  boundary share: J rej 0.245 (share 0.75) -> 0.120 (0.28) -> 0.079
+  (0.19) -> 0.060 (0.00).
+- *Calibration claim delivered at G20*: stratified coverage
+  0.956/0.958, SE/SD 0.99/1.00, J 0.060 -- while uncentered PSU
+  clustering is conservative (coverage 0.998, SE/SD 1.37), the
+  centered-vs-uncentered discrimination. At G5 the stratified arm
+  shows the onset of few-PSU degradation (0.925/0.943, J 0.079).
+- *Practitioner headline*: at the H boundary (G_c = 2 with heavy
+  per-moment missingness) the design-exact estimator's sharpness costs
+  validity (anticonservative J and coverage) while plain
+  dof-corrected PSU clustering stays safely conservative -- below ~5
+  PSUs/cell prefer the conservative estimator or a bootstrap. Feeds
+  #134's evidence base: this degradation occurs with binding_ridge ==
+  0 everywhere -- the feasibility test does not see it.
+
+** Study 3 --- DesignAware: coupling + #119 dof inheritance (per-rep anchored)
+
+RESCOPED claims (adversarial-review fix 3): under the fixed demeaned
+v_strat profile all per-rep randomness is independent across PSUs, so
+the true cross-ARM component of V_TS is exactly zero in this fixture;
+the couple=True/False contrast exercises the MECHANICAL same-unit
+coupling only (m_T a sub-sum of m_const; Var(b1) inflates ~3x under
+couple=False). A genuine cross-arm-shock fixture is recorded follow-up
+work. Added arms: (i) sigma_strat=0 contamination check --- if the
+coupled arm's b1 coverage normalizes without the stratum profile, the
+pilot's under-coverage (SE/SD ~0.49) is profile contamination of the
+uncentered V_SS/V_TS blocks glued to centered V_TT; (ii) the #119
+dof-inheritance ablation (sampling dof_correction on/off) in a
+few-cluster sampling regime (G=12) read via CRN-paired flips, since at
+G~100 the per-pair correction is a deterministic ~1.01 no-op. The
+review REJECTED switching the sampling engine to stratum-level
+clustering under this DGP (uncentered stratum totals would pick up the
+fixed profile means; no cross-arm term exists for it to capture).
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study design_aware --n-reps 300 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| design_aware              | 270/300 | 175se/270J ! | 0.096 | 0.100 | 0.033 | 0.877 / 0.663 | -0.0033 / -0.0045 |  4633.410 /  236.780 | 0.393 | 3461s |
+| design_aware_uncoupled    | 297/300 | 297se/297J   | 0.037 | 0.037 | 0.043 | 1.000 / 1.000 | +0.0078 / -0.0138 |     1.723 /    1.636 | 0.000 | 3465s |
+| stratified                | 297/300 | 297se/297J   | 0.057 | 0.057 | 0.021 | 0.923 / 0.946 | +0.0033 / -0.0095 |     0.910 /    0.934 | 0.000 | 3679s |
+| nostrat/design_aware      | 298/300 | 298se/298J   | 0.013 | 0.013 | 0.023 | 0.919 / 0.930 | +0.0048 / -0.0116 |     0.904 /    0.922 | 0.000 | 3862s |
+| fewG12/design_aware       | 262/300 | 223se/262J ! | 0.000 | 0.015 | 0.094 | 0.766 / 0.798 | -0.0136 / +0.0032 | 14484.824 / 5290.434 | 0.340 | 3638s |
+| fewG12/design_aware_nodof | 263/300 | 235se/263J ! | 0.004 | 0.027 | 0.096 | 0.776 / 0.796 | -0.0307 / +0.0122 | 23409.409 / 5078.133 | 0.278 | 3856s |
+|paired fewG12-#119 | n=209 | b1-cover flips +4/-10 (dof gains/loses) | mean dJ -0.1255 |
+|jadj design_aware  | binding 106/270 | KS nom/adj (all): 0.033/0.037 | KS nom/adj (binding): 0.117/0.126 |
+#+END_EXAMPLE
+
+Reading (n_reps = 300, per-rep anchored; MC SE on a 5% rate ~ 1.3%):
+
+- *The headline finding -- stratum-heterogeneity contamination,
+  attribution pinned by the control arm* (-> issue #145; doc caveat
+  landed in the class docstring + CLAUDE.md commitment 10). Under the
+  fixed stratum profile, couple=True under-covers the randomized
+  contrast badly (b1 0.663) with tau binding on 39% of datasets and
+  NaN-SE events on ~a third of used reps (the ! validity markers);
+  couple=False is conservative (1.000, SE/SD ~1.6); V_TT alone
+  (stratified) is calibrated (0.946). The sigma_strat = 0 control
+  normalizes the coupled arm completely (0.930, binding 0.000,
+  298/300) -- the contamination IS the fixed stratum profile entering
+  the uncentered V_SS / V_TS cross-products glued to the centered
+  V_TT.
+- *SE/SD columns on the binding arms are dominated by binding-rep SE
+  explosions* -- read them via the validity cells and the per-rep
+  records (the #140 discipline), not at face value.
+- *#119 dof-inheritance ablation*: direction consistent (mean paired
+  dJ -0.13: the inherited correction enlarges V), magnitude small at
+  G = 12, and the paired flips are two-sided (+4/-10) because the
+  per-pair correction enters the CU weighting and moves theta_hat --
+  the same weighting-channel effect as study 1's dof pair. No
+  evidence the inheritance choice is mis-signed; its finite-sample
+  effect is modest.
+- *Adjusted-p evidence (feeds the Davies/Imhof decision)*: among the
+  106 binding reps, KS(nominal) = 0.117 vs KS(adjusted) = 0.126 --
+  neither rejects uniformity at the 5% KS critical value (~0.132 at
+  n = 106), and the adjusted column shows no advantage; in the
+  conservative fewG12 tails the adjusted rejection moves toward
+  nominal (0.015/0.027 vs 0.000/0.004). See study 5 for the
+  completion of this evidence.
+
+** Study 4 --- Misspecified alternatives: J power + CU/LM robustness (flat-path canary)
+
+Claims (rescoped per adversarial-review fix 8): J power rises along
+delta in {0, 0.1, 0.3}; CU+LM convergence and step counts degrade
+gracefully or not. All arms start far (theta_init = (0,0)), null arm
+as CRN baseline. SCOPE: this is the owner-approved robustness column
+on the FLAT (Euclidean) path --- CU's V(theta) channel makes even
+affine psi a genuine ratio-of-quadratics with far-start failure modes,
+so the step-count table is a valid graded discriminator --- but it is
+NOT by itself evidence to reopen or close #9, which was decided on
+direct PSDFixedRank-quotient verification this fixture cannot probe.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study misspec_power --n-reps 500 --out docs/validation/data
+: .venv/bin/python scripts/validation/ladder_mc.py --study misspec_steps --n-reps 500 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| delta0.0/cluster_psu | 497/500 | 497se/497J | 0.024 | 0.024 | 0.017 | 0.918 / 0.926 | -0.0007 / -0.0085 | 0.906 / 0.923 | 0.000 | 13s |
+| delta0.1/cluster_psu | 492/500 | 492se/492J | 0.390 | 0.390 | 0.475 | 0.894 / 0.915 | -0.0024 / -0.0044 | 0.858 / 0.889 | 0.000 | 11s |
+| delta0.3/cluster_psu | 485/500 | 485se/485J | 1.000 | 1.000 | 0.900 | 0.798 / 0.792 | +0.0004 / -0.0072 | 0.631 / 0.642 | 0.000 | 22s |
+
+| arm      | conv  | iters p50/p90/max |
+|-
+| delta0.0 | 0.994 | 15/29/200  |
+| delta0.1 | 0.984 | 21/46/200  |
+| delta0.3 | 0.970 | 63/123/200 |
+#+END_EXAMPLE
+
+Reading:
+
+- *Power curve clean*: size 0.024 (the same tail-conservatism as
+  study 1, CRN-matched arm), power 0.390 at delta = 0.1 and 1.000 at
+  delta = 0.3.
+- *Pseudo-true stays centered, Wald inference does not*: at
+  delta = 0.3 bias is negligible (+0.000 / -0.007 -- the unviolated
+  moments pin theta) yet coverage drops to ~0.79 via SE/SD ~ 0.63:
+  under misspecification the sandwich SEs lose validity even though
+  the point estimate barely moves. A rejected J invalidates the Wald
+  intervals even when theta_hat looks reasonable.
+- *CU+LM robustness (the flat-path canary)*: convergence degrades
+  gracefully (0.994 -> 0.984 -> 0.970 from the far (0,0) start) while
+  median step counts quadruple (15 -> 63) and the p90 hits 123 with a
+  200-step ceiling visible in the max column. LM strains exactly
+  where the omitted CU curvature term is largest, but it does not
+  fail. On the flat path there is no evidence motivating a
+  full-Hessian trust region; the quotient half of the #9 question is
+  out of this fixture's scope by design.
+
+** Study 5 --- Regularised-J calibration where the ridge ACTUALLY binds (per-rep anchored)
+
+Re-engineered after the review's blocker fix 1 (the prior spec
+provably never tripped the feasibility test --- measured anchors at
+kappa ~1e2 vs target 1e10, leaving checklist item 4 empty). Binding is
+now engineered via the near-collinear fifth moment r * z5,
+z5 = x + eps*eta, with eps swept {3e-2, 1e-2, 3e-3} so the measured
+binding frequency spans low-to-high; a no-eps baseline pins the
+no-binding contrast. Claims: (a) the item-4 reading --- among BINDING
+reps, J_pvalue_adjusted's ECDF/KS calibrates where the nominal does
+not (Welch-Satterthwaite suffices; else Davies/Imhof) --- is GATED on
+the measured binding frequency (the jadj readout refuses arms with ~0
+binding events); (b) the near-boundary stratified V degrades (J
+over-rejection, under-coverage) WITHOUT tripping the feasibility test
+(the noeps arm) --- quantified and fed to #134.
+
+: .venv/bin/python scripts/validation/ladder_mc.py --study ridge_binding --n-reps 300 --out docs/validation/data
+
+#+BEGIN_EXAMPLE
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| da_fewG12         | 262/300 | 223se/262J ! | 0.000 | 0.015 | 0.094 | 0.766 / 0.798 | -0.0136 / +0.0032 | 14484.824 / 5290.434 | 0.340 | 827s |
+| da_fewG12_eps1e-2 | 244/300 | 205se/244J ! | 0.000 | 0.008 | 0.211 | 0.750 / 0.795 | +0.0041 / -0.0031 | 13450.137 /  925.813 | 0.357 | 863s |
+| da_G5             | 270/300 | 175se/270J ! | 0.096 | 0.100 | 0.033 | 0.877 / 0.663 | -0.0033 / -0.0045 |  4633.410 /  236.780 | 0.393 | 869s |
+| strat_eps3e-2     | 287/300 | 287se/287J   | 0.314 | 0.314 | 0.319 | 0.676 / 0.732 | -0.0182 / +0.0174 |     0.526 /    0.541 | 0.000 | 746s |
+| noeps_strat       | 294/300 | 294se/294J   | 0.221 | 0.221 | 0.269 | 0.762 / 0.796 | -0.0052 / +0.0112 |     0.616 /    0.689 | 0.000 | 735s |
+|jadj da_fewG12         | binding  89/262 | KS nom/adj (all): 0.094/0.136 | KS nom/adj (binding): 0.163/0.209 |
+|jadj da_fewG12_eps1e-2 | binding  87/244 | KS nom/adj (all): 0.211/0.085 | KS nom/adj (binding): 0.378/0.182 |
+|jadj da_G5             | binding 106/270 | KS nom/adj (all): 0.033/0.037 | KS nom/adj (binding): 0.117/0.126 |
+|jadj strat_eps3e-2     | binding   0/287 | (no binding events; contrast not readable) |
+|jadj noeps_strat       | binding   0/294 | (no binding events; contrast not readable) |
+#+END_EXAMPLE
+
+Reading -- the two claims adjudicated, plus the night's second headline:
+
+- *Welch--Satterthwaite works exactly where Theorem 6 says it should.*
+  In the near-collinearity arm (=da_fewG12_eps1e-2= -- binding driven
+  by an engineered small eigenvalue, the fixed-tau regime
+  mcar-asymptotics Theorem 6 describes), the nominal J p-value badly
+  fails uniformity over the full law (KS 0.211, critical ~0.087 at
+  n = 244) while the ADJUSTED p-value passes (KS 0.085). Binding-subset
+  ECDFs are selected subsamples (conditional uniformity is not the
+  null), so the full-law contrast is the decisive cell. In the
+  #145-contaminated arms the adjustment neither helps nor should: the
+  COVARIANCE is mis-centered there, and no reference-distribution
+  correction can repair a wrong V.
+- *The dangerous regime is the feasible-but-degraded one, not the
+  binding one* (the #134-decisive finding): =strat_eps3e-2= over-
+  rejects J at 0.314 with binding_ridge == 0 on every rep -- the
+  near-collinear-but-PD V sails through the signed-spectrum
+  feasibility test while badly miscalibrated, WORSE than the
+  H-boundary degradation alone (=noeps_strat=, 0.221). Any emergency
+  floor keyed to infeasibility is blind to this regime by
+  construction.
+- The amortized cache-clearing ran these arms ~4.5x faster than
+  design_aware's per-rep clearing (746-869 s vs ~3500-3900 s per arm),
+  confirming the recompile-tax diagnosis in production.
+
+** Tau-binding column (cross-study; owner-approved column (a))
+
+Per-dataset binding frequency (per-rep anchored where it matters; the
+factory-anchored arms' zeros are exact under their shared healthy
+anchors):
+
+| regime | arms | binding frequency |
+|-
+| IID / Clustered, all designs           | studies 1, 4       | 0.000 everywhere |
+| Stratified, incl. H-boundary and eps   | studies 2, 5       | 0.000 everywhere |
+| DesignAware coupled (the #145 glue)    | studies 3, 5       | 0.28 -- 0.39 |
+| DesignAware uncoupled / nostrat control| study 3            | 0.000 |
+
+The empirical answer to "is the regularized regime the rule or the
+exception under realistic missingness": *the exception, categorically*
+--- EXCEPT under the coupled design-aware assembly, where it is a
+30-40% per-dataset event and is itself a symptom of the #145
+contamination (the sigma_strat = 0 control binds never). Realised-tau
+distributions ride in the per-rep CSVs.
+
+* Verdict
+
+The ladder validates where its assumptions hold, fails honestly and
+diagnosably where they do not, and the validation surfaced two real
+defects (both now filed and one doc-mitigated) --- which is what a
+validation pillar is for.
+
+1. *Calibration delivered*: IIDCovariance under independence;
+   ClusteredCovariance at moderate-to-large G (with a mild,
+   quantified tail-conservatism of the J: rej ~2.2-2.4% at nominal
+   5%, ECDF otherwise uniform); StratifiedCovariance at G >= 5 under
+   exactly the estimand its centering targets, with every
+   pre-registered guaranteed-fail row (fpc, H-boundary) reproducing
+   its predicted magnitudes.
+2. *Discrimination delivered*: the wrong-strategy arms fail by 7-45
+   sigma at every scale tested; a study in which nothing could fail
+   validates nothing, and no study here is of that kind (the
+   adversarial review's falsifiability lens signed off on the final
+   arm set).
+3. *Honest failure regimes, quantified*: few-cluster (G ~ 12)
+   cluster-robust SEs run ~35% small; the H_{c,jk} < 2 boundary
+   degrades the stratified V in proportion to the boundary share;
+   the feasible-but-degraded near-collinear V is the worst J
+   miscalibration in the suite (rej 0.31) and is INVISIBLE to the
+   feasibility test -- prefer conservative estimators or bootstrap
+   inference in all three regimes.
+4. *Defects surfaced by the validation*: #142 (factory-shared anchor;
+   API landed same-session) and #145 (coupled-assembly contamination
+   under stratum heterogeneity; doc caveat landed, centering fix is
+   v2.1). The tau-binding column and the SE-explosion accounting only
+   exist because of per-rep anchoring (#142) and the #140 validity
+   discipline -- the protocol findings were load-bearing.
+5. *The owner-approved columns*: (a) tau-binding: above. (b) CU+LM
+   robustness: convergence degrades gracefully under misspecification
+   (0.994 -> 0.970) while median step counts quadruple; no evidence
+   motivating a trust-region option on the flat path (#9's quotient
+   half untouched by design).
+
+* Decision briefs (owner decisions; evidence above)
+
+** #134 --- emergency PD floor for CU mid-solve Cholesky failure
+
+The floor's actual targets, measured: exactly-singular zero-diagonal
+V rows (~0.3% of reps at the G=2/p_w=0.5 boundary --- the mask-only
+readout's named event) and the mid-solve failures inside the coupled
+design-aware arms (10-19% exclusions, concentrated in the #145
+pathology). Against: (i) the regime doing the most inferential damage
+(feasible-but-degraded, J rej 0.31) is invisible to ANY
+infeasibility-keyed floor by construction; (ii) the reps a floor would
+rescue are exactly those whose V is least trustworthy --- the floor
+converts loud, counted failures (#138/#140 discipline) into quiet fits
+with dubious inference; (iii) the largest consumer of failures (#145)
+is a covariance defect with its own fix path. /Recommendation: close
+with reason --- the diagnose-loudly policy is the better contract, the
+floor is cheap to revive if a consumer demands point estimates under
+pathological V, and the evidence shows it would not address the
+regime that matters./
+
+** Davies/Imhof exact generalised chi-squared (Arc-3's last decision)
+
+In the regime Theorem 6 actually describes (fixed-tau binding from
+near-collinearity), Welch--Satterthwaite brings the J p-value from a
+failing KS 0.211 to a passing 0.085 over the full law. The cases where
+the adjusted p-value stays miscalibrated are the #145-contaminated
+arms, where the covariance itself is wrong and exactness of the
+reference distribution is beside the point. /Recommendation: close as
+not-needed --- W-S calibrates where the limit theory applies; Davies/
+Imhof would buy exactness in a regime exhibiting no deficit./
+
+* Appendix: adversarial design review
+
+The harness draft went through a 41-agent adversarial workflow
+(5 lens finders -> dedup -> 2-skeptic refutation per finding ->
+synthesis): 44 raw findings, 17 after dedup, 8 survived. Verdict:
+"sound at the skeleton level; proceed to full runs after the fixes" --
+no package bugs found; every defect harness- or report-level.
+
+** Surviving findings (all applied before the full runs)
+
+1. /Blocker/ --- the ridge-binding study never bound (verified against
+   the seed stream: anchors feasible at kappa ~1e2 vs target 1e10);
+   item 4 was empty. -> near-collinear z5 moment with eps sweep, gated
+   jadj readout, docstring re-synced (the drift was how the property
+   was silently lost).
+2. The few-cluster regime was absent (min 40 PSUs anywhere; the G=100
+   dof pair is a deterministic 100/99 no-op). -> fewG12 sub-study +
+   CRN-paired flip readout; G=100 pair relabelled scale-regime.
+3. The #119 dof-inheritance ablation had no arm; the V_TS materiality
+   claim over-reached (cross-arm component exactly zero under the
+   fixed profile). -> design_aware_nodof arm at G=12; claims rescoped;
+   sigma_strat=0 contamination-check arm added.
+4. The G=2 H-boundary arm was indistinguishable from a bookkeeping
+   bug. -> pre-registered ~2x V_ww truncation target, mask-only CRN
+   boundary-share readout, named all-zero-row event, G2hi minority-
+   boundary rung.
+5. The #140 n_valid denominators never reached the printed rates. ->
+   validity cell + loud warning in org rows; sidecar counts; package
+   half filed as #143 (FitRecord lacks sigma_meat_indefinite).
+6. The provenance sidecar did not pin the DGP (spec/SHA/versions/PRNG
+   impl) and misspec_steps evidence lived only in stdout. -> full
+   environment + per-arm spec/validity provenance; org fragment and
+   step CSVs written to the out dir.
+7. The fpc arm was a guaranteed-fail without pre-registration. ->
+   quantitative reproduction targets (SE ratio 0.7071, b1 coverage
+   ~0.834, J rej ~0.224) pre-registered in docstring + this report.
+8. /Minor/ --- the #9 framing over-claimed (flat-path fixture cannot
+   probe the quotient decision). -> rescoped to the flat-path canary.
+
+** Considered-and-rejected (killed by the skeptic panel)
+
+Notable kills, recorded so they are not re-litigated: the factory-
+anchor finding (real, already routed around via per-rep anchoring and
+filed as #142); "stratum effects redrawn per rep" (false -- the fixed
+demeaned profile was already the fix); "FitRecord drops iterations
+blocks the #9 column" (false as a blocker -- misspec_steps collects
+them inline); switching the design-aware sampling engine to stratum
+level (refuted by both skeptics: uncentered stratum totals would pick
+up the fixed profile means, ~10x worse); J=0.000 under-rejection "the
+harness never prints the evidence" (false -- the J-KS column exists;
+the question itself is deferred to the full runs); a CU-only weighting
+gap (real but scope-conformant; optional control arm noted in fix 8).
+
+* Reproducibility
+
+- Seeds: master seed 20260610 per study; replicate r uses
+  jax.random.fold_in(PRNGKey(seed), r) (the documented driver
+  contract); the stratum profile uses fixed seed 777 in make_design.
+- Environment: emu-gmm at the commit recorded in each study's JSON
+  sidecar (git SHA + dirty flag, package/jax/numpy versions, PRNG
+  impl); float64; CPU. jax PRNG output is version-sensitive, so the
+  committed records are reproducible only against those pins.
+- Per-replicate records: docs/validation/data/*.csv with JSON sidecars
+  carrying study, seed, per-arm DesignSpec/theta_init/anchor-mode/
+  validity counts, the regenerating command, and runtime.
+- Bit-stability check: the four factory-anchored studies were run
+  twice (before and after an intervening package merge that does not
+  touch their statistics) and reproduced bit-identically -- the CRN
+  contract observed end-to-end.
+
+** Run-protocol incidents (recorded; they are findings, not noise)
+
+1. The first full run's =design_aware= study was OOM-killed at 9.4 GB:
+   the then-unfixed #139 append-only caches retained ~14 MB per bare
+   =estimate()= call on the per-rep-anchoring path. Fixed in-package
+   (#139), mitigated in-harness.
+2. The mitigation (=jax.clear_caches()= per replicate) traded the leak
+   for a ~3-5x wall-clock recompilation tax (XLA kernel compilations
+   ARE re-hit across reps even though closure traces are not):
+   measured ~12 s/rep at N = 2000 vs the ~2.6 s/rep pilot rate. The
+   second run's =design_aware= study ran under per-rep clearing
+   (correct, slow: ~6 h); =ridge_binding= and the shipped harness use
+   every-25 clearing (~350 MB swing, few-percent overhead). Clearing
+   frequency has zero numerical effect; the studies' statistics are
+   unaffected.
+3. design_aware's sidecar records the worktree commit current at its
+   END (the every-25 commit landed mid-study); the code it RAN was the
+   per-rep-clearing revision one commit earlier. Timing-only drift;
+   noted here so the sidecar is read correctly.
+4. The per-rep-anchored studies run n_reps = 300 (not 500): MC SE on a
+   5% rate is 1.3%, and the binding-event counts (>= 80 per binding
+   arm) clear the jadj gate comfortably; the factory studies run 500.

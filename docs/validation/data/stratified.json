@@ -1,0 +1,319 @@
+{
+  "study": "stratified",
+  "n_reps": 500,
+  "seed": 20260610,
+  "environment": {
+    "git_commit": "36386566b484c4edb18b0991dc2717fb71f882e2",
+    "git_dirty": "no",
+    "emu_gmm_version": "0.1.0a0",
+    "jax_version": "0.10.1",
+    "numpy_version": "2.4.6",
+    "jax_default_prng_impl": "threefry2x32",
+    "beta_true": {
+      "beta0": 0.5,
+      "beta1": 1.0
+    },
+    "stratum_profile_seed": 777
+  },
+  "arms": {
+    "G2/stratified": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 494,
+        "n_excluded": 6,
+        "n_valid_se_min": 494,
+        "n_valid_J_nominal": 494,
+        "n_valid_J_adjusted": 494
+      },
+      "seconds": 10.5
+    },
+    "G2/stratified_fpc": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 495,
+        "n_excluded": 5,
+        "n_valid_se_min": 495,
+        "n_valid_J_nominal": 495,
+        "n_valid_J_adjusted": 495
+      },
+      "seconds": 9.5
+    },
+    "G2/cluster_psu_dof": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 493,
+        "n_excluded": 7,
+        "n_valid_se_min": 493,
+        "n_valid_J_nominal": 493,
+        "n_valid_J_adjusted": 493
+      },
+      "seconds": 9.0
+    },
+    "G5/stratified": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 495,
+        "n_excluded": 5,
+        "n_valid_se_min": 495,
+        "n_valid_J_nominal": 495,
+        "n_valid_J_adjusted": 495
+      },
+      "seconds": 10.2
+    },
+    "G5/stratified_fpc": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 494,
+        "n_excluded": 6,
+        "n_valid_se_min": 494,
+        "n_valid_J_nominal": 494,
+        "n_valid_J_adjusted": 494
+      },
+      "seconds": 9.9
+    },
+    "G5/cluster_psu_dof": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 5,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 499,
+        "n_excluded": 1,
+        "n_valid_se_min": 499,
+        "n_valid_J_nominal": 499,
+        "n_valid_J_adjusted": 499
+      },
+      "seconds": 10.1
+    },
+    "G20/stratified": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 20,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 496,
+        "n_excluded": 4,
+        "n_valid_se_min": 496,
+        "n_valid_J_nominal": 496,
+        "n_valid_J_adjusted": 496
+      },
+      "seconds": 11.9
+    },
+    "G20/stratified_fpc": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 20,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 493,
+        "n_excluded": 7,
+        "n_valid_se_min": 493,
+        "n_valid_J_nominal": 493,
+        "n_valid_J_adjusted": 493
+      },
+      "seconds": 12.7
+    },
+    "G20/cluster_psu_dof": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 20,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.5,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 497,
+        "n_excluded": 3,
+        "n_valid_se_min": 497,
+        "n_valid_J_nominal": 497,
+        "n_valid_J_adjusted": 497
+      },
+      "seconds": 9.2
+    },
+    "G2hi/stratified": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.85,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 493,
+        "n_excluded": 7,
+        "n_valid_se_min": 493,
+        "n_valid_J_nominal": 493,
+        "n_valid_J_adjusted": 493
+      },
+      "seconds": 9.5
+    },
+    "G2hi/cluster_psu_dof": {
+      "spec": {
+        "n_strata": 10,
+        "psu_per_cell": 2,
+        "psu_size": 20,
+        "rho": 0.5,
+        "sigma_strat": 0.7,
+        "x_psu_load": 0.7,
+        "p_x": 0.9,
+        "p_w": 0.85,
+        "delta": 0.0,
+        "collinear_eps": null
+      },
+      "theta_init": {
+        "beta0": 0.5,
+        "beta1": 1.0
+      },
+      "anchor": "factory",
+      "validity": {
+        "n_used": 494,
+        "n_excluded": 6,
+        "n_valid_se_min": 494,
+        "n_valid_J_nominal": 494,
+        "n_valid_J_adjusted": 494
+      },
+      "seconds": 9.0
+    }
+  },
+  "command": "python scripts/validation/ladder_mc.py --study stratified --n-reps 500 --seed 20260610 --out docs/validation/data",
+  "seconds": 130.5
+}
