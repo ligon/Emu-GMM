@@ -17,9 +17,9 @@ PYTEST_FLAGS =
 endif
 
 ifdef PYTEST_TARGET
-PYTEST_CMD = $(POETRY) run pytest $(PYTEST_TARGET)
+PYTEST_CMD = $(POETRY) run python -m pytest $(PYTEST_TARGET)
 else
-PYTEST_CMD = $(POETRY) run pytest $(PYTEST_FLAGS)
+PYTEST_CMD = $(POETRY) run python -m pytest $(PYTEST_FLAGS)
 endif
 
 .PHONY: setup lint black mypy test test-parallel check quick-check slow-tests clean build publish release
@@ -31,25 +31,25 @@ setup: .venv/pyvenv.cfg
 	@touch $@
 
 lint:
-	$(POETRY) run ruff check $(RUFF_TARGET)
+	$(POETRY) run python -m ruff check $(RUFF_TARGET)
 
 black:
-	$(POETRY) run black --check $(BLACK_TARGET)
+	$(POETRY) run python -m black --check $(BLACK_TARGET)
 
 mypy:
-	$(POETRY) run mypy $(MYPY_TARGET)
+	$(POETRY) run python -m mypy $(MYPY_TARGET)
 
 test:
 	$(PYTEST_CMD)
 
 test-parallel:
-	$(POETRY) run pytest -n auto $(PYTEST_FLAGS) $(PYTEST_TARGET)
+	$(POETRY) run python -m pytest -n auto $(PYTEST_FLAGS) $(PYTEST_TARGET)
 
 quick-check: lint black mypy
-	$(POETRY) run pytest -m "not slow" $(PYTEST_TARGET)
+	$(POETRY) run python -m pytest -m "not slow" $(PYTEST_TARGET)
 
 check: lint black mypy
-	$(POETRY) run pytest $(PYTEST_TARGET)
+	$(POETRY) run python -m pytest $(PYTEST_TARGET)
 
 slow-tests:
 	$(POETRY) run pytest -m slow $(PYTEST_TARGET)
