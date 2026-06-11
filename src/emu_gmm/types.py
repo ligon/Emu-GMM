@@ -378,8 +378,8 @@ class Diagnostics:
     #: ``standard_errors`` entries are NaN BY DESIGN (the honest answer
     #: when V is not a covariance matrix); use the bootstrap for SEs in
     #: this regime, and see the studies summarizers' ``n_valid_se``
-    #: accounting (#140). Traced 0-d bool under jit, Python bool eagerly.
-    #: Recorded per-rep as the stackable 0/1 float
+    #: accounting (#140; see design.org). Traced 0-d bool under jit,
+    #: Python bool eagerly. Recorded per-rep as the stackable 0/1 float
     #: ``FitRecord.sigma_meat_indefinite`` (#143), so the event is
     #: auditable in committed MC records.
     sigma_meat_indefinite: Any = False

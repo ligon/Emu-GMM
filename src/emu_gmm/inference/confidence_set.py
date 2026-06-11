@@ -33,7 +33,7 @@ Design notes (upstreamed from the Seasonality consumer's prototype,
 - **Boundaries are interpolated.** Interior component edges are refined
   by linear interpolation of :math:`p - \\alpha` between the adjacent
   grid points, so the resolution is better than the raw grid spacing.
-- **NaN is an event, not a value** (the #140 convention): a grid point
+- **NaN is an event, not a value** (the #140 convention; see design.org): a grid point
   whose p-value is NaN (e.g. a Cholesky failure at an extreme null) is
   *excluded* from the set, counted in ``n_invalid``, and surfaced in
   ``invalid_indices`` and the summary — it never silently becomes

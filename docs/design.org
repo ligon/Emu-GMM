@@ -418,6 +418,15 @@ The framework reports the generalised-chi-squared survival as =EstimationResult.
 1. *No External Scalar Multipliers*: Because \(V_\mu(\theta)\) represents the variance of the sample moment vector itself (scaling at \(O(1/N)\)) rather than the variance of an individual observation, the standard textbook \(N\) multiplier is absorbed into the variance definition; \(Q_X(\hat{\theta})\) converges to a \(\chi^2\) natively. This is a convention choice rather than a free lunch --- it differs from the [cite/t:@hansen82] / [cite/t:@hayashi00] textbook normalisation, and the divergence should be remembered when porting code from elsewhere.
 2. *Asymmetric Scale Resolution*: The interaction of the coordinate scaling inside \(G_\mu(\theta)\) and the scaling inside \(V_\mu(\theta)\) ensures that the sample information matrix properly weighs the relative data density across different variables without requiring listwise deletion.
 
+** NaN is an event, not a value (#140)
+
+A NaN in a diagnostic output must either propagate loudly or be counted explicitly --- it must never fold into a rate or a mean. A diagnostic NaN encodes a /named event/ (the quantity is undefined, or a policy fired), not a numeric value; the hazard motivating the rule is that numpy comparisons silently coerce NaN to =False= /inside a live denominator/, so an unguarded aggregation fabricates a rate (a just-identified model's all-NaN J p-values would read as a 0% rejection rate).
+
+- Producer obligation :: every NaN-emitting site documents which event its NaN encodes, paired with a named flag where feasible. Current emitters: NaN standard errors under the diagnose-loudly indefinite-meat policy (#138; the flag is =sigma_meat_indefinite=, carried onto =FitRecord= per #143), and NaN p-values on just-identified problems (\(\mathrm{df} = 0\): the J p-values in =estimator.py=, =k_statistic='s =p_S=).
+- Consumer obligation :: every aggregation over potentially-NaN diagnostics carries an explicit valid count, never a silent denominator (the =n_valid_*= accounting in the =emu_gmm.studies= summarizers); and a set/decision consumer never lets a NaN choose a side --- =k_confidence_set= excludes NaN-p grid points from the set /and/ surfaces them (=n_invalid=, =invalid_indices=, a summary warning), so an invalid point is neither accepted nor rejected.
+
+The convention's first full-stack exercise is the #130 validation harness, whose mask-only zero-row events and validity cells apply exactly this named-event accounting end to end.
+
 ** Open Theoretical Questions
 The pairwise-overlap covariance machinery introduced in Section 2 sidesteps listwise deletion at the cost of theoretical loose ends that deserve treatment before the framework is leaned on for primary inference:
 

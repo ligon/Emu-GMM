@@ -84,7 +84,7 @@ class BiasSD:
     n_excluded: int
     #: Per-coordinate count of used reps with a FINITE analytic SE; a
     #: NaN SE is an event (e.g. indefinite sandwich meat, #138), counted
-    #: here rather than silently absorbed (#140 convention).
+    #: here rather than silently absorbed (#140 convention; see design.org).
     n_valid_se: np.ndarray = dataclasses.field(
         default_factory=lambda: np.zeros(0, dtype=int)
     )
