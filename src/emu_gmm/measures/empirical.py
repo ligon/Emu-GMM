@@ -539,8 +539,8 @@ class EmpiricalMeasure:
             When ``nan_aware`` is true (the default) and no explicit
             ``mask`` is supplied, NaN cells are treated as missing: the
             mask is inferred as ``~df.isna()`` and NaN cells in ``x``
-            are replaced with zero so they cannot poison downstream
-            JAX arithmetic.
+            are replaced with the per-column mean of the observed rows
+            (see :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`).
         weights : :class:`pandas.Series` or array-like, optional
             Per-observation weights. Defaults to all-ones.
         mask : :class:`pandas.DataFrame` or array-like of shape ``(N, M)``,
@@ -567,8 +567,8 @@ class EmpiricalMeasure:
             If ``nan_aware`` is true, ``mask`` is supplied, and ``df``
             still contains NaN cells. The combination is ambiguous: the
             user's mask might mark a NaN cell observable, in which case
-            silently rewriting it to zero would bias :math:`N_j` and
-            the moment sum. Drop the explicit mask (let NaN-inference
+            silently rewriting it to a sentinel would bias :math:`N_j`
+            and the moment sum. Drop the explicit mask (let NaN-inference
             run), scrub NaN in ``df`` before calling, or pass
             ``nan_aware=False`` to opt back into NaN-passthrough.
 

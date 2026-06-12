@@ -31,7 +31,7 @@ This sketch describes the v1 surface of =emu-gmm=: the minimal API needed to run
 - Replicate-weight statistics (BRR, jackknife, bootstrap).
 
 ** Dependencies
-- =jax= (>= 0.4.something current)
+- =jax= (see =pyproject.toml= for the pinned floor)
 - =haliax= (named axes / PyTree-friendly tensors)
 - =jaxtyping= (compile-time shape annotations)
 - =jax_dataclasses= (pytree-dataclass decorator, exposed as =jdc=)
@@ -99,7 +99,7 @@ class EulerModel:
         return jnp.array([theta.beta * (c_next / c) ** (-theta.gamma) * (1 + adj_r) - 1.0])
 #+END_SRC
 
-The framework duck-types: both forms work. Dataclass authoring is the right tool when the model has calibration constants or auxiliary objects that need to ride through =jit=/=vmap=.
+The framework duck-types: both forms work. Dataclass authoring is the right tool when the model has calibration constants or auxiliary objects that need to ride through =jit= / =vmap=.
 
 Optionally, the user can provide an analytical gradient via a paired callable (e.g., =psi_grad(x, theta)= returning the \(M \times K\) Jacobian); the framework falls through to =jax.jacfwd= when not supplied.
 
@@ -583,8 +583,6 @@ print(f"J-stat = {result.J_stat:.3f}  (dof={result.J_dof}, p={result.J_pvalue:.3
 print(f"Converged: {result.converged} in {result.iterations} iterations")
 #+END_SRC
 
-To get a properly identified system, add a second moment --- for instance a return-on-equity Euler condition with an excess-return instrument --- so \(M > K\). The demo is structured to demonstrate the pipeline rather than recover textbook parameter values; the identification failure surfaced by the diagnostics is itself useful information.
-
 Recovery in practice (N_SIM=5000, seed 0): \(\hat\beta \approx 0.962\), \(\hat\gamma \approx 2.08\), both within Monte Carlo error of the truth. See =tests/test_estimator.py= for the acceptance test.
 
 
@@ -659,7 +657,7 @@ These are real questions that need answers before code can be written, not archi
 
 6. *Output dataclass reconstruction.* The framework needs to round-trip the user's parameter dataclass through a flat JAX array. The implementation uses =jax.tree_util.tree_flatten= / =tree_unflatten=, which assumes the dataclass leaves are scalar-like JAX arrays. Document the restriction; provide a clear error message if violated.
 
-7. *Optimistix interaction with `vmap`.* If a user wants to =vmap= a sweep over hyperparameter grids (e.g., fitting the same model to many cuts of the data), the optimiser must be vmappable. =optimistix= supports this. =scipy_lm= does not. Document the constraint when the scipy adapter is used.
+7. *Optimistix interaction with =vmap=.* If a user wants to =vmap= a sweep over hyperparameter grids (e.g., fitting the same model to many cuts of the data), the optimiser must be vmappable. =optimistix= supports this. =scipy_lm= does not. Document the constraint when the scipy adapter is used.
 
 8. *Sampler signature for =SyntheticMeasure=.* The signature is =sampler(key, theta) -> (n_sim, D)=, but for \(\theta\)-independent samplers (the Euler demo case) the user is forced to accept and ignore =theta=. Acceptable boilerplate for v1; revisit if the pattern proves annoying in practice. A polymorphic overload accepting =sampler(key)= would require runtime introspection of the user's callable.
 

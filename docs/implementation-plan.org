@@ -19,7 +19,7 @@ This plan operationalises =docs/api-sketch.org= as a sequence of phases. The ord
 
 Each phase has dependencies, tasks, and an acceptance criterion. The first end-to-end run is at the end of Phase 5 (synthetic Euler estimation). Real-data acceptance is deferred to whenever data arrives.
 
-Effort estimates are rough: /S/ ≈ 1-2 hours, /M/ ≈ half-day, /L/ ≈ full day. They are calibrated against /Sue + Claude working together/ pair-of-hours, not solo developer time.
+Effort estimates are rough: /S/ ~ 1-2 hours, /M/ ~ half-day, /L/ ~ full day. They are calibrated against /Sue + Claude working together/ pair-of-hours, not solo developer time.
 
 ---
 
@@ -45,12 +45,12 @@ Not blocking implementation; the docs cite the entries either way. Done before a
 /Acceptance: every module below has a passing pytest suite./
 
 ** DONE src/emu_gmm/_internal/params.py                                    :M:
-Parameter dataclass ↔ flat JAX array conversion.
+Parameter dataclass <-> flat JAX array conversion.
 
 - =flatten_params(params)=: returns =(flat_array, treedef)= via =jax.tree_util.tree_flatten=.
 - =unflatten_params(flat_array, treedef)=: inverse.
 - Validation: leaves must be 0-d JAX-friendly (scalar floats); raise =ValueError= with a clear message if not.
-- Optional: =param_names(params)= → list of field names in canonical order, for diagnostics.
+- Optional: =param_names(params)= -> list of field names in canonical order, for diagnostics.
 
 /Tests:/ round-trip on =EulerParams(beta=0.95, gamma=2.0)=; failure path with a non-scalar leaf; field-order preservation.
 
@@ -58,7 +58,7 @@ Parameter dataclass ↔ flat JAX array conversion.
 Canonical Haliax =Axis= definitions.
 
 - Module-level =Params=, =ParamsDual=, =Moments=, =MomentsDual=, =Obs= as factory functions that take size and return an =ha.Axis=. (Cannot be module-level constants because size depends on the user's problem.)
-- Helper =dual(axis)= → matching =*Dual= axis with the same size.
+- Helper =dual(axis)= -> matching =*Dual= axis with the same size.
 
 /Tests:/ factory returns axes with the expected names and sizes; =dual()= round-trip.
 
@@ -76,8 +76,8 @@ Cholesky factor + forward/back substitution wrappers.
 Polymorphic-input adapter and label tracking.
 
 - =LabelContext= dataclass: =param_names=, =moment_names=, =variable_names=, =obs_names=. Static (non-traced) PyTree leaves so jit/vmap don't re-trace when labels change.
-- =normalise_x(x_in) -> (x_array, variable_names, obs_names)=: dispatches on input type. =pd.DataFrame= → column names → =Variables= labels, index name → =Obs= label. =ha.NamedArray= → coordinate labels. =jnp.ndarray= → positional labels =["v_0", "v_1", ...]=.
-- =normalise_weights(w_in) -> w_array=: =pd.Series= / =ha.NamedArray= / =jnp.ndarray= → plain array.
+- =normalise_x(x_in) -> (x_array, variable_names, obs_names)=: dispatches on input type. =pd.DataFrame= -> column names -> =Variables= labels, index name -> =Obs= label. =ha.NamedArray= -> coordinate labels. =jnp.ndarray= -> positional labels =["v_0", "v_1", ...]=.
+- =normalise_weights(w_in) -> w_array=: =pd.Series= / =ha.NamedArray= / =jnp.ndarray= -> plain array.
 - =normalise_mask(mask_in, n, m) -> mask_array=: ditto, with default =jnp.ones((n, m))=.
 - =resolve_moment_names(model_return, kwarg, m) -> moment_names=: applies the precedence policy (model return > kwarg > positional).
 - =label_matrix(arr, row_axis, row_names, col_axis, col_names) -> ha.NamedArray=: convenience for output construction.
@@ -161,8 +161,8 @@ The =Fixed= constructor takes a \(V_0\) array and stores its Cholesky factor, no
 ** DONE src/emu_gmm/optimizer.py                                           :M:
 =Optimizer= protocol + factories.
 
-- =optimistix_lm(rtol=1e-8, atol=1e-8, max_steps=200)= → Optimizer callable. Wraps =optimistix.LevenbergMarquardt= and =optimistix.least_squares=.
-- =scipy_lm(**kw)= → Optimizer callable. Wraps =scipy.optimize.least_squares(method='lm')=. Performs =jax.numpy= ↔ =numpy= conversion at the boundary.
+- =optimistix_lm(rtol=1e-8, atol=1e-8, max_steps=200)= -> Optimizer callable. Wraps =optimistix.LevenbergMarquardt= and =optimistix.least_squares=.
+- =scipy_lm(**kw)= -> Optimizer callable. Wraps =scipy.optimize.least_squares(method='lm')=. Performs =jax.numpy= <-> =numpy= conversion at the boundary.
 - Both return =(theta_opt, OptimizerInfo)=.
 
 /Tests:/ Both optimisers converge on Rosenbrock-as-NLLS (=residual_fn(x) = [10*(x[1] - x[0]**2), 1 - x[0]]=) from a far-from-optimum start.
@@ -192,10 +192,10 @@ The =estimate()= entry point.
 - Flatten =theta_init= to a flat JAX array via =_internal/params=.
 - Build a closure =residual_fn(theta_flat)= that:
   1. Unflattens =theta_flat= back to the user's params dataclass.
-  2. Calls =measure.expectation(model, theta)= → \(m\).
-  3. Calls =covariance.covariance(model, theta, measure)= → \(V\).
-  4. Calls =regularization.apply(V)= → \(V^\star\) (anchor-once-then-freeze policy).
-  5. Calls =weighting.whitening_residual(m, V_star, theta)= → \(y\).
+  2. Calls =measure.expectation(model, theta)= -> \(m\).
+  3. Calls =covariance.covariance(model, theta, measure)= -> \(V\).
+  4. Calls =regularization.apply(V)= -> \(V^\star\) (anchor-once-then-freeze policy).
+  5. Calls =weighting.whitening_residual(m, V_star, theta)= -> \(y\).
   6. Returns \(y\) as the NLLS residual.
 - The =LabelContext= rides as a static closure variable; it does not enter =residual_fn='s traced inputs.
 - Hand =residual_fn= and =theta_init_flat= to =optimizer=.
@@ -258,7 +258,7 @@ The variant in =docs/api-sketch.org= Section 5 runs end-to-end and converges.
 ** DONE src/emu_gmm/covariance/iid.py                                      :M:
 =IIDCovariance= pairwise-overlap form.
 
-- =covariance(psi, theta, measure)=: =einsum= over the pairwise-overlap mask × \(\psi_j \psi_k\) × \(w_i^2\).
+- =covariance(psi, theta, measure)=: =einsum= over the pairwise-overlap mask \(\times\) \(\psi_j \psi_k\) \(\times\) \(w_i^2\).
 
 /Tests:/ Special case with full mask and uniform weights matches =numpy.cov= on the \(\psi\) matrix; pairwise-overlap test with a strict-subset missingness pattern matches the analytic formula on a 3x3 toy.
 
@@ -316,7 +316,7 @@ Decide once whether =mypy= runs against =src= and =tests= or only =src=. Manifol
 * Section 12: Phase Dependencies Summary
 
 #+BEGIN_SRC text
-Phase 0 (decisions: polymorphic-input ✓; bibfile gaps)
+Phase 0 (decisions: polymorphic-input DONE; bibfile gaps)
   |
   v
 Phase 1 (foundations: params, axes, cholesky, labels, types)

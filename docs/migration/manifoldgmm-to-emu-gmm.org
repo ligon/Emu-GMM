@@ -65,13 +65,16 @@ parameter (default =True=). With =nan_aware=True= and no explicit
 
 - The per-coordinate mask is inferred from =~df.isna()= *element-wise*,
   giving an =(N, M)= 0/1 matrix (not a row-level =~df.isna().any(axis=1)=).
-- NaN cells in the stored =x= array are replaced with zero so they
-  cannot poison downstream JAX arithmetic when a model =psi= happens to
-  read a masked-out cell.
+- NaN cells in the stored =x= array are replaced with the per-column
+  mean of that column's /observed/ rows (=safe_x_for_psi= in
+  =_internal/nan_safety.py=), so a partial residual (=log=, =1/x=,
+  =sqrt=) stays inside its domain when =psi= reads a masked-out cell.
 
 Set =nan_aware=False= to preserve a legacy "all-ones mask, NaN
-verbatim" behaviour. An explicit =mask= argument always takes precedence
-over NaN inference.
+verbatim" behaviour. An explicit =mask= argument takes precedence over
+NaN inference, but combining one with NaN-laden data raises: the mask
+might mark a NaN cell observable, and silently rewriting it would bias
+\(N_j\) and the moment sum.
 
 For raw-array inputs, =EmpiricalMeasure.from_nan_aware(x, weights=...)=
 is the array-side convenience constructor with the same per-cell
@@ -82,12 +85,13 @@ semantics.
 The hot path in =expectation= and =jacobian= uses two complementary
 =jnp.where= guards:
 
-1. *Pre-sanitise =x=*: before invoking the user's =psi=, replace
-   =NaN= cells in =x= with zero
-   (=x_safe = jnp.where(jnp.isnan(x), 0.0, x)=). This means the user's
-   residual never sees =NaN= inputs --- even at masked-out cells where
-   the residual is undefined --- so neither the primal nor the JVP/VJP
-   tape carries =NaN=.
+1. *Pre-sanitise =x=*: before invoking the user's =psi=, replace =NaN=
+   cells in =x= with the per-column mean of the /observed/ rows
+   (=safe_x_for_psi=). The residual never sees =NaN= inputs, and the
+   sentinel lies inside the domain of partial residuals (=log=, =1/x=,
+   =sqrt=) whenever any observed cell of that column does, so neither
+   the primal nor the JVP/VJP tape carries =NaN=. (Zero, the prior
+   sentinel, fails exactly here: =log(0)= feeds =-inf= into the tape.)
 2. *Mask the residual output*: after =psi= produces a per-row =(M,)=
    vector (or the gradient a =(M, K)= block), zero out cells where
    =mask == 0= /before/ multiplying by the per-coordinate weight
@@ -96,9 +100,11 @@ The hot path in =expectation= and =jacobian= uses two complementary
 
 Only one of these guards is *not* enough:
 
-- Sanitising =x= alone leaves a =psi= that legitimately returns =NaN= at
-  unobserved cells (a natural pattern, e.g., =log(return)= for a
-  non-holder) free to poison the moment sum via =0 * NaN = NaN=.
+- Sanitising =x= alone is not enough when =psi= still returns a
+  non-finite value at a masked-out row (the sentinel guarantees an
+  in-domain /input/, not a finite /output/ for every residual); without
+  the output mask, that value poisons the moment sum via
+  =0 * NaN = NaN=.
 - Masking the output alone --- writing
   =jnp.where(mask, psi(x), 0.0)= without sanitising =x= --- looks
   safe in the primal but fails under reverse-mode AD. Cotangent flow
@@ -118,8 +124,8 @@ is the implementation of that rule for the NaN-mask case.
 
 - =EmpiricalMeasure.from_pandas(df)= with =nan_aware=True= (default)
   derives a per-cell mask from =~df.isna()= and replaces NaN cells in
-  =x= with zero. The mask is the authoritative source of
-  observability; downstream computations never see NaN inputs.
+  =x= with the per-column observed mean. The mask is the authoritative
+  source of observability; downstream computations never see NaN inputs.
 - =EmpiricalMeasure.from_nan_aware(x, weights=...)= is the equivalent
   for raw arrays.
 - If you construct =EmpiricalMeasure= directly with =mask= and =x=,
@@ -321,7 +327,7 @@ re-exported from the top-level =emu_gmm= namespace. Each is a single
 functional call against an existing =measure= / =covariance= / =model=
 trio; none requires holding a driver object.
 
-** =j_test= --- zero-parameter J-test at a hypothesised \(\theta_0\)
+** =j_test=: zero-parameter J-test at a hypothesised \(\theta_0\)
 
 #+BEGIN_SRC python
 from emu_gmm import j_test  # -> JTestResult
@@ -336,7 +342,7 @@ jt = j_test(
 # jt.V_X (haliax.NamedArray).
 #+END_SRC
 
-** =k_statistic= --- Kleibergen weak-IV-robust \(K/S/J\) decomposition
+** =k_statistic=: Kleibergen weak-IV-robust \(K/S/J\) decomposition
 
 #+BEGIN_SRC python
 from emu_gmm import k_statistic  # -> KStatisticResult
@@ -352,7 +358,7 @@ ks = k_statistic(
 # the chi^2_p limit holds regardless of identification strength.
 #+END_SRC
 
-** =moment_wild_bootstrap= --- refit-free cluster-wild Rademacher bootstrap
+** =moment_wild_bootstrap=: refit-free cluster-wild Rademacher bootstrap
 
 #+BEGIN_SRC python
 import jax
@@ -371,7 +377,7 @@ wb = moment_wild_bootstrap(
 # Refit-free: L = chol(V_X(theta_hat)) is fixed across replicates.
 #+END_SRC
 
-** =cluster_bootstrap= --- refit-based cluster bootstrap
+** =cluster_bootstrap=: refit-based cluster bootstrap
 
 #+BEGIN_SRC python
 import jax
@@ -390,7 +396,7 @@ cb = cluster_bootstrap(
 # cb.param_names (tuple[str, ...]).
 #+END_SRC
 
-** =numerics.ridge_inverse= --- adaptive ridge inverse helper
+** =numerics.ridge_inverse=: adaptive ridge inverse helper
 
 #+BEGIN_SRC python
 from emu_gmm import ridge_inverse
@@ -400,7 +406,7 @@ M_inv, info = ridge_inverse(M, target_condition=1.0e6)
 # info: dict with 'tau', 'kappa_before', 'kappa_after', 'binding'.
 #+END_SRC
 
-** =IteratedWeighting= --- legacy two-step / k-step weighting
+** =IteratedWeighting=: legacy two-step / k-step weighting
 
 #+BEGIN_SRC python
 from emu_gmm import IteratedWeighting
