@@ -39,6 +39,7 @@ outer loop should follow the same pattern.
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from typing import Any, cast
 
@@ -57,6 +58,23 @@ from emu_gmm.types import (
     ParamsLike,
     StructuralModel,
 )
+
+
+def _optimizer_takes_manifold_spec(optimizer: Any) -> bool:
+    """True for a v2 :class:`RiemannianOptimizer` (``manifold_spec`` arg).
+
+    Duck-types the optimiser by its ``__call__`` signature --- the same
+    surface :func:`emu_gmm.estimator._is_riemannian_optimizer` keys on ---
+    so :meth:`IteratedWeighting.outer_loop_driver` can dispatch the inner
+    solve through the pytree + ``manifold_spec`` convention a Riemannian
+    optimiser needs, without importing the estimator (which would be a
+    circular dependency). A v1 ``Optimizer`` (``__call__(residual,
+    theta)``) returns ``False`` and keeps the flat-vector inner solve.
+    """
+    try:
+        return "manifold_spec" in inspect.signature(optimizer.__call__).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
 
 
 @jdc.pytree_dataclass
@@ -368,6 +386,7 @@ class IteratedWeighting:
         optimizer: Optimizer,
         fixed_kernel: Any = None,
         chol_kernel: Any = None,
+        manifold_spec: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo, str]:
         """Drive the outer iterated-GMM loop in pure Python.
 
@@ -421,6 +440,16 @@ class IteratedWeighting:
             pathway bit-for-bit; the kwargs are keyword-only with
             defaults so third-party callers of the OLD signature are
             unaffected.
+        manifold_spec
+            The :class:`~emu_gmm._internal.params.ManifoldSpec` for a
+            non-scalar (manifold) parameter space, or ``None`` for the
+            v1 scalar-leaf path (#146). Threaded into the legacy-path
+            ``unflatten_params`` so a ``Product(PSDFixedRank, ...)`` tree
+            reshapes its ambient blocks instead of being rejected against
+            the leaf-count treedef. ``None`` reproduces the v1 unflatten
+            exactly. Like the kernel kwargs it is keyword-only with a
+            default, so OLD-signature third-party drivers are unaffected
+            (the estimator passes it only when the signature accepts it).
 
         Termination
         -----------
@@ -508,7 +537,15 @@ class IteratedWeighting:
                     fixed_kernel, theta_k_flat, args=(measure, L0_k)
                 )
             else:
-                theta_k = params_mod.unflatten_params(theta_k_flat, treedef)
+                # #146: pass ``manifold_spec`` so a non-scalar (manifold)
+                # parameter space takes the manifold-aware unflatten path
+                # and reshapes the ambient blocks. Omitting it took the v1
+                # scalar-leaf path, which rejected the ambient flatten
+                # against the leaf-count treedef. ``ContinuouslyUpdated``
+                # never hit this because it has no Python outer loop.
+                theta_k = params_mod.unflatten_params(
+                    theta_k_flat, treedef, manifold_spec=manifold_spec
+                )
                 # Refresh V at the current theta_k and apply the *anchored*
                 # ridge so the inner Fixed-weight surface uses the same tau
                 # the rest of the framework does. Then freeze a Fixed-weight
@@ -519,7 +556,23 @@ class IteratedWeighting:
                 fixed_k = Fixed.from_V0(V_star_k)
                 inner_residual = make_residual_fn(fixed_k)
 
-                theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
+                if _optimizer_takes_manifold_spec(optimizer):
+                    # #146: v2 inner solve. A RiemannianOptimizer takes
+                    # the parameter *pytree* plus ``manifold_spec`` and
+                    # returns a pytree (it owns the flat<->pytree round
+                    # trip and the retraction geometry); the flat residual
+                    # ``inner_residual`` is the same closure the v1 path
+                    # uses. Re-flatten the recovered pytree so the outer
+                    # loop's V-refresh and convergence test stay in ambient
+                    # coordinates.
+                    theta_next_pytree, info_k = cast(Any, optimizer)(
+                        inner_residual, theta_k, manifold_spec
+                    )
+                    theta_next_flat, _, _ = params_mod.flatten_params_with_spec(
+                        theta_next_pytree
+                    )
+                else:
+                    theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
             last_info = info_k
             # Inspect inner-solve status. ``"traced"`` is the placeholder
             # returned under jit (concrete status is not available); we
