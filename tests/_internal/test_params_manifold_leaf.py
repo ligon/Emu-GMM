@@ -115,6 +115,40 @@ class TestManifoldLeafPyTree:
         _, dtype = aux
         assert dtype == jnp.float32
 
+    @pytest.mark.parametrize(
+        "array, manifold",
+        [
+            (jnp.arange(10.0).reshape((5, 2)), PSDFixedRank(5, 2)),
+            (jnp.array([1.0, 2.0, 3.0]), Euclidean(3)),
+        ],
+    )
+    def test_pickle_round_trip(self, array, manifold):
+        # #147: the frozen __setattr__ rejected pickle's default slot-state
+        # reconstruction, so pickle.loads (and EstimationResult.from_pickle
+        # on a manifold theta_hat) raised "ManifoldLeaf is immutable". The
+        # __getstate__/__setstate__ hooks restore the slots via
+        # object.__setattr__. A round-trip must preserve type, value, and
+        # exact dtype, and the result must still be immutable.
+        import pickle
+
+        leaf = ManifoldLeaf(array, manifold)
+        leaf2 = pickle.loads(pickle.dumps(leaf))
+        assert type(leaf2) is ManifoldLeaf
+        assert jnp.allclose(leaf2.array, leaf.array)
+        assert leaf2.array.dtype == leaf.array.dtype
+        assert leaf2.array.shape == leaf.array.shape
+        assert leaf2.manifold == leaf.manifold
+        with pytest.raises(AttributeError):
+            leaf2.array = jnp.zeros_like(leaf2.array)
+
+    def test_pickle_preserves_float32_dtype(self):
+        # R8/R12 under pickle: a float32 leaf must not silently promote.
+        import pickle
+
+        leaf = ManifoldLeaf(jnp.zeros((5, 2), dtype=jnp.float32), PSDFixedRank(5, 2))
+        leaf2 = pickle.loads(pickle.dumps(leaf))
+        assert leaf2.array.dtype == jnp.float32
+
 
 # ---------------------------------------------------------------------------
 # v1 back-compat (R1, R2, R3, R15, R16).
