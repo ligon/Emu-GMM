@@ -128,6 +128,28 @@ def _supports_args(optimizer: Any) -> bool:
     )
 
 
+def _takes_manifold_spec(optimizer: Any) -> bool:
+    """True iff ``optimizer.__call__`` accepts a ``manifold_spec`` argument.
+
+    The distinguishing surface between a v1 :class:`~emu_gmm.types.Optimizer`
+    (``__call__(residual_fn, theta_init)``) and a v2
+    :class:`~emu_gmm.manifolds.optimizer.RiemannianOptimizer`
+    (``__call__(residual_fn, theta_init, manifold_spec)``). This is the
+    single source of truth for the duck-typed Riemannian dispatch used by
+    both :mod:`emu_gmm.estimator` (``_is_riemannian_optimizer``) and
+    :mod:`emu_gmm.weighting` (the iterated outer loop's inner solve); it
+    lives here -- a module both already import -- so ``weighting`` need not
+    import ``estimator`` (which would be a circular dependency).
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(optimizer.__call__)
+    except (TypeError, ValueError):
+        return False
+    return "manifold_spec" in sig.parameters
+
+
 # ---------------------------------------------------------------------------
 # Optimistix adapter
 # ---------------------------------------------------------------------------
