@@ -137,6 +137,25 @@ class ManifoldLeaf:
         raise AttributeError("ManifoldLeaf is immutable; cannot delete attributes.")
 
     # ------------------------------------------------------------------
+    # Pickle support (#147).
+    # ------------------------------------------------------------------
+    # The frozen ``__setattr__`` rejects pickle's default slot-state
+    # reconstruction (it ``setattr``\s each slot on a blank instance), so
+    # ``pickle.loads`` -- and therefore ``EstimationResult.from_pickle``
+    # on a manifold-valued ``theta_hat`` -- raised ``AttributeError:
+    # ManifoldLeaf is immutable``. Define the state hooks explicitly and
+    # populate the slots through ``object.__setattr__`` (the same bypass
+    # ``tree_unflatten`` uses). State is the ``(array, manifold)`` pair,
+    # so a round-trip is lossless; the array carries its own dtype.
+    def __getstate__(self) -> tuple[Any, ManifoldParam]:
+        return (self.array, self.manifold)
+
+    def __setstate__(self, state: tuple[Any, ManifoldParam]) -> None:
+        array, manifold = state
+        object.__setattr__(self, "array", jnp.asarray(array))
+        object.__setattr__(self, "manifold", manifold)
+
+    # ------------------------------------------------------------------
     # PyTree registration.
     # ------------------------------------------------------------------
     def tree_flatten(self) -> tuple[tuple[Any], tuple[ManifoldParam, Any]]:
