@@ -59,6 +59,52 @@ from emu_gmm.types import (
 )
 
 
+def _gauge_invariant_signature(theta: Any) -> Float[Array, " S"]:
+    """Flatten ``theta`` into gauge-INVARIANT coordinates for the iterated
+    outer-loop convergence test.
+
+    The raw ambient flatten of a manifold parameter is gauge-DEPENDENT: a
+    ``PSDFixedRank`` factor ``A`` is identified only up to ``A -> A Q`` for
+    orthogonal ``Q`` (both give the same ``Gamma = A A^T``). Comparing raw
+    ``A`` across outer iterations can register a large delta from a pure
+    gauge rotation even after the estimable content ``Gamma`` has stopped
+    moving, spuriously tripping the non-convergence warning (#146 follow-up).
+    The failure is safe-direction -- it can only over-report movement, never
+    declare a still-moving estimate converged -- but it muddies the status.
+
+    Each :class:`~emu_gmm.manifolds.manifold_leaf.ManifoldLeaf` is
+    self-describing, so we key on the leaf's own manifold rather than on the
+    spec-leaf order:
+
+    * a gauge-carrying ``PSDFixedRank`` leaf contributes ``vec(A A^T)`` --
+      the gauge-invariant Gram block;
+    * a gauge-free leaf (``Euclidean`` / ``Positive``, ``gauge_dim == 0``)
+      and any plain scalar leaf (the v1 path) contribute the array unchanged.
+
+    With no gauge directions the signature is the ordinary ambient flatten,
+    so the scalar / Euclidean convergence test is unchanged bit-for-bit. A
+    future gauge-carrying manifold other than ``PSDFixedRank`` would fall
+    through to the unchanged-array branch (conservative: it merely restores
+    the original safe-direction over-reporting for that leaf) and should be
+    given its own invariant here.
+    """
+    from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
+    from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
+
+    parts: list[Any] = []
+    for leaf in jax.tree_util.tree_leaves(
+        theta, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
+    ):
+        if isinstance(leaf, ManifoldLeaf) and isinstance(leaf.manifold, PSDFixedRank):
+            A = leaf.array
+            parts.append(jnp.ravel(A @ A.T))
+        elif isinstance(leaf, ManifoldLeaf):
+            parts.append(jnp.ravel(leaf.array))
+        else:
+            parts.append(jnp.ravel(jnp.asarray(leaf)))
+    return jnp.concatenate(parts) if parts else jnp.zeros((0,), dtype=jnp.float64)
+
+
 @jdc.pytree_dataclass
 class Identity:
     """Identity weighting: ``y = m``.
@@ -368,6 +414,7 @@ class IteratedWeighting:
         optimizer: Optimizer,
         fixed_kernel: Any = None,
         chol_kernel: Any = None,
+        manifold_spec: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo, str]:
         """Drive the outer iterated-GMM loop in pure Python.
 
@@ -421,6 +468,16 @@ class IteratedWeighting:
             pathway bit-for-bit; the kwargs are keyword-only with
             defaults so third-party callers of the OLD signature are
             unaffected.
+        manifold_spec
+            The :class:`~emu_gmm._internal.params.ManifoldSpec` for a
+            non-scalar (manifold) parameter space, or ``None`` for the
+            v1 scalar-leaf path (#146). Threaded into the legacy-path
+            ``unflatten_params`` so a ``Product(PSDFixedRank, ...)`` tree
+            reshapes its ambient blocks instead of being rejected against
+            the leaf-count treedef. ``None`` reproduces the v1 unflatten
+            exactly. Like the kernel kwargs it is keyword-only with a
+            default, so OLD-signature third-party drivers are unaffected
+            (the estimator passes it only when the signature accepts it).
 
         Termination
         -----------
@@ -472,7 +529,7 @@ class IteratedWeighting:
         # import: ``emu_gmm.optimizer`` does not import this module, but
         # keeping the dependency call-time avoids ordering surprises in
         # ``emu_gmm/__init__``.
-        from emu_gmm.optimizer import _supports_args
+        from emu_gmm.optimizer import _supports_args, _takes_manifold_spec
 
         use_args_path = (
             fixed_kernel is not None
@@ -493,6 +550,11 @@ class IteratedWeighting:
             )
 
         for _k in range(int(self.weighting_iterations)):
+            # Set only on the v2 (manifold) inner solve; drives the
+            # gauge-invariant convergence signal below. Stays ``None`` on
+            # the scalar / kernel paths, where the test runs on ambient
+            # flats and is therefore unchanged bit-for-bit.
+            theta_next_pytree = None
             if use_args_path:
                 # V-refresh through the factory's jitted kernel: the
                 # anchor L0_k = chol(ridge(V(theta_k))) comes back as a
@@ -508,7 +570,15 @@ class IteratedWeighting:
                     fixed_kernel, theta_k_flat, args=(measure, L0_k)
                 )
             else:
-                theta_k = params_mod.unflatten_params(theta_k_flat, treedef)
+                # #146: pass ``manifold_spec`` so a non-scalar (manifold)
+                # parameter space takes the manifold-aware unflatten path
+                # and reshapes the ambient blocks. Omitting it took the v1
+                # scalar-leaf path, which rejected the ambient flatten
+                # against the leaf-count treedef. ``ContinuouslyUpdated``
+                # never hit this because it has no Python outer loop.
+                theta_k = params_mod.unflatten_params(
+                    theta_k_flat, treedef, manifold_spec=manifold_spec
+                )
                 # Refresh V at the current theta_k and apply the *anchored*
                 # ridge so the inner Fixed-weight surface uses the same tau
                 # the rest of the framework does. Then freeze a Fixed-weight
@@ -519,7 +589,24 @@ class IteratedWeighting:
                 fixed_k = Fixed.from_V0(V_star_k)
                 inner_residual = make_residual_fn(fixed_k)
 
-                theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
+                if _takes_manifold_spec(optimizer):
+                    # #146: v2 inner solve. A RiemannianOptimizer takes
+                    # the parameter *pytree* plus ``manifold_spec`` and
+                    # returns a pytree (it owns the flat<->pytree round
+                    # trip and the retraction geometry); the flat residual
+                    # ``inner_residual`` is the same closure the v1 path
+                    # uses. Re-flatten the recovered pytree so the outer
+                    # loop's V-refresh stays in ambient coordinates; the
+                    # convergence test below instead runs on the
+                    # gauge-invariant signature of this pytree.
+                    theta_next_pytree, info_k = cast(Any, optimizer)(
+                        inner_residual, theta_k, manifold_spec
+                    )
+                    theta_next_flat, _, _ = params_mod.flatten_params_with_spec(
+                        theta_next_pytree
+                    )
+                else:
+                    theta_next_flat, info_k = optimizer(inner_residual, theta_k_flat)
             last_info = info_k
             # Inspect inner-solve status. ``"traced"`` is the placeholder
             # returned under jit (concrete status is not available); we
@@ -538,15 +625,24 @@ class IteratedWeighting:
                 # concrete.
                 pass
 
-            delta = jnp.linalg.norm(theta_next_flat - theta_k_flat)
-            # Rescale the tolerance by the current parameter norm so the
-            # test is meaningful when parameters differ by orders of
-            # magnitude (e.g. one component O(1), another O(1e6)). The
-            # ``rescale_eps`` floor protects the limit |theta_k| -> 0,
-            # where an absolute test on ``weighting_tol`` is still right.
-            theta_scale = float(
-                jnp.maximum(jnp.linalg.norm(theta_next_flat), rescale_eps)
-            )
+            # Outer-loop convergence on a GAUGE-INVARIANT signal. On the
+            # manifold path the raw ambient factor ``A`` is identified only
+            # up to ``A -> A Q``, so compare ``vec(A A^T)`` (and the
+            # gauge-free leaves unchanged) instead; on the scalar / kernel
+            # paths ``theta_next_pytree is None`` and the signal is the
+            # ambient flat, identical to the v1 test.
+            if theta_next_pytree is not None:
+                conv_prev = _gauge_invariant_signature(theta_k)
+                conv_next = _gauge_invariant_signature(theta_next_pytree)
+            else:
+                conv_prev, conv_next = theta_k_flat, theta_next_flat
+            delta = jnp.linalg.norm(conv_next - conv_prev)
+            # Rescale the tolerance by the current signal norm so the test
+            # is meaningful when parameters differ by orders of magnitude
+            # (e.g. one component O(1), another O(1e6)). The ``rescale_eps``
+            # floor protects the limit |theta_k| -> 0, where an absolute
+            # test on ``weighting_tol`` is still right.
+            theta_scale = float(jnp.maximum(jnp.linalg.norm(conv_next), rescale_eps))
             theta_k_flat = theta_next_flat
             if float(delta) < float(self.weighting_tol) * theta_scale:
                 outer_status = "converged"

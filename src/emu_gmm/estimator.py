@@ -86,7 +86,7 @@ from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.optimizer import RiemannianOptimizer
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.manifolds.spec import ManifoldSpec
-from emu_gmm.optimizer import _supports_args, optimistix_lm
+from emu_gmm.optimizer import _supports_args, _takes_manifold_spec, optimistix_lm
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
@@ -165,13 +165,11 @@ def _is_riemannian_optimizer(optimizer: Any) -> bool:
     A v1 :class:`~emu_gmm.types.Optimizer` has ``__call__(residual_fn,
     theta_init)``; a v2 :class:`~emu_gmm.manifolds.optimizer.RiemannianOptimizer`
     adds a third ``manifold_spec`` parameter. The signature is the
-    distinguishing surface (plan §2.6 / §7).
+    distinguishing surface (plan §2.6 / §7). Thin wrapper over the shared
+    :func:`emu_gmm.optimizer._takes_manifold_spec` predicate so the estimator
+    and the iterated-weighting outer loop key on one source of truth.
     """
-    try:
-        sig = inspect.signature(optimizer.__call__)
-    except (TypeError, ValueError):
-        return False
-    return "manifold_spec" in sig.parameters
+    return _takes_manifold_spec(optimizer)
 
 
 def _resolve_optimizer(
@@ -392,13 +390,19 @@ def build_estimator(
     # ``_supports_args``).
     _outer_driver = getattr(weighting, "outer_loop_driver", None)
     _driver_accepts_kernels = False
+    # #146: the legacy-path driver needs ``manifold_spec`` to unflatten a
+    # non-scalar parameter space. Probe for it with the same capability
+    # detection used for the kernels, so an OLD-signature third-party
+    # driver simply never receives the kwarg.
+    _driver_accepts_manifold_spec = False
     if _outer_driver is not None:
         try:
-            _driver_accepts_kernels = (
-                "fixed_kernel" in inspect.signature(_outer_driver).parameters
-            )
+            _driver_params = inspect.signature(_outer_driver).parameters
+            _driver_accepts_kernels = "fixed_kernel" in _driver_params
+            _driver_accepts_manifold_spec = "manifold_spec" in _driver_params
         except (TypeError, ValueError):
             _driver_accepts_kernels = False
+            _driver_accepts_manifold_spec = False
     _outer_args_ok = (
         all_scalar
         and dispatch_mode == "v1"
@@ -1000,6 +1004,10 @@ def build_estimator(
             else:
                 cu_residual_fn = residual_fn
                 kernel_kwargs = {}
+            # #146: hand the driver the manifold spec (None on the scalar
+            # path) so its legacy-path unflatten reshapes ambient blocks.
+            if _driver_accepts_manifold_spec:
+                kernel_kwargs["manifold_spec"] = unflatten_spec
             (
                 theta_hat_flat,
                 optimizer_info,
