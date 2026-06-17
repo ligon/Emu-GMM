@@ -22,10 +22,13 @@ from emu_gmm.inference.cluster_bootstrap import (
     _cluster_row_indices,
     _resample_one,
 )
+from emu_gmm.manifolds import Euclidean, ManifoldLeaf, PSDFixedRank
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.penalty import TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.weighting import ContinuouslyUpdated
+from jaxtyping import Array, Float
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -692,3 +695,319 @@ class TestPytreeRoundTrip:
         # across all stacked results (same parameter names; checked
         # via tree-equality on the static fields).
         assert stacked.param_names == results[0].param_names
+
+
+# ---------------------------------------------------------------------------
+# #150: penalty passthrough + manifold / non-scalar parameter support
+#
+# Two independent blockers fixed together, both inside cluster_bootstrap:
+#   (1) the v1 scalar-only ``flatten_params`` rejected manifold leaves, so
+#       the whole refit bootstrap died on a ``PSDFixedRank`` factor;
+#   (2) ``penalty=`` was not forwarded to the per-replicate ``estimate()``,
+#       so a penalized point estimate was refit through an *unpenalized*
+#       objective (a different, non-reportable optimum, not just a wider CI).
+# ---------------------------------------------------------------------------
+
+
+def _reconstruct_replicate0(
+    measure,
+    covariance,
+    theta_init,
+    model,
+    *,
+    key,
+    penalty,
+    optimizer=None,
+):
+    """Deterministically rebuild bootstrap replicate ``b = 0`` and refit it.
+
+    Mirrors :func:`cluster_bootstrap`'s internal draw *exactly* --
+    ``split(key, n_boot=1)`` then a uniform ``randint`` over clusters --
+    so the package's ``theta_boot[0]`` can be compared against an
+    independently-computed refit. That is the rigorous check that the
+    refit actually used the forwarded ``penalty`` (and the deferred
+    optimiser auto-dispatch), not a behavioural proxy.
+    """
+    cluster_ids_np = np.asarray(covariance.cluster_ids).astype(np.int64)
+    n_clusters = int(covariance.n_clusters)
+    rows_by_cluster = _cluster_row_indices(cluster_ids_np, n_clusters)
+    keys = jax.random.split(key, 1)
+    drawn = np.asarray(
+        jax.random.randint(keys[0], shape=(n_clusters,), minval=0, maxval=n_clusters)
+    )
+    boot_measure, boot_cov = _resample_one(measure, rows_by_cluster, drawn)
+    return estimate(
+        model=model,
+        measure=boot_measure,
+        covariance=boot_cov,
+        weighting=ContinuouslyUpdated(),
+        regularization=DiagonalTikhonov(),
+        optimizer=optimizer,
+        penalty=penalty,
+        theta_init=theta_init,
+    )
+
+
+class TestPenaltyForwarding:
+    """``penalty=`` reaches each refit (#150, second blocker)."""
+
+    def test_penalty_changes_refit_and_is_forwarded(self):
+        """The refit re-solves the *penalized* objective, not the
+        unpenalized one. Proven by exact reconstruction of replicate 0.
+        """
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=10, obs_per_cluster=20, seed=0
+        )
+        theta_init = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
+        penalty = TikhonovPenalty(c=jnp.asarray(2.0))
+        key = jax.random.PRNGKey(20240617)
+
+        boot = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=theta_init,
+            measure=measure,
+            covariance=covariance,
+            n_boot=1,
+            key=key,
+            penalty=penalty,
+        )
+        boot0 = np.asarray(boot.theta_boot.array)[0]
+
+        res_pen = _reconstruct_replicate0(
+            measure, covariance, theta_init, euler_residual, key=key, penalty=penalty
+        )
+        recon_pen = np.array(
+            [float(res_pen.theta_hat.beta), float(res_pen.theta_hat.gamma)]
+        )
+        res_nopen = _reconstruct_replicate0(
+            measure, covariance, theta_init, euler_residual, key=key, penalty=None
+        )
+        recon_nopen = np.array(
+            [float(res_nopen.theta_hat.beta), float(res_nopen.theta_hat.gamma)]
+        )
+
+        # The penalty is non-trivial: it moves the optimum.
+        assert np.max(np.abs(recon_pen - recon_nopen)) > 1e-3
+        # The bootstrap refit matched the *penalized* reconstruction ...
+        np.testing.assert_allclose(boot0, recon_pen, rtol=1e-6, atol=1e-8)
+        # ... and NOT the unpenalized one (the pre-#150 behaviour).
+        assert np.max(np.abs(boot0 - recon_nopen)) > 1e-3
+
+    def test_default_penalty_none_is_bitwise_unpenalized(self):
+        """Omitting ``penalty`` reproduces the prior (unpenalized) refit."""
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=10, obs_per_cluster=20, seed=1
+        )
+        theta_init = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
+        key = jax.random.PRNGKey(7)
+        boot = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=theta_init,
+            measure=measure,
+            covariance=covariance,
+            n_boot=1,
+            key=key,
+        )
+        boot0 = np.asarray(boot.theta_boot.array)[0]
+        res_nopen = _reconstruct_replicate0(
+            measure, covariance, theta_init, euler_residual, key=key, penalty=None
+        )
+        recon_nopen = np.array(
+            [float(res_nopen.theta_hat.beta), float(res_nopen.theta_hat.gamma)]
+        )
+        np.testing.assert_allclose(boot0, recon_nopen, rtol=1e-6, atol=1e-8)
+
+
+# --- manifold fixture: PSDFixedRank(4, 2) factor A + Euclidean(1) phi ------
+# Gauge-invariant moments triu(A A') ++ phi (adapted from
+# tests/inference/test_k_statistic_gauge.py).
+
+_N_SIDE = 4
+_K_RANK = 2
+_GAUGE_DIM = _K_RANK * (_K_RANK - 1) // 2  # 1
+_AMBIENT_P = _N_SIDE * _K_RANK + 1  # 9 (vec A ++ phi)
+_M_MANIFOLD = _N_SIDE * (_N_SIDE + 1) // 2 + 1  # 11
+_TRIU_IDX = jnp.array(np.triu_indices(_N_SIDE)).T
+
+
+@jdc.pytree_dataclass
+class _ManifoldParams:
+    """``PSDFixedRank(4, 2)`` factor ``A`` + ``Euclidean(1)`` ``phi``."""
+
+    A: ManifoldLeaf
+    phi: ManifoldLeaf
+
+
+def _make_manifold_params(A, phi) -> _ManifoldParams:
+    return _ManifoldParams(
+        A=ManifoldLeaf(jnp.asarray(A), PSDFixedRank(_N_SIDE, _K_RANK)),
+        phi=ManifoldLeaf(jnp.reshape(jnp.asarray(phi), (1,)), Euclidean(1)),
+    )
+
+
+def _manifold_model(x, theta):
+    """psi = (triu(A A') ++ phi) - x: gauge-invariant in A by construction."""
+    A = theta.A.array
+    phi = theta.phi.array[0]
+    g = (A @ A.T)[_TRIU_IDX[:, 0], _TRIU_IDX[:, 1]]
+    return jnp.concatenate([g, jnp.reshape(phi, (1,))]) - x
+
+
+def _manifold_cluster_setup(n_clusters=6, obs_per_cluster=40, noise=0.1, seed=0):
+    rng = np.random.default_rng(seed)
+    A_true = jnp.asarray(rng.normal(size=(_N_SIDE, _K_RANK)))
+    phi_true = 0.7
+    g_true = (A_true @ A_true.T)[_TRIU_IDX[:, 0], _TRIU_IDX[:, 1]]
+    target = jnp.concatenate([g_true, jnp.reshape(jnp.asarray(phi_true), (1,))])
+    N = n_clusters * obs_per_cluster
+    x = np.asarray(target)[None, :] + noise * rng.standard_normal((N, _M_MANIFOLD))
+    measure = EmpiricalMeasure(
+        x=jnp.asarray(x),
+        mask=jnp.ones((N, _M_MANIFOLD)),
+        weights=jnp.ones(N),
+    )
+    cluster_ids = jnp.repeat(jnp.arange(n_clusters, dtype=jnp.float64), obs_per_cluster)
+    covariance = ClusteredCovariance(cluster_ids=cluster_ids, n_clusters=n_clusters)
+    theta_true = _make_manifold_params(A_true, phi_true)
+    return theta_true, measure, covariance
+
+
+@pytest.mark.slow
+class TestManifoldSupport:
+    """``cluster_bootstrap`` runs on a manifold parameter tree (#150,
+    first blocker). Pre-#150 it died in the scalar-only ``flatten_params``
+    (``"all parameter leaves must be 0-d scalars in v1"``) before any
+    resampling.
+    """
+
+    def test_runs_on_psd_fixed_rank_tree(self):
+        theta_true, measure, covariance = _manifold_cluster_setup()
+        # optimizer=None -> estimate() auto-dispatches riemannian_lm() for
+        # the manifold tree (the deferred-default fix; the v1 optimistix_lm
+        # cannot retract on a PSDFixedRank factor).
+        result = cluster_bootstrap(
+            model=_manifold_model,
+            theta_init=theta_true,
+            measure=measure,
+            covariance=covariance,
+            n_boot=4,
+            key=jax.random.PRNGKey(0),
+        )
+        assert isinstance(result, ClusterBootstrapResult)
+        # theta_boot is over the AMBIENT flatten axis (9 = 4*2 + 1),
+        # matching Sigma_theta's parameters axis.
+        assert result.theta_boot.array.shape == (4, _AMBIENT_P)
+        assert result.J_boot.shape == (4,)
+        assert result.convergence.shape == (4,)
+
+    def test_param_names_are_ambient_coordinate_labels(self):
+        theta_true, measure, covariance = _manifold_cluster_setup()
+        result = cluster_bootstrap(
+            model=_manifold_model,
+            theta_init=theta_true,
+            measure=measure,
+            covariance=covariance,
+            n_boot=2,
+            key=jax.random.PRNGKey(1),
+        )
+        names = result.param_names
+        assert len(names) == _AMBIENT_P
+        # PSDFixedRank factor entries get positional ambient labels ...
+        assert names[0] == "A[0,0]"
+        assert "A[3,1]" in names
+        # ... and the Euclidean leaf contributes one labelled entry.
+        assert names[-1] == "phi[0]"
+        # Identical to the manifold-aware flatten Sigma_theta / eigenvalue_se
+        # use -- the labelling contract the issue asked for.
+        from emu_gmm._internal import labels as labels_mod
+        from emu_gmm._internal import params as params_mod
+
+        _, _, spec = params_mod.flatten_params_for_ad(theta_true)
+        assert names == tuple(labels_mod.tangent_basis_names(spec))
+
+    def test_replicates_produce_finite_ambient_estimates(self):
+        theta_true, measure, covariance = _manifold_cluster_setup(seed=3)
+        result = cluster_bootstrap(
+            model=_manifold_model,
+            theta_init=theta_true,
+            measure=measure,
+            covariance=covariance,
+            n_boot=4,
+            key=jax.random.PRNGKey(2),
+        )
+        boot = np.asarray(result.theta_boot.array)
+        # Every replicate completes (no documented-divergence NaN rows) and
+        # yields a finite ambient estimate -- the actual deliverable.
+        #
+        # We deliberately do NOT gate on ``result.convergence``: the
+        # Riemannian LM does not always *certify* convergence on the
+        # gauge-invariant quotient at the default tolerance (a direct
+        # full-sample solve on this same fixture also reports
+        # ``converged=False`` while returning a finite, sensible estimate,
+        # J ~ 6 with well-separated Gamma eigenvalues). That certification
+        # behaviour is a manifold-LM property orthogonal to #150; here we
+        # only assert the bootstrap returns usable finite draws.
+        assert boot.shape == (4, _AMBIENT_P)
+        assert np.all(np.isfinite(boot))
+
+
+@jdc.pytree_dataclass
+class _PhiRidgePenalty:
+    """Manifold-aware in-objective ridge on the Euclidean ``phi`` leaf.
+
+    Stand-in for the consumer's ``CSlopePenalty`` (#150): a penalty that
+    reads a *specific* leaf of a manifold parameter tree. The bundled
+    :class:`~emu_gmm.penalty.TikhonovPenalty` cannot, because it routes
+    through the v1 scalar-only ``flatten_params`` -- so a manifold + penalty
+    use case must supply its own ``PenaltyStrategy``, which the package's
+    ``estimate()`` penalty path already accepts.
+    """
+
+    c: Float[Array, ""]
+
+    def penalty(self, theta) -> Float[Array, ""]:
+        return jnp.asarray(self.c) * jnp.sum(theta.phi.array**2)
+
+    def gradient(self, theta):
+        return jax.grad(self.penalty)(theta)
+
+
+@pytest.mark.slow
+class TestManifoldWithPenalty:
+    """The motivating #150 case: a manifold factor AND an in-objective
+    penalty at once. Both fixes must compose.
+    """
+
+    def test_manifold_and_penalty_compose(self):
+        from emu_gmm._internal import params as params_mod
+
+        theta_true, measure, covariance = _manifold_cluster_setup(seed=5)
+        penalty = _PhiRidgePenalty(c=jnp.asarray(5.0))
+        key = jax.random.PRNGKey(99)
+
+        boot = cluster_bootstrap(
+            model=_manifold_model,
+            theta_init=theta_true,
+            measure=measure,
+            covariance=covariance,
+            n_boot=1,
+            key=key,
+            penalty=penalty,
+        )
+        boot0 = np.asarray(boot.theta_boot.array)[0]
+
+        res_pen = _reconstruct_replicate0(
+            measure, covariance, theta_true, _manifold_model, key=key, penalty=penalty
+        )
+        recon_pen = np.asarray(params_mod.flatten_params_for_ad(res_pen.theta_hat)[0])
+        res_nopen = _reconstruct_replicate0(
+            measure, covariance, theta_true, _manifold_model, key=key, penalty=None
+        )
+        recon_nopen = np.asarray(
+            params_mod.flatten_params_for_ad(res_nopen.theta_hat)[0]
+        )
+
+        # Both fixes compose: the ambient theta_boot is the penalized refit.
+        np.testing.assert_allclose(boot0, recon_pen, rtol=1e-6, atol=1e-8)
+        # The phi-ridge actually moved the phi coordinate (last ambient entry).
+        assert abs(float(recon_pen[-1]) - float(recon_nopen[-1])) > 1e-3
