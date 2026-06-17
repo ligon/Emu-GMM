@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly full run on main (07:00 UTC) so slow / accumulation-sensitive
+    # failures surface even when no PR is open.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Match the dev box: a single host CPU device for XLA. Float64 is enabled
+  # by emu_gmm at import, so no flag is needed for it.
+  XLA_FLAGS: "--xla_force_host_platform_device_count=1"
+
+jobs:
+  # --------------------------------------------------------------------- #
+  # Fast gate: lint + type + the non-slow suite. Mirrors `make quick-check`.
+  # Runs on every push and PR.
+  # --------------------------------------------------------------------- #
+  quick-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pipx install poetry
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: poetry
+      - name: Install project
+        run: poetry install --no-interaction
+      - name: ruff
+        run: poetry run python -m ruff check .
+      - name: black
+        run: poetry run python -m black --check .
+      - name: mypy
+        run: poetry run python -m mypy src tests
+      - name: pytest (not slow)
+        run: poetry run python -m pytest -m "not slow"
+
+  # --------------------------------------------------------------------- #
+  # Full gate: the WHOLE suite (incl. slow), one matrix leg per test
+  # directory. A fresh runner per leg + the module-boundary cache clear in
+  # tests/conftest.py keep JAX's compilation cache bounded, so the suite
+  # actually completes instead of SIGABRT-ing mid-run (see CLAUDE.md
+  # "64-core JIT-mmap hazard"). Runs on PRs, nightly, and on demand --- not
+  # on every push, to keep the per-push gate fast.
+  # --------------------------------------------------------------------- #
+  full-suite:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk:
+          - _internal
+          - covariance
+          - inference
+          - manifolds
+          - measures
+          - numerics
+          - examples
+          - studies
+          - toplevel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pipx install poetry
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: poetry
+      - name: Install project
+        run: poetry install --no-interaction
+      - name: pytest (${{ matrix.chunk }})
+        run: |
+          if [ "${{ matrix.chunk }}" = "toplevel" ]; then
+            # Top-level test_*.py only (subdirs run as their own legs).
+            targets=$(ls tests/test_*.py)
+          else
+            targets="tests/${{ matrix.chunk }}"
+          fi
+          echo "Running: $targets"
+          poetry run python -m pytest -q $targets
