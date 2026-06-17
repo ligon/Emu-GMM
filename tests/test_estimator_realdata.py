@@ -70,6 +70,11 @@ from emu_gmm.manifolds import Positive
 from emu_gmm.types import EstimationResult
 from jax.ops import segment_sum
 
+# Real-data acceptance test: marked slow so the every-push quick gate
+# (`pytest -m "not slow"`) skips it; it still runs in the full-suite matrix
+# and nightly. (#154)
+pytestmark = pytest.mark.slow
+
 DATA_DIR = Path(__file__).parent / "data"
 NPZ_PATH = DATA_DIR / "seasonality_euler_extract.npz"
 PROVENANCE_PATH = DATA_DIR / "seasonality_euler_extract.json"
@@ -387,7 +392,13 @@ class TestDesignSpec:
         assert bool(fit_design.converged)
 
     def test_J_at_boundary_limit(self, fit_design):
-        assert float(fit_design.J_stat) == pytest.approx(J_STAT_DESIGN, rel=2e-3)
+        # rel=1e-2 (looser than the interior pins): the sigma->0 boundary is
+        # ill-conditioned (weak identification, near-singular V_X, a *binding*
+        # ridge), so J varies ~0.3% across CPU/BLAS -- 7.0600 on the x86-64
+        # reference (Savio), 7.0823 on GitHub Actions. Conditioning
+        # sensitivity, not a regression: the interior pins
+        # (TestPublishedTreatmentSpec, J=6.574) reproduce cross-platform. (#154)
+        assert float(fit_design.J_stat) == pytest.approx(J_STAT_DESIGN, rel=1e-2)
         assert fit_design.J_dof == 11
 
     def test_adjusted_pvalue(self, fit_design):
