@@ -188,9 +188,21 @@ def _make_gauge_variant_Q(k, seed):
     term -- it must DISAGREE with the metric-exact FD reference.
     """
     base = _make_gauge_invariant_Q(k, seed, nonlinear=True)
+    # Gauge-variant perturbation along a GENERIC fixed direction R: a linear
+    # term (vertical egrad component) PLUS a quadratic term (a genuine
+    # second-order / connection term the naive additive recipe drops). (#152)
+    # A single raw entry c*Y[0,1] was tried first, but its gradient e_{0,1} is
+    # nearly HORIZONTAL at the test Y, so the vertical egrad fraction SATURATED
+    # at ~5e-4 for any coefficient (||g_bad|| grows with the coefficient too).
+    # A generic R has vertical fraction ~ sqrt(gauge_dim/dim) = O(0.3) at any
+    # full-rank Y, clearing the vert_frac > 1e-3 precondition for both k=2 and
+    # k=3; the quadratic <Y,R>**2 keeps the recipe-disagreement assertion
+    # (the naive recipe drops its connection term) non-vacuous.
+    R = jnp.asarray(np.random.default_rng(seed + 99).normal(size=(N, k)))
 
     def Q(Y):
-        return base(Y) + 2.5 * Y[0, 1] + 0.7 * Y[0, 1] ** 2
+        s = jnp.vdot(Y, R)
+        return base(Y) + 2.0 * s + 1.5 * s**2
 
     return Q
 

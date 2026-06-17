@@ -239,12 +239,16 @@ class TestRhoRegularizationNearConvergence:
     def _build_offset_fixture(self, k: int = 2, c: float = 0.1):
         r"""A PSD fixture with a non-zero residual floor at the optimum.
 
-        ``r = concat( vec(Y Y^T - Gamma_true) + c,  [phi - phi_true] )`` -- an
-        additive constant ``c`` so the optimum has ``||r|| > 0`` (whitened
-        residuals O(c=0.1), the realistic regime) and ``Q* ~ 0.5 * 15 * c^2``
-        which is sub-1.  The minimiser of ``Q`` over ``Gamma`` is still
-        ``Gamma_true`` (the constant only shifts the floor), so the optimum is
-        known.
+        ``r = concat( vec(Y Y^T - Gamma_true), [phi - phi_true], [c] )`` -- the
+        floor is an UNMODELED constant moment ``c`` (no ``theta`` can drive it to
+        zero) so the optimum has ``||r|| > 0`` (whitened residuals O(c=0.1), the
+        realistic regime where the rho_regularization noise floor bites) WITHOUT
+        moving the minimiser: the constant is additively separable from the
+        theta-dependent block, so ``Gamma_true`` / ``phi_true`` remain the EXACT
+        argmin. (#152: the previous construction added ``c`` to the
+        ``vec(Y Y^T - Gamma_true)`` residuals, which shifts the rank-2 minimiser
+        ~O(c) off ``Gamma_true`` -- pymanopt-TR lands ~0.06 away, confirming the
+        shift; see docs/handoff-2026-06-17-rtr-triage.org.)
         """
         rng = np.random.default_rng(7 + k)
         A_true = jnp.asarray(rng.normal(size=(N, k)))
@@ -253,8 +257,7 @@ class TestRhoRegularizationNearConvergence:
 
         def residual_fn(tf):
             base = _flat_psd_residual(tf, Gamma_true, phi_true, k)
-            shift = jnp.concatenate([jnp.full((N * N,), c), jnp.zeros((1,))])
-            return base + shift
+            return jnp.concatenate([base, jnp.full((1,), c)])
 
         return residual_fn, A_true, Gamma_true, phi_true
 

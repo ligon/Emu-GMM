@@ -325,10 +325,18 @@ class TestTruncatedCGStaysHorizontal:
         # just at the end.
         rngM = np.random.default_rng(1)
         flat_dim = n * k
-        Msym = jnp.asarray(rngM.normal(size=(flat_dim, flat_dim)))
-        Msym = 0.5 * (Msym + Msym.T)
-        # Make it indefinite so tCG can run to the boundary / neg curvature.
-        Msym = Msym - 0.5 * jnp.eye(flat_dim)
+        # SPD operator with a deliberately SPREAD eigen-spectrum (cond ~ 1e3),
+        # so tCG genuinely runs many interior CG steps before the residual
+        # target is met. The previous fixture used an INDEFINITE Msym with a
+        # tiny radius, which made tCG stop on iter 1 (negative-curvature bail
+        # or an immediate boundary hit) -- the recurrence was never exercised.
+        # Restricted to the horizontal subspace the operator ``P Msym`` equals
+        # the symmetric ``P Msym P`` (P is the orthogonal horizontal
+        # projection), which is SPD when Msym is SPD: no neg-curvature bail.
+        Qortho, _ = jnp.linalg.qr(jnp.asarray(rngM.normal(size=(flat_dim, flat_dim))))
+        eigs = jnp.asarray(np.geomspace(1.0, 1.0e3, num=flat_dim))
+        Msym = Qortho @ jnp.diag(eigs) @ Qortho.T
+        Msym = 0.5 * (Msym + Msym.T)  # symmetrize away rounding
 
         def hvp(eta_flat):
             vmat = jnp.reshape(eta_flat, (n, k))
@@ -340,13 +348,17 @@ class TestTruncatedCGStaysHorizontal:
         grad = jnp.reshape(
             psd.projection(Y, jnp.asarray(rng.normal(size=(n, k)))), (-1,)
         )
-        # Small radius forces many inner iterations to the boundary.
+        # Large radius so the boundary is NOT the binding stop on iter 1, and a
+        # tight kappa/theta residual target so the two-regime stop is not met
+        # until the spread spectrum has been resolved over many CG steps. With
+        # an SPD, well-conditioned-only-by-luck operator this needs >= 5 inner
+        # iterations to drive ||r|| below ``norm_r0 * 1e-6``.
         eta, info = _truncated_cg(
             hvp,
             grad,
-            radius=1e-2,
+            radius=1e3,
             max_inner=50,
-            kappa=0.1,
+            kappa=1e-6,
             theta=1.0,
             min_inner=1,
         )
@@ -649,17 +661,27 @@ class TestVerticalGradientNegativeControl:
         assert float(jnp.linalg.norm(psd.projection(Y, vertical_dir))) < 1e-8
         assert float(jnp.linalg.norm(vertical_dir)) > 1e-3  # but ambient large
 
-        # Residual whose gradient at flat(Y, phi*) is exactly this vertical
-        # direction on the PSD block and 0 on phi: r(theta) = <vertical, Y> as
-        # a single linear moment. grad_Y (1/2 r^2)... we instead make r linear
-        # so the Euclidean gradient is the constant vertical_dir.
+        # Residual whose Euclidean gradient at flat(Y, phi*) is a nonzero
+        # multiple of this vertical direction on the PSD block and 0 on phi.
+        # The criterion is the least-squares ``0.5 * sum(r^2)``, so the ambient
+        # gradient of moment 0 is ``r0 * c``. With the bare moment ``r0 =
+        # <c, Yf>`` this VANISHES at the start: ``<Y Omega, Y>_F = 0`` because a
+        # skew-symmetric ``Omega`` is Frobenius-orthogonal to the symmetric
+        # ``Y^T Y``, so ``r0 = 0`` and the ambient gradient is ~0 -- the
+        # negative control would be VACUOUS. Adding a nonzero constant offset
+        # ``r0 = <c, Yf> - 1`` makes ``r0 = -1`` at the start, so the ambient
+        # gradient is ``-1 * c = -vertical_dir`` (large, purely vertical) while
+        # its horizontal projection is still ~0 (genuine horizontal
+        # stationarity). The offset does not change WHERE the horizontal
+        # stationary point is -- the only descent direction stays the
+        # quotiented-out vertical ``c``.
         c = jnp.reshape(vertical_dir, (-1,))
 
         def residual_fn(tf):
             # phi already at its target (0), so only the vertical PSD push.
             Yf = tf[: n * k]
             phi = tf[n * k]
-            return jnp.stack([jnp.sum(c * Yf), phi])
+            return jnp.stack([jnp.sum(c * Yf) - 1.0, phi])
 
         @jdc.pytree_dataclass
         class P:

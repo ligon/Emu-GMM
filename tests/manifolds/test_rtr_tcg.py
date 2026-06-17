@@ -301,25 +301,38 @@ class TestRetangentialization:
         k = 3
         manifold = PSDFixedRank(N, k)
         rng = np.random.default_rng(123)
-        # Y deliberately OFF the canonical gauge so jax.grad(Q) carries a
-        # measurable skew Y^T g - g^T Y != 0 -- the seed has a vertical part
-        # that a no-reprojection CG would amplify.
+        # Y is a generic off-canonical factor. The residual below is
+        # GAUGE-INVARIANT (depends on Y only through Gamma = Y Y^T), so the
+        # ambient gradient AND the projected HVP map the horizontal subspace to
+        # itself. The property under test: tCG keeps its iterate HORIZONTAL
+        # across the inner CG recurrence (where re-tangentialization lives), so
+        # the returned eta carries (essentially) zero vertical energy.
+        #
+        # (#152) An earlier revision asserted a >1e-3 vertical (skew) component
+        # in the SEED gradient as a non-vacuity precondition -- but a function of
+        # Y Y^T alone has a strictly horizontal egrad (Y^T g - g^T Y == 0
+        # identically), so that precondition is UNSATISFIABLE for the very
+        # gauge-invariant residual the property requires. (Making the residual
+        # gauge-VARIANT to satisfy it instead injects a genuine vertical descent
+        # direction that tCG correctly KEEPS, giving vertical energy O(0.1) --
+        # not a re-tangentialization failure.) Non-vacuity is pinned instead by
+        # num_inner >= 2: the re-tangentialized recurrence is genuinely run over
+        # multiple inner iterations.
         Y = jnp.asarray(rng.normal(size=(N, k)))
-        target = (Y @ Y.T)[_TRIU4[:, 0], _TRIU4[:, 1]] + 0.5 * jnp.asarray(
+        triu_target = (Y @ Y.T)[_TRIU4[:, 0], _TRIU4[:, 1]] + 0.5 * jnp.asarray(
             rng.normal(size=(_TRIU4.shape[0],))
         )
-        residual_fn = _gauge_invariant_residual(target, k)
+
+        def residual_fn(theta_flat: jnp.ndarray) -> jnp.ndarray:
+            Y_ = jnp.reshape(theta_flat[: N * k], (N, k))
+            return (Y_ @ Y_.T)[_TRIU4[:, 0], _TRIU4[:, 1]] - triu_target
+
         params = _psd_params(Y, k)
         spec = manifold_spec_from_params(params)
         flat, _, _ = flatten_params_with_spec(params)
 
         Q = _objective(residual_fn)
         grad_flat = jax.grad(Q)(flat)
-        # Confirm the seed gradient genuinely has a skew (vertical) component
-        # in the ambient frame -- otherwise this test would be vacuous.
-        g = grad_flat.reshape(N, k)
-        skew = Y.T @ g - g.T @ Y
-        assert float(jnp.linalg.norm(skew)) > 1e-3
 
         def hvp(eta_flat):
             return _riemannian_hvp(residual_fn, flat, spec, eta_flat)
