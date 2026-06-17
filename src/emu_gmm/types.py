@@ -233,6 +233,33 @@ class OptimizerInfo:
     # Riemannian-LM path). Carried as a traced child of the PyTree.
     done: Any = None
 
+    # #152 (Riemannian trust region): ADDITIVE, backward-compatible fields.
+    # Every pre-existing backend leaves these at their ``None`` default, so
+    # nothing about the LM / optimistix / scipy paths changes (they remain
+    # traced children of the pytree, but ``None`` rides as an empty subtree).
+    #
+    # ``final_gradient_norm`` is the HORIZONTAL Riemannian gradient norm at
+    # the returned iterate (gauge-invariant); RTR surfaces it so a caller can
+    # read the stationarity certificate without re-deriving it. Traced 0-d.
+    final_gradient_norm: Any = None
+    # ``max_tcg_steps`` / ``max_radius`` are the RESOLVED tCG / trust-radius
+    # defaults the run actually used (derived from the intrinsic quotient
+    # dimension, not the ambient nk). Surfaced for the intrinsic-dimension
+    # contract (#152). Static-ish ints/floats; carried traced for jit safety.
+    max_tcg_steps: Any = None
+    max_radius: Any = None
+    # ``n_negcurv`` counts the outer steps whose inner tCG reported a
+    # negative-curvature exit -- the meta-check that RTR genuinely used its
+    # second-order machinery (non-convex navigation), not a vacuous GN path.
+    n_negcurv: Any = None
+    # ``tr_trace`` is the per-outer-step trace (Delta, rho, rhonum, rho_reg,
+    # grad_norm, accepted, stop-reason, conv_threshold, proposed_full_rank).
+    # A mapping of stacked 0-d arrays keyed by name; ``None`` for non-RTR
+    # backends. Read via the tests' ``_info_get`` helper (which also probes
+    # an ``extra`` mapping; we expose the same dict under both names).
+    tr_trace: Any = None
+    extra: Any = None
+
 
 @dataclasses.dataclass(frozen=True)
 class Diagnostics:
