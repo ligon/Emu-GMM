@@ -100,7 +100,7 @@ def _psd_pos_params(Y: jnp.ndarray, s: float, k: int) -> _PSDPosParams:
     # Positive's ambient_shape is () (0-d scalar); ManifoldLeaf carries it.
     return _PSDPosParams(
         Y=ManifoldLeaf(jnp.asarray(Y), PSDFixedRank(N, k)),
-        s=ManifoldLeaf(jnp.asarray(jnp.float64(s)), Positive()),
+        s=ManifoldLeaf(jnp.asarray(jnp.float64(s)), Positive()),  # type: ignore[arg-type]
     )
 
 

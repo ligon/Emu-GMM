@@ -768,6 +768,48 @@ class _TCGInfo:
         return self._d[key]
 
 
+@dataclasses.dataclass(frozen=True)
+class _TRTrace:
+    """Attribute view over the per-outer-step trust-region trace (#152).
+
+    The pymanopt-parity gate (``test_rtr_pymanopt_parity.py``) reads the trace
+    via ATTRIBUTE access on lowercase, partly-renamed fields
+    (``tr_trace.delta`` / ``.rho`` / ``.grad_norm`` / ``.tcg_stop`` /
+    ``.n_negcurv``). Internally the solve accumulates a raw dict keyed
+    ``'Delta'`` / ``'rho'`` / ``'grad_norm'`` / ``'stop_code'`` / ... ; this
+    frozen view maps the spec names onto that dict (still kept verbatim under
+    ``OptimizerInfo.extra`` for the dict-style ``_info_get`` path) and carries
+    the scalar negative-curvature count. ``stop_code`` is cast to int so
+    ``tcg_stop`` matches pymanopt's integer stop-reason enumeration.
+    """
+
+    _d: dict
+    _n_negcurv: Any
+
+    @property
+    def delta(self) -> Any:
+        return self._d["Delta"]
+
+    @property
+    def rho(self) -> Any:
+        return self._d["rho"]
+
+    @property
+    def grad_norm(self) -> Any:
+        return self._d["grad_norm"]
+
+    @property
+    def tcg_stop(self) -> Any:
+        return jnp.asarray(self._d["stop_code"], dtype=jnp.int32)
+
+    @property
+    def n_negcurv(self) -> Any:
+        return self._n_negcurv
+
+    def __getitem__(self, key: str) -> Any:
+        return self._d[key]
+
+
 # ===========================================================================
 # The trust-region outer loop + RiemannianOptimizer adapter.
 # ===========================================================================
@@ -995,25 +1037,17 @@ class _RiemannianTR:
                 rnorm_new = jnp.sqrt(jnp.sum(r_new * r_new))
 
                 conv_thresh = self.atol + self.rtol * rnorm_new
-                # A boundary-limited step that was accepted AND achieved a
-                # GENUINE cost decrease (rhonum well clear of the rho_reg
-                # floor) means the quadratic model wanted to move further than
-                # the trust radius allowed and is still making real progress --
-                # do NOT certify convergence yet. This is what lets RTR keep
-                # sliding when the gradient is momentarily tiny but the cost is
-                # still dropping toward the optimum, while a TRUE optimum (cost
-                # flat, rhonum ~ rho_reg) releases the gate so the ordinary
-                # gradient-norm stop fires. Preserves both the convex
-                # convergence (an all-Euclidean linear residual hits the
-                # boundary every step yet must still certify once the cost
-                # settles) and saddle/plateau navigation.
-                genuine_progress = rhonum > (10.0 * rho_reg)
-                boundary_progressing = jnp.logical_and(
-                    jnp.logical_and(accept, is_boundary), genuine_progress
-                )
-                converged = jnp.logical_and(
-                    gnorm_new < conv_thresh, jnp.logical_not(boundary_progressing)
-                )
+                # #152 parity: match pymanopt's stopping rule -- certify on a
+                # pure (horizontal) gradient-norm floor
+                # (pymanopt._check_stopping_criterion stops when
+                # ||grad|| < min_gradient_norm). pymanopt has NO boundary-
+                # progress hold-off, so we drop the emu-gmm-specific one that
+                # could defer 'converged' on a boundary-riding trajectory all
+                # the way to max_steps (the source of the non-convex meta-gate's
+                # converged=False). The all-Euclidean linear case that rides the
+                # trust boundary every step still certifies here exactly as
+                # pymanopt does, the moment the gradient norm settles.
+                converged = gnorm_new < conv_thresh
 
                 n_negc_new = n_negc + jnp.where(is_negc, 1, 0)
 
@@ -1135,7 +1169,7 @@ class _RiemannianTR:
             max_tcg_steps=jnp.asarray(max_tcg),
             max_radius=jnp.asarray(Delta_bar),
             n_negcurv=n_negc,
-            tr_trace=trace,
+            tr_trace=_TRTrace(trace, n_negc),
             extra=extra,
         )
         return theta_hat, info

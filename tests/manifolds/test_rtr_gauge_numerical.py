@@ -221,9 +221,18 @@ class TestGaugeInvariantConvergence:
         assert bool(info_a.done) is True
         assert bool(info_b.done) is True
 
-        # (1) IDENTICAL outer-iteration count: the trajectory in Gamma is the
-        # same orbit, so a correctly gauged solver takes the same steps.
-        assert _outer_steps(info_a) == _outer_steps(info_b)
+        # (1) Outer-iteration count agrees to WITHIN ONE step. ``Q`` here is a
+        # DENSE rotation (``_orthogonal`` = qr of a Gaussian), so ``Y0 @ Q`` is
+        # itself a rounded matrix product and the two trajectories are
+        # gauge-equivalent only up to ~1e-9 rounding. The integer outer-step
+        # count is the single most fragile observable -- a hard threshold
+        # crossing near convergence -- so it can differ by one between gauges
+        # even when every CONTINUOUS invariant agrees (Gamma to 1e-9 below; the
+        # reported horizontal gradient norm to 1e-9 in the sibling test). Exact
+        # integer equality under a dense rotation is not achievable without
+        # per-step gauge canonicalization (owner decision 2026-06-17: out of
+        # scope; the meaningful gauge invariants stay strict). #152.
+        assert abs(_outer_steps(info_a) - _outer_steps(info_b)) <= 1
 
         # (2) Gamma agrees to 1e-9 (gauge-invariant point estimate).
         Aa, _ = _components(th_a, k)
@@ -386,7 +395,7 @@ class TestIntrinsicDimensionDefaults:
                 Y: ManifoldLeaf
                 phi: ManifoldLeaf
 
-            params = P(
+            params = P(  # type: ignore[assignment]
                 Y=ManifoldLeaf(jnp.ones((n, k)), PSDFixedRank(n, k)),
                 phi=ManifoldLeaf(jnp.ones((1,)), Euclidean(1)),
             )
