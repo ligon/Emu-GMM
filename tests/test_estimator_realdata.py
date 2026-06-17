@@ -89,8 +89,17 @@ J_PVALUE_PUBLISHED = 0.8324639536151227
 # Design-based spec: StratifiedCovariance over PSU-in-cell-in-stratum.
 # The real-data CUE optimum collapses to the boundary sigma -> 0+; the
 # J pin is the criterion's stable log-residual limit there.
-J_STAT_DESIGN = 5.437512368259919
-J_PVALUE_ADJ_DESIGN = 0.9081434949046955
+#
+# Re-blessed for #151. The previous pins (J=5.437512, p_adjusted=0.908143)
+# were an ORPHANED transcription -- no current code path reproduces them.
+# emu-gmm's StratifiedCovariance and the consumer's current 'design' spec
+# (which is built on that same emu-gmm covariance and reads J off the
+# EstimationResult) both yield J=7.0600 on this extract, independently
+# re-derived from first principles as m_bar' V_X^{-1} m_bar = 7.058. The
+# 5.44 was a stale pre-migration value hidden by the suite's accumulation
+# crash. See issue #151 for the full investigation.
+J_STAT_DESIGN = 7.059998900803705
+J_PVALUE_ADJ_DESIGN = 0.7942040529790122
 
 # Data-integrity pins (exact properties of the frozen extract).
 N_ROWS = 3422
@@ -382,7 +391,9 @@ class TestDesignSpec:
         assert fit_design.J_dof == 11
 
     def test_adjusted_pvalue(self, fit_design):
-        # Matches the consumer's p_adjusted = 0.9081 for the design level.
+        # emu-gmm StratifiedCovariance value -- the consumer's current
+        # 'design' spec reads this same p_adjusted off the result. The old
+        # 0.9081 was a stale pre-migration orphan (#151).
         assert float(fit_design.J_pvalue_adjusted) == pytest.approx(
             J_PVALUE_ADJ_DESIGN, abs=2e-3
         )
