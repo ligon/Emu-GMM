@@ -38,7 +38,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
-from emu_gmm._internal.params import flatten_params
+from emu_gmm._internal.params import flatten_params_for_ad
 
 ParamsLike = Any
 
@@ -69,12 +69,33 @@ class TikhonovPenalty:
     Computes :math:`p(\\theta) = c \\cdot \\lVert \\theta_{\\mathrm{flat}}
     \\rVert^2` where ``c`` is a non-negative scalar coefficient and
     :math:`\\theta_{\\mathrm{flat}}` is the leaf-stacked 1-D
-    representation of ``theta`` (same convention as
-    :func:`emu_gmm._internal.params.flatten_params`).
+    representation of ``theta`` produced by the manifold-aware
+    :func:`emu_gmm._internal.params.flatten_params_for_ad`.
 
     The gradient is :math:`\\nabla_\\theta p(\\theta) = 2 c
     \\theta_{\\mathrm{flat}}`, returned in the original pytree shape so
     the user can compose it with their own theta-shaped values.
+
+    Manifold parameters
+    -------------------
+    For an all-scalar (v1) tree the flatten is the v1 leaf-stack, so the
+    value is **bitwise unchanged** from the original scalar-only
+    implementation. For a tree with a non-scalar / manifold leaf the ridge
+    acts on the **ambient** flatten (issue #150). For a
+    :class:`~emu_gmm.manifolds.psd_fixed_rank.PSDFixedRank` factor ``A``
+    this is
+
+    .. math::
+       c \\, \\lVert A \\rVert_F^2 = c \\, \\operatorname{tr}(A A^\\top)
+         = c \\, \\operatorname{tr}(\\Gamma),
+
+    which is **gauge-invariant** --- :math:`\\lVert A Q \\rVert_F =
+    \\lVert A \\rVert_F` for orthogonal ``Q`` --- so the penalty is
+    well-defined on the quotient (it shrinks the scale of
+    :math:`\\Gamma = A A^\\top`, not a gauge-arbitrary coordinate). A
+    consumer wanting to penalise only a *specific* leaf (e.g. a coefficient
+    sub-block) should supply its own :class:`PenaltyStrategy` reading that
+    leaf directly; this class ridges the whole ambient vector uniformly.
 
     Parameters
     ----------
@@ -86,8 +107,13 @@ class TikhonovPenalty:
     c: Float[Array, ""]
 
     def penalty(self, theta: ParamsLike) -> Float[Array, ""]:
-        """Return :math:`p(\\theta) = c \\cdot \\lVert \\theta_{\\mathrm{flat}} \\rVert^2`."""
-        flat, _ = flatten_params(theta)
+        """Return :math:`p(\\theta) = c \\cdot \\lVert \\theta_{\\mathrm{flat}} \\rVert^2`.
+
+        ``theta`` may carry manifold / non-scalar leaves; the ambient
+        flatten is used (see the class docstring for the gauge-invariance
+        of the resulting ridge on a ``PSDFixedRank`` factor).
+        """
+        flat, _, _ = flatten_params_for_ad(theta)
         return jnp.asarray(self.c) * jnp.sum(flat * flat)
 
     def gradient(self, theta: ParamsLike) -> ParamsLike:
