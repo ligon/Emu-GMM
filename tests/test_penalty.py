@@ -19,6 +19,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 import pytest
 from emu_gmm.covariance import SyntheticCovariance
 from emu_gmm.estimator import estimate
@@ -28,6 +29,7 @@ from emu_gmm.examples.euler import (
     euler_residual,
     euler_sampler_factory,
 )
+from emu_gmm.manifolds import Euclidean, ManifoldLeaf, PSDFixedRank
 from emu_gmm.measures import SyntheticMeasure
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
@@ -87,6 +89,84 @@ class TestProtocolConformance:
     def test_isinstance_protocol(self):
         pen = TikhonovPenalty(c=jnp.asarray(1.0))
         assert isinstance(pen, PenaltyStrategy)
+
+
+# ---------------------------------------------------------------------------
+# Manifold / non-scalar parameter support (#150)
+#
+# Pre-#150 TikhonovPenalty routed through the v1 scalar-only flatten_params
+# and raised on any non-scalar leaf. It now uses the manifold-aware
+# flatten_params_for_ad, so it ridges the ambient flatten. For a
+# PSDFixedRank factor A the ridge c*||A||_F^2 = c*tr(Gamma) is
+# gauge-invariant.
+# ---------------------------------------------------------------------------
+
+_N_SIDE = 5
+_K_RANK = 2
+
+
+@jdc.pytree_dataclass
+class _ManifoldTheta:
+    """PSDFixedRank(5, 2) factor ``A`` + Euclidean(1) ``phi``."""
+
+    A: ManifoldLeaf
+    phi: ManifoldLeaf
+
+
+def _mk_manifold(A, phi) -> _ManifoldTheta:
+    return _ManifoldTheta(
+        A=ManifoldLeaf(jnp.asarray(A), PSDFixedRank(_N_SIDE, _K_RANK)),
+        phi=ManifoldLeaf(jnp.reshape(jnp.asarray(phi), (1,)), Euclidean(1)),
+    )
+
+
+class TestTikhonovPenaltyManifold:
+    """The bundled ridge accepts manifold trees (#150)."""
+
+    def test_value_on_manifold_tree(self):
+        rng = np.random.default_rng(0)
+        A = jnp.asarray(rng.normal(size=(_N_SIDE, _K_RANK)))
+        phi = 0.7
+        c = 0.5
+        pen = TikhonovPenalty(c=jnp.asarray(c))
+        got = float(pen.penalty(_mk_manifold(A, phi)))
+        # Ambient ridge: c * (||A||_F^2 + phi^2).
+        expected = c * (float(jnp.sum(A * A)) + phi**2)
+        assert got == pytest.approx(expected, rel=1e-12)
+
+    def test_gauge_invariant_on_psd_factor(self):
+        # p depends on A only through ||A||_F^2 = tr(A A') = tr(Gamma),
+        # invariant under the gauge action A -> A Q (Q orthogonal).
+        rng = np.random.default_rng(1)
+        A = jnp.asarray(rng.normal(size=(_N_SIDE, _K_RANK)))
+        Q, _ = jnp.linalg.qr(jnp.asarray(rng.normal(size=(_K_RANK, _K_RANK))))
+        pen = TikhonovPenalty(c=jnp.asarray(1.3))
+        p0 = float(pen.penalty(_mk_manifold(A, 0.4)))
+        p1 = float(pen.penalty(_mk_manifold(A @ Q, 0.4)))
+        assert p1 == pytest.approx(p0, rel=1e-10, abs=1e-12)
+
+    def test_gradient_is_two_c_theta(self):
+        rng = np.random.default_rng(2)
+        A = jnp.asarray(rng.normal(size=(_N_SIDE, _K_RANK)))
+        phi = 0.6
+        c = 0.25
+        pen = TikhonovPenalty(c=jnp.asarray(c))
+        theta = _mk_manifold(A, phi)
+        g = pen.gradient(theta)
+        # tree_leaves descends into ManifoldLeaf -> [grad_A, grad_phi]
+        # regardless of the wrapper jax.grad reconstructs.
+        leaves = [np.asarray(x) for x in jax.tree_util.tree_leaves(g)]
+        assert len(leaves) == 2
+        np.testing.assert_allclose(leaves[0], 2 * c * np.asarray(A), rtol=1e-10)
+        np.testing.assert_allclose(leaves[1], 2 * c * np.array([phi]), rtol=1e-10)
+
+    def test_protocol_conformance_on_manifold_value(self):
+        # Still satisfies the runtime-checkable protocol, and the value is
+        # a finite scalar on a manifold tree.
+        pen = TikhonovPenalty(c=jnp.asarray(1.0))
+        assert isinstance(pen, PenaltyStrategy)
+        val = pen.penalty(_mk_manifold(np.ones((_N_SIDE, _K_RANK)), 0.5))
+        assert jnp.ndim(val) == 0 and bool(jnp.isfinite(val))
 
 
 # ---------------------------------------------------------------------------
