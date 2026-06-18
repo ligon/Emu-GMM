@@ -83,11 +83,21 @@ if TYPE_CHECKING:
 _RHO_PRIME: float = 0.1
 _RHO_REGULARIZATION: float = 1e3
 _GAUGE_FLOOR: float = 1e-6
-# #152: trust-radius stagnation floor. When Delta collapses below this the
-# solver cannot make further progress (the CU noise-floor / boundary case);
-# certify rather than spin to max_steps. Far below any useful radius, so a
-# clean run (which certifies on the gradient norm with Delta still O(1)) never
-# reaches it -- keeping the criterion gauge-safe.
+# #152/#156: ftol (cost-stagnation) convergence, mirroring riemannian_lm's #156
+# stop. After ``_FTOL_PATIENCE`` consecutive ACCEPTED steps whose relative cost
+# reduction is below ``_FTOL`` the iterate is at the achievable cost floor;
+# certify. GATED on ``total_gauge_dim > 0`` (gauge-bearing leaves only) -- a
+# gauge-free / scalar tree keeps its exact pre-#156 stopping point so a pinned
+# boundary J is unchanged (the sigma->0 boundary is a consumer-model issue, not
+# a solver one; see #159). Cost is gauge-invariant, so a fired ftol stop is
+# identical along the O(k) fibre -- unlike a step-norm stop it never perturbs
+# the gauge-equivariant step count.
+_FTOL: float = 1e-8
+_FTOL_PATIENCE: int = 8
+# Trust-radius stagnation floor (RTR companion to ftol; see the converged-block
+# note). Far below any useful radius, so a clean run -- which certifies on the
+# gradient norm with Delta still O(1) -- never reaches it. Also gated on
+# total_gauge_dim > 0.
 _MIN_RADIUS: float = 1e-12
 
 # tCG stop-reason codes (string mirror of pymanopt's six integer codes).
@@ -834,6 +844,8 @@ class _RiemannianTR:
     max_radius: float | None
     init_radius: float | None
     gauge_floor: float
+    ftol: float
+    ftol_patience: int
 
     def __call__(
         self,
@@ -854,6 +866,14 @@ class _RiemannianTR:
         total_dim = int(manifold_spec.total_dimension)
         total_gauge = int(manifold_spec.total_gauge_dim)
         identified = total_dim - total_gauge
+        # ftol (cost-stagnation) certification is gated on gauge structure
+        # (#156): a gauge-free / scalar tree keeps its exact gradient-norm
+        # stopping point (so a pinned boundary J is unchanged), while a
+        # gauge-bearing leaf -- whose CU criterion gradient has a noise floor
+        # the gradient test cannot reach -- certifies on cost stationarity.
+        ftol_active = total_gauge > 0
+        ftol = float(self.ftol)
+        ftol_patience = int(self.ftol_patience)
 
         # Intrinsic-dimension defaults (NOT ambient nk): maxinner / Delta_bar
         # from the identified quotient dimension.
@@ -952,12 +972,12 @@ class _RiemannianTR:
             init_trace["proposed_full_rank"] = jnp.ones((max_steps,), dtype=jnp.float64)
 
             def cond_fun(carry: Any) -> Any:
-                _x, _g, _gn, _f, _rn, Delta, step, done, _nn, _tr = carry
+                _x, _g, _gn, _f, _rn, Delta, step, done, _nn, _tr, _stall = carry
                 del _x, _g, _gn, _f, _rn, Delta, _nn, _tr
                 return jnp.logical_and(step < max_steps, jnp.logical_not(done))
 
             def body_fun(carry: Any) -> Any:
-                x, g, gnorm, fx, rnorm, Delta, step, done, n_negc, trace = carry
+                x, g, gnorm, fx, rnorm, Delta, step, done, n_negc, trace, stall = carry
                 del done
 
                 hvp = hvp_at(x, args_in)
@@ -1054,25 +1074,45 @@ class _RiemannianTR:
                 # trust boundary every step still certifies here exactly as
                 # pymanopt does, the moment the gradient norm settles.
                 grad_converged = gnorm_new < conv_thresh
-                # #152 (CU Delta-collapse): a trust-radius STAGNATION criterion.
-                # Under continuously-updated weighting the criterion's gradient
-                # carries an empirical noise floor (V_X estimation + the
-                # d/dtheta W term) that can sit ABOVE atol + rtol*||r||, so the
-                # horizontal gradient norm never reaches the floor and a
-                # gradient-only rule lets Delta collapse to ~1e-16 at the
-                # (correctly recovered) optimum without ever certifying. When
-                # Delta has collapsed below _MIN_RADIUS the solver cannot make
-                # further progress and is stationary to within achievable
-                # precision -- certify. GAUGE-SAFE (vs a step-norm stop, which is
-                # a knife-edge threshold that flips between dense-gauge-rotated
-                # runs near convergence): Delta is a gauge-invariant scalar that
-                # does NOT collapse in a clean run (the gradient criterion fires
-                # first with Delta still O(1)), so this clause never perturbs the
-                # gauge-equivariant step count -- only a genuine collapse trips
-                # it. (riemannian_lm has an analogous stop; pymanopt exposes
-                # min_step_size.)
+                # #152/#156 ftol (cost-stagnation): an ACCEPTED step whose
+                # relative cost reduction is below ftol is "stagnant" -- the
+                # iterate is at the achievable cost floor. After ftol_patience
+                # consecutive such steps, certify on cost stationarity. This
+                # catches what grad_converged misses under continuously-updated
+                # weighting, where the criterion gradient has an empirical noise
+                # floor (V_X estimation + the d/dtheta W term) sitting above
+                # atol+rtol*||r||, so the horizontal gradient norm never reaches
+                # the floor (RTR reaches the right optimum but never certifies).
+                # A REJECTED step resets the counter (the solver is still
+                # exploring). GATED on gauge structure (ftol_active): a
+                # gauge-free / scalar tree keeps its exact grad-norm stopping
+                # point; and since the cost is gauge-invariant, a fired ftol stop
+                # is identical along the O(k) fibre -- so, unlike a step-norm
+                # stop, it never perturbs the gauge-equivariant step count.
+                # Mirrors riemannian_lm's #156 ftol stop.
+                actual_reduction = fx - fx_prop
+                stagnant_accepted = jnp.logical_and(
+                    accept, actual_reduction < ftol * fx
+                )
+                stall_next = jnp.where(stagnant_accepted, stall + 1, 0)
+                # RTR-specific companion to ftol: at the CU noise floor RTR
+                # OSCILLATES accept(rho~1, expand)/reject(rho<0 at the larger
+                # radius, shrink), so the trust radius collapses toward ~1e-16
+                # while the *consecutive-accepted* ftol counter keeps resetting
+                # on the rejects and never reaches patience (whereas LM's
+                # monotone-accepted collapse lets ftol fire -- #156). The radius
+                # collapse is monotone through the oscillation, so certify when
+                # Delta falls below _MIN_RADIUS: the solver is at the achievable
+                # floor and cannot make further progress. Both criteria are gated
+                # on gauge structure (scalar boundary keeps its grad-norm stop)
+                # and are gauge-safe (cost and Delta are gauge-invariant).
                 radius_collapsed = Delta_new < _MIN_RADIUS
-                converged = jnp.logical_or(grad_converged, radius_collapsed)
+                converged = grad_converged
+                if ftol_active:
+                    converged = jnp.logical_or(
+                        converged,
+                        jnp.logical_or(stall_next >= ftol_patience, radius_collapsed),
+                    )
 
                 n_negc_new = n_negc + jnp.where(is_negc, 1, 0)
 
@@ -1106,6 +1146,7 @@ class _RiemannianTR:
                     converged,
                     n_negc_new,
                     trace,
+                    stall_next,
                 )
 
             init_carry = (
@@ -1119,6 +1160,7 @@ class _RiemannianTR:
                 jnp.asarray(False),
                 jnp.asarray(0),
                 init_trace,
+                jnp.asarray(0),
             )
             (
                 x_final,
@@ -1131,6 +1173,7 @@ class _RiemannianTR:
                 done,
                 n_negc,
                 trace,
+                _stall,
             ) = jax.lax.while_loop(cond_fun, body_fun, init_carry)
 
             return {
@@ -1213,6 +1256,8 @@ def riemannian_tr(
     max_radius: float | None = None,
     init_radius: float | None = None,
     gauge_floor: float = _GAUGE_FLOOR,
+    ftol: float = _FTOL,
+    ftol_patience: int = _FTOL_PATIENCE,
 ) -> _RiemannianTR:
     """Build a JAX-native Riemannian Trust Region optimiser (#152).
 
@@ -1235,6 +1280,8 @@ def riemannian_tr(
         max_radius=max_radius,
         init_radius=init_radius,
         gauge_floor=gauge_floor,
+        ftol=ftol,
+        ftol_patience=ftol_patience,
     )
 
 
