@@ -221,6 +221,64 @@ fixture; identical stuck-point on Rosenbrock d=4). After F1+F3+C the suite is
 - SOLVER items: investigate CU-collapse (#3) and Positive sigma->0 (#16)
   separately; these are real and matter for K-Aggregators CU/boundary usage.
 
+* Late session (2026-06-17): merge origin/main + ftol + #16 + #159
+** Pulled origin/main into feat/riemannian-tr (clean merge, no conflicts)
+- #156 (ftol/cost-stagnation convergence for riemannian LM) + #150
+  (cluster_bootstrap manifold+penalty, manifold-aware TikhonovPenalty) now in
+  the branch. Merge gate: 361 passed / 4 failed (manifolds + new upstream
+  tests), the 4 = meta-gate #5/#6, #10, #16. Upstream coexists with the RTR
+  work; no merge regressions.
+
+** #159 (maintainer, RESOLVED): sigma->0 boundary is a CONSUMER-MODEL issue
+- emu-gmm's CUE is exact / scale-invariant (verified bit-identical to moment
+  scale 1e15); tau=0 at the boundary. NOT an estimator/regulariser bug.
+- Root cause: the consumer model's explicit holder-mean demeaning
+  ``(m**sigma - mbar)/|sigma|`` -- as sigma->0 it removes the common scale
+  before the estimator (CUE self-normalisation becomes a no-op) AND subtracts
+  at the 1/|sigma| scale (catastrophic cancellation that corrupts the moment
+  DIRECTION, which CUE cannot fix). One-line fix: ``m**sigma -> expm1(sigma*log
+  m)`` everywhere incl. the holder-mean (the 1's cancel analytically) -- stable
+  to 1e-13, economics/composition bit-identical. Filed downstream against
+  ../Seasonality (= task C; the consumer owns it). This repo's design realdata
+  test (TestDesignSpec) re-pins to the stable limit J~7.087/p~0.792 -- ALSO the
+  consumer's to land once the stable moment is adopted.
+
+** DONE this session (commits on feat/riemannian-tr, UNPUSHED)
+- 813277c cluster_bootstrap docs; 67cb58b checkpoint; 845432c + f944245 the 10
+  test reconciliations; 455218d Interval manifold; merge; 421c3f2 RTR
+  ftol+radius-collapse (A); fecc5ce #16 fixed-W (B).
+- A (RTR stagnation stop): mirror #156's ftol (cost-stagnation, patience=8) AND
+  a radius-collapse companion, BOTH gated on total_gauge_dim>0. ftol alone does
+  NOT fix the gauge-CU certification (#3-class): at the CU noise floor RTR
+  OSCILLATES accept(expand)/reject(shrink), resetting ftol's consecutive-
+  accepted counter (LM's collapse is monotone-accepted, so its ftol fires);
+  the radius collapses monotonically through the oscillation, so radius-collapse
+  catches it. Gauge-safe (cost + Delta gauge-invariant; gated off scalar so the
+  boundary stop is preserved per #159). Verified: #3 + gauge tests pass.
+- B (#16): TestSigmaToZeroBoundary now uses fixed W (Identity) -- the affine
+  boundary GEOMETRY is well-posed there and RTR matches LM at sigma->0; CU at
+  the boundary is ill-posed (#159). Verified passing.
+- Interval(lo,hi) manifold built + leaf-tested (12/12); kept as a bounded-scale
+  FEATURE, NOT the sigma->0 fix (that's #159 option-2/papering per the owner).
+
+** REMAINING (next session)
+- D (#10 test_affine_metric_enters_gradient_norm): the reported Positive-leaf
+  gnorm came out bare-Euclidean, not affine |egrad|/sigma. BUT Positive's
+  retraction_differential docstring sets a NATURAL-SCALE convention (Sigma_theta
+  ambient; the affine norm is deliberately NOT used to rescale reported
+  quantities). So the test's "affine enters the reported gnorm" expectation is
+  probably WRONG -- verify what estimate() actually reports (RTR riem_norm is
+  affine; the estimator may report natural-scale), then reconcile the test to
+  the natural-scale convention OR fix the reporter. Owner call on the contract.
+- #5/#6 (meta-gate lm_stalls_tr_escapes): under-identified fixture -> "recover
+  Gamma_true" is UNSATISFIABLE (pymanopt also lands wrong-Gamma cost-0). With A
+  RTR now certifies (ftol/radius-collapse) but fails on tr_err. Reconcile to the
+  realizable form: assert RTR reaches a STRICTLY LOWER criterion than LM +
+  n_negcurv>=1 (drop recover-Gamma_true). Re-identifying is impossible (kills
+  the LM-stall -- see the C-decision note above).
+- Push the branch (~14 commits ahead of origin/feat/riemannian-tr) once green.
+- Final ``make check`` on the merged tree.
+
 * Run discipline (this box)
 - This session sees CPUs 0-31, ~92 GB. Pin pytest: =XLA_FLAGS=... taskset -c
   0-31 .venv/bin/python -m pytest ...=. Full RTR suite ~9.5 min.
