@@ -350,34 +350,50 @@ class TestPositiveReductionMatchesLM:
         assert sig_tr > 0.0
         assert sig_tr == pytest.approx(sig_lm, rel=1e-6)
 
-    def test_affine_metric_enters_gradient_norm(self):
-        r"""The reported gradient norm is the RIEMANNIAN norm under the affine
-        ``1/x^2`` metric, NOT the flat ``|g|``. At the optimum ``sigma_hat``
-        (!= 1, so ``1/x^2 != 1``) RTR's reported gradient norm must match what
-        the LM solver reports (which also uses the affine metric via
-        ``riemannian_lm.riem_norm``). A flat-metric port reports a
-        systematically different (by the factor ``1/sigma_hat``) gradient norm.
+    def test_reported_gradient_norm_is_natural_scale(self):
+        r"""The REPORTED gradient norm is the NATURAL / ambient-sigma-scale
+        ``|g| = |dQ/dsigma|`` -- deliberately COHERENT with the reported
+        natural-scale ``Sigma_theta`` / SEs (``Var(sigma_hat)``; see
+        ``Positive.retraction_differential``). The affine ``1/x^2`` metric is
+        load-bearing in the SOLVER'S convergence norm (``riemannian_tr``'s
+        ``riem_norm``, surfaced as ``optimizer_info.final_gradient_norm =
+        |g|/sigma``), NOT in the reported diagnostic.
 
-        We confirm the metric is load-bearing by checking ``1/sigma_hat^2``
-        genuinely differs from 1, so "the affine metric enters" is a real
-        constraint here, not an identity.
+        So at the optimum ``sigma_hat != 1`` the two reported quantities differ
+        by exactly ``sigma_hat``:
+
+            r.diagnostics.final_gradient_norm
+                ~= r.diagnostics.optimizer_info.final_gradient_norm * sigma_hat
+
+        We do NOT compare RTR's reported gnorm to LM's: the true-Hessian RTR
+        converges several orders TIGHTER than the Gauss-Newton LM, so their
+        reported gnorms legitimately differ. We pin the natural-vs-affine
+        relation WITHIN the single RTR run instead, and confirm the metric is
+        load-bearing by checking ``1/sigma_hat^2`` genuinely differs from 1 (so
+        natural != affine is a real distinction here, not an identity).
         """
         r_tr = _run_scale(riemannian_tr(max_steps=200))
         assert bool(r_tr.converged)
         sigma_hat = float(r_tr.theta_hat.sigma)
-        # sigma_hat is genuinely off 1, so the metric weighting is non-trivial.
+        # sigma_hat is genuinely off 1, so the metric weighting is non-trivial
+        # and the natural / affine scales are genuinely distinct.
         assert abs(sigma_hat - 1.0) > 0.3
         assert abs(1.0 / sigma_hat**2 - 1.0) > 0.1
 
-        # The estimator's reported final gradient norm (affine metric).
-        g_norm_reported = float(jnp.asarray(r_tr.diagnostics.final_gradient_norm))
+        # The estimator's reported final gradient norm (NATURAL / ambient scale).
+        rep = float(jnp.asarray(r_tr.diagnostics.final_gradient_norm))
+        # The solver's internal convergence norm (affine 1/x^2 metric: |g|/sigma).
+        solver = float(jnp.asarray(r_tr.diagnostics.optimizer_info.final_gradient_norm))
 
-        # The LM run uses the same affine norm, so at the shared optimum its
-        # reported gradient norm must match RTR's. A flat-metric RTR would
-        # report a different (1/sigma_hat-scaled) value.
-        r_lm = _run_scale(riemannian_lm(max_steps=200))
-        g_norm_lm = float(jnp.asarray(r_lm.diagnostics.final_gradient_norm))
-        assert g_norm_reported == pytest.approx(g_norm_lm, rel=1e-4, abs=1e-8)
+        # Reported is the NATURAL |g| = (affine |g|/sigma) * sigma -- coherent
+        # with the natural-scale Sigma_theta / SEs.
+        assert rep == pytest.approx(solver * sigma_hat, rel=1e-4)
+        # And it is genuinely NOT the affine convergence norm -> the metric
+        # distinction is really exercised (not a coincidental tie at sigma=1).
+        # (abs=0.0 disables approx's default ~1e-12 absolute floor, which would
+        # otherwise swallow these ~1e-13-magnitude norms regardless of the
+        # sigma_hat factor between them.)
+        assert rep != pytest.approx(solver, rel=1e-2, abs=0.0)
 
 
 # ===========================================================================
