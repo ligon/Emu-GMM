@@ -168,6 +168,7 @@ def _run_saddle(**lm_kw):
     return res, _nonconvex_warning(recs)
 
 
+@pytest.mark.slow  # estimate()-based; full-suite/nightly gate (#152)
 class TestAdvisoryWarnsAtIndefiniteStationaryPoint:
     def test_warning_fires_and_fields_set(self):
         res, warned = _run_saddle()
@@ -200,6 +201,7 @@ def _convex_model(x, theta):
     return jnp.concatenate([_triu(Y @ Y.T), jnp.reshape(phi, (1,))]) - x
 
 
+@pytest.mark.slow  # estimate()-based; full-suite/nightly gate (#152)
 class TestAdvisorySilentAtMinimum:
     def test_convex_minimum_probed_but_no_warning(self):
         rng = np.random.default_rng(2)

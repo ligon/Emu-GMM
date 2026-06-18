@@ -69,6 +69,12 @@ riemannian_tr = riemannian_tr_mod.riemannian_tr
 
 jax.config.update("jax_enable_x64", True)
 
+# This whole file is RTR integration (jit/vmap done-flag, MC cache-leak,
+# inference parity, reverse-AD) -- solver-heavy. Route it to the full-suite /
+# nightly gate to keep the per-push quick-check under its 30-min budget;
+# full-suite (manifolds) + nightly still run it on every PR and on main. #152
+pytestmark = pytest.mark.slow
+
 N = 5  # ambient PSD side; matches the Phase-6 / K-Agg fixture geometry.
 _TRIU = jnp.array(np.triu_indices(N)).T  # (15, 2) upper-triangular index pairs
 

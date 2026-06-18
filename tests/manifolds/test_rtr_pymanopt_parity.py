@@ -107,6 +107,12 @@ riemannian_tr_mod = pytest.importorskip(
 )
 riemannian_tr = riemannian_tr_mod.riemannian_tr
 
+# This whole file is pymanopt-oracle parity (a dev-only cross-check). Those runs
+# are the heaviest in the manifolds suite, so route them to the full-suite /
+# nightly gate rather than the per-push quick-check (30-min budget); full-suite
+# (manifolds) + nightly still run them on every PR and on main. #152
+pytestmark = pytest.mark.slow
+
 N = 5  # ambient PSD side (K-Aggregators primary geometry)
 
 # Upper-triangular index pairs of the (5,5) symmetric Gamma: 15 unique entries.

@@ -159,6 +159,7 @@ def _components(theta_hat, k: int):
 # Risk: "Convergence test on raw ambient ||grad||/||eta|| is not gauge-
 # invariant" + "tCG search direction is not re-tangentialized". (blocker/high)
 # ---------------------------------------------------------------------------
+@pytest.mark.slow  # heavy YQ-gauge RTR solves; full-suite/nightly gate (#152)
 @pytest.mark.parametrize("k", [2, 3])
 @pytest.mark.parametrize("reflect", [False, True])
 class TestGaugeInvariantConvergence:
@@ -372,6 +373,7 @@ class TestTruncatedCGStaysHorizontal:
 # Risk: "TR radius / maxinner from the AMBIENT dimension nk inflates Delta by
 # the gauge fraction". (medium)
 # ---------------------------------------------------------------------------
+@pytest.mark.slow  # heavy RTR radius/tcg-default solves; full-suite/nightly (#152)
 class TestIntrinsicDimensionDefaults:
     r"""[numerical-gauge] Intrinsic-dimension defaults.
 
