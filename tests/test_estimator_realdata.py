@@ -66,7 +66,7 @@ from emu_gmm import (
     StratifiedCovariance,
     estimate,
 )
-from emu_gmm.manifolds import Positive
+from emu_gmm.manifolds import Positive, riemannian_lm
 from emu_gmm.types import EstimationResult
 from jax.ops import segment_sum
 
@@ -103,8 +103,21 @@ J_PVALUE_PUBLISHED = 0.8324639536151227
 # re-derived from first principles as m_bar' V_X^{-1} m_bar = 7.058. The
 # 5.44 was a stale pre-migration value hidden by the suite's accumulation
 # crash. See issue #151 for the full investigation.
-J_STAT_DESIGN = 7.059998900803705
-J_PVALUE_ADJ_DESIGN = 0.7942040529790122
+# Boundary-limit design J / adjusted p-value, evaluated at a FIXED in-zone
+# sigma (#159). Under the design (CUE) spec the optimum collapses to
+# sigma -> 0+, where (a) the criterion is flat in sigma -- so the optimiser's
+# exact stopping sigma is float-rounding noise -- and (b) the consumer's
+# ``m**sigma`` moment loses precision below ~1e-11 via catastrophic
+# cancellation (ligon/Emu-GMM#159, fixed upstream in TaimakaSeasonality#27).
+# Pinning J off the optimiser's stopping point is therefore platform-fragile
+# (J=5.44 on one OpenBLAS box vs ~7.08 on CI). We instead pin the boundary
+# limit at ``SIGMA_BOUNDARY_EVAL`` -- firmly above the cancellation cliff,
+# where J is deterministic and platform-stable (it varies < 1e-5 across
+# sigma in [1e-7, 1e-5]). These values are J(sigma=1e-6); tolerances are
+# tightened accordingly (rel 1e-2 -> 1e-4).
+SIGMA_BOUNDARY_EVAL = 1e-6
+J_STAT_DESIGN = 7.0867474141
+J_PVALUE_ADJ_DESIGN = 0.7920156209
 
 # Data-integrity pins (exact properties of the frozen extract).
 N_ROWS = 3422
@@ -256,15 +269,21 @@ def bundle(extract):
     }
 
 
-def _estimate(bundle, covariance) -> EstimationResult:
+def _estimate(
+    bundle, covariance, *, optimizer=None, init_sigma=1.0
+) -> EstimationResult:
+    # optimizer=None auto-dispatches to RiemannianLM (sigma > 0, the actual
+    # optimise). Passing riemannian_lm(max_steps=0) instead *evaluates* the
+    # criterion at the fixed ``init_sigma`` without moving the iterate -- used
+    # to pin the boundary-limit J at a stable in-zone sigma (#159).
     return estimate(
         model=bundle["psi"],
         measure=bundle["measure"],
         covariance=covariance,
         weighting=ContinuouslyUpdated(),
         regularization=DiagonalTikhonov(kappa_target=1e10),
-        optimizer=None,  # auto-dispatch -> RiemannianLM (sigma > 0)
-        theta_init=EulerSigma(sigma=jnp.asarray(1.0)),
+        optimizer=optimizer,
+        theta_init=EulerSigma(sigma=jnp.asarray(init_sigma)),
     )
 
 
@@ -278,10 +297,9 @@ def fit_published(bundle) -> EstimationResult:
     return _estimate(bundle, covariance)
 
 
-@pytest.fixture(scope="module")
-def fit_design(bundle) -> EstimationResult:
-    """Design-based spec: three-level StratifiedCovariance, fpc off."""
-    covariance = StratifiedCovariance(
+def _design_covariance(bundle) -> StratifiedCovariance:
+    """Three-level StratifiedCovariance (PSU-in-cell-in-stratum, fpc off)."""
+    return StratifiedCovariance(
         psu_ids=jnp.asarray(bundle["psu_codes"], dtype=jnp.float64),
         cell_ids=jnp.asarray(bundle["cell_codes"], dtype=jnp.float64),
         stratum_ids=jnp.asarray(bundle["cid_codes"], dtype=jnp.float64),
@@ -290,7 +308,29 @@ def fit_design(bundle) -> EstimationResult:
         n_strata=bundle["n_strata"],
         fpc=False,  # superpopulation estimand; matches the consumer
     )
-    return _estimate(bundle, covariance)
+
+
+@pytest.fixture(scope="module")
+def fit_design(bundle) -> EstimationResult:
+    """Design-based spec: the actual CUE optimise (collapses to sigma -> 0)."""
+    return _estimate(bundle, _design_covariance(bundle))
+
+
+@pytest.fixture(scope="module")
+def fit_design_boundary_limit(bundle) -> EstimationResult:
+    """Design J evaluated at a FIXED in-zone sigma (#159 robustness).
+
+    ``riemannian_lm(max_steps=0)`` evaluates the criterion at
+    ``SIGMA_BOUNDARY_EVAL`` without moving the iterate -- deterministic and
+    platform-stable, unlike J read off the optimiser's flat-region,
+    cancellation-prone stopping point.
+    """
+    return _estimate(
+        bundle,
+        _design_covariance(bundle),
+        optimizer=riemannian_lm(max_steps=0),
+        init_sigma=SIGMA_BOUNDARY_EVAL,
+    )
 
 
 # ── Extract integrity (cheap; no JAX compilation) ────────────────────
@@ -379,32 +419,60 @@ class TestPublishedTreatmentSpec:
 class TestDesignSpec:
     """StratifiedCovariance over PSU-in-cell-in-stratum (179/90/30).
 
-    On the real data the CUE optimum under the design covariance
-    collapses to the boundary ``sigma -> 0+`` (the weak-identification
-    regime; the criterion's limit is the log-residual specification).
-    The pins assert (a) the Positive manifold keeps the iterate strictly
-    positive at the boundary, and (b) the J at the boundary limit.
+    On the real data the CUE optimum under the design covariance collapses to
+    the boundary ``sigma -> 0+`` (the weak-identification regime; the
+    criterion's limit is the log-residual specification). Two separable
+    claims, deliberately tested off *different* fits (#159):
+
+    * the *actual optimise* (``fit_design``) collapses to the boundary and the
+      ``Positive`` manifold keeps the iterate strictly positive -- but its
+      exact stopping sigma is float-rounding noise (the criterion is flat
+      there) so we do NOT pin J off it;
+    * the *boundary-limit J* is pinned off ``fit_design_boundary_limit``, which
+      evaluates the criterion at a fixed in-zone sigma where it is
+      deterministic and platform-stable (above the ``m**sigma`` cancellation
+      cliff; see SIGMA_BOUNDARY_EVAL and #159).
     """
 
     def test_boundary_collapse_stays_positive(self, fit_design):
+        # The Positive-manifold guarantee on the real optimise: it collapses to
+        # the sigma -> 0 boundary and never crosses zero. (Robust; the exact
+        # sigma is platform-dependent and is NOT asserted -- see #159.)
         sigma = float(fit_design.theta_hat.sigma)
-        assert 0.0 < sigma < 1e-6  # boundary regime, never crosses zero
+        assert 0.0 < sigma < 1e-6
         assert bool(fit_design.converged)
 
-    def test_J_at_boundary_limit(self, fit_design):
-        # rel=1e-2 (looser than the interior pins): the sigma->0 boundary is
-        # ill-conditioned (weak identification, near-singular V_X, a *binding*
-        # ridge), so J varies ~0.3% across CPU/BLAS -- 7.0600 on the x86-64
-        # reference (Savio), 7.0823 on GitHub Actions. Conditioning
-        # sensitivity, not a regression: the interior pins
-        # (TestPublishedTreatmentSpec, J=6.574) reproduce cross-platform. (#154)
-        assert float(fit_design.J_stat) == pytest.approx(J_STAT_DESIGN, rel=1e-2)
-        assert fit_design.J_dof == 11
+    def test_J_at_boundary_limit(self, fit_design_boundary_limit):
+        # Boundary-limit J at a FIXED in-zone sigma (#159): deterministic and
+        # platform-stable, so tightened from rel=1e-2 to rel=1e-4. The old pin
+        # read J off the optimiser's flat-region, catastrophic-cancellation-
+        # prone stopping point (J=5.44 on one OpenBLAS box vs ~7.08 on CI).
+        assert float(fit_design_boundary_limit.J_stat) == pytest.approx(
+            J_STAT_DESIGN, rel=1e-4
+        )
+        assert fit_design_boundary_limit.J_dof == 11
 
-    def test_adjusted_pvalue(self, fit_design):
-        # emu-gmm StratifiedCovariance value -- the consumer's current
-        # 'design' spec reads this same p_adjusted off the result. The old
-        # 0.9081 was a stale pre-migration orphan (#151).
-        assert float(fit_design.J_pvalue_adjusted) == pytest.approx(
-            J_PVALUE_ADJ_DESIGN, abs=2e-3
+    def test_adjusted_pvalue(self, fit_design_boundary_limit):
+        # The consumer's 'design' spec reads this p_adjusted off the result;
+        # now pinned at the stable boundary limit (#159). The old 0.9081 was a
+        # stale pre-migration orphan (#151).
+        assert float(fit_design_boundary_limit.J_pvalue_adjusted) == pytest.approx(
+            J_PVALUE_ADJ_DESIGN, abs=2e-4
+        )
+
+    def test_eval_sigma_is_in_the_stable_zone(self, bundle, fit_design_boundary_limit):
+        # Guard the #159 fix: SIGMA_BOUNDARY_EVAL must sit in the cancellation-
+        # free zone, where J is flat. If a future change pushed the cliff up
+        # into it, J would diverge from J at a neighbouring in-zone sigma and
+        # this fails loudly -- a clear signal, not a silently-wrong pin.
+        j_neighbor = float(
+            _estimate(
+                bundle,
+                _design_covariance(bundle),
+                optimizer=riemannian_lm(max_steps=0),
+                init_sigma=SIGMA_BOUNDARY_EVAL / 10.0,
+            ).J_stat
+        )
+        assert float(fit_design_boundary_limit.J_stat) == pytest.approx(
+            j_neighbor, rel=1e-3
         )
