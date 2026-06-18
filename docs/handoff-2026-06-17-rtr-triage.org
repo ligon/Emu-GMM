@@ -279,6 +279,68 @@ fixture; identical stuck-point on Rosenbrock d=4). After F1+F3+C the suite is
 - Push the branch (~14 commits ahead of origin/feat/riemannian-tr) once green.
 - Final ``make check`` on the merged tree.
 
+* Session end state (2026-06-17) + next-session queue
+** Done & committed (branch feat/riemannian-tr, UNPUSHED, tree clean)
+A (421c3f2) RTR ftol+radius-collapse (gauge-gated) -> #3 fixed, gauge-safe.
+B (fecc5ce) #16 boundary geometry under fixed W (CU at sigma->0 ill-posed,#159).
+D (be6ba7c) #10: reported gnorm is NATURAL-scale (coherent with SEs); verified
+   diagnostics.final_gradient_norm == optimizer_info.final_gradient_norm*sigma_hat
+   (estimator already reports natural; affine metric lives in the solver's
+   convergence norm). No solver change; test reconciled + renamed.
+Plus the merge of origin/main (#156 LM ftol, #150 cluster_bootstrap+penalty),
+the 10 earlier test reconciliations, Interval manifold (leaf-tested 12/12), docs.
+Suite: 84/20 -> ~2 failing (#5/#6 only). Have NOT run a full ``make check`` on
+the integrated A+B+D+merge tree -- each verified via targeted subsets; DO run it.
+
+** REMAINING #1: #5/#6 meta-gate (the only failing tests)
+Reconcile test_lm_stalls_tr_escapes_with_negcurv[2,3] to the realizable form:
+keep (a) LM stalls + (c) n_negcurv>=1; change (b) from "recover Gamma_true"
+(UNSATISFIABLE -- under-identified fixture, pymanopt also lands wrong-Gamma
+cost-0) to "RTR reaches a STRICTLY LOWER criterion value than LM". BEFORE
+editing, VERIFY empirically: does RTR's final cost end up below LM's, and under
+CU or only fixed-W? (pre-A, under CU RTR was stuck near LM's point; fixed-W
+head-to-head shows RTR escapes to cost~0. May need the #16 fixed-W switch.)
+Re-identifying the fixture is impossible -- it kills the LM-stall (GN stalls only
+where J is rank-deficient, which conflicts with identification).
+
+** REMAINING #2: NEW FEATURE -- LM stall -> curvature probe -> non-convexity ADVISORY
+Owner-approved design (advise, do NOT auto-switch -- a stall is information):
+when riemannian_lm certifies via the #156 ftol (cost-stagnation) path, probe the
+true Hessian; if non-definite, WARN the user the criterion appears non-convex and
+suggest riemannian_tr(). Build steps:
+1. Trigger: in riemannian_lm.__call__ EAGER tail (post while_loop), fire iff LM
+   stopped via the ftol stall path (surface a "certified-via-stall" bool from the
+   loop: stall>=ftol_patience at termination), NOT via grad_ok.
+2. Probe: smallest eigenvalue of the HORIZONTAL true Hessian at theta_hat via
+   RTR's _riemannian_hvp (Lanczos, a few HVPs; or HVP-on-basis + eigvalsh for
+   small dim). GAUGE-CRITICAL: use the PROJECTED HVP so the k(k-1)/2 gauge
+   directions map to ~0 -- lambda_min < -tol then = a genuine horizontal saddle,
+   not gauge flatness.
+3. Advise if lambda_min < -tol: warnings.warn("riemannian_lm stopped at a
+   stationary point with negative curvature (min horizontal eig ~ X); criterion
+   appears non-convex -- may be a saddle. Consider riemannian_tr().") AND set
+   OptimizerInfo fields stalled_indefinite: bool, min_curvature: float.
+DECISIONS (Sue's recommendations, pending owner nod):
+- default-ON (fires only on a stall; cheap), with a kwarg to silence. [REC]
+- BOTH warning (human) + diagnostic field (consumer / future explicit hybrid).
+- Caveat to DOCUMENT: probe+warning are EAGER post-solve, so they DON'T fire on
+  the vmapped/replicate MC path (can't warn inside vmap); field absent/None there.
+  Acceptable -- advisory is for interactive fits.
+- Reuse _riemannian_hvp from riemannian_tr (no import cycle: tr doesn't import lm)
+  OR factor a tiny shared _curvature helper. [REC: reuse]
+Cost: a few HVPs, once, only on stalled runs -> negligible. jit-safe (eager tail;
+the jitted _solve is unchanged). Test: a non-convex manifold fixture where LM
+stalls (the _nonconvex meta-gate fixture is a candidate) -> assert warning fires
++ field set + lambda_min<0; a convex fixture -> assert NO warning.
+
+** REMAINING #3: ops
+- Push the branch (~18 commits ahead of origin/feat/riemannian-tr) once green.
+- Seasonality owns C (#159 expm1 moment fix + realdata re-pin) -- downstream.
+- Solver decision guidance (when RTR vs riemannian_lm vs optimistix) captured in
+  this session's discussion; consider distilling into docs/CLAUDE.md: optimistix
+  for Euclidean; riemannian_lm (GN, cheaper) the manifold default; riemannian_tr
+  ONLY for non-convex manifold criteria where GN demonstrably stalls.
+
 * Run discipline (this box)
 - This session sees CPUs 0-31, ~92 GB. Pin pytest: =XLA_FLAGS=... taskset -c
   0-31 .venv/bin/python -m pytest ...=. Full RTR suite ~9.5 min.
