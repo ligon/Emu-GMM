@@ -260,6 +260,20 @@ class OptimizerInfo:
     tr_trace: Any = None
     extra: Any = None
 
+    # #152 advisory (Riemannian-LM curvature probe): set ONLY on the EAGER
+    # ``riemannian_lm`` path, and only when a gauge-bearing solve converges to a
+    # genuine STATIONARY point (a #156 ftol cost-stagnation stop drifts at large
+    # gradient and is excluded). ``min_curvature`` is the smallest eigenvalue of
+    # the horizontal true Hessian at the optimum (the ``k(k-1)/2`` gauge
+    # directions map to ~0 under the projected HVP, so they do NOT masquerade as
+    # curvature); ``stalled_indefinite`` is the Python bool
+    # ``min_curvature < -tol`` -- True flags a saddle where ``riemannian_tr`` may
+    # do better. Both stay ``None`` on every other backend, on the
+    # vmapped/replicate MC path (the probe is eager-only -- warnings cannot fire
+    # inside ``vmap``), and at non-stationary (ftol-drift) stops, by design.
+    stalled_indefinite: Any = None
+    min_curvature: Any = None
+
 
 @dataclasses.dataclass(frozen=True)
 class Diagnostics:
