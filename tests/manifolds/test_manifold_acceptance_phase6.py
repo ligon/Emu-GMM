@@ -308,6 +308,7 @@ class TestGaugeInvariance:
 # ---------------------------------------------------------------------------
 # Gate #2 -- pymanopt TrustRegions cross-check ON THE QUOTIENT.
 # ---------------------------------------------------------------------------
+@pytest.mark.slow  # pymanopt oracle cross-check: heavy, full-suite/nightly gate (#152)
 class TestPymanoptCrossCheck:
     r"""Cross-check emu-gmm's Riemannian-LM against a pymanopt TrustRegions
     solve of the *identical* least-squares problem over

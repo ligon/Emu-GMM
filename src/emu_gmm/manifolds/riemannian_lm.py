@@ -97,6 +97,7 @@ mode; that machinery is the #77 work item.
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -125,6 +126,48 @@ def _is_positive(manifold: Any) -> bool:
 # component of the step (red-team R11). For ``total_gauge_dim == 0`` the
 # floor is exactly 0 and the scalar path is bitwise unchanged.
 _GAUGE_FLOOR: float = 1e-6
+
+# #152 advisory: an eigenvalue of the horizontal true Hessian is treated as
+# genuine negative curvature only when it is below
+# ``-(_CURV_ATOL + _CURV_RTOL * |lambda_max|)``. The relative term keeps the
+# ``k(k-1)/2`` gauge directions (~eps * ||H|| under the projected HVP) and
+# benign round-off from being mislabelled a saddle.
+_CURV_RTOL: float = 1e-6
+_CURV_ATOL: float = 1e-9
+
+
+def _min_horizontal_curvature(
+    residuals: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+    manifold_spec: ManifoldSpec,
+    x_flat: Float[Array, " K"],
+) -> tuple[float, float]:
+    """Smallest / largest eigenvalue of the projected horizontal true Hessian.
+
+    Assembles the ``(K, K)`` retraction-pullback Hessian of
+    ``0.5 ||residuals(.)||^2`` at ``x_flat`` by applying RTR's projected
+    Riemannian HVP to each ambient basis vector, then returns
+    ``(lambda_min, lambda_max)`` of its symmetric part. The HVP is projected to
+    the horizontal space, so the ``k(k-1)/2`` gauge directions map to ~0 and do
+    NOT masquerade as curvature -- a ``lambda_min`` below
+    ``-(_CURV_ATOL + _CURV_RTOL * |lambda_max|)`` is genuine horizontal negative
+    curvature (a saddle), the regime ``riemannian_tr`` exists for.
+
+    EAGER-only helper (a handful of HVPs at a single point). Reuses
+    ``riemannian_tr._riemannian_hvp`` via a local import -- the TR module does
+    not import this one, so there is no cycle.
+    """
+    from emu_gmm.manifolds.riemannian_tr import _riemannian_hvp
+
+    K = int(x_flat.shape[0])
+    eye = jnp.eye(K, dtype=x_flat.dtype)
+    cols = [
+        _riemannian_hvp(residuals, x_flat, manifold_spec, eye[:, j]) for j in range(K)
+    ]
+    H = jnp.stack(cols, axis=1)  # column j = H @ e_j
+    H = 0.5 * (H + H.T)  # symmetrise numerical residue before eigvalsh
+    evals = jnp.linalg.eigvalsh(H)
+    return float(evals[0]), float(evals[-1])
+
 
 # #124 (PR B): memoised jitted solve cores for the traced-``args`` path.
 # Keyed per kernel OBJECT with secondary key ``(self, manifold_spec)`` --
@@ -157,6 +200,13 @@ class _RiemannianLM:
     gauge_floor: float = _GAUGE_FLOOR
     ftol: float = 1e-8
     ftol_patience: int = 8
+    # #152 advisory: when a gauge-bearing solve converges to a genuine
+    # stationary point, probe the horizontal true Hessian at the optimum and --
+    # if it is indefinite (a saddle) -- emit a non-convexity warning and set
+    # ``OptimizerInfo.stalled_indefinite`` / ``.min_curvature``. EAGER-only (it
+    # never fires under the vmapped/replicate MC path). Set ``False`` to silence
+    # both the warning and the probe.
+    advise_nonconvex: bool = True
 
     def __call__(
         self,
@@ -491,6 +541,67 @@ class _RiemannianLM:
         theta_hat = params_mod.unflatten_params(
             x_final, treedef, manifold_spec=manifold_spec
         )
+
+        # #152 advisory (EAGER-only): warn when an interactive gauge-bearing
+        # solve converges to a genuine STATIONARY POINT whose horizontal true
+        # Hessian is indefinite -- a saddle, where riemannian_tr (which follows
+        # negative curvature) may do better. Three guards keep it precise:
+        #   * ``status == "converged" and not two_arg`` -> only the eager v2 path
+        #     (a single ``estimate()`` / interactive fit). The vmapped/replicate
+        #     path is ``"traced"`` (warnings cannot fire inside vmap, fields stay
+        #     None) and the #124 ``args`` channel is skipped so the user kernel
+        #     is not re-traced (trace-sharing preserved).
+        #   * a recomputed ``grad_ok`` stationarity test at ``theta_hat``. NOTE
+        #     this REVISES the handoff's "fire iff the ftol stall path" trigger:
+        #     empirically the #156 ftol (cost-stagnation) certification stops
+        #     where the Gauss--Newton model can no longer drive the gradient to
+        #     zero, so the iterate DRIFTS at a *large* gradient (||g|| ~ 1e-1) on
+        #     a CORRECT estimate. Its Hessian is trivially indefinite but it is
+        #     NOT a critical point, so a stall-based probe would warn on every
+        #     CU+clustered solve (a false positive). Genuine saddles instead
+        #     certify via ``grad_ok`` (||g|| ~ 0). Gating on real stationarity
+        #     confines the warning to true saddles.
+        # A gauge-free tree (``ftol_active`` False) never probes, so the scalar /
+        # Euclidean / Positive path is bitwise unchanged.
+        stalled_indefinite = None
+        min_curvature = None
+        if (
+            self.advise_nonconvex
+            and ftol_active
+            and status == "converged"
+            and not two_arg
+        ):
+
+            def _residuals_eager(xx: Float[Array, " K"]) -> Float[Array, " M"]:
+                # two_arg is False in this branch (gated above): the v2 path
+                # passes a one-argument flat residual closure.
+                return residual_fn(xx)
+
+            # Genuine-stationarity gate: the exact ``grad_ok`` test the solve
+            # loop uses, recomputed at the returned iterate (horizontal gradient).
+            r_fin = _residuals_eager(x_final)
+            Jh_fin = project_jacobian(x_final, jax.jacfwd(_residuals_eager)(x_final))
+            g_norm_fin = riem_norm(x_final, Jh_fin.T @ r_fin)
+            r_norm_fin = jnp.sqrt(jnp.sum(r_fin * r_fin))
+            is_stationary = bool(g_norm_fin < (self.atol + self.rtol * r_norm_fin))
+            if is_stationary:
+                lam_min, lam_max = _min_horizontal_curvature(
+                    _residuals_eager, manifold_spec, x_final
+                )
+                min_curvature = lam_min
+                neg_tol = _CURV_ATOL + _CURV_RTOL * abs(lam_max)
+                stalled_indefinite = lam_min < -neg_tol
+                if stalled_indefinite:
+                    warnings.warn(
+                        "riemannian_lm converged to a stationary point whose "
+                        "horizontal true Hessian is indefinite (min eigenvalue "
+                        f"~ {lam_min:.3e}, max ~ {lam_max:.3e}); the criterion "
+                        "appears non-convex there -- it may be a saddle rather "
+                        "than a minimum. Consider re-solving with "
+                        "riemannian_tr(), which follows negative curvature.",
+                        stacklevel=2,
+                    )
+
         # #78: propagate the REAL done flag (traced bool) out so the
         # estimator reports genuine convergence, not the always-True
         # status=="traced" collapse (red-team R6/R10/R16/R28).
@@ -500,6 +611,8 @@ class _RiemannianLM:
             status=status,
             backend="riemannian_lm",
             done=jnp.asarray(done),
+            stalled_indefinite=stalled_indefinite,
+            min_curvature=min_curvature,
         )
         return theta_hat, info
 
@@ -511,6 +624,7 @@ def riemannian_lm(
     gauge_floor: float = _GAUGE_FLOOR,
     ftol: float = 1e-8,
     ftol_patience: int = 8,
+    advise_nonconvex: bool = True,
 ) -> _RiemannianLM:
     """Build a per-leaf Riemannian Levenberg--Marquardt optimiser.
 
@@ -548,6 +662,17 @@ def riemannian_lm(
         gauge-bearing solve, a healthy run certifies via the gradient test
         before the counter accumulates, so the iterate and step count of an
         already-converging solve are unchanged.
+    advise_nonconvex
+        When ``True`` (default), a gauge-bearing solve that converges to a
+        genuine stationary point probes the horizontal true Hessian at the
+        optimum and, if it is indefinite (a saddle), emits a non-convexity
+        warning and sets ``OptimizerInfo.stalled_indefinite`` /
+        ``.min_curvature``. The probe is eager-only -- it never fires under the
+        vmapped/replicate MC path, where those fields stay ``None``. A
+        cost-stagnation (#156 ftol) certification is NOT a stationary point (the
+        iterate drifts at a large gradient on a correct estimate), so it does
+        not trigger the probe. Set ``False`` to silence the warning and skip the
+        probe entirely.
     """
     return _RiemannianLM(
         rtol=rtol,
@@ -556,6 +681,7 @@ def riemannian_lm(
         gauge_floor=gauge_floor,
         ftol=ftol,
         ftol_patience=ftol_patience,
+        advise_nonconvex=advise_nonconvex,
     )
 
 

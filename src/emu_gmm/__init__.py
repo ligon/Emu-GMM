@@ -76,12 +76,14 @@ from emu_gmm.inference import (
 )
 from emu_gmm.manifolds import (
     Euclidean,
+    Interval,
     ManifoldLeaf,
     ManifoldParam,
     Positive,
     Product,
     PSDFixedRank,
     riemannian_lm,
+    riemannian_tr,
 )
 from emu_gmm.measures import (
     AnalyticalMeasure,
@@ -162,6 +164,7 @@ __all__ = [
     "scipy_lm",
     "linear_solver",
     "riemannian_lm",
+    "riemannian_tr",
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
@@ -198,6 +201,7 @@ __all__ = [
     "PSDFixedRank",
     "Product",
     "Positive",
+    "Interval",
     "ManifoldLeaf",
     # Parameter-space declaration layer (#107): declare field -> manifold
     # geometry once in a class, then ParameterSpace.point([seed]) lowers to a
