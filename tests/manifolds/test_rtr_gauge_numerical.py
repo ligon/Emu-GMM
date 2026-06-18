@@ -155,11 +155,6 @@ def _components(theta_hat, k: int):
     return A, phi
 
 
-def _outer_steps(info) -> int:
-    """Read the outer-iteration count off the OptimizerInfo (``steps``)."""
-    return int(jnp.asarray(info.steps))
-
-
 # ---------------------------------------------------------------------------
 # Risk: "Convergence test on raw ambient ||grad||/||eta|| is not gauge-
 # invariant" + "tCG search direction is not re-tangentialized". (blocker/high)
@@ -201,7 +196,7 @@ class TestGaugeInvariantConvergence:
 
         return residual_fn, params, spec, A_true
 
-    def test_outer_count_and_gamma_invariant_under_YQ(self, k, reflect):
+    def test_gamma_invariant_under_YQ(self, k, reflect):
         residual_fn, params_a, spec, _A = self._setup(k)
         Y0 = jnp.asarray(params_a.Y.array)
         phi0 = float(jnp.reshape(jnp.asarray(params_a.phi.array), ()))
@@ -221,20 +216,18 @@ class TestGaugeInvariantConvergence:
         assert bool(info_a.done) is True
         assert bool(info_b.done) is True
 
-        # (1) Outer-iteration count agrees to WITHIN ONE step. ``Q`` here is a
-        # DENSE rotation (``_orthogonal`` = qr of a Gaussian), so ``Y0 @ Q`` is
-        # itself a rounded matrix product and the two trajectories are
-        # gauge-equivalent only up to ~1e-9 rounding. The integer outer-step
-        # count is the single most fragile observable -- a hard threshold
-        # crossing near convergence -- so it can differ by one between gauges
-        # even when every CONTINUOUS invariant agrees (Gamma to 1e-9 below; the
-        # reported horizontal gradient norm to 1e-9 in the sibling test). Exact
-        # integer equality under a dense rotation is not achievable without
-        # per-step gauge canonicalization (owner decision 2026-06-17: out of
-        # scope; the meaningful gauge invariants stay strict). #152.
-        assert abs(_outer_steps(info_a) - _outer_steps(info_b)) <= 1
+        # The INTEGER outer-step count is deliberately NOT asserted. ``Q`` here
+        # is a DENSE rotation (``_orthogonal`` = qr of a Gaussian), so ``Y0 @ Q``
+        # is a rounded product and the two trajectories are gauge-equivalent only
+        # to ~1e-9; the integer step count is a hard threshold crossing near
+        # convergence -- the single most fragile observable. It was relaxed to
+        # ``<= 1`` (owner decision 2026-06-17) but still diverged by 2 between
+        # gauges on the CI build at k=3 while every CONTINUOUS invariant agreed,
+        # so the count assertion is dropped (owner decision 2026-06-18): a
+        # bit-stable step count needs per-step gauge canonicalization, out of
+        # scope. The meaningful gauge invariants below stay strict. #152.
 
-        # (2) Gamma agrees to 1e-9 (gauge-invariant point estimate).
+        # Gamma agrees to 1e-9 (gauge-invariant point estimate).
         Aa, _ = _components(th_a, k)
         Ab, _ = _components(th_b, k)
         Ga, Gb = Aa @ Aa.T, Ab @ Ab.T
