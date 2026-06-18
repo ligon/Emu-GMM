@@ -89,6 +89,7 @@ from emu_gmm.manifolds.spec import ManifoldSpec
 from emu_gmm.optimizer import _supports_args, _takes_manifold_spec, optimistix_lm
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.runtime import maybe_warn_cpu_oversubscription
 from emu_gmm.types import (
     CovarianceStrategy,
     Emu_GMM_DimensionError,
@@ -329,6 +330,8 @@ def build_estimator(
     (``anchor_per_rep=True``; #142) without duplicating this factory's
     kwarg surface at the driver.
     """
+    # One-time at-risk-host warning before the first compile (#115).
+    maybe_warn_cpu_oversubscription()
     # Resolve the polymorphic starting point (pure Python, pre-tracing): a
     # ParameterSpace class -> .point(); a ManifoldPoint view -> its raw
     # pytree; anything else used directly. theta_init= is a deprecated alias
@@ -1334,6 +1337,8 @@ def estimate(
     -------
     :class:`EstimationResult`
     """
+    # One-time at-risk-host warning before the first compile (#115).
+    maybe_warn_cpu_oversubscription()
     # Resolve once here so the same concrete start is used both to build the
     # estimator and to invoke it (the run() call needs a concrete PyTree, not
     # a ParameterSpace class). Pure Python; runs before any tracing (#107).

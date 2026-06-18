@@ -93,6 +93,7 @@ from emu_gmm.optimizer import linear_solver, optimistix_lm, scipy_lm
 from emu_gmm.parameter_space import ParameterSpace, on
 from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.runtime import configure, recommended_env
 from emu_gmm.types import (
     CovarianceStrategy,
     Diagnostics,
@@ -122,6 +123,8 @@ except PackageNotFoundError:
 
 __all__ = [
     "__version__",
+    "configure",
+    "recommended_env",
     # Entry point
     "estimate",
     "build_estimator",
