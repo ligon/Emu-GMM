@@ -95,7 +95,7 @@ from emu_gmm.manifolds import Euclidean, PSDFixedRank
 from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.measures import SyntheticMeasure
-from emu_gmm.weighting import ContinuouslyUpdated
+from emu_gmm.weighting import ContinuouslyUpdated, Identity
 
 jax.config.update("jax_enable_x64", True)
 
@@ -232,12 +232,12 @@ def _estimate_lm(model, measure, theta_init, *, max_steps=400):
     )
 
 
-def _estimate_tr(model, measure, theta_init, **tr_kwargs):
+def _estimate_tr(model, measure, theta_init, *, weighting=None, **tr_kwargs):
     return estimate(
         model,
         measure,
         covariance=SyntheticCovariance(),
-        weighting=ContinuouslyUpdated(),
+        weighting=weighting if weighting is not None else ContinuouslyUpdated(),
         optimizer=riemannian_tr(**tr_kwargs),
         theta_init=theta_init,
     )
@@ -247,76 +247,90 @@ def _estimate_tr(model, measure, theta_init, **tr_kwargs):
 # Risk 1 -- non-convex meta-gate (parity-test: convex fixture certifies nothing)
 # ===========================================================================
 class TestNonConvexMetaGate:
-    r"""parity-test / "convex fixture cannot distinguish true-Hessian RTR from a
-    GN hill-climber" (blocker).
+    r"""parity-test / "a convex fixture cannot distinguish a true-Hessian RTR
+    from a Gauss-Newton hill-climber" (blocker) -- RECONCILED 2026-06-17.
 
-    On a deliberately NON-CONVEX fixture with a start on the wrong side of a
-    saddle, assert the THREE-part meta-gate from the register's ``proposed_test``:
+    The original three-part contract (``riemannian_lm`` stalls at a saddle;
+    ``riemannian_tr`` escapes and recovers ``Gamma_true``) was empirically
+    falsified on this fixture and is NOT oracle-true.  Under BOTH continuously-
+    updated and a fixed (Identity) weighting, ``riemannian_lm``,
+    ``riemannian_tr``, AND the pymanopt-TR oracle all converge to the SAME
+    cost~0 point at the SAME wrong ``Gamma`` (``max|dGamma|`` ~ 3.71 from
+    ``Gamma_true``; LM and RTR land on the identical criterion value to ~1e-11).
+    The moment map ``g(Gamma) = [tr^2, tr(G@G), exp(0.3 tr), triu(G)[:6], phi]``
+    is NON-INJECTIVE in ``Gamma`` -- ``Gamma_true`` is simply not identified --
+    so "recover ``Gamma_true``" AND the fallback "RTR reaches a strictly lower
+    criterion than LM" are both unsatisfiable.  (Evidence + owner decision:
+    ``docs/handoff-2026-06-17-rtr-triage.org``.)
 
-      (a) ``riemannian_lm`` (Gauss-Newton, J'J PSD-by-construction) STALLS --
-          it cannot reach ``Gamma_true`` because it never follows negative
-          curvature. This GUARDS that the fixture genuinely exercises the RTR
-          code path; if a future edit convex-ifies the fixture, LM stops
-          stalling and this assertion fails LOUDLY rather than the test passing
-          for the wrong reason.
-      (b) ``riemannian_tr`` escapes the saddle and recovers ``Gamma_true``.
-      (c) tCG reported >= 1 NEGATIVE_CURVATURE exit on the path
-          (``info.tr_trace.n_negcurv >= 1``) -- the meta-check that the negative-
-          curvature branch actually fired. A solver that silently replaced the
-          true Hessian with a J'J surrogate would converge (maybe) but report
-          ZERO negative-curvature exits and fail here.
+    What IS true, oracle-verified, and what the meta-gate now asserts -- under a
+    fixed (Identity) weighting, so it is apples-to-apples with the fixed-cost
+    pymanopt oracle (continuously-updated weighting has no pymanopt analogue):
 
-    All recovery is on the gauge invariant ``Gamma``; raw ``A`` is never touched.
+      (a) On this deliberately non-convex fixture, tCG fires its
+          NEGATIVE_CURVATURE branch (``info.tr_trace.n_negcurv >= 1`` and a
+          NEGATIVE_CURVATURE stop code).  This is the meta-check that the
+          true-Hessian branch actually ran: a solver that silently replaced the
+          true Hessian with a ``J'J`` (Gauss-Newton) surrogate would report ZERO
+          negative-curvature exits and fail here.  It is the discriminating
+          assertion the original test was built around, and it survives intact.
+
+      (b) ``riemannian_tr`` matches the pymanopt-TR oracle on the IDENTICAL
+          fixed-W problem on the gauge invariants that ARE identified: the
+          eigenvalues of ``Gamma`` and the criterion value agree to ~1e-6 (in
+          practice ~1e-12 / ~1e-16).  The full ``Gamma`` matrix and
+          ``Gamma_true`` are NOT asserted -- the fixture does not identify them
+          (the eigenvectors of the cost~0 solution drift at ~1e-4 between
+          criterion-equivalent minimisers).
+
+    ``k=3`` is DROPPED: it is under-identified (``M=10`` moments ``< K_id=13``)
+    and ``estimate()`` raises ``Emu_GMM_DimensionError`` before optimising;
+    re-identifying it is out of scope for this reconciliation.
+
+    All comparison is on the gauge-invariant ``Gamma`` spectrum; raw ``A`` is
+    never touched.
     """
 
     @pytest.mark.slow
-    @pytest.mark.parametrize("k", [2, 3])
-    def test_lm_stalls_tr_escapes_with_negcurv(self, k):
+    @pytest.mark.parametrize("k", [2])
+    def test_negcurv_fires_and_matches_pymanopt_oracle(self, k):
+        pytest.importorskip("pymanopt")
+        import pymanopt
+        from pymanopt.manifolds import Euclidean as PymEuclidean
+        from pymanopt.manifolds import Product as PymProduct
+        from pymanopt.manifolds import PSDFixedRank as PymPSDFixedRank
+        from pymanopt.optimizers import TrustRegions
+
         rng = np.random.default_rng(700 + k)
         A_true = jnp.asarray(rng.normal(size=(N, k)))
         Gamma_true = A_true @ A_true.T
         phi_true = 0.5
         target = _nonconvex_target(A_true, phi_true)
-        measure, _x_bar = _make_synthetic_measure(
+        measure, x_bar = _make_synthetic_measure(
             target, n_sim=400, noise=0.01, draw_seed=k
         )
 
-        # Start on the WRONG side of the saddle: a strongly shrunk + rotated
-        # factor whose Gamma has the wrong trace sign-structure for the squared
-        # moments, so the Gauss-Newton model points the LM iterate away from
-        # the truth. (Deterministic, not near-truth: this is a basin test.)
+        # Start on the wrong side of the saddle (deterministic, not near-truth).
         Y0 = 0.15 * jnp.asarray(rng.normal(size=(N, k)))
         theta_init = _make_params(Y0, 0.4, k)
 
-        # (a) riemannian_lm STALLS -- does NOT reach Gamma_true.
-        res_lm = _estimate_lm(_nonconvex_model, measure, theta_init, max_steps=400)
-        A_lm, _ = res_lm.components()
-        Gamma_lm = A_lm @ A_lm.T
-        lm_err = float(jnp.max(jnp.abs(Gamma_lm - Gamma_true)))
-        assert lm_err > 0.1, (
-            "fixture is no longer non-convex: riemannian_lm reached Gamma_true "
-            f"(max|dGamma|={lm_err:.3e}); the meta-gate would pass vacuously"
-        )
-
-        # (b) riemannian_tr ESCAPES and recovers Gamma_true to a tight tol.
+        # Fixed (Identity) weighting: the criterion is the bare 0.5||m - x||^2
+        # that the fixed-cost pymanopt oracle also minimises. Under Identity both
+        # reach a cost~0 stationary point (CU has no pymanopt analogue).
         res_tr = _estimate_tr(
-            _nonconvex_model, measure, theta_init, max_steps=300, rtol=1e-8
+            _nonconvex_model,
+            measure,
+            theta_init,
+            weighting=Identity(),
+            max_steps=300,
+            rtol=1e-8,
         )
         assert bool(res_tr.converged)
         A_tr, _ = res_tr.components()
         Gamma_tr = A_tr @ A_tr.T
-        tr_err = float(jnp.max(jnp.abs(Gamma_tr - Gamma_true)))
-        assert tr_err < 2e-2, (Gamma_tr, Gamma_true, tr_err)
-        # eigvals (gauge invariant) recovered too.
-        assert bool(
-            jnp.allclose(
-                jnp.linalg.eigvalsh(Gamma_tr),
-                jnp.linalg.eigvalsh(Gamma_true),
-                atol=2e-2,
-            )
-        )
 
-        # (c) tCG fired its negative-curvature branch at least once.
+        # (a) tCG fired its NEGATIVE_CURVATURE branch -- the true-Hessian
+        # meta-check (a J'J surrogate would report ZERO such exits).
         n_negcurv = int(
             jnp.asarray(res_tr.diagnostics.optimizer_info.tr_trace.n_negcurv)
         )
@@ -324,9 +338,53 @@ class TestNonConvexMetaGate:
             "tCG reported ZERO negative-curvature exits on a provably non-convex "
             "fixture -- the true-Hessian branch never fired (J'J surrogate?)"
         )
-        # And the stop-reason trace actually contains a NEGATIVE_CURVATURE code.
         stops = np.asarray(res_tr.diagnostics.optimizer_info.tr_trace.tcg_stop)
         assert int(np.sum(stops == NEGATIVE_CURVATURE)) >= 1
+
+        # Guard that we are still in the non-injective regime that motivates the
+        # reconciliation: this fixture does NOT identify Gamma_true. If a future
+        # edit makes it identified, this fires loudly so the contract is revisited.
+        tr_err = float(jnp.max(jnp.abs(Gamma_tr - Gamma_true)))
+        assert tr_err > 0.1, (
+            "fixture unexpectedly identified Gamma_true (max|dGamma|="
+            f"{tr_err:.3e}); the reconciled meta-gate assumes the non-injective "
+            "regime -- re-examine the contract if this fires"
+        )
+
+        # (b) pymanopt-TR on the IDENTICAL fixed-W (Identity) cost.
+        manifold = PymProduct([PymPSDFixedRank(N, k), PymEuclidean(1)])
+
+        @pymanopt.function.jax(manifold)
+        def cost(Y, phi):
+            G = Y @ Y.T
+            tr = jnp.trace(G)
+            moms = jnp.array([tr * tr, jnp.trace(G @ G), jnp.exp(0.3 * tr)])
+            extra = _triu_of(G)[:6]
+            m = jnp.concatenate([moms, extra, phi])
+            r = m - x_bar
+            return 0.5 * jnp.sum(r * r)  # W = I
+
+        problem = pymanopt.Problem(manifold, cost)
+        optimizer = TrustRegions(
+            verbosity=0, max_iterations=300, min_gradient_norm=1e-10
+        )
+        out = optimizer.run(problem, initial_point=[np.asarray(Y0), np.array([0.4])])
+        Y_pym = np.asarray(out.point[0], dtype=np.float64)
+        Gamma_pym = jnp.asarray(Y_pym @ Y_pym.T)
+        J_tr = float(jnp.asarray(res_tr.J_stat))
+        J_pym = 2.0 * float(out.cost)  # J = r'r = 2 * 0.5 r'r
+
+        # Oracle parity on the gauge invariants that ARE identified: the
+        # eigenvalues of Gamma and the criterion value. (Full Gamma / Gamma_true
+        # are not identified on this non-injective fixture, so are NOT asserted.)
+        assert bool(
+            jnp.allclose(
+                jnp.linalg.eigvalsh(Gamma_tr),
+                jnp.linalg.eigvalsh(Gamma_pym),
+                atol=1e-6,
+            )
+        ), (jnp.linalg.eigvalsh(Gamma_tr), jnp.linalg.eigvalsh(Gamma_pym))
+        assert J_tr == pytest.approx(J_pym, abs=1e-6)
 
 
 # ===========================================================================
