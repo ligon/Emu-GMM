@@ -76,6 +76,7 @@ from emu_gmm.inference import (
 )
 from emu_gmm.manifolds import (
     Euclidean,
+    Interval,
     ManifoldLeaf,
     ManifoldParam,
     Positive,
@@ -195,6 +196,7 @@ __all__ = [
     "PSDFixedRank",
     "Product",
     "Positive",
+    "Interval",
     "ManifoldLeaf",
     # Parameter-space declaration layer (#107): declare field -> manifold
     # geometry once in a class, then ParameterSpace.point([seed]) lowers to a

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from emu_gmm.manifolds.base import ManifoldParam
 from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.interval import Interval
 from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
 from emu_gmm.manifolds.optimizer import RiemannianOptimizer
 from emu_gmm.manifolds.positive import Positive
@@ -47,6 +48,7 @@ __all__ = [
     "ManifoldParam",
     "Euclidean",
     "ManifoldLeaf",
+    "Interval",
     "Positive",
     "PSDFixedRank",
     "Product",
