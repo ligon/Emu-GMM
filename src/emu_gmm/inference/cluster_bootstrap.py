@@ -61,7 +61,8 @@ Given an empirical measure with ``N`` observations partitioned into
 3. Build a fresh ``ClusteredCovariance`` matched to the resampled
    layout and call :func:`~emu_gmm.estimator.estimate` from
    ``theta_init`` with the user's ``weighting``, ``regularization``,
-   and ``optimizer``.
+   ``optimizer``, and ``penalty`` --- so a penalized point estimate is
+   refit under the *same* in-objective penalty (issue #150).
 4. Record :math:`\\hat\\theta^{(b)}`, :math:`J^{(b)}`, and a Python
    boolean convergence flag.
 
@@ -110,7 +111,7 @@ from emu_gmm._internal import params as params_mod
 from emu_gmm.covariance.clustered import ClusteredCovariance
 from emu_gmm.estimator import estimate
 from emu_gmm.measures.empirical import EmpiricalMeasure
-from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     Emu_GMM_DimensionError,
@@ -123,8 +124,9 @@ from emu_gmm.weighting import ContinuouslyUpdated
 
 # A bare ``Optimizer``-protocol callable is hard to name precisely here
 # because the framework's protocol is annotated for a single solve. The
-# bootstrap simply re-invokes whatever the user supplied (defaulting to
-# the standard :func:`optimistix_lm`) once per replicate.
+# bootstrap simply re-invokes whatever the user supplied (or, when
+# ``None``, defers to ``estimate()``'s optimiser auto-dispatch) once per
+# replicate.
 _OptimizerLike = Callable
 
 
@@ -149,7 +151,13 @@ class ClusterBootstrapResult:
         parameter dataclass via :attr:`param_names` and
         :attr:`coords` (haliax's :class:`Axis` itself only stores a
         single name + size, not per-coordinate labels, so the
-        coordinate strings live on this result object).
+        coordinate strings live on this result object). For a manifold
+        / non-scalar parameter tree ``K`` is the **ambient** flatten
+        dimension and ``param_names`` are the positional ambient
+        coordinate labels (``A[0,0]``, ...), matching
+        :attr:`~emu_gmm.types.EstimationResult.Sigma_theta`; those raw
+        entries are gauge-arbitrary across replicates (see
+        :func:`cluster_bootstrap`'s manifold note).
     J_boot : :class:`jax.Array`
         Per-replicate J statistic, shape ``(n_boot,)``. ``NaN`` for
         replicates whose solver diverged.
@@ -168,9 +176,12 @@ class ClusterBootstrapResult:
         a fresh key from their original seed.
     param_names : tuple[str, ...] (static)
         Parameter names matching ``theta_boot``'s ``parameters`` axis,
-        in PyTree-flatten order. Lifted from the user's parameter
-        dataclass via :func:`emu_gmm._internal.params.param_names`
-        and carried through so downstream tabular gestures
+        in PyTree-flatten order. For an all-scalar (v1) tree these are
+        the dataclass field names
+        (:func:`emu_gmm._internal.params.param_names`); for a manifold
+        tree they are the positional ambient-coordinate labels
+        (:func:`emu_gmm._internal.labels.tangent_basis_names`).
+        Carried through so downstream tabular gestures
         (``pd.Series(boot_se, index=result.param_names)``) work
         without the caller re-reading the dataclass. Marked as a
         :func:`jax_dataclasses.static_field` because the names ride
@@ -309,6 +320,7 @@ def cluster_bootstrap(
     weighting: WeightingStrategy | None = None,
     regularization: RegularizationStrategy | None = None,
     optimizer: _OptimizerLike | None = None,
+    penalty: PenaltyStrategy | None = None,
 ) -> ClusterBootstrapResult:
     """Refit-based cluster bootstrap for a GMM estimator.
 
@@ -334,10 +346,26 @@ def cluster_bootstrap(
         random stream was used as intended.
     weighting, regularization, optimizer
         Forwarded to :func:`emu_gmm.estimate` on each replicate.
-        Defaults match the framework defaults:
-        :class:`~emu_gmm.weighting.ContinuouslyUpdated`,
-        :class:`~emu_gmm.regularization.DiagonalTikhonov`,
-        :func:`~emu_gmm.optimizer.optimistix_lm`.
+        ``weighting`` / ``regularization`` default to the framework
+        defaults (:class:`~emu_gmm.weighting.ContinuouslyUpdated`,
+        :class:`~emu_gmm.regularization.DiagonalTikhonov`). ``optimizer``
+        defaults to ``None``, which lets :func:`emu_gmm.estimate`
+        auto-dispatch per replicate --- :func:`~emu_gmm.optimizer.optimistix_lm`
+        for an all-Euclidean parameter, :func:`~emu_gmm.manifolds.riemannian_lm.riemannian_lm`
+        for a manifold parameter (the v1 Euclidean solver cannot retract on
+        a :class:`~emu_gmm.manifolds.psd_fixed_rank.PSDFixedRank` factor).
+    penalty : :class:`~emu_gmm.penalty.PenaltyStrategy`, keyword-only, optional
+        In-objective parameter penalty forwarded to each refit (#150). This
+        is a *separate channel* from ``regularization``: ``regularization``
+        is a covariance-side :class:`RegularizationStrategy` that
+        PD-restores ``V``, whereas ``penalty`` adds a term to the GMM
+        criterion itself. If the point estimate was obtained under a
+        penalty (e.g. an in-objective ridge that identifies an otherwise
+        ill-posed model), it **must** be passed here so each replicate
+        re-solves the *same* penalized objective; an unpenalized refit can
+        land in a different, non-reportable optimum rather than merely
+        widening the interval. ``penalty=None`` (the default) reproduces
+        the prior unpenalized behaviour bitwise.
 
     Returns
     -------
@@ -347,28 +375,61 @@ def cluster_bootstrap(
     -----
     See the module docstring for the distinction from the refit-free
     moment-wild bootstrap (issue #6).
+
+    **Manifold / non-scalar parameters (#150).** ``theta_init`` may carry
+    non-scalar leaves (e.g. a :class:`~emu_gmm.manifolds.manifold_leaf.ManifoldLeaf`
+    wrapping a ``PSDFixedRank`` factor ``A``). ``theta_boot`` is then
+    returned over the **ambient** flatten axis, with the same positional
+    coordinate labels (``A[0,0]``, ``A[0,1]``, ...) that
+    :attr:`~emu_gmm.types.EstimationResult.Sigma_theta` /
+    :meth:`~emu_gmm.types.EstimationResult.eigenvalue_se` use. Those raw
+    ambient entries are **gauge-arbitrary**: each refit's ``A`` is
+    identified only up to ``A -> A Q`` (orthogonal ``Q``), so a column of
+    ``theta_boot`` for an ``A`` entry is *not* comparable across
+    replicates. Map each replicate through a gauge-invariant functional of
+    ``Gamma = A @ A.T`` (eigenvalues, ``vech(Gamma)``) **before** forming
+    an empirical distribution --- the same discipline the analytic
+    :meth:`~emu_gmm.types.EstimationResult.functional_se` enforces.
     """
     if n_boot <= 0:
         raise ValueError(f"cluster_bootstrap: n_boot must be positive, got {n_boot}")
 
-    # Resolve defaults to the same values used by :func:`estimate`.
+    # Probe the parameter tree with the manifold-aware flatten (#150).
+    # ``flatten_params_for_ad`` dispatches exactly like ``estimate()``:
+    # an all-scalar (v1) tree returns ``spec=None`` and the bitwise-v1
+    # flat layout; a tree carrying a non-scalar / manifold leaf (e.g. a
+    # ``PSDFixedRank`` factor) returns the ambient flatten plus its
+    # ``ManifoldSpec``. ``K`` is the ambient flatten length in both cases
+    # (== ``total_ambient_dim`` == ``total_dimension``), matching the
+    # ``parameters`` axis ``Sigma_theta`` is sized along.
+    theta_init_flat, _treedef, init_spec = params_mod.flatten_params_for_ad(theta_init)
+    K = int(theta_init_flat.shape[0])
+    if init_spec is None:
+        # v1 / all-scalar: dataclass field names, bitwise unchanged.
+        param_names = tuple(params_mod.param_names(theta_init))
+    else:
+        # Manifold: positional ambient-coordinate labels (e.g. ``A[0,0]``),
+        # identical to the gauge-arbitrary labelling ``Sigma_theta`` /
+        # ``eigenvalue_se`` use. See the function docstring's manifold note
+        # on why the raw entries are not cross-replicate comparable.
+        param_names = tuple(labels_mod.tangent_basis_names(init_spec))
+
+    # Resolve defaults to the same values used by :func:`estimate`. The
+    # optimiser default is *deferred*: we forward ``optimizer=None`` so
+    # :func:`estimate` auto-dispatches per replicate (``optimistix_lm`` for
+    # an all-Euclidean tree, ``riemannian_lm`` for a manifold tree) rather
+    # than pinning the v1 Euclidean solver here, which cannot retract on a
+    # manifold leaf (#150).
     if weighting is None:
         weighting = ContinuouslyUpdated()
     if regularization is None:
         regularization = DiagonalTikhonov()
-    if optimizer is None:
-        optimizer = optimistix_lm()
 
     # Pre-compute the cluster -> row-indices lookup once. Pulled to
     # NumPy here so the per-replicate assembly stays cheap.
     cluster_ids_np = np.asarray(covariance.cluster_ids).astype(np.int64)
     n_clusters = int(covariance.n_clusters)
     rows_by_cluster = _cluster_row_indices(cluster_ids_np, n_clusters)
-
-    # Probe K (number of parameters) so we can allocate theta_boot.
-    theta_init_flat, _treedef = params_mod.flatten_params(theta_init)
-    K = int(theta_init_flat.shape[0])
-    param_names = tuple(params_mod.param_names(theta_init))
 
     # Draw the cluster indices for all replicates from a single key
     # via split: B splits give B independent (n_clusters,) draws.
@@ -404,6 +465,7 @@ def cluster_bootstrap(
                 weighting=weighting,
                 regularization=regularization,
                 optimizer=optimizer,
+                penalty=penalty,
                 theta_init=theta_init,
             )
         except (
@@ -432,7 +494,7 @@ def cluster_bootstrap(
             J_boot[b] = np.nan
             convergence[b] = False
             continue
-        theta_hat_flat, _ = params_mod.flatten_params(result.theta_hat)
+        theta_hat_flat, _, _ = params_mod.flatten_params_for_ad(result.theta_hat)
         theta_boot[b] = np.asarray(theta_hat_flat)
         J_boot[b] = float(result.J_stat)
         convergence[b] = bool(result.converged)

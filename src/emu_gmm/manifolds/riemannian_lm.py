@@ -47,7 +47,19 @@ which ``Y -> Y Q`` leaves ``Y Y^T`` fixed). Two mechanisms enforce this:
 
 Convergence norms are computed on the **horizontal** step / gradient, so a
 gauge-wandering iterate cannot certify falsely (red-team R9): the gauge
-component is removed before the norm is taken.
+component is removed before the norm is taken. A third, ftol (cost-stagnation)
+criterion (#156), **active only for a gauge-bearing tree
+(``total_gauge_dim > 0``)**, certifies after ``ftol_patience`` consecutive
+**accepted** steps whose relative cost reduction is below ``ftol`` -- the
+standard MINPACK / scipy termination for an objective whose Gauss--Newton model
+cannot drive the gradient to zero (the continuously-updated + clustered
+criterion on the over-parameterised PSDFixedRank factor: the cost basin is
+reached but the horizontal gradient plateaus while the iterate drifts at
+constant cost). A *rejected* step resets the counter (the LM is still
+exploring). For a gauge-free tree the criterion is gated off, so every scalar /
+Euclidean / Positive solve -- including the ill-conditioned ``sigma -> 0``
+boundary collapse -- keeps its exact stopping point. The cost ``||r||^2`` is
+itself gauge-invariant.
 
 #78 done-flag (Phase-3 contract item 3; red-team R6/R10/R16)
 ------------------------------------------------------------
@@ -143,6 +155,8 @@ class _RiemannianLM:
     atol: float
     max_steps: int
     gauge_floor: float = _GAUGE_FLOOR
+    ftol: float = 1e-8
+    ftol_patience: int = 8
 
     def __call__(
         self,
@@ -218,6 +232,17 @@ class _RiemannianLM:
         # gauge structure -> scalar/v1 path is bitwise unchanged
         # (red-team R7/R13/R18).
         lam_floor = float(self.gauge_floor) * float(total_gauge)
+
+        # ftol (cost-stagnation) certification is gated on gauge structure
+        # (#156). It exists for the over-parameterised PSDFixedRank factor,
+        # where the gauge redundancy + the continuously-updated/clustered
+        # curvature stall the Gauss--Newton step at the cost floor. A
+        # gauge-free leaf (scalar / Euclidean / Positive) has no such
+        # redundancy: its solve converges via grad_ok / step_ok, and gating
+        # ftol off keeps its stopping point -- and any pinned J / p-value
+        # downstream (e.g. the ill-conditioned Positive sigma->0 boundary
+        # collapse in test_estimator_realdata) -- bitwise unchanged.
+        ftol_active = total_gauge > 0
 
         def _block(x: Float[Array, " K"], offset: int, size: int) -> Any:
             return x[offset : offset + size]
@@ -336,12 +361,12 @@ class _RiemannianLM:
             lam0 = jnp.maximum(lam0, lam_floor)
 
             def cond_fun(carry: Any) -> Any:
-                x, lam, step, done = carry
-                del x, lam
+                x, lam, step, done, stall = carry
+                del x, lam, stall
                 return jnp.logical_and(step < self.max_steps, jnp.logical_not(done))
 
             def body_fun(carry: Any) -> Any:
-                x, lam, step, done = carry
+                x, lam, step, done, stall = carry
                 del done
                 r = residuals(x)
                 cost = jnp.sum(r * r)
@@ -380,11 +405,57 @@ class _RiemannianLM:
                     improved, step_norm < (self.atol + self.rtol * x_norm)
                 )
 
-                converged = jnp.logical_or(grad_ok, step_ok)
-                return (x_out, lam_out, step + 1, converged)
+                #   3. ftol (cost stagnation; #156). An **accepted** step
+                #      (``improved``) that reduces the cost by less than
+                #      ``ftol * cost`` is "stagnant" -- the iterate is moving
+                #      but the cost is at its achievable floor. After
+                #      ``ftol_patience`` *consecutive* such steps we certify on
+                #      cost stationarity (the standard MINPACK / scipy ``ftol``
+                #      termination), catching the case ``grad_ok`` / ``step_ok``
+                #      miss: an objective whose Gauss--Newton model is imperfect
+                #      (the continuously-updated + clustered criterion -- the
+                #      cost basin is reached but the GN step can no longer drive
+                #      the horizontal gradient to zero, and the iterate drifts
+                #      at constant cost).
+                #
+                #      A **rejected** step does NOT count -- it resets the
+                #      counter. A rejection means the LM is still exploring,
+                #      ramping ``lam`` to find a descent direction (e.g. the
+                #      transient stuck phase of a ``Positive`` solve climbing
+                #      off a sub-true start, where the GN step overshoots and is
+                #      rejected for a dozen-odd steps before it breaks free).
+                #      Counting rejections would falsely certify that stuck
+                #      start. Because a healthy solve makes a large relative
+                #      reduction on every accepted step until it certifies via
+                #      ``grad_ok``, the counter never accumulates and the
+                #      iterate / step count of an already-converging solve are
+                #      unchanged (the all-scalar / all-Euclidean path included).
+                actual_reduction = cost - cost_new
+                stagnant_accepted = jnp.logical_and(
+                    improved, actual_reduction < self.ftol * cost
+                )
+                stall_next = jnp.where(stagnant_accepted, stall + 1, 0)
 
-            init_carry = (theta0_flat, lam0, jnp.asarray(0), jnp.asarray(False))
-            x_final, _lam, steps, done = jax.lax.while_loop(
+                converged = jnp.logical_or(grad_ok, step_ok)
+                if ftol_active:
+                    # Gauge-bearing leaf only (#156): OR in cost stagnation.
+                    # For a gauge-free tree this branch is not taken, so
+                    # ``converged`` is exactly ``grad_ok | step_ok`` and the
+                    # stall counter is inert -- the iterate / step count are
+                    # bitwise the pre-#156 behaviour.
+                    converged = jnp.logical_or(
+                        converged, stall_next >= self.ftol_patience
+                    )
+                return (x_out, lam_out, step + 1, converged, stall_next)
+
+            init_carry = (
+                theta0_flat,
+                lam0,
+                jnp.asarray(0),
+                jnp.asarray(False),
+                jnp.asarray(0),
+            )
+            x_final, _lam, steps, done, _stall = jax.lax.while_loop(
                 cond_fun, body_fun, init_carry
             )
 
@@ -438,6 +509,8 @@ def riemannian_lm(
     atol: float = 1e-8,
     max_steps: int = 200,
     gauge_floor: float = _GAUGE_FLOOR,
+    ftol: float = 1e-8,
+    ftol_patience: int = 8,
 ) -> _RiemannianLM:
     """Build a per-leaf Riemannian Levenberg--Marquardt optimiser.
 
@@ -453,9 +526,36 @@ def riemannian_lm(
         ``lam_floor = gauge_floor * total_gauge_dim``. ``0`` for any
         all-scalar / all-Euclidean / all-Positive tree (no gauge
         structure), so the scalar path is bitwise unchanged.
+    ftol, ftol_patience
+        Cost-stagnation (MINPACK / scipy ``ftol``) termination (#156), gated
+        on gauge structure: the solve certifies after ``ftol_patience``
+        *consecutive accepted* steps whose relative cost reduction is below
+        ``ftol``. A rejected step resets the counter (the LM is still
+        exploring -- ramping ``lam`` to find a descent direction -- not
+        stalled). This lets a solve whose Gauss--Newton model cannot drive the
+        gradient to zero -- the continuously-updated + clustered criterion on
+        the over-parameterised ``PSDFixedRank`` factor, where the cost basin
+        is reached but the horizontal gradient plateaus while the iterate
+        drifts -- still report ``converged=True`` once the cost is at its
+        achievable floor.
+
+        The criterion is **only active when ``total_gauge_dim > 0``**. A
+        gauge-free leaf (scalar / ``Euclidean`` / ``Positive``) has no gauge
+        redundancy: its solve converges via the gradient / step tests, so ftol
+        is gated off and its stopping point -- and any pinned J / p-value
+        downstream (e.g. the ill-conditioned ``Positive`` ``sigma -> 0``
+        boundary collapse) -- stays **bitwise unchanged**. Even within a
+        gauge-bearing solve, a healthy run certifies via the gradient test
+        before the counter accumulates, so the iterate and step count of an
+        already-converging solve are unchanged.
     """
     return _RiemannianLM(
-        rtol=rtol, atol=atol, max_steps=max_steps, gauge_floor=gauge_floor
+        rtol=rtol,
+        atol=atol,
+        max_steps=max_steps,
+        gauge_floor=gauge_floor,
+        ftol=ftol,
+        ftol_patience=ftol_patience,
     )
 
 
