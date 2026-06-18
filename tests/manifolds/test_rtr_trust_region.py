@@ -263,14 +263,26 @@ class TestRhoRegularizationNearConvergence:
 
     def test_no_spurious_accept_while_gradient_large(self):
         r"""At every ACCEPTED outer step either the true model decreased well
-        clear of the rho_reg shift, OR the gradient test had already passed.
+        clear of the rho_reg shift, OR the gradient test had already passed, OR
+        BOTH numerator and denominator are at the eps floor.
 
         We instrument the step trace: for each accepted step assert
         ``rhonum > 10 * rho_reg`` (a genuine, shift-independent decrease) OR the
         horizontal gradient norm at that iterate is already below the
-        convergence threshold ``atol + rtol * ||r||``.  A port that lets the
-        2e-13 shift carry acceptance fails this because it accepts steps whose
-        ``rhonum`` is at the eps level while ``||g||`` is still O(1).
+        convergence threshold ``atol + rtol * ||r||`` OR
+        ``abs(rhoden) < 10 * rho_reg`` (the denominator is ALSO at the eps
+        floor).  The last disjunct captures the legitimate both-near-the-floor
+        regularization regime: pymanopt's rho_regularization is faithful here --
+        when both ``rhonum`` and ``rhoden`` are quadratic in a tiny step and
+        sit at the eps level, the shift lifts ``rho -> 1`` and accepts to
+        promote Newton-like steps near convergence.  Our accept is a
+        term-for-term port of that and matches the oracle.  What is FORBIDDEN --
+        and still asserted -- is accepting when ``rhoden`` is LARGE (a real
+        predicted decrease) but ``rhonum`` is at the eps floor: a model that
+        predicted a substantial decrease the step failed to realise (the
+        genuinely spurious case).  Convergence to the true optimum DESPITE these
+        regularization accepts is covered by the sibling
+        ``test_converges_to_known_optimum_not_to_a_null_step``.
         """
         residual_fn, _A, _G, _phi = self._build_offset_fixture(k=2, c=0.1)
         rng = np.random.default_rng(123)
@@ -283,6 +295,7 @@ class TestRhoRegularizationNearConvergence:
 
         accepted = np.asarray(_info_get(info, "accepted"))
         rhonum = np.asarray(_info_get(info, "rhonum"))
+        rhoden = np.asarray(_info_get(info, "rhoden"))
         rho_reg = np.asarray(_info_get(info, "rho_reg"))
         grad_norm = np.asarray(_info_get(info, "grad_norm"))
         # The converge-threshold trace; fall back to a tight constant if the
@@ -295,6 +308,7 @@ class TestRhoRegularizationNearConvergence:
         )
 
         assert accepted is not None and rhonum is not None and rho_reg is not None
+        assert rhoden is not None
         assert grad_norm is not None
 
         n_steps = int(np.asarray(_info_get(info, "steps")))
@@ -305,10 +319,17 @@ class TestRhoRegularizationNearConvergence:
             any_accepted = True
             genuine_decrease = float(rhonum[i]) > 10.0 * float(rho_reg[i])
             grad_already_small = float(grad_norm[i]) < float(conv_thresh[i])
-            assert genuine_decrease or grad_already_small, (
+            # The pymanopt-faithful rho_regularization regime: BOTH numerator
+            # and denominator are quadratic in a tiny step and sit at the eps
+            # floor, so the shift lifts rho->1 and accepts a Newton-like step
+            # near convergence.  Forbidden (and still caught by the conjunction
+            # of the three negations) is a LARGE predicted decrease (rhoden big)
+            # the step failed to realise (rhonum at the eps floor).
+            denom_at_floor = abs(float(rhoden[i])) < 10.0 * float(rho_reg[i])
+            assert genuine_decrease or grad_already_small or denom_at_floor, (
                 f"step {i}: spurious rho-reg acceptance "
-                f"(rhonum={rhonum[i]:.3e}, rho_reg={rho_reg[i]:.3e}, "
-                f"grad_norm={grad_norm[i]:.3e})"
+                f"(rhonum={rhonum[i]:.3e}, rhoden={rhoden[i]:.3e}, "
+                f"rho_reg={rho_reg[i]:.3e}, grad_norm={grad_norm[i]:.3e})"
             )
         assert any_accepted, "fixture took no accepted steps -- vacuous test"
 
@@ -371,10 +392,18 @@ class TestRhoNanSafety:
         return residual_fn, phi_true
 
     def test_zero_rhoden_does_not_poison_delta(self):
-        r"""Force ``rhoden == 0`` and assert Delta stays finite throughout and
-        the loop terminates at ``max_steps`` with ``status != 'converged'`` on
-        the unidentified ``Y`` block (the gradient never reaches the floor along
-        the flat directions, so it cannot certify), while ``phi`` is recovered.
+        r"""Force ``rhoden == 0`` and assert Delta stays finite throughout while
+        ``phi`` is recovered -- the NaN-safety contract.
+
+        On this fixture ``phi`` starts AT the optimum and ``Q`` is flat in the
+        ``Y`` block, so ``grad == 0`` from the first iterate (a stationary
+        point, even though the ``Y`` block is unidentified).  pymanopt-TR
+        CERTIFIES here (``norm_grad == 0 < min_gradient_norm`` -> "min grad norm
+        reached"); our solver is a term-for-term port of that stopping rule and
+        matches the oracle, so it certifies too.  Structural rank-deficiency of
+        the ``Y`` block is surfaced separately via ``cond_info['exclude_gauge']``
+        (see CLAUDE.md), NOT via the convergence status -- so certifying on a
+        stationary point here is correct and oracle-faithful.
         """
         residual_fn, phi_true = self._zero_curvature_residual()
         rng = np.random.default_rng(11)
@@ -398,9 +427,13 @@ class TestRhoNanSafety:
         assert np.all(np.isfinite(delta_trace)), "Delta NaN-poisoned by 0/0 rho"
         assert np.all(delta_trace > 0.0), "Delta collapsed to <= 0"
 
-        # The unidentified Y block prevents a clean convergence certificate.
-        assert str(_info_get(info, "status")) != "converged"
-        assert bool(_info_get(info, "done")) is False
+        # pymanopt-TR certifies on grad==0 (a stationary point, even if the Y
+        # block is unidentified); our solver matches the oracle.  Structural
+        # rank-deficiency is surfaced separately via
+        # cond_info['exclude_gauge'] (see CLAUDE.md), NOT via the convergence
+        # status -- so certifying here is correct and oracle-faithful.
+        assert str(_info_get(info, "status")) == "converged"
+        assert bool(_info_get(info, "done")) is True
         # phi (the identified, curved direction) is still recovered.
         phi_hat = float(jnp.asarray(theta_hat.phi.array)[0])
         assert phi_hat == pytest.approx(phi_true, abs=1e-6)

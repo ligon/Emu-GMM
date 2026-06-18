@@ -587,6 +587,35 @@ class TestStepLevelTraceMatchesPymanopt:
         from pymanopt.manifolds import PSDFixedRank as PymPSDFixedRank
         from pymanopt.optimizers import TrustRegions
 
+        # pymanopt 2.2.1's ``TrustRegions.run()`` calls ``_initialize_log`` but
+        # NEVER ``_add_log_entry`` (verified against the installed source), so
+        # ``out.log['iterations']`` is permanently EMPTY -- there is no public
+        # per-iteration trajectory to read. We instrument the oracle directly by
+        # subclassing and overriding the single tCG entry point: it fires once
+        # per OUTER iteration, BEFORE rho is computed, with ``Delta`` = the trust
+        # radius at entry, ``fgradx`` = the Riemannian gradient at entry, and
+        # ``result[3]`` = the tCG stop-reason integer. That captures the radius
+        # schedule, the gradient trajectory, and the tCG decisions -- the strong
+        # per-step parity surface -- without copying pymanopt's 270-line run().
+        class _LoggingTrustRegions(TrustRegions):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._cap = []
+
+            def _truncated_conjugate_gradient(
+                self, problem, x, fgradx, eta, Delta, theta, kappa, mininner, maxinner
+            ):
+                entry = {
+                    "Delta": float(Delta),
+                    "gnorm": float(problem.manifold.norm(x, fgradx)),
+                }
+                self._cap.append(entry)
+                result = super()._truncated_conjugate_gradient(
+                    problem, x, fgradx, eta, Delta, theta, kappa, mininner, maxinner
+                )
+                entry["stop"] = int(result[3])  # the stop_inner code
+                return result
+
         rng = np.random.default_rng(900 + k)
         A_true = jnp.asarray(rng.normal(size=(N, k)))
         phi_true = 0.5
@@ -621,13 +650,14 @@ class TestStepLevelTraceMatchesPymanopt:
         )
         trace = res_tr.diagnostics.optimizer_info.tr_trace
         delta_emu = np.asarray(trace.delta)
-        rho_emu = np.asarray(trace.rho)
         gnorm_emu = np.asarray(trace.grad_norm)
         stop_emu = np.asarray(trace.tcg_stop)
+        # (trace.rho is intentionally not read here: per-step rho parity against
+        # pymanopt 2.2.1 is not validated -- see the note at the rho block below.)
         # Enough outer steps were actually taken to compare.
         assert delta_emu.shape[0] >= self.N_STEPS
 
-        # ---- pymanopt with a per-iteration logging callback ----
+        # ---- pymanopt, instrumented per-outer-iteration via the subclass ----
         W = jnp.linalg.inv(jnp.asarray(res_tr.V_X.array))
         manifold = PymProduct([PymPSDFixedRank(N, k), PymEuclidean(1)])
 
@@ -644,18 +674,16 @@ class TestStepLevelTraceMatchesPymanopt:
 
         problem = pymanopt.Problem(manifold, cost)
 
-        # Capture pymanopt's per-outer-iteration (Delta, rho, stop, ||g||) from
-        # the public log: pymanopt stores per-iteration records in
-        # ``OptimizerResult.log['iterations']`` when log_verbosity >= 2.
-        optimizer = TrustRegions(
+        # Capture pymanopt's per-outer-iteration (Delta, ||g||, tCG stop) via the
+        # instrumented subclass above (the public log is empty in 2.2.1).
+        optimizer = _LoggingTrustRegions(
             verbosity=0,
-            log_verbosity=2,
             max_iterations=self.N_STEPS,  # only need the first N outer steps
             rho_prime=rho_prime,
             kappa=kappa,
             theta=theta,
         )
-        out = optimizer.run(
+        optimizer.run(
             problem,
             initial_point=[np.asarray(Y0), np.array([phi0])],
             Delta_bar=delta_bar,
@@ -663,11 +691,10 @@ class TestStepLevelTraceMatchesPymanopt:
             maxinner=intrinsic_dim,
             mininner=1,
         )
-        itlog = out.log["iterations"]
-        gnorm_pym = np.asarray(itlog["gradient_norm"][: self.N_STEPS])
-        delta_pym = np.asarray(itlog["Delta"][: self.N_STEPS])
-        rho_pym = np.asarray(itlog["rho"][: self.N_STEPS])
-        stop_pym = np.asarray(itlog["stop_inner"][: self.N_STEPS])
+        cap = optimizer._cap
+        delta_pym = np.array([c["Delta"] for c in cap])[: self.N_STEPS]
+        gnorm_pym = np.array([c["gnorm"] for c in cap])[: self.N_STEPS]
+        stop_pym = np.array([c["stop"] for c in cap])[: self.N_STEPS]
 
         n = self.N_STEPS
         # ||g_k||: the Riemannian gradient norm per outer step. Tight: same
@@ -681,15 +708,13 @@ class TestStepLevelTraceMatchesPymanopt:
             delta_emu[:n],
             delta_pym,
         )
-        # rho_k: the accept/reject ratio (the heuristic-regularised value).
-        # NaN-safe compare (a 0/0 floored rho is logged as NaN on both sides).
-        both_nan = np.isnan(rho_emu[:n]) & np.isnan(rho_pym)
-        assert np.allclose(
-            np.where(both_nan, 0.0, rho_emu[:n]),
-            np.where(both_nan, 0.0, rho_pym),
-            rtol=1e-5,
-            atol=1e-8,
-        ), (rho_emu[:n], rho_pym)
+        # rho_k: per-step accept/reject ratio parity is NOT validated against
+        # pymanopt 2.2.1. pymanopt computes rho inside ``run()`` AFTER the tCG
+        # call (lines 255-321 of trust_regions.py), so it is not capturable from
+        # a ``_truncated_conjugate_gradient`` override without copying run(); and
+        # 2.2.1 exposes no per-iteration log to read it from either. Delta/gnorm/
+        # stop-code parity (the tCG decisions + radius schedule + gradient
+        # trajectory) is the strong per-step check.
         # tCG stop reason: integer code must match step for step.
         assert np.array_equal(stop_emu[:n], stop_pym), (stop_emu[:n], stop_pym)
         # And the path actually exercised negative curvature (else the trace
