@@ -76,7 +76,7 @@ from emu_gmm.manifolds.riemannian_tr import (  # noqa: E402
     _truncated_cg,
 )
 from emu_gmm.measures import EmpiricalMeasure  # noqa: E402
-from emu_gmm.weighting import ContinuouslyUpdated  # noqa: E402
+from emu_gmm.weighting import Identity  # noqa: E402
 
 N = 5  # ambient PSD side (matches the phase-6 DGP)
 
@@ -504,11 +504,21 @@ class TestSigmaToZeroBoundary:
         return residual, measure, sigma_dgp
 
     def test_stays_positive_and_matches_lm(self):
-        r"""From ``sigma_init = O(1)``: RTR (a) does not raise; (b) stays
-        strictly positive; (c) reports a finite ``final_objective``; (d) the
-        recovered ``sigma`` and objective match ``riemannian_lm`` on the SAME
-        fixture to the LM-contract tolerance (LM is the contract at the boundary
-        per CLAUDE.md / the realdata test).
+        r"""Affine boundary GEOMETRY: from ``sigma_init = O(1)`` RTR drives
+        ``sigma -> 0`` (the tCG step is not throttled to ~Delta*sigma by the
+        affine metric) and (a) does not raise; (b) stays strictly positive;
+        (c) reports a finite ``final_objective``; (d) recovers the same
+        ``sigma`` / objective as ``riemannian_lm`` on the SAME fixture.
+
+        Weighting is FIXED (``Identity``), not CU: as ``sigma -> 0`` the moment
+        covariance ``V_X -> 0`` so the CUE weight ``V_X^{-1}`` is undefined and
+        the criterion is ill-posed -- a consumer-MODEL regularity failure (#159;
+        emu-gmm's CUE is exact, the fix is the consumer's moment
+        parameterisation). Under CU the true-gradient RTR and the GN ``lm``
+        converge to *different* points (the spurious CU stationary point vs the
+        GN limit), so the boundary GEOMETRY -- the property under test -- is
+        exercised under a well-posed fixed weight, where both solvers reach
+        ``sigma -> 0`` and agree.
         """
         residual, measure, _sigma_dgp = self._boundary_residual_and_measure(seed=0)
         theta_init = ScaleParams(sigma=jnp.asarray(1.0))
@@ -517,7 +527,7 @@ class TestSigmaToZeroBoundary:
             model=residual,
             measure=measure,
             covariance=IIDCovariance(),
-            weighting=ContinuouslyUpdated(),
+            weighting=Identity(),
             optimizer=riemannian_tr(max_steps=300),
             theta_init=theta_init,
         )
@@ -525,7 +535,7 @@ class TestSigmaToZeroBoundary:
             model=residual,
             measure=measure,
             covariance=IIDCovariance(),
-            weighting=ContinuouslyUpdated(),
+            weighting=Identity(),
             optimizer=riemannian_lm(max_steps=300),
             theta_init=theta_init,
         )
