@@ -84,6 +84,13 @@ adversarial; the land/PR/fix decision stays with the coordinator. Nothing merges
   #42 fast-follow* (maintainer chose "minimal now, #42 fast-follow", 2026-05-31).
 - *Solver:* =RiemannianLM= only (gauge λ-floor + per-leaf retraction/projection); defer
   Riemannian TrustRegions (#9); verify LM==TR equivalence on the quotient if needed.
+  *SUPERSEDED 2026-06-17 (#152, reopening #9):* a JAX-native =riemannian_tr=
+  (Steihaug–Toint tCG, verified faithful to the pymanopt-TrustRegions oracle on
+  the quotient) WAS added for the non-convex manifold criteria where the
+  Gauss–Newton =riemannian_lm= stalls; =riemannian_lm= stays the manifold
+  default. =riemannian_lm= also gained a non-convexity *advisory* (warn at an
+  indefinite stationary point, suggest =riemannian_tr=). The
+  =RiemannianLM=-only lock no longer holds.
 - *Backend:* native =Product=/=PSDFixedRank= constructors only; no pymanopt runtime dep
   (#3); optional gated parity test only.
 - *Param expression:* =ManifoldLeaf=-wrapped pytree (not a =__emu_manifolds__= annotation

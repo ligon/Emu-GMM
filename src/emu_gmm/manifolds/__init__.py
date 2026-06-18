@@ -42,6 +42,7 @@ from emu_gmm.manifolds.positive import Positive
 from emu_gmm.manifolds.product import Product
 from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
+from emu_gmm.manifolds.riemannian_tr import riemannian_tr
 from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "LeafSpec",
     "RiemannianOptimizer",
     "riemannian_lm",
+    "riemannian_tr",
 ]

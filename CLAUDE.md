@@ -219,10 +219,22 @@ been through four reviewer iterations; the abstractions are deliberate.
   `Euclidean` / `PSDFixedRank` / `Product` / `Positive` + `RiemannianLM`, the
   manifold-aware flatten/spec path, gauge-aware `Sigma_theta` (`pinv_eigvalrule`
   dropping the `K(K-1)/2` gauge directions by count), and gauge-invariant
-  Gamma-functional SEs (#42). Decided and closed 2026-06-09: a Riemannian
-  TrustRegions solver will not be added (#9 — LM suffices and was verified
-  equivalent on the quotient) and there is no pymanopt backend (#3 — native
-  constructors only; pymanopt is a dev-only gated cross-check). The
+  Gamma-functional SEs (#42). A JAX-native Riemannian TrustRegions solver
+  (`riemannian_tr`, top-level exported) **was added 2026-06-17 (#152, reopening
+  #9)**, reversing the 2026-06-09 "won't-do": it follows negative curvature for
+  non-convex manifold criteria (the K-Aggregators use case) where the
+  Gauss–Newton `riemannian_lm` stalls, and is verified faithful to a
+  pymanopt-TrustRegions oracle on the quotient
+  (`tests/manifolds/test_rtr_pymanopt_parity.py`). `riemannian_lm` stays the
+  manifold default (cheaper GN); reach for `riemannian_tr()` only on
+  demonstrably non-convex criteria. `riemannian_lm` additionally emits a
+  non-convexity **advisory**: on an interactive fit that converges to a genuine
+  stationary point whose horizontal true Hessian is indefinite (a saddle), it
+  warns and sets `OptimizerInfo.stalled_indefinite` / `.min_curvature`,
+  suggesting `riemannian_tr()` (eager-only; never under the vmapped/replicate
+  path; a #156 ftol cost-stagnation stop drifts at large gradient and is
+  excluded as non-stationary). There is still no pymanopt RUNTIME backend (#3 —
+  native constructors only; pymanopt is a dev-only gated cross-check). The
   high-gauge-fraction `k/n > 0.7` regime remains surfaced as a caveat, not
   supported. Validated against a pymanopt-TrustRegions baseline on the
   quotient. The epic's last open item landed with #20:

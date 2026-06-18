@@ -83,6 +83,7 @@ from emu_gmm.manifolds import (
     Product,
     PSDFixedRank,
     riemannian_lm,
+    riemannian_tr,
 )
 from emu_gmm.measures import (
     AnalyticalMeasure,
@@ -160,6 +161,7 @@ __all__ = [
     "scipy_lm",
     "linear_solver",
     "riemannian_lm",
+    "riemannian_tr",
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
