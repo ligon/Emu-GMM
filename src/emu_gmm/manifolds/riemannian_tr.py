@@ -83,6 +83,12 @@ if TYPE_CHECKING:
 _RHO_PRIME: float = 0.1
 _RHO_REGULARIZATION: float = 1e3
 _GAUGE_FLOOR: float = 1e-6
+# #152: trust-radius stagnation floor. When Delta collapses below this the
+# solver cannot make further progress (the CU noise-floor / boundary case);
+# certify rather than spin to max_steps. Far below any useful radius, so a
+# clean run (which certifies on the gradient norm with Delta still O(1)) never
+# reaches it -- keeping the criterion gauge-safe.
+_MIN_RADIUS: float = 1e-12
 
 # tCG stop-reason codes (string mirror of pymanopt's six integer codes).
 _NEG_CURV = "negative_curvature"
@@ -1047,7 +1053,26 @@ class _RiemannianTR:
                 # converged=False). The all-Euclidean linear case that rides the
                 # trust boundary every step still certifies here exactly as
                 # pymanopt does, the moment the gradient norm settles.
-                converged = gnorm_new < conv_thresh
+                grad_converged = gnorm_new < conv_thresh
+                # #152 (CU Delta-collapse): a trust-radius STAGNATION criterion.
+                # Under continuously-updated weighting the criterion's gradient
+                # carries an empirical noise floor (V_X estimation + the
+                # d/dtheta W term) that can sit ABOVE atol + rtol*||r||, so the
+                # horizontal gradient norm never reaches the floor and a
+                # gradient-only rule lets Delta collapse to ~1e-16 at the
+                # (correctly recovered) optimum without ever certifying. When
+                # Delta has collapsed below _MIN_RADIUS the solver cannot make
+                # further progress and is stationary to within achievable
+                # precision -- certify. GAUGE-SAFE (vs a step-norm stop, which is
+                # a knife-edge threshold that flips between dense-gauge-rotated
+                # runs near convergence): Delta is a gauge-invariant scalar that
+                # does NOT collapse in a clean run (the gradient criterion fires
+                # first with Delta still O(1)), so this clause never perturbs the
+                # gauge-equivariant step count -- only a genuine collapse trips
+                # it. (riemannian_lm has an analogous stop; pymanopt exposes
+                # min_step_size.)
+                radius_collapsed = Delta_new < _MIN_RADIUS
+                converged = jnp.logical_or(grad_converged, radius_collapsed)
 
                 n_negc_new = n_negc + jnp.where(is_negc, 1, 0)
 
