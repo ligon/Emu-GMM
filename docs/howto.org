@@ -212,6 +212,44 @@ These fields are *authoritative*; read them, do not recompute them:
 - =converged=, =iterations= :: convergence flag and optimiser info.
 - =to_pandas()= (method) / =coef_table= (property) :: materialise for reporting.
 
+* Inference: which uncertainty tool?
+
+=theta_hat= is half the answer; the other half is its uncertainty, and the framework gives you a small menu. All of it reads off the same pipeline --- you never hand-roll a variance.
+
+| You want                                | Use                                  | Re-solves?      |
+|-----------------------------------------+--------------------------------------+-----------------|
+| parameter SEs, fast                     | =result.standard_errors=             | no (analytic)   |
+| parameter SEs / CIs, robust             | =cluster_bootstrap= \(\to\) =theta_boot= | *yes (refit)* |
+| the \(J\) over-identification test      | =moment_wild_bootstrap=              | no              |
+| inference robust to weak identification | =k_statistic= / =k_confidence_set=   | no              |
+| SEs on functionals of \(AA'\) (gauge)   | =functional_se= / =gamma_se=         | no (analytic)   |
+| =n_boot= to a precision target          | =adaptive_bootstrap=                 | wraps the above |
+
+** Two bootstraps, and why they differ
+
+The distinction trips people up, so be explicit about it.
+
+- =moment_wild_bootstrap= is /refit-free/. It perturbs the empirical moments with a wild weighting and reads off the \(J\) distribution (and, via the first-order delta, an approximate parameter distribution). It never re-solves the GMM problem, so it's cheap --- and it's the right tool for the \(J\) test.
+- =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap. It resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns =theta_boot=, the bootstrap distribution of \(\hat\theta\) itself (Cameron, Gelbach & Miller 2008). It captures nonlinearity the delta method can't, and it's the one to reach for under few clusters, a boundary optimum, or a badly non-Gaussian sampling distribution.
+
+#+begin_src python
+import jax, jax.numpy as jnp
+from emu_gmm.inference import cluster_bootstrap
+
+boot = cluster_bootstrap(
+    model=psi, theta_init=result.theta_hat, measure=measure,
+    covariance=cov, n_boot=999, key=jax.random.PRNGKey(1),
+)
+se   = boot.theta_boot.array.std(axis=0)                                  # bootstrap SE
+ci95 = jnp.quantile(boot.theta_boot.array, jnp.array([0.025, 0.975]), axis=0)
+#+end_src
+
+** The trick: a bootstrap is just =estimate()= on a resampled =Measure=
+
+There's no monolithic =bootstrap_se= function, and that's deliberate. Because variance construction is orthogonal to integration, /resampling is a measure-construction concern/: =cluster_bootstrap= builds a fresh =EmpiricalMeasure= from the drawn clusters, pairs it with a matching =ClusteredCovariance=, and re-runs the ordinary pipeline. The refit bootstrap is a thin loop over =estimate()=, not a special variance routine --- which is exactly why a design-aware variant is cheap to add (the /stratified/ refit bootstrap is tracked in issue #155).
+
+For large =n_boot=, build on the =build_estimator= factory rather than bare =estimate()= (see "Performance: estimating many times"), and let =adaptive_bootstrap= choose =n_boot= by targeting the Monte Carlo precision of the functional you care about. =examples/empirical_bootstrap.py= runs the wild and cluster bootstraps side by side.
+
 * Contracts that bite (read before you debug)
 
 1. *=psi= is per-observation and returns =(M,)=.* Returning an

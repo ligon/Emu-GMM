@@ -50,6 +50,35 @@ print(result.to_pandas()["Sigma_theta"])
 
 The same =euler_residual= drives the analytical and empirical variants of the demo; only the =Measure= / =CovarianceStrategy= change. See =docs/api-sketch.org= Section 5 for the three side-by-side, and =examples/run_euler.py= for the runnable script.
 
+* Inference
+
+Estimation gives you =theta_hat=; inference gives you the uncertainty around it. =emu-gmm= hands you a menu, not a single number, and every tool reads off the same pipeline --- you never recompute a variance by hand (see "Using emu-gmm correctly" below).
+
+| You want                              | Use                                       | Kind                         |
+|---------------------------------------+-------------------------------------------+------------------------------|
+| parameter SEs, fast                   | =result.standard_errors= / =Sigma_theta= | analytic sandwich            |
+| parameter SEs / CIs, robust           | =cluster_bootstrap= \(\to\) =theta_boot=  | refit: resample + re-solve   |
+| the overidentification test \(J\)     | =moment_wild_bootstrap=                    | refit-free: perturb moments  |
+| identification-robust inference       | =k_statistic= / =k_confidence_set=        | weak-id-robust               |
+| gauge-invariant functionals of \(AA'\) | =functional_se= / =gamma_se=             | analytic                     |
+| =n_boot= chosen to a precision target | =adaptive_bootstrap=                      | wrapper over the above       |
+
+*Two bootstraps, deliberately distinct.* =moment_wild_bootstrap= perturbs the moments and never re-solves --- cheap, and the right tool for the \(J\) distribution. =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap people usually mean: it resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns the bootstrap distribution =theta_boot= of =theta_hat= (Cameron, Gelbach & Miller 2008). Reach for it when the analytic sandwich is suspect --- few clusters, a boundary optimum, or a functional whose nonlinearity the first-order delta method can't capture.
+
+The capability is easy to miss, so it's worth naming why it exists: a refit bootstrap is just =estimate()= on a resampled =Measure=. Because variance construction is orthogonal to integration (the commitment at the top of this README), resampling is a measure-construction concern, and the bootstrap is a thin re-run of the ordinary pipeline rather than a bespoke variance routine. That's also why there's no monolithic =bootstrap_se=: the capability falls out of the architecture.
+
+#+begin_src python
+from emu_gmm.inference import cluster_bootstrap
+
+boot = cluster_bootstrap(
+    model=euler_residual, theta_init=result.theta_hat, measure=measure,
+    covariance=cov, n_boot=999, key=jax.random.PRNGKey(1),
+)
+se = boot.theta_boot.array.std(axis=0)   # bootstrap SE, per parameter
+#+end_src
+
+=docs/howto.org= has the expanded menu and the refit-vs-refit-free decision in full. Design-aware note: =cluster_bootstrap= resamples flat clusters; the /stratified/ refit bootstrap (resample PSUs within strata) is tracked in issue #155.
+
 * Documents
 
 - =docs/howto.org= --- *start here.* Integration HOWTO: the architecture

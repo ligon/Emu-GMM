@@ -76,12 +76,14 @@ from emu_gmm.inference import (
 )
 from emu_gmm.manifolds import (
     Euclidean,
+    Interval,
     ManifoldLeaf,
     ManifoldParam,
     Positive,
     Product,
     PSDFixedRank,
     riemannian_lm,
+    riemannian_tr,
 )
 from emu_gmm.measures import (
     AnalyticalMeasure,
@@ -93,6 +95,7 @@ from emu_gmm.optimizer import linear_solver, optimistix_lm, scipy_lm
 from emu_gmm.parameter_space import ParameterSpace, on
 from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.runtime import configure, recommended_env
 from emu_gmm.types import (
     CovarianceStrategy,
     Diagnostics,
@@ -122,6 +125,8 @@ except PackageNotFoundError:
 
 __all__ = [
     "__version__",
+    "configure",
+    "recommended_env",
     # Entry point
     "estimate",
     "build_estimator",
@@ -159,6 +164,7 @@ __all__ = [
     "scipy_lm",
     "linear_solver",
     "riemannian_lm",
+    "riemannian_tr",
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
@@ -195,6 +201,7 @@ __all__ = [
     "PSDFixedRank",
     "Product",
     "Positive",
+    "Interval",
     "ManifoldLeaf",
     # Parameter-space declaration layer (#107): declare field -> manifold
     # geometry once in a class, then ParameterSpace.point([seed]) lowers to a

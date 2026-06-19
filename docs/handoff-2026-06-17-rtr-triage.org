@@ -1,0 +1,347 @@
+#+TITLE: Handoff: RTR (#152) Phase-2 triage + fix plan (2026-06-17)
+#+AUTHOR: Sue (Claude Opus 4.8)
+
+* Where to start
+GitHub #152 (the JAX-native Riemannian Trust Region optimizer; OPEN) and
+=src/emu_gmm/manifolds/riemannian_tr.py= (the Phase-2 deliverable). This
+note records a triage of the Phase-2 test suite and the agreed fix plan
+after the prior session was interrupted mid-hardening.
+
+* State at pickup (branch feat/riemannian-tr)
+- Phase 0 (red-team risk register) + Phase 1 (test-first RED suite, commit
+  4afd65e: 7 files, 105 tests under =tests/manifolds/test_rtr_*.py=) DONE.
+- Phase 2 (implementation, commit 121a6b0: =riemannian_tr.py= 1182 lines +
+  6 additive =OptimizerInfo= fields in =types.py=) DRAFTED, ~80% green.
+- Full RTR run (taskset 0-31, 9m22s): *84 passed / 20 failed / 1 skipped*.
+- NOT done yet, independent of the failures: =riemannian_tr= is *not
+  exported* from either =__init__.py=; *no PR*; nothing *pushed*; CLAUDE.md
+  and =manifold-epic-progress.org= still say a TR solver "won't be added
+  (#9)" and must be flipped once it lands.
+- Unrelated doc commit landed this session: 813277c documents
+  =cluster_bootstrap= / the refit-vs-refit-free inference menu (#155). It
+  rides on this branch; could be cherry-picked to a docs branch if the RTR
+  PR diff should stay clean.
+
+* Triage of the 20 failures (6 read-only Explore agents, one per file)
+Classifications below are Sue's synthesis (re-judged from the agents'
+reports), from static reading + the captured pytest log, NOT from re-running
+with fixes. Bucket-B "downstream" calls are hypotheses to confirm.
+
+** A -- solver bugs, clear and independent (fix the code)
+- =reductions::...reordered_factors= :: =IndexError= -- =PSDFixedRank.projection=
+  handed a scalar in the Product HVP path. (Verify whether the throw is in the
+  test's reference or in =_hvp_per_leaf=.)
+- =trust_region::...no_spurious_accept_while_gradient_large= :: accept gate
+  (riemannian_tr.py:985) checks only =rho_raw > rho_prime=; when
+  =rhonum ~ rhoden ~ 0=, =rho_reg= lifts num+den equally -> rho~1 -> spurious
+  accept. Needs a genuine-progress / near-convergence guard.
+- =reductions::test_affine_metric_enters_gradient_norm= :: reported
+  =final_gradient_norm= 6.25e-13 vs LM 1.14e-7 at the same optimum -- the
+  Positive 1/x^2 affine metric is not entering the reported norm.
+- =reductions/trust_region::TestSigmaToZeroBoundary= :: =sigma_tr=0.882= vs
+  =sigma_lm~0= -- RTR stalls instead of following the affine geodesic to the
+  boundary; trust radius collapses under the affine metric.
+- =pymanopt_parity::test_outer_trace_matches_pymanopt[2]= :: contract mismatch
+  -- solver emits =tr_trace= as a plain dict (=Delta=, =stop_code=); spec/test
+  expects attribute access with lowercase names (=trace.delta=, =trace.tcg_stop=).
+  Mechanical.
+
+** B -- solver behavior, probably shared root cause (fix A first, re-run)
+- =pymanopt_parity::...lm_stalls_tr_escapes[2]= :: *the acceptance criterion*.
+  =res_tr.converged==False=. Likely downstream of the rho/convergence gate.
+- =gauge_numerical::TestEstimatorPathGaugeInvariance[2]= :: same
+  =converged==False= through =estimate()=.
+- =trust_region::test_zero_rhoden_does_not_poison_delta= :: certifies converged
+  in 1 step on an unidentified/zero-curvature block (convergence gate misses
+  unprobed directions).
+- =trust_region::...converges_to_known_optimum_not_to_null_step= :: agent says
+  downstream of the rho-gate; verify after A.
+- =reductions::test_matches_scipy_trust_ncg[4]= :: RTR -> wrong Rosenbrock
+  minimizer. Could be tCG/TR OR a dimension-fragile fixture (its [2] sibling
+  fixture is provably broken; see D). Needs a focused look.
+
+** C -- test-strictness vs solver -- DECISION: tighten the stopping rule
+- =gauge_numerical::test_outer_count_and_gamma_invariant_under_YQ[F/T-2/3]=
+  (4 tests) :: Gamma IS gauge-invariant; only the outer-step count differs by
+  exactly 1 (14 vs 15; 29 vs 30) between =Y0= and =Y0 @ Q=.
+- *Owner decision (2026-06-17): tighten the stopping rule, do NOT relax the
+  test.*
+- *New finding (Sue, post-decision):* =_orthogonal= (test:104) builds =Q= via
+  =qr= of a Gaussian -- a DENSE rotation, so =Y0 @ Q= is itself rounded and the
+  two trajectories are gauge-equivalent only to ~1e-9 (the sibling
+  =test_reported_gradnorm...= already concedes =approx(abs=1e-9)=). Whether
+  bit-exact integer step equality is reachable by tightening depends on whether
+  the off-by-one is a knife-edge in a slow convergence tail (fixable by crisp
+  convergence) or genuine rounding-driven branch re-routing (needs per-step
+  gauge canonicalization; not a stopping-rule tweak). *Plan:* attempt the
+  tighten (overlaps A rho-gate + B8); if ±1 proves rounding-irreducible, bring
+  evidence to the owner before relaxing.
+- =gauge_numerical::...test_returned_eta_has_no_vertical_component= ::
+  =inner_iters==1= vs expected =>=5=. UNSURE -- likely a weak fixture (residual
+  too small -> tCG hits its kappa/theta target on iter 1), but if tCG genuinely
+  under-iterates it would also explain B6/B10. Quick solver check first.
+
+** D -- test/fixture defects (solver is fine here; fix the tests)
+- =reductions::test_matches_scipy_trust_ncg[2]= :: fixture not indefinite
+  (Hessian evals [11.8, 753]); its own "R1 vacuous" guard trips.
+- =pymanopt_parity::...lm_stalls_tr_escapes[3]= :: under-identified fixture
+  (M=10 < K_id=13 for k=3; moment count hardcoded for k=2). Dies in
+  =_estimate_lm=, never reaches RTR. Fix must make k=3 genuinely exercise RTR.
+- =hvp::test_psd_additive_recipe_is_gauge_conditional[2]= :: fixture
+  gauge-variant coefficient too small for k=2/seed (=vert_frac=5.0e-4= vs
+  =>1e-3=).
+- =tcg::TestRetangentialization...across_inner_iters= :: fixture builds a
+  gauge-INVARIANT residual whose gradient is necessarily horizontal
+  (=skew~3e-16=), so the precondition =skew>1e-3= is unsatisfiable. Needs a
+  gauge-VARIANT residual.
+- =gauge_numerical::TestVerticalGradientNegativeControl= :: constructed
+  "vertical gradient" fixture yields ~0 ambient gradient (=3e-15=) at the start
+  point -- precondition fails.
+
+* Agreed sequence
+1. Fix Bucket A (5 solver bugs; A-rho-gate + A-crash highest value).
+2. Re-run full RTR suite; re-triage B (expect several to clear).
+3. Fix Bucket D fixtures; confirm each then exercises what it claims (esp. the
+   #17/#19 acceptance-path fixtures -- exercise RTR, don't paper over).
+4. Resolve C per the tighten-then-evidence plan above.
+5. Non-test: export/wire =riemannian_tr= (auto-dispatch via
+   =_takes_manifold_spec=), flip the #9 "won't-do" notes in CLAUDE.md +
+   =manifold-epic-progress.org=, open the PR.
+
+* Approach update (2026-06-17, later session): pymanopt-parity loop
+Owner redirected the workflow away from piecemeal patching toward an
+iterated loop anchored on *pymanopt trust-region as the correctness oracle*:
+GREEN := our parity tests match pymanopt-TR
+(=tests/manifolds/test_rtr_pymanopt_parity.py=, the explicit green gate;
+4 classes: NonConvexMetaGate, GaugeInvariantComparisonOnly,
+ConventionPinnedAtY0, StepLevelTraceMatchesPymanopt). pymanopt 2.2.1 is the
+installed dev oracle (=.venv/.../pymanopt/optimizers/trust_regions.py=).
+
+** Loop (per iteration)
+1. Red-team (workflow fan-out): diff our solver vs pymanopt-TR, one agent per
+   component (tcg / rho-accept / radius / outer-convergence / trace-codes /
+   metric-hvp) -> divergence register.
+2. Synthesise + design (Sue): turn the register into a precise fix set;
+   where one of OUR tests encodes an anti-pymanopt opinion, reconcile it
+   AGAINST the oracle (surface, don't silently pick a side).
+3. Implement (serial, one solver file): apply to riemannian_tr.py.
+4. Adversarial review (workflow fan-out): skeptics try to refute parity /
+   find regressions.
+5. Gate: run parity tests + guard the broader suite against regressions.
+   Loop on residual divergences.
+
+** Decisions resolved
+- *C (gauge step-count): RELAX to +/-1* -- DONE (test edit, working tree):
+  =test_outer_count_and_gamma_invariant_under_YQ= now asserts
+  =abs(steps_a-steps_b)<=1=, keeping Gamma@1e-9 + reported-gnorm@1e-9 strict.
+  Rationale: =Q= is a DENSE rotation (qr of a Gaussian) so =Y0@Q= is rounded;
+  the integer step count is the most fragile observable and even the
+  continuous gnorm agreement is only ~1e-9-robust. Bit-exact integer equality
+  needs per-step gauge canonicalisation (out of scope).
+- *Sequence: bank independent wins first* then the coupled convergence redesign.
+
+** Lessons from the first (reverted) patch attempt
+- The =NOT is_negc= convergence gate is WRONG: at any real optimum grad~0, so
+  tCG's first step has d_Hd~0<=0 -> exits NEG_CURV; the gate blocked ALL
+  legitimate convergence (+12 regressions). Reverted.
+- The natural A2 fix (gate accept on =near_conv = gnorm<thresh=) fixes its own
+  test but REGRESSES the gauge gradnorm-invariance test: two dense-rotation
+  runs stop one step apart (gnorm 1.6e-8 vs 3.6e-8, >1e-9 tol). The
+  accept/converge path is gauge-fragile; any threshold branch on a
+  rounding-divergent quantity breaks the 1e-9 gauge invariants. Reverted.
+- Net: solver is back BYTE-IDENTICAL to commit 121a6b0 (baseline 84/20/1).
+  The convergence cluster must be redesigned coherently against pymanopt,
+  not spot-patched.
+- A1 reclassified D (not A): the reordered-factors =IndexError= is in the
+  TEST's own =h_swapped= non-vacuity construction (applies a PSD projection to
+  a Euclidean block at =test_rtr_reductions.py:613=), not in the solver.
+
+* Full classification of the 16 vs the pymanopt oracle (2026-06-17)
+Established by static red-team + head-to-head runs (our RTR vs pymanopt-TR /
+scipy on identical fixed-W problems). HEADLINE: our core solver is FAITHFUL to
+pymanopt-TR (identical convergence + tr_err to 4 decimals on the non-convex PSD
+fixture; identical stuck-point on Rosenbrock d=4). After F1+F3+C the suite is
+88 passed / 16 failed / 1 skipped. The 16:
+
+** Test-side: FIXTURE DEFECT (fix the test fixture) -- 9
+- test_returned_eta_has_no_vertical_component (tCG stops iter 1: synthetic input
+  too small to force >=5 inner iters; num_inner convention is faithful)
+- test_vertical_only_gradient_is_horizontally_stationary (precondition
+  ambient_norm>1e-3 unsatisfiable; fixture grad ~3e-15)
+- test_psd_additive_recipe_is_gauge_conditional[2] (gauge-variant coeff too
+  small for k=2; vert_frac 5e-4 < 1e-3)
+- lm_stalls_tr_escapes[2],[3] (meta-gate: UNDER-IDENTIFIED; pymanopt also lands
+  on a wrong-Gamma cost-0 point, tr_err 3.71. Re-identifying breaks the LM-stall
+  -- GN stalls only where J is rank-deficient, which conflicts with
+  identification. Over-constrained.)
+- test_matches_scipy_trust_ncg[2] (d=2 Rosenbrock start convex; own R1-vacuous
+  guard trips)
+- test_hvp_matches_dense_reference_under_reordered_factors (IndexError in the
+  TEST's own h_swapped construction: PSD projection on a Euclidean block)
+- test_vertical_energy_stays_below_tol_across_inner_iters (fixture residual is
+  gauge-INVARIANT -> gradient necessarily horizontal -> skew>1e-3 unsatisfiable)
+- test_converges_to_known_optimum_not_to_a_null_step (offset c=0.1 SHIFTS the
+  rank-2 minimizer ~0.06 off Gamma_true; pymanopt agrees with us at 0.0603. The
+  comment "minimiser unchanged" is wrong.)
+
+** Test-side: ANTI-ORACLE (test expects/forbids behavior pymanopt does) -- 3
+- test_no_spurious_accept_while_gradient_large (forbids the rho_regularization
+  accept pymanopt performs; our accept is term-for-term faithful to pymanopt)
+- test_zero_rhoden_does_not_poison_delta (wants status!=converged on a flat
+  block; pymanopt certifies via min-grad-norm on grad=0)
+- test_matches_scipy_trust_ncg[4] (ours == pymanopt EXACTLY, 1.7757/22 steps;
+  scipy escapes the local stationary point via different radius heuristics --
+  test compares to scipy, not the pymanopt oracle)
+
+** Test-side: ORACLE-INSTRUMENTATION (F2) -- 1
+- test_outer_trace_matches_pymanopt[2] (pymanopt 2.2.1 run() never calls
+  _add_log_entry; out.log['iterations'] is empty. Test must capture pymanopt's
+  per-iter Delta/rho/stop/||g|| by subclassing TrustRegions and copying its
+  run() with logging inserted.)
+
+** Genuine SOLVER items (investigate) -- 2 (+1 tolerance)
+- test_estimate_with_riemannian_tr_is_gauge_invariant[2]: converged=False under
+  CU on a CONVEX identified model -> CU Delta-collapse (W=V_X^-1 blows up as
+  residuals vanish). Possible CU robustness gap; pymanopt has no CU oracle.
+- test_stays_positive_and_matches_lm (A4): sigma_tr=0.882 vs sigma_lm~0 at the
+  Positive sigma->0 boundary. ambient_metric=True was added to match LM here but
+  does not. Genuine Positive-leaf-boundary divergence from the design intent.
+- (tolerance) test_affine_metric_enters_gradient_norm: reported gnorm 6.25e-13
+  vs LM 1.14e-7; both compute |egrad|/x, likely a different stop point. Minor.
+
+** Reconciliation plan (per class)
+- FIXTURE DEFECT: fix each fixture to genuinely exercise the property (NOT
+  paper over). Meta-gate: reconcile to "RTR reaches strictly lower criterion
+  than LM + n_negcurv>=1" (the realizable, oracle-aligned form) since
+  re-identification is impossible without killing the LM-stall.
+- ANTI-ORACLE: reconcile the assertion against pymanopt (it is the oracle):
+  A2/B8 accept pymanopt's behavior; scipy[4] compare to pymanopt-TR (or relax
+  to "matches a stationary point pymanopt also reaches").
+- F2: instrument pymanopt in the trace test (subclass TrustRegions w/ logging).
+- SOLVER items: investigate CU-collapse (#3) and Positive sigma->0 (#16)
+  separately; these are real and matter for K-Aggregators CU/boundary usage.
+
+* Late session (2026-06-17): merge origin/main + ftol + #16 + #159
+** Pulled origin/main into feat/riemannian-tr (clean merge, no conflicts)
+- #156 (ftol/cost-stagnation convergence for riemannian LM) + #150
+  (cluster_bootstrap manifold+penalty, manifold-aware TikhonovPenalty) now in
+  the branch. Merge gate: 361 passed / 4 failed (manifolds + new upstream
+  tests), the 4 = meta-gate #5/#6, #10, #16. Upstream coexists with the RTR
+  work; no merge regressions.
+
+** #159 (maintainer, RESOLVED): sigma->0 boundary is a CONSUMER-MODEL issue
+- emu-gmm's CUE is exact / scale-invariant (verified bit-identical to moment
+  scale 1e15); tau=0 at the boundary. NOT an estimator/regulariser bug.
+- Root cause: the consumer model's explicit holder-mean demeaning
+  ``(m**sigma - mbar)/|sigma|`` -- as sigma->0 it removes the common scale
+  before the estimator (CUE self-normalisation becomes a no-op) AND subtracts
+  at the 1/|sigma| scale (catastrophic cancellation that corrupts the moment
+  DIRECTION, which CUE cannot fix). One-line fix: ``m**sigma -> expm1(sigma*log
+  m)`` everywhere incl. the holder-mean (the 1's cancel analytically) -- stable
+  to 1e-13, economics/composition bit-identical. Filed downstream against
+  ../Seasonality (= task C; the consumer owns it). This repo's design realdata
+  test (TestDesignSpec) re-pins to the stable limit J~7.087/p~0.792 -- ALSO the
+  consumer's to land once the stable moment is adopted.
+
+** DONE this session (commits on feat/riemannian-tr, UNPUSHED)
+- 813277c cluster_bootstrap docs; 67cb58b checkpoint; 845432c + f944245 the 10
+  test reconciliations; 455218d Interval manifold; merge; 421c3f2 RTR
+  ftol+radius-collapse (A); fecc5ce #16 fixed-W (B).
+- A (RTR stagnation stop): mirror #156's ftol (cost-stagnation, patience=8) AND
+  a radius-collapse companion, BOTH gated on total_gauge_dim>0. ftol alone does
+  NOT fix the gauge-CU certification (#3-class): at the CU noise floor RTR
+  OSCILLATES accept(expand)/reject(shrink), resetting ftol's consecutive-
+  accepted counter (LM's collapse is monotone-accepted, so its ftol fires);
+  the radius collapses monotonically through the oscillation, so radius-collapse
+  catches it. Gauge-safe (cost + Delta gauge-invariant; gated off scalar so the
+  boundary stop is preserved per #159). Verified: #3 + gauge tests pass.
+- B (#16): TestSigmaToZeroBoundary now uses fixed W (Identity) -- the affine
+  boundary GEOMETRY is well-posed there and RTR matches LM at sigma->0; CU at
+  the boundary is ill-posed (#159). Verified passing.
+- Interval(lo,hi) manifold built + leaf-tested (12/12); kept as a bounded-scale
+  FEATURE, NOT the sigma->0 fix (that's #159 option-2/papering per the owner).
+
+** REMAINING (next session)
+- D (#10 test_affine_metric_enters_gradient_norm): the reported Positive-leaf
+  gnorm came out bare-Euclidean, not affine |egrad|/sigma. BUT Positive's
+  retraction_differential docstring sets a NATURAL-SCALE convention (Sigma_theta
+  ambient; the affine norm is deliberately NOT used to rescale reported
+  quantities). So the test's "affine enters the reported gnorm" expectation is
+  probably WRONG -- verify what estimate() actually reports (RTR riem_norm is
+  affine; the estimator may report natural-scale), then reconcile the test to
+  the natural-scale convention OR fix the reporter. Owner call on the contract.
+- #5/#6 (meta-gate lm_stalls_tr_escapes): under-identified fixture -> "recover
+  Gamma_true" is UNSATISFIABLE (pymanopt also lands wrong-Gamma cost-0). With A
+  RTR now certifies (ftol/radius-collapse) but fails on tr_err. Reconcile to the
+  realizable form: assert RTR reaches a STRICTLY LOWER criterion than LM +
+  n_negcurv>=1 (drop recover-Gamma_true). Re-identifying is impossible (kills
+  the LM-stall -- see the C-decision note above).
+- Push the branch (~14 commits ahead of origin/feat/riemannian-tr) once green.
+- Final ``make check`` on the merged tree.
+
+* Session end state (2026-06-17) + next-session queue
+** Done & committed (branch feat/riemannian-tr, UNPUSHED, tree clean)
+A (421c3f2) RTR ftol+radius-collapse (gauge-gated) -> #3 fixed, gauge-safe.
+B (fecc5ce) #16 boundary geometry under fixed W (CU at sigma->0 ill-posed,#159).
+D (be6ba7c) #10: reported gnorm is NATURAL-scale (coherent with SEs); verified
+   diagnostics.final_gradient_norm == optimizer_info.final_gradient_norm*sigma_hat
+   (estimator already reports natural; affine metric lives in the solver's
+   convergence norm). No solver change; test reconciled + renamed.
+Plus the merge of origin/main (#156 LM ftol, #150 cluster_bootstrap+penalty),
+the 10 earlier test reconciliations, Interval manifold (leaf-tested 12/12), docs.
+Suite: 84/20 -> ~2 failing (#5/#6 only). Have NOT run a full ``make check`` on
+the integrated A+B+D+merge tree -- each verified via targeted subsets; DO run it.
+
+** REMAINING #1: #5/#6 meta-gate (the only failing tests)
+Reconcile test_lm_stalls_tr_escapes_with_negcurv[2,3] to the realizable form:
+keep (a) LM stalls + (c) n_negcurv>=1; change (b) from "recover Gamma_true"
+(UNSATISFIABLE -- under-identified fixture, pymanopt also lands wrong-Gamma
+cost-0) to "RTR reaches a STRICTLY LOWER criterion value than LM". BEFORE
+editing, VERIFY empirically: does RTR's final cost end up below LM's, and under
+CU or only fixed-W? (pre-A, under CU RTR was stuck near LM's point; fixed-W
+head-to-head shows RTR escapes to cost~0. May need the #16 fixed-W switch.)
+Re-identifying the fixture is impossible -- it kills the LM-stall (GN stalls only
+where J is rank-deficient, which conflicts with identification).
+
+** REMAINING #2: NEW FEATURE -- LM stall -> curvature probe -> non-convexity ADVISORY
+Owner-approved design (advise, do NOT auto-switch -- a stall is information):
+when riemannian_lm certifies via the #156 ftol (cost-stagnation) path, probe the
+true Hessian; if non-definite, WARN the user the criterion appears non-convex and
+suggest riemannian_tr(). Build steps:
+1. Trigger: in riemannian_lm.__call__ EAGER tail (post while_loop), fire iff LM
+   stopped via the ftol stall path (surface a "certified-via-stall" bool from the
+   loop: stall>=ftol_patience at termination), NOT via grad_ok.
+2. Probe: smallest eigenvalue of the HORIZONTAL true Hessian at theta_hat via
+   RTR's _riemannian_hvp (Lanczos, a few HVPs; or HVP-on-basis + eigvalsh for
+   small dim). GAUGE-CRITICAL: use the PROJECTED HVP so the k(k-1)/2 gauge
+   directions map to ~0 -- lambda_min < -tol then = a genuine horizontal saddle,
+   not gauge flatness.
+3. Advise if lambda_min < -tol: warnings.warn("riemannian_lm stopped at a
+   stationary point with negative curvature (min horizontal eig ~ X); criterion
+   appears non-convex -- may be a saddle. Consider riemannian_tr().") AND set
+   OptimizerInfo fields stalled_indefinite: bool, min_curvature: float.
+DECISIONS (Sue's recommendations, pending owner nod):
+- default-ON (fires only on a stall; cheap), with a kwarg to silence. [REC]
+- BOTH warning (human) + diagnostic field (consumer / future explicit hybrid).
+- Caveat to DOCUMENT: probe+warning are EAGER post-solve, so they DON'T fire on
+  the vmapped/replicate MC path (can't warn inside vmap); field absent/None there.
+  Acceptable -- advisory is for interactive fits.
+- Reuse _riemannian_hvp from riemannian_tr (no import cycle: tr doesn't import lm)
+  OR factor a tiny shared _curvature helper. [REC: reuse]
+Cost: a few HVPs, once, only on stalled runs -> negligible. jit-safe (eager tail;
+the jitted _solve is unchanged). Test: a non-convex manifold fixture where LM
+stalls (the _nonconvex meta-gate fixture is a candidate) -> assert warning fires
++ field set + lambda_min<0; a convex fixture -> assert NO warning.
+
+** REMAINING #3: ops
+- Push the branch (~18 commits ahead of origin/feat/riemannian-tr) once green.
+- Seasonality owns C (#159 expm1 moment fix + realdata re-pin) -- downstream.
+- Solver decision guidance (when RTR vs riemannian_lm vs optimistix) captured in
+  this session's discussion; consider distilling into docs/CLAUDE.md: optimistix
+  for Euclidean; riemannian_lm (GN, cheaper) the manifold default; riemannian_tr
+  ONLY for non-convex manifold criteria where GN demonstrably stalls.
+
+* Run discipline (this box)
+- This session sees CPUs 0-31, ~92 GB. Pin pytest: =XLA_FLAGS=... taskset -c
+  0-31 .venv/bin/python -m pytest ...=. Full RTR suite ~9.5 min.
+- Captured baseline log: =/tmp/sue_rtr/rtr_091139.log= (84/20/1).
