@@ -148,7 +148,31 @@ digits.
 
 ---
 
-## 4. Critical assessment
+## 4. Performance (indicative)
+
+Wall-clock for the headline `rc_demographics` spec, 4-core CPU, float64
+(`benchmark.py`):
+
+| run | time | notes |
+|---|---|---|
+| **pyblp** solve (BFGS, 2-step) | **44.2 s** | its own nested fixed point + analytic gradients/SEs |
+| emu warm, incl. JIT compile | 9.9 s | started at pyblp's `theta_hat` (~9 LM iters) |
+| emu warm, compiled (steady) | 4.7 s | |
+| emu **cold** from Nevo init, compiled | **11.7 s** | finds the optimum independently (117 LM iters) |
+
+The like-for-like comparison — both finding the optimum from scratch — is emu
+~11.7 s vs pyblp ~44 s, **roughly 3.8× faster**; warm steady-state is ~4.7 s.
+
+**This is indicative, not a controlled benchmark.** Caveats: (a) different
+optimisers — pyblp uses gradient BFGS (~92 objective evaluations in the
+reference run), emu uses Gauss–Newton LM; (b) emu's edge comes from JAX JIT plus
+the contraction vectorised across all 94 markets in one `vmap`, and the first
+call pays ~5 s of compilation that pyblp never incurs; (c) pyblp does extra work
+in that 44 s (two full GMM steps, analytic Jacobians, richer diagnostics); (d)
+4 cores only (sandbox limit). Read it as "emu is in the same ballpark or
+somewhat faster," not as a precise speedup factor.
+
+## 5. Critical assessment
 
 **What this validates about emu-gmm.** The full estimation pipeline is correct
 on a real, independently-implemented, non-trivial GMM problem:
@@ -204,7 +228,7 @@ nested-fixed-point structural model without special-casing in the core.
 
 ---
 
-## 5. Reproducing
+## 6. Reproducing
 
 From the repo root (CPU affinity per CLAUDE.md's JIT-mmap note):
 
