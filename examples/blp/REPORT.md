@@ -172,6 +172,60 @@ in that 44 s (two full GMM steps, analytic Jacobians, richer diagnostics); (d)
 4 cores only (sandbox limit). Read it as "emu is in the same ballpark or
 somewhat faster," not as a precise speedup factor.
 
+### Scaling — measured (`scaling_benchmark.py`)
+
+Two curves on this box (≤4 cores, no GPU), to ground the "what about more
+hardware" question with numbers rather than hope.
+
+**(A) Cost vs. number of Monte-Carlo integration draws `I`** (per evaluation;
+the contraction and the LM Jacobian through it), at 4 cores:
+
+| `I` draws | obs `N` | expectation (ms) | Jacobian (ms) |
+|---:|---:|---:|---:|
+| 20 | 1 880 | 32 | 36 |
+| 100 | 9 400 | 94 | 118 |
+| 500 | 47 000 | 363 | 585 |
+| 2 000 | 188 000 | 1 626 | 2 160 |
+
+Cost grows ~linearly in `I`. The Jacobian (forward-mode AD through the
+contraction) tracks the expectation at a small constant multiple — the
+custom-JVP IFT pays off (no unrolled iteration tape).
+
+**Core sweep** on the `I=2000` Jacobian: 1 core 3 874 ms → 2 cores 2 096 ms
+(**1.85×**) → 4 cores 2 160 ms (**no further gain**). At `I=20` the time is flat
+across 1–4 cores (~30 ms). So a single Nevo-scale fit saturates ~2 cores on this
+hardware and is otherwise latency/structure-bound — consistent with the "modest,
+plateaus fast" expectation.
+
+**(B) `vmap`-batched throughput** — evaluating the moment at `R` parameter
+vectors sequentially vs. as one `vmap` batch (`I=100`), 4 cores:
+
+| `R` | sequential (ms) | vmapped (ms) | speedup |
+|---:|---:|---:|---:|
+| 4 | 398 | 422 | 0.9× |
+| 16 | 1 695 | 1 598 | 1.1× |
+| 32 | 3 394 | 3 344 | 1.0× |
+
+**On a CPU already saturated by a single fit, batching gives ~no throughput
+gain** — it is the same total work, just dispatched once. This corrects an
+over-optimistic reading of "vmap scales near-linearly": that holds only when
+there is *spare* parallelism to fill. The case for it is therefore:
+
+- **GPU/TPU**, where a single Nevo-scale fit badly under-utilises the device, so
+  a `vmap`/`pmap` batch of replicates (bootstrap, Monte-Carlo studies,
+  optimal-instrument restarts) fills the SMs and *does* scale. Untested here (no
+  GPU); the script runs unchanged where one exists. Caveat: BLP needs float64,
+  so a datacenter card (A100/H100), not a consumer GPU.
+- **Larger problems** — curve (A) shows the per-market work grows ~linearly with
+  draws, and large-`I` batched matmuls are exactly what saturates a GPU; the
+  per-market contraction stays serial, so the parallel dimension that pays is
+  markets × draws × replicates, never the contraction iterations.
+
+Net: for *this* problem on CPU, expect ≲2× from more cores and ~nothing from
+batching; the real hardware lever is a fp64 GPU on a *larger* problem or a
+*many-fit* workload, where emu's `vmap`/`pmap`-native design carries over with no
+code change.
+
 ## 5. Critical assessment
 
 **What this validates about emu-gmm.** The full estimation pipeline is correct
