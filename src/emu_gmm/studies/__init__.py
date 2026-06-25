@@ -47,7 +47,7 @@ from emu_gmm.studies.conditioning import (
     event_share,
     given,
 )
-from emu_gmm.studies.driver import MCRecords, replicate
+from emu_gmm.studies.driver import MCRecords, replicate, replicate_coupled
 from emu_gmm.studies.study import StudyResult, monte_carlo_study
 from emu_gmm.studies.summaries import (
     BiasSD,
@@ -65,6 +65,7 @@ from emu_gmm.studies.summaries import (
 __all__ = [
     "MCRecords",
     "replicate",
+    "replicate_coupled",
     "BiasSD",
     "Coverage",
     "SizePower",

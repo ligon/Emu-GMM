@@ -19,7 +19,7 @@ from emu_gmm.examples.euler import (
 )
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.optimizer import optimistix_lm
-from emu_gmm.studies import MCRecords, replicate
+from emu_gmm.studies import MCRecords, crn_pair, replicate, replicate_coupled
 
 N = 400
 THETA_TRUE = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
@@ -514,3 +514,81 @@ class TestAnchorPerRep:
             np.asarray(study.records.records.binding_ridge),
             np.asarray(flags, dtype=float),
         )
+
+
+class TestReplicateCoupled:
+    """#171: the coupled-arms factory stamps a sound shared coupling_id."""
+
+    def test_shared_token_and_crn_pair_accepts(self):
+        out = replicate_coupled(
+            {"a": _make_run(), "b": _make_run()},
+            _make_dgp(),
+            n_reps=3,
+            key=jax.random.PRNGKey(11),
+            theta_init=_theta0(),
+        )
+        assert set(out) == {"a", "b"}
+        # one shared, non-None token across the set
+        assert out["a"].coupling_id is not None
+        assert out["a"].coupling_id == out["b"].coupling_id
+        # crn_pair verifies with NO explicit token and NO assert_coupled
+        cp = crn_pair(out["a"], out["b"])
+        assert cp.n_reps == 3
+
+    def test_arms_see_identical_crn_draws(self):
+        """Every arm sees dgp(fold_in(key, r)) rep-for-rep (the CRN contract)."""
+        base = _make_dgp()
+        seen: list[np.ndarray] = []
+
+        def recording_dgp(key):
+            m = base(key)
+            seen.append(np.asarray(m.x))
+            return m
+
+        key = jax.random.PRNGKey(5)
+        replicate_coupled(
+            {"a": _make_run(), "b": _make_run()},
+            recording_dgp,
+            n_reps=3,
+            key=key,
+            theta_init=_theta0(),
+        )
+        assert len(seen) == 6  # 2 arms x 3 reps
+        for r in range(3):
+            np.testing.assert_array_equal(seen[r], seen[3 + r])  # arm a == arm b
+            expected = np.asarray(base(jax.random.fold_in(key, r)).x)
+            np.testing.assert_array_equal(seen[r], expected)  # documented schedule
+
+    def test_distinct_calls_get_distinct_tokens(self):
+        """Two SEPARATE coupled sets never share a token, even at the same key
+        --- so crn_pair cannot false-accept a cross-set pairing (the reason the
+        token is per-call-unique, not derived from (key, n_reps))."""
+        k = jax.random.PRNGKey(0)
+        o1 = replicate_coupled(
+            {"a": _make_run()}, _make_dgp(), n_reps=2, key=k, theta_init=_theta0()
+        )
+        o2 = replicate_coupled(
+            {"a": _make_run()}, _make_dgp(), n_reps=2, key=k, theta_init=_theta0()
+        )
+        assert o1["a"].coupling_id != o2["a"].coupling_id
+
+    def test_explicit_coupling_id_override(self):
+        out = replicate_coupled(
+            {"a": _make_run(), "b": _make_run()},
+            _make_dgp(),
+            n_reps=2,
+            key=jax.random.PRNGKey(1),
+            theta_init=_theta0(),
+            coupling_id="study-X",
+        )
+        assert out["a"].coupling_id == out["b"].coupling_id == "study-X"
+
+    def test_empty_runs_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            replicate_coupled(
+                {},
+                _make_dgp(),
+                n_reps=2,
+                key=jax.random.PRNGKey(0),
+                theta_init=_theta0(),
+            )
