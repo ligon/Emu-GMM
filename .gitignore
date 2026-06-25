@@ -26,12 +26,14 @@ dist/
 
 # Claude Code: ignore local/temporary state (worktrees created by
 # isolation: worktree, local settings, caches) but TRACK the shared,
-# portable tooling so agents/commands/workflows travel with the repo.
+# portable tooling so agents/commands/workflows/skills travel with the repo.
 .claude/*
 !.claude/agents/
 !.claude/commands/
 !.claude/workflows/
+!.claude/skills/
 
 # OS metadata
 .DS_Store
 Thumbs.db
+.gitnexus
