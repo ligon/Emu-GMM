@@ -43,6 +43,9 @@ Records / driver (`src/emu_gmm/studies/driver.py`, `src/emu_gmm/types.py`):
   `tests/studies/test_replicate.py`.
 - `replicate` — `driver.py:122`; CRN: rep `r` sees `fold_in(key,r)` (`:264`).
   Tested: `tests/studies/test_replicate.py`.
+- `replicate_coupled` (#171) — `driver.py`; runs N arms over one `(dgp, key)` and
+  stamps a shared per-call `coupling_id` (sound coupling by construction).
+  Tested: `tests/studies/test_replicate.py::TestReplicateCoupled`.
 - `monte_carlo_study` / `StudyResult` — `study.py:65` / `:35`. Tested:
   `tests/studies/test_study_smoke.py`.
 
@@ -125,6 +128,7 @@ Consumers retrofitted: `scripts/validation/ladder_mc.py` —
 | `event_share` (both denominators) | **new** | no existing "size of a selection" with all-vs-converged denominators; new to avoid the denominator-mismatch footgun (§4). |
 | `crn_pair`/`flips`/`paired_diff` | **new** | grep confirms no prior finite-mask-and-pair or directional-flip helper outside the retrofitted readouts; net-new CRN-coupled contrast. |
 | `coupling_id` field | **extend** | additive static field on existing `MCRecords` (`driver.py:81`) + passthrough in `replicate`/`monte_carlo_study`; closes the same-DGP gap key-equality can't. |
+| `replicate_coupled` (#171) | **extend (reuse)** | thin wrapper over `replicate` (no new estimation path); stamps a shared per-call token so coupling is sound *by construction* — the only correct alternative to the rejected dgp-callable auto-derivation (§6.2). |
 | `Bootstrap*` retrofit | **deferred (not in #167)** | already a query algebra (`adaptive.py`); #144 marks it for a later additive retrofit, explicitly out of #167 scope. |
 
 Verify-against-ledger result for #167: **OK (anchored on §3/§4)** — no
@@ -143,9 +147,18 @@ ripgrep-floor "new" decisions at the call-graph tier.
    `coverage`/`size_power` a selection-conditional answer. Documented, not
    gated. Leave general (a harness legitimately wants conditional coverage as a
    *diagnostic*) or add a louder guard on the estimator-internal flags?
-2. **`coupling_id` provenance.** Currently caller-supplied (the harness uses
-   `(repr(design.spec), seed)`). Worth auto-deriving from the `dgp` callable
-   identity in `replicate`, or keep explicit (clearer, less magic)?
+2. **`coupling_id` provenance. RESOLVED (#171): keep explicit; reject
+   callable-derivation; add a coupled-arms factory.** Auto-deriving the token
+   from the `dgp` callable in `replicate` is unsound: the ladder passes a *fresh
+   lambda per arm*, so `id(dgp)` differs across coupled arms (false-refuse →
+   forces `assert_coupled`, losing the guard), while `__qualname__`/bytecode
+   collide across *different* DGPs sharing a lambda body (false-accept → the B1
+   hole #167 closed); closure-hashing is fragile (unhashable JAX arrays) and
+   blind to branching inside the DGP. A function's semantic identity is not
+   computable — the witness must come from *construction*. So
+   `replicate_coupled` (`driver.py`, #171) builds the arms together over one
+   `(dgp, key)` and stamps a fresh per-call shared token; sound by construction,
+   and the per-arm `coupling_id` stays the low-level primitive.
 3. **`h_boundary_readout`** was left out of the #167 retrofit: it reconstructs
    the *mask draw stream* — a different carrier (the missingness-field law), not
    a records query. Track as a future ledger entry when that carrier is built?
