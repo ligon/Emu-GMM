@@ -30,7 +30,8 @@ is reproducible from ``(key, r)`` alone.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import jax
@@ -284,4 +285,70 @@ def replicate(
     )
 
 
-__all__ = ["MCRecords", "replicate"]
+def replicate_coupled(
+    runs: Mapping[str, Callable[[Any, Measure], EstimationResult]],
+    dgp: Callable[[jax.Array], Measure],
+    *,
+    n_reps: int,
+    key: jax.Array,
+    theta_init: Any,
+    anchor_per_rep: bool = False,
+    coupling_id: Any = None,
+) -> dict[str, MCRecords]:
+    """Replicate several estimator arms over the SAME draws, as a CRN set.
+
+    Each arm in ``runs`` (name -> a :func:`emu_gmm.build_estimator` callable) is
+    replicated over the *identical* ``(dgp, key, n_reps)`` stream --- so rep
+    ``r`` of every arm sees ``dgp(fold_in(key, r))`` (the documented CRN
+    contract) --- and every returned :class:`MCRecords` is stamped with **one
+    shared** ``coupling_id``. Because this factory *enforces* the shared
+    ``(dgp, key)``, that token is a sound witness of coupling:
+    :func:`emu_gmm.studies.crn_pair` will verify any two of the returned arms
+    with no explicit token and no ``assert_coupled``.
+
+    This is the ergonomic, sound alternative to a per-arm hand-rolled token ---
+    and to auto-deriving one from the ``dgp`` callable, which is **unsound**: a
+    fresh lambda per arm defeats object identity (false-refuse), while name /
+    bytecode collide across *different* DGPs that share a lambda body
+    (false-accept). A function's semantic identity is not computable; the
+    coupling witness must come from *construction*, which is what this factory
+    provides (issue #171; prior-art ledger ``.coder/ledger.md`` Section 6).
+
+    Parameters
+    ----------
+    runs
+        Mapping of arm name to a fitted-estimator callable. Arms typically
+        differ only in covariance / weighting strategy --- the same data, scored
+        differently --- which is exactly the CRN-paired-contrast use case.
+    dgp, n_reps, key, theta_init, anchor_per_rep
+        Passed through to :func:`replicate`, identical for every arm.
+    coupling_id
+        The shared token stamped on every returned arm. Defaults to a fresh,
+        unique value **per call**, so two *separate* coupled sets never compare
+        equal (no cross-set false-accept even at the same ``key``). Pass an
+        explicit value for a stable / meaningful token.
+
+    Returns
+    -------
+    dict[str, MCRecords]
+        One :class:`MCRecords` per arm (insertion order preserved), all sharing
+        ``coupling_id``.
+    """
+    if not runs:
+        raise ValueError("replicate_coupled(): `runs` is empty; nothing to couple.")
+    token = f"coupled-{uuid.uuid4().hex}" if coupling_id is None else coupling_id
+    return {
+        name: replicate(
+            run,
+            dgp,
+            n_reps=n_reps,
+            key=key,
+            theta_init=theta_init,
+            anchor_per_rep=anchor_per_rep,
+            coupling_id=token,
+        )
+        for name, run in runs.items()
+    }
+
+
+__all__ = ["MCRecords", "replicate", "replicate_coupled"]
