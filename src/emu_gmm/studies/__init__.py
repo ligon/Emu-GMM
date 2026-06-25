@@ -40,9 +40,11 @@ frozen into the package namespace.
 
 from emu_gmm.studies.conditioning import (
     FLAG_FIELDS,
+    SELECTION_CONDITIONAL_FLAGS,
     CoupledRecords,
     EventShare,
     Flips,
+    SelectionConditionalWarning,
     crn_pair,
     event_share,
     given,
@@ -86,4 +88,6 @@ __all__ = [
     "CoupledRecords",
     "Flips",
     "FLAG_FIELDS",
+    "SELECTION_CONDITIONAL_FLAGS",
+    "SelectionConditionalWarning",
 ]

@@ -631,8 +631,9 @@ def jadj_readout(r: ArmResult, label: str) -> None:
     # The binding subpopulation via given() (#167); event_share() supplies the
     # loud counts (selected & converged vs total converged). The within-subset
     # nominal-vs-adjusted p-value contrast is the *blessed* conditional query:
-    # a within-selection calibration contrast, NOT a coverage claim.
-    cond = given(mc, "binding_ridge")
+    # a within-selection calibration contrast, NOT a coverage claim -- so it
+    # acknowledges the selection-conditional gate (#167 Section 6 Q1).
+    cond = given(mc, "binding_ridge", acknowledge_conditional=True)
     share = event_share(mc, "binding_ridge")
     bconv = np.asarray(cond.converged) > 0.5  # binding AND converged
     p_nom = np.asarray(rec.J_pvalue)

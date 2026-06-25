@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from emu_gmm.studies import (
     MCRecords,
+    SelectionConditionalWarning,
     coverage,
     crn_pair,
     event_share,
@@ -80,7 +81,7 @@ class TestGiven:
             converged=[1, 1, 0],
             binding=[1, 0, 1],
         )
-        g = given(rec, "binding_ridge")
+        g = given(rec, "binding_ridge", acknowledge_conditional=True)
         assert np.asarray(g.theta_flat).shape == (2, 2)  # 2 binding reps
         assert g.J_dof == 1 and g.param_names == ("b0", "b1")  # statics survive
         np.testing.assert_array_equal(np.asarray(g.binding_ridge), [1.0, 1.0])
@@ -117,7 +118,9 @@ class TestGiven:
             converged=[1, 1, 1],
             binding=[1, 1, 0],
         )
-        cov_helper = coverage(given(rec, "binding_ridge"), theta0=[1.0, 3.0])
+        cov_helper = coverage(
+            given(rec, "binding_ridge", acknowledge_conditional=True), theta0=[1.0, 3.0]
+        )
         # Manual: same two binding reps.
         manual = coverage(
             _rec(
@@ -139,9 +142,9 @@ class TestGiven:
             binding=[0, 0, 1, 1],  # the far-off reps are the binding ones
         )
         marginal = coverage(rec, theta0=[1.0, 3.0]).coverage[1]
-        conditional = coverage(given(rec, "binding_ridge"), theta0=[1.0, 3.0]).coverage[
-            1
-        ]
+        conditional = coverage(
+            given(rec, "binding_ridge", acknowledge_conditional=True), theta0=[1.0, 3.0]
+        ).coverage[1]
         assert conditional < marginal  # selection on binding shows miscoverage
 
     def test_empty_subset_is_nan_not_crash(self):
@@ -151,7 +154,7 @@ class TestGiven:
             converged=[1],
             binding=[0],  # no binding reps
         )
-        g = given(rec, "binding_ridge")
+        g = given(rec, "binding_ridge", acknowledge_conditional=True)
         assert np.asarray(g.theta_flat).shape == (0, 2)
         cov = coverage(g, theta0=[1.0, 2.0])
         assert np.all(np.isnan(cov.coverage)) and cov.n_used == 0
@@ -163,9 +166,19 @@ class TestGiven:
             converged=[1, 1, 1],
             binding=[1, 0, 0],
         )
-        assert np.asarray(given(rec, "binding_ridge").binding_ridge).size == 1
         assert (
-            np.asarray(given(rec, "binding_ridge", negate=True).binding_ridge).size == 2
+            np.asarray(
+                given(rec, "binding_ridge", acknowledge_conditional=True).binding_ridge
+            ).size
+            == 1
+        )
+        assert (
+            np.asarray(
+                given(
+                    rec, "binding_ridge", negate=True, acknowledge_conditional=True
+                ).binding_ridge
+            ).size
+            == 2
         )
 
     def test_predicate_form(self):
@@ -276,7 +289,9 @@ class TestCrnPair:
         with pytest.raises(TypeError, match="whole MCRecords"):
             crn_pair(a, a.records)  # a bare FitRecord
         with pytest.raises(TypeError, match="whole MCRecords"):
-            crn_pair(a, given(a, "binding_ridge"))  # a conditioned record
+            crn_pair(
+                a, given(a, "binding_ridge", acknowledge_conditional=True)
+            )  # a conditioned record
 
     def test_self_pair_positive_control(self):
         a, _ = _pair_fixture()
@@ -366,7 +381,7 @@ class TestRetrofitByteEquality:
         pnb_old = np.asarray(rec.J_pvalue)[binding_old]
         pab_old = np.asarray(rec.J_pvalue_adjusted)[binding_old]
         # NEW helper logic
-        cond = given(mc, "binding_ridge")
+        cond = given(mc, "binding_ridge", acknowledge_conditional=True)
         share = event_share(mc, "binding_ridge")
         bconv = np.asarray(cond.converged) > 0.5
         pnb_new = np.asarray(cond.J_pvalue)[bconv]
@@ -412,3 +427,49 @@ class TestRetrofitByteEquality:
         jd_new = cp.mean_paired_diff(Ja, Jb, where=both_new)
         assert (fl.gain, fl.lose, fl.n_both) == (gain_old, lose_old, n_old)
         assert jd_new == pytest.approx(jd_old, abs=0, rel=0)
+
+
+class TestSelectionConditionalGate:
+    """#167 §6 Q1: given() warns when conditioning on an estimator-internal
+    event (selection-conditional, not nominal), unless acknowledged."""
+
+    def _rec3(self):
+        return _rec(
+            theta=[[0.0, 0.0]] * 3,
+            se=[[1.0, 1.0]] * 3,
+            converged=[1, 1, 1],
+            binding=[1, 0, 1],
+        )
+
+    @pytest.mark.parametrize("flag", ["binding_ridge", "sigma_meat_indefinite"])
+    def test_warns_on_internal_hazard_flags(self, flag):
+        with pytest.warns(SelectionConditionalWarning, match="SELECTION-CONDITIONAL"):
+            given(self._rec3(), flag)
+
+    def test_warning_silenced_by_acknowledge(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning becomes an error
+            given(self._rec3(), "binding_ridge", acknowledge_conditional=True)
+
+    def test_complement_also_warns(self):
+        # coverage among NON-binding reps is equally selection-conditional.
+        with pytest.warns(SelectionConditionalWarning):
+            given(self._rec3(), "binding_ridge", negate=True)
+
+    def test_converged_not_gated(self):
+        # the standard exclude-but-count exclusion is not a hazard.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            given(self._rec3(), "converged")
+
+    def test_predicate_not_gated(self):
+        # a predicate event is the caller's explicit responsibility.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            given(self._rec3(), lambda r: np.asarray(r.binding_ridge) > 0.5)
+
+    def test_event_share_not_gated(self):
+        # event_share only reports a count; it produces no subset for coverage.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            event_share(self._rec3(), "binding_ridge")

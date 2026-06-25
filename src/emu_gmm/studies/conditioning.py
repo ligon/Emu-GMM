@@ -44,6 +44,7 @@ Design notes (the red-team dispositions for #167):
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -61,6 +62,25 @@ FLAG_FIELDS: tuple[str, ...] = (
     "binding_ridge",
     "sigma_meat_indefinite",
 )
+
+#: Estimator-INTERNAL flags whose value is a function of the same data as
+#: ``theta_hat`` / ``se``. Conditioning the estimator law on one of these makes
+#: a Wald-coverage / rejection-rate summary *selection-conditional*, NOT
+#: nominal: ``binding_ridge`` fires when ``V`` is ill-conditioned, which is
+#: exactly where ``se`` is distorted, so ``coverage | binding`` is biased by
+#: construction. ``given`` warns on these unless ``acknowledge_conditional``.
+#: ``converged`` is deliberately excluded -- it is the standard exclude-but-
+#: count exclusion the summarizers already apply, not a hazard.
+SELECTION_CONDITIONAL_FLAGS: tuple[str, ...] = (
+    "binding_ridge",
+    "sigma_meat_indefinite",
+)
+
+
+class SelectionConditionalWarning(UserWarning):
+    """Conditioning the estimator law on an estimator-internal event yields a
+    selection-conditional quantity, not a nominal one (see
+    :data:`SELECTION_CONDITIONAL_FLAGS` and :func:`given`)."""
 
 
 def _unwrap(records: MCRecords | FitRecord) -> FitRecord:
@@ -129,6 +149,7 @@ def given(
     event: str | Callable[[FitRecord], Any],
     *,
     negate: bool = False,
+    acknowledge_conditional: bool = False,
 ) -> FitRecord:
     """The conditional law: the sub-record where ``event`` holds.
 
@@ -139,11 +160,18 @@ def given(
     summarizers further restrict to *converged* reps, so the result is the
     coverage among ``binding & converged`` reps.
 
-    **This is selection-conditional, not nominal.** When ``event`` is an
-    estimator-internal flag the selection is correlated with ``theta_hat`` and
-    ``se``; read the result as a within-selection diagnostic, and pair it with
-    :func:`event_share` so the conditioning is never lost. See the module
-    docstring.
+    **This is selection-conditional, not nominal.** When ``event`` is one of the
+    estimator-internal flags in :data:`SELECTION_CONDITIONAL_FLAGS`
+    (``binding_ridge`` / ``sigma_meat_indefinite``), the selection is correlated
+    with ``theta_hat`` and ``se``, so a Wald-coverage / rejection-rate summary
+    over the result is a within-selection *diagnostic*, not a coverage
+    guarantee. ``given`` therefore emits a :class:`SelectionConditionalWarning`
+    on those flags; pass ``acknowledge_conditional=True`` once you have read this
+    (the blessed use is a within-subset *contrast* such as the nominal-vs-
+    adjusted p-value calibration, not a coverage/size claim). ``converged`` is
+    not gated -- it is the standard exclusion the summarizers already apply --
+    and a predicate ``event`` is the caller's own responsibility, so neither
+    warns.
 
     Parameters
     ----------
@@ -154,8 +182,30 @@ def given(
         A flag name in :data:`FLAG_FIELDS`, or a predicate
         ``FitRecord -> (n_reps,) bool``.
     negate
-        Select the complement (``~mask``).
+        Select the complement (``~mask``). Conditioning on the complement of an
+        internal flag is equally selection-conditional, so the warning still
+        fires.
+    acknowledge_conditional
+        Silence the :class:`SelectionConditionalWarning` for an
+        estimator-internal ``event`` (you are asserting you will read the result
+        as a within-selection diagnostic, not a nominal quantity).
     """
+    if (
+        isinstance(event, str)
+        and event in SELECTION_CONDITIONAL_FLAGS
+        and not acknowledge_conditional
+    ):
+        warnings.warn(
+            f"given(..., {event!r}) conditions the estimator law on an "
+            "estimator-internal event correlated with theta_hat/se. A coverage / "
+            "size_power / bias_sd summary over the result is "
+            "SELECTION-CONDITIONAL (a within-selection diagnostic), NOT a nominal "
+            "guarantee. Read it as such and pass acknowledge_conditional=True to "
+            "silence; the blessed use is a within-subset contrast (e.g. nominal "
+            "vs adjusted p-value calibration), not a coverage/size claim.",
+            SelectionConditionalWarning,
+            stacklevel=2,
+        )
     rec = _unwrap(records)
     mask = _event_mask(rec, event, negate)
     return jax.tree_util.tree_map(lambda leaf: leaf[mask], rec)
@@ -368,6 +418,8 @@ def crn_pair(
 
 __all__ = [
     "FLAG_FIELDS",
+    "SELECTION_CONDITIONAL_FLAGS",
+    "SelectionConditionalWarning",
     "given",
     "event_share",
     "EventShare",
