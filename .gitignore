@@ -24,8 +24,13 @@ dist/
 # Coder session scaffolding
 .coder-session/
 
-# Claude Code worktrees (temporary; created by isolation: worktree)
-.claude/
+# Claude Code: ignore local/temporary state (worktrees created by
+# isolation: worktree, local settings, caches) but TRACK the shared,
+# portable tooling so agents/commands/workflows travel with the repo.
+.claude/*
+!.claude/agents/
+!.claude/commands/
+!.claude/workflows/
 
 # OS metadata
 .DS_Store
