@@ -312,7 +312,7 @@ def replicate_coupled(
     bytecode collide across *different* DGPs that share a lambda body
     (false-accept). A function's semantic identity is not computable; the
     coupling witness must come from *construction*, which is what this factory
-    provides (issue #171; prior-art ledger ``.coder/ledger.md`` Section 6).
+    provides (issue #171; prior-art ledger ``.coder/ledger.org`` Section 6).
 
     Parameters
     ----------
