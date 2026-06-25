@@ -70,6 +70,15 @@ class MCRecords:
     key: jax.Array
     #: Number of replicates run (static; the leading-axis length).
     n_reps: int = jdc.static_field()  # type: ignore[attr-defined]
+    #: Optional CRN-coupling token (static). Two arms are CRN-coupled iff
+    #: they were drawn from the *same* DGP/fold-in stream; master-key
+    #: equality is necessary but NOT sufficient to witness that (the key
+    #: does not see the DGP's internal ``split`` scheme). Stamp a value
+    #: here -- any hashable identifying the (DGP, master-key) stream --
+    #: and :func:`emu_gmm.studies.crn_pair` verifies it before zipping two
+    #: arms. ``None`` (the default) means "coupling unverifiable"; pairing
+    #: then requires an explicit ``assert_coupled=True``.
+    coupling_id: Any = jdc.static_field(default=None)  # type: ignore[attr-defined]
 
     @property
     def converged_mask(self) -> np.ndarray:
@@ -127,6 +136,7 @@ def replicate(
     key: jax.Array,
     theta_init: Any,
     anchor_per_rep: bool = False,
+    coupling_id: Any = None,
 ) -> MCRecords:
     """Run ``n_reps`` independent draw-and-estimate replicates.
 
@@ -197,6 +207,15 @@ def replicate(
         replicate ``r`` draws
         with ``fold_in(key, r)`` on both paths, so the two modes see
         identical datasets and differ only in anchoring.
+    coupling_id
+        Optional CRN-coupling token stamped onto the returned
+        :class:`MCRecords` (default ``None``). Give two arms drawn from
+        the *same* ``(dgp, key)`` stream the *same* value, and
+        :func:`emu_gmm.studies.crn_pair` will verify it before zipping
+        them. Master-key equality alone is necessary but not sufficient
+        evidence of coupling (it does not witness the DGP's internal
+        ``split`` scheme), so unmatched / ``None`` ids force an explicit
+        ``assert_coupled=True`` at pairing time.
 
     Returns
     -------
@@ -260,7 +279,9 @@ def replicate(
             result = run(theta_init, dgp(rep_key))
             records.append(result.record())
     stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *records)
-    return MCRecords(records=stacked, key=jnp.asarray(key), n_reps=n_reps)
+    return MCRecords(
+        records=stacked, key=jnp.asarray(key), n_reps=n_reps, coupling_id=coupling_id
+    )
 
 
 __all__ = ["MCRecords", "replicate"]

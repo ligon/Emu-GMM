@@ -73,6 +73,7 @@ def monte_carlo_study(
     level: float = 0.95,
     alpha: tuple[float, ...] = (0.01, 0.05, 0.10),
     anchor_per_rep: bool = False,
+    coupling_id: Any = None,
 ) -> StudyResult:
     """Run a study and compute the standard summary battery.
 
@@ -108,6 +109,7 @@ def monte_carlo_study(
         key=key,
         theta_init=theta_init,
         anchor_per_rep=anchor_per_rep,
+        coupling_id=coupling_id,
     )
     return StudyResult(
         records=records,

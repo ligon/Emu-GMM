@@ -15,6 +15,11 @@ separated layers (the #114 critical-read shape):
    non-converged replicates.
 3. **Sugar** --- :func:`monte_carlo_study` / :class:`StudyResult`:
    composition by delegation only (the ``Context`` precedent).
+4. **Conditional / coupled queries** (#167) --- :func:`given` /
+   :func:`event_share` (the conditional law: the sub-record where a
+   diagnostic event holds, plus its loud size) and :func:`crn_pair` (the
+   coupled law: two CRN-verified arms and their paired contrasts). The
+   first, minimum-viable increment of the ``EstimatorLaw`` design (#144).
 
 Typical use::
 
@@ -33,6 +38,15 @@ studies API gets a release of real use (#130) before its surface is
 frozen into the package namespace.
 """
 
+from emu_gmm.studies.conditioning import (
+    FLAG_FIELDS,
+    CoupledRecords,
+    EventShare,
+    Flips,
+    crn_pair,
+    event_share,
+    given,
+)
 from emu_gmm.studies.driver import MCRecords, replicate
 from emu_gmm.studies.study import StudyResult, monte_carlo_study
 from emu_gmm.studies.summaries import (
@@ -63,4 +77,12 @@ __all__ = [
     "j_calibration",
     "StudyResult",
     "monte_carlo_study",
+    # Conditional / coupled empirical-law queries (#167)
+    "given",
+    "event_share",
+    "EventShare",
+    "crn_pair",
+    "CoupledRecords",
+    "Flips",
+    "FLAG_FIELDS",
 ]
