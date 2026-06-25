@@ -54,6 +54,7 @@ from emu_gmm.diagnostics import (
     build_diagnostics,
     build_optimizer_health,
     compute_cond_info,
+    regularization_adjusted_pvalue,
 )
 from emu_gmm.estimator import build_estimator, estimate
 from emu_gmm.inference import (
@@ -182,6 +183,7 @@ __all__ = [
     "build_diagnostics",
     "build_optimizer_health",
     "compute_cond_info",
+    "regularization_adjusted_pvalue",
     # Inference
     "moment_wild_bootstrap",
     "WildBootstrapResult",

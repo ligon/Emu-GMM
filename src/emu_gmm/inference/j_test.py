@@ -145,9 +145,32 @@ def j_test(
     explicitly --- the same Cholesky-based computation used inside
     :func:`emu_gmm.estimate`.
 
+    .. warning::
+
+       This is a **zero-parameter** test: ``J_dof = M`` and the
+       reference is :math:`\\chi^2_M`. That is correct only when
+       ``theta_null`` is a genuinely fixed value --- hypothesised, or
+       estimated from *other* data / *other* moments. At a GMM-fitted
+       estimate that minimised this same criterion --- e.g.
+       ``theta_null=result.theta_hat`` --- ``K`` parameters have been
+       projected out of the moments, so the correct
+       over-identification reference is :math:`\\chi^2_{M-K}` (or the
+       regularised weighted-:math:`\\chi^2` limit), not
+       :math:`\\chi^2_M`. Calling ``j_test`` there **over-states the dof
+       and under-rejects (conservative)**. For the post-estimation
+       over-id test, read it straight off the fitted result instead:
+       ``result.J_stat`` / ``result.J_dof`` (``= M - K``) /
+       ``result.J_pvalue`` / ``result.J_pvalue_adjusted`` (the
+       projected, regularisation-adjusted reference) --- all already
+       computed by :func:`emu_gmm.estimate`. For a standalone projected
+       reference at an externally-fixed ``theta_null`` you can pass the
+       moment Jacobian ``G`` to
+       :func:`emu_gmm.regularization_adjusted_pvalue`.
+
     The helper independently re-anchors ``tau`` at ``theta_null``; when
     paired with a fitted :class:`emu_gmm.EstimationResult` via
-    ``j_test(..., theta_null=result.theta_hat)`` and the ridge is
+    ``j_test(..., theta_null=result.theta_hat)`` (which, per the warning
+    above, is the wrong dof for an over-id test) and the ridge is
     binding, the resulting ``J_stat`` will not in general equal
     ``result.J_stat`` (which used the first-stage-anchored ``tau``).
     """
