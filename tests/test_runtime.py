@@ -163,6 +163,17 @@ class TestPublicApi:
         assert "configure" in emu_gmm.__all__
         assert "recommended_env" in emu_gmm.__all__
 
+    def test_regularization_adjusted_pvalue_exported(self):
+        # #164: the projected over-id reference must be discoverable at the
+        # top level, not only via emu_gmm.diagnostics.
+        from emu_gmm import diagnostics
+
+        assert (
+            emu_gmm.regularization_adjusted_pvalue
+            is diagnostics.regularization_adjusted_pvalue
+        )
+        assert "regularization_adjusted_pvalue" in emu_gmm.__all__
+
 
 class TestEstimatorWiring:
     """``estimate`` / ``build_estimator`` call the one-time warning hook."""

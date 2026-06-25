@@ -166,6 +166,25 @@ class Fixed:
     :math:`V_0 = W^{-1}`. Silently storing ``W`` as ``L0`` would yield
     a wrong-but-runnable estimator, so we require an explicit kwarg.
 
+    A second, subtler footgun is *scale*. ``V0`` must be the variance of
+    the **mean** moment vector --- the same :math:`V_X` the package's
+    covariance strategies build, carrying the per-coordinate
+    :math:`1/(N_j N_k)` normalisation (``CLAUDE.md`` commitment 9) ---
+    **not** the per-observation moment covariance
+    :math:`\\Omega = \\frac1N \\sum_i (g_i-\\bar g)(g_i-\\bar g)^\\top`.
+    The two differ by a factor of :math:`N` (and, under unequal
+    per-coordinate observability, by *different* factors per moment).
+    Because ``Fixed`` whitens with whatever ``V0`` carries, feeding the
+    per-observation :math:`\\Omega` makes ``result.J_stat`` come out
+    un-N-scaled (``= Hansen / N``) --- silently off the
+    :math:`\\chi^2_{J\\_dof}` scale that ``J_pvalue`` and a hand-rolled
+    ``N * gbar' Omega^{-1} gbar`` live on --- and
+    :func:`emu_gmm.cluster_bootstrap`'s ``J_boot`` inherits that scale.
+    Pass ``V0 = Omega / N`` (the mean-moment :math:`V_X`), or just let a
+    covariance strategy build it. ``ContinuouslyUpdated`` / iterated
+    weighting do not expose this knob: they construct :math:`V(\\theta)`
+    internally on the mean-moment scale.
+
     Parameters
     ----------
     L0 : (M, M) lower-triangular array, keyword-only
@@ -223,7 +242,12 @@ class Fixed:
     def from_V0(cls, V0: Float[Array, "M M"]) -> Fixed:
         """Construct from an anchor variance ``V0`` (pre-cholesky).
 
-        Equivalent to ``Fixed(V0=V0)``.
+        Equivalent to ``Fixed(V0=V0)``. ``V0`` is the **mean-moment**
+        covariance :math:`V_X` (carrying the per-coordinate
+        :math:`1/(N_j N_k)` normalisation), not the per-observation
+        moment covariance :math:`\\Omega`; the two differ by a factor of
+        :math:`N` and feeding :math:`\\Omega` leaves ``result.J_stat``
+        un-N-scaled. See the :class:`Fixed` class Notes.
         """
         return cls(V0=V0)
 
