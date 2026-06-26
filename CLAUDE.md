@@ -375,6 +375,26 @@ single-thread caps only as a last resort.
   that rebuilds closures per iteration, call `jax.clear_caches()` per
   iteration — it costs nothing there precisely because nothing is re-hit.
   The `build_estimator` + `replicate` factory path does not leak.
+- **gitnexus MCP / Kùzu single-writer lock — diagnose by holders, not theory.**
+  Each *indexed* repo has its **own** `.gitnexus/lbug` (a single-writer Kùzu
+  DB); only the MCP server **binary** and `~/.gitnexus/registry.json` (a
+  name→path map) are shared, so the lock is **per-repo**, not cross-repo. The
+  recurring `FTS index ensure failed ... read-only database` warning means more
+  than one process has *this repo's* `lbug` open at once — and the usual culprit
+  is **your own session leaking duplicate servers**: each `/mcp` reconnect spawns
+  a fresh `gitnexus mcp` without reaping the old one. Diagnose with the process
+  table, not a theory: `lsof .gitnexus/lbug` (or `pgrep -f "gitnexus mcp"` then
+  check each PID's `PPid` — they're usually all children of *your own* harness,
+  not "another session/repo"). Do **not** kill-by-guess — "newest = live, oldest
+  = stale" is unreliable, and killing the live stdio-connected server drops your
+  MCP connection (learned the hard way 2026-06-25). Recycle via a `/mcp`
+  reconnect (reaps + respawns cleanly), never `kill`. The warning is **cosmetic**:
+  the per-Bash staleness hook spawns its *own* short-lived gitnexus process that
+  contends for the same single-writer lock, so it can recur even with one server;
+  `context` / `cypher` / `impact` work off the read path — only NL `query()`
+  (FTS-backed) is the casualty. General rule (applies beyond gitnexus): for any
+  *locked / read-only / contended* symptom, enumerate the actual holders before
+  theorizing, acting, or sending the user to act.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
