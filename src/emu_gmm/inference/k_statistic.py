@@ -119,7 +119,7 @@ previous thin-QR form).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import haliax as ha
@@ -129,7 +129,10 @@ import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import cholesky as cho
-from emu_gmm._internal.params import manifold_spec_from_params
+from emu_gmm._internal.params import (
+    interest_identified_dim,
+    manifold_spec_from_params,
+)
 from emu_gmm.covariance import (
     ClusteredCovariance,
     DesignAwareCovariance,
@@ -598,6 +601,7 @@ def k_statistic(
     L: Float[Array, "M M"] | None = None,
     gauge_nullspace_dim: int | None = None,
     strong_id_fallback: bool = False,
+    interest: Sequence[str] | None = None,
 ) -> KStatisticResult:
     """Compute the Kleibergen :math:`K`/:math:`S`/:math:`J` decomposition.
 
@@ -669,6 +673,20 @@ def k_statistic(
         resulting statistic is *not* weak-identification-robust; before
         #41 this fallback fired silently, which let a caller believe
         they had a robust test when they did not.
+    interest : sequence of str, keyword-only, optional
+        Field names of the *interest* leaves for a **subvector** test
+        (#176/#179). When given, ``theta_0`` is assumed to hold the named
+        leaves at their null and the remaining (nuisance) leaves at their
+        CONCENTRATED values, and the result is referenced to the
+        Kleibergen--Mavroeidis (2009) subvector distribution: ``df_K =``
+        identified dim of the interest leaves (``d_I``), ``df_J = M - d_N``
+        (``d_N = p_id - d_I`` the nuisance dim), ``df_S = M - p_id``
+        unchanged. The K/S/J *values* are the ordinary full-vector ones —
+        only the reference dofs (and p-values) change. Omit (the default)
+        for the full-vector test. Valid only when the **nuisance is
+        strongly identified**; the interest direction may be weak. This is
+        the shared surface :func:`emu_gmm.inference.profiled_k_confidence_set`
+        uses, so the subvector dof lives in one place.
 
     Returns
     -------
@@ -759,6 +777,28 @@ def k_statistic(
         identified_dim=identified_dim,
         strong_id_fallback=strong_id_fallback,
     )
+
+    # Subvector reference distribution (#176/#179): when ``interest`` names a
+    # strict subset of the leaves (the rest being a CONCENTRATED nuisance), the
+    # Kleibergen--Mavroeidis (2009) subvector limits apply: K -> chi^2_{d_I}
+    # (d_I = identified dim of the interest leaves; the concentrated nuisance
+    # score is zero by the inner FOC, so the full-vector K collapses onto the
+    # interest block) and the restricted-model J -> chi^2_{M - d_N} with d_N =
+    # p_id - d_I; S = J - K ~ chi^2_{M - p_id} is unchanged (df_K + df_S = df_J
+    # still holds). The statistic VALUES are untouched -- the caller must supply
+    # a theta_0 with the nuisance concentrated -- only the reference dofs (and
+    # hence the p-values) change. Valid under STRONG nuisance identification.
+    if interest is not None:
+        d_i = interest_identified_dim(theta_0, interest)
+        if not 0 < d_i < identified_dim:
+            raise ValueError(
+                f"k_statistic(interest=...): the interest leaves carry "
+                f"identified dim d_I={d_i}, which must be a strict subvector "
+                f"(0 < d_I < p_id={identified_dim}). Got the whole vector or "
+                f"none -- drop `interest` for the full-vector test."
+            )
+        df_K = d_i
+        df_J = M - identified_dim + d_i  # restricted over-id; == df_K + df_S
 
     # p-values via jax.scipy.stats.chi2.sf — traceable under jit / vmap.
     p_K = _kappa_chi2_sf(K_stat, df_K)

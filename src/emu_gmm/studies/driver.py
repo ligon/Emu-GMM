@@ -80,6 +80,15 @@ class MCRecords:
     #: arms. ``None`` (the default) means "coupling unverifiable"; pairing
     #: then requires an explicit ``assert_coupled=True``.
     coupling_id: Any = jdc.static_field(default=None)  # type: ignore[attr-defined]
+    #: Optional per-draw custom statistics collected by ``replicate(statistics=)``
+    #: (#179). A ``{name: (n_reps,)-array}`` dict, leading rep axis, or ``None``
+    #: when no extractors were supplied. This is the general
+    #: "let the harness collect a statistic the FitRecord schema doesn't carry"
+    #: channel --- e.g. an identification-robust K p-value at a null, an
+    #: identification-strength scalar --- each computed by package code from the
+    #: harness's own ``(EstimationResult, Measure)`` draw. A traced pytree child
+    #: (not static): it rides jit/vmap and stacks like ``records``.
+    extra: dict[str, jax.Array] | None = None
 
     @property
     def converged_mask(self) -> np.ndarray:
@@ -106,7 +115,8 @@ class MCRecords:
 
         Columns: ``theta_<name>`` / ``se_<name>`` per parameter, the J
         triple, ``converged``, ``tau_realised``, ``binding_ridge``,
-        ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143).
+        ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143), and one
+        column per custom statistic in :attr:`extra` (#179).
         Pandas stays outside the compiled boundary --- this is the only
         pandas touchpoint in the studies module.
         """
@@ -124,6 +134,8 @@ class MCRecords:
         data["tau_realised"] = np.asarray(rec.tau_realised)
         data["binding_ridge"] = np.asarray(rec.binding_ridge)
         data["sigma_meat_indefinite"] = np.asarray(rec.sigma_meat_indefinite)
+        for name, col in (self.extra or {}).items():
+            data[name] = np.asarray(col)
         df = pd.DataFrame(data)
         df.index.name = "rep"
         return df
@@ -138,6 +150,7 @@ def replicate(
     theta_init: Any,
     anchor_per_rep: bool = False,
     coupling_id: Any = None,
+    statistics: Mapping[str, Callable[[EstimationResult, Measure], Any]] | None = None,
 ) -> MCRecords:
     """Run ``n_reps`` independent draw-and-estimate replicates.
 
@@ -217,13 +230,32 @@ def replicate(
         evidence of coupling (it does not witness the DGP's internal
         ``split`` scheme), so unmatched / ``None`` ids force an explicit
         ``assert_coupled=True`` at pairing time.
+    statistics
+        Optional ``{name: extractor}`` map of **custom per-draw
+        statistics** the harness should collect alongside the
+        :class:`~emu_gmm.types.FitRecord` (#179). Each
+        ``extractor(result, measure) -> scalar`` is called once per
+        replicate with that rep's fitted :class:`EstimationResult` and the
+        :class:`Measure` the harness drew (so there is no measure
+        re-generation and no hand loop), and its outputs are stacked into
+        :attr:`MCRecords.extra` under ``name`` with the same leading
+        ``n_reps`` axis. This is the general way to record a statistic the
+        ``FitRecord`` schema does not carry --- e.g. an identification-robust
+        ``k_statistic(..., interest=[...]).p_K`` at a null, or an
+        :func:`~emu_gmm.inference.identification.identification_strength`
+        scalar --- computed by package code rather than reinvented in a
+        caller's loop. The extractor SHOULD return a finite scalar or
+        ``nan`` (a NaN rides through as an event, the #140 convention);
+        the value is converted with ``jnp.asarray``. ``None`` (default)
+        leaves :attr:`MCRecords.extra` ``None``.
 
     Returns
     -------
     MCRecords
         Stacked :class:`~emu_gmm.types.FitRecord` plus study metadata.
         Non-converged replicates are recorded, not dropped; their
-        ``converged`` field is 0.
+        ``converged`` field is 0. When ``statistics`` is given, the
+        collected per-draw values are on :attr:`MCRecords.extra`.
     """
     if n_reps < 1:
         raise ValueError(f"replicate(): n_reps must be >= 1, got {n_reps}")
@@ -261,11 +293,14 @@ def replicate(
         fit_per_rep = _fit_fresh_anchor
 
     records: list[FitRecord] = []
+    extra_cols: dict[str, list[Any]] = {name: [] for name in (statistics or {})}
     for r in range(n_reps):
         rep_key = jax.random.fold_in(key, r)
+        measure = dgp(rep_key)
         if fit_per_rep is not None:
-            result = fit_per_rep(dgp(rep_key))
+            result = fit_per_rep(measure)
             records.append(result.record())
+            _collect_statistics(statistics, extra_cols, result, measure)
             # Bare estimate() builds fresh closures per call, so JAX's
             # global caches accumulate write-only traces (~14 MB/call
             # measured; the unmitigated leak OOM-killed a 300-rep study
@@ -277,12 +312,35 @@ def replicate(
             if (r + 1) % 25 == 0:
                 jax.clear_caches()
         else:
-            result = run(theta_init, dgp(rep_key))
+            result = run(theta_init, measure)
             records.append(result.record())
+            _collect_statistics(statistics, extra_cols, result, measure)
     stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *records)
-    return MCRecords(
-        records=stacked, key=jnp.asarray(key), n_reps=n_reps, coupling_id=coupling_id
+    extra = (
+        {name: jnp.stack(vals) for name, vals in extra_cols.items()}
+        if statistics
+        else None
     )
+    return MCRecords(
+        records=stacked,
+        key=jnp.asarray(key),
+        n_reps=n_reps,
+        coupling_id=coupling_id,
+        extra=extra,
+    )
+
+
+def _collect_statistics(
+    statistics: Mapping[str, Callable[[EstimationResult, Measure], Any]] | None,
+    extra_cols: dict[str, list[Any]],
+    result: EstimationResult,
+    measure: Measure,
+) -> None:
+    """Evaluate each custom per-draw extractor and append its scalar (#179)."""
+    if not statistics:
+        return
+    for name, fn in statistics.items():
+        extra_cols[name].append(jnp.asarray(fn(result, measure)))
 
 
 def replicate_coupled(

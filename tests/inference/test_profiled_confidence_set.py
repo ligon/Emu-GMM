@@ -33,6 +33,7 @@ from emu_gmm import (
     ContinuouslyUpdated,
     EmpiricalMeasure,
     IIDCovariance,
+    build_estimator,
     estimate,
     k_confidence_set,
     k_statistic,
@@ -41,6 +42,7 @@ from emu_gmm import (
 from emu_gmm.manifolds import ManifoldLeaf, PSDFixedRank
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.studies import monte_carlo_study
 
 jax.config.update("jax_enable_x64", True)
 
@@ -406,3 +408,134 @@ class TestValidationAndApi:
         # Each profiled point holds theta_w at its grid value (the fixed field).
         for g, pt in zip(grid, pts, strict=True):
             np.testing.assert_allclose(float(pt.theta_w), float(g), rtol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# (e) Subvector calibration Monte Carlo (#179), via the studies harness.
+#
+# The studies harness owns the draws AND the statistic: `monte_carlo_study`
+# draws + fits the restricted (nuisance-only) model, its native `size_power`
+# checks the restricted over-id J (chi^2_{M - dim_nuisance}), and the new
+# per-draw `statistics=` channel collects the package's own subvector-K
+# p-value (k_statistic(interest=[...])) at the true null -- no hand-rolled
+# replication loop, no measure regeneration, no re-derived p-value. Under
+# strong nuisance ID the subvector K (df = dim(interest)) is much closer to
+# nominal than the pre-#179 full-vector dof, which under-rejects (conservative).
+#
+# The weak-nuisance degradation is the strong_id precondition (documented on
+# profiled_k_confidence_set / k_statistic(interest=)); it is not gated here --
+# the strong-vs-weak size gap is within MC noise at feasible rep counts, so a
+# tight assertion would be flaky. The _mc_dgp(strong_nuisance=False) arm stays
+# available for ad-hoc study.
+#
+# Interest is theta_s (always strongly instrumented); the profiled-out nuisance
+# theta_w is strongly or weakly instrumented. True null (theta_s, theta_w) =
+# (_B0, _G0). M = 3 moments, 2 params: dim(interest) = 1, full p_id = 2.
+# ---------------------------------------------------------------------------
+
+_MC_KEY = jax.random.PRNGKey(20260630)
+_B0, _G0 = 1.5, -0.7
+
+
+@jdc.pytree_dataclass
+class _WOnly:
+    """Nuisance-only reduced parameter (theta_s pinned at the truth _B0)."""
+
+    theta_w: float
+
+
+def _mc_dgp(strong_nuisance: bool, n: int = 1500):
+    pi_a = jnp.array([1.4, 1.2, 1.1])  # interest theta_s: always strong instruments
+    pi_b = (
+        jnp.array([1.0, 0.9, 1.1])  # nuisance strongly instrumented
+        if strong_nuisance
+        else jnp.array([0.03, 0.025, 0.035])  # nuisance genuinely weak
+    )
+
+    def dgp(key: jax.Array) -> EmpiricalMeasure:
+        k1, k2, k3, k4 = jax.random.split(key, 4)
+        Z = jax.random.normal(k1, (n, 3))
+        a = Z @ pi_a + 0.4 * jax.random.normal(k2, (n,))
+        b = Z @ pi_b + 0.4 * jax.random.normal(k3, (n,))
+        y = _B0 * a + _G0 * b + 0.3 * jax.random.normal(k4, (n,))
+        X = jnp.column_stack([y[:, None], a[:, None], b[:, None], Z])
+        return EmpiricalMeasure.from_arrays(X, M=3)
+
+    return dgp
+
+
+def _restricted_model(x, nu):
+    # Nuisance-only reduced model: interest theta_s pinned at the truth _B0.
+    return _iv_model(x, IVParams(theta_s=_B0, theta_w=nu.theta_w))
+
+
+def _full_at(result):
+    # Reconstruct the full null theta from the concentrated nuisance fit.
+    return IVParams(theta_s=_B0, theta_w=result.theta_hat.theta_w)
+
+
+def _p_K_sub(result, measure):
+    # The package's OWN subvector-K p-value at the concentrated point.
+    return k_statistic(
+        _full_at(result), measure, IIDCovariance(), _iv_model, interest=["theta_s"]
+    ).p_K
+
+
+def _p_K_full(result, measure):
+    # The pre-#179 full-vector reference (no `interest=`), for contrast.
+    return k_statistic(_full_at(result), measure, IIDCovariance(), _iv_model).p_K
+
+
+def _run_subvector_study(strong_nuisance: bool, n_reps: int = 300):
+    dgp = _mc_dgp(strong_nuisance)
+    run = build_estimator(  # factory => the no-leak cached path (CLAUDE.md)
+        _restricted_model,
+        measure=dgp(_MC_KEY),
+        covariance=IIDCovariance(),
+        weighting=ContinuouslyUpdated(),
+        optimizer=optimistix_lm(),
+        parameters=_WOnly(theta_w=_G0),
+    )
+    return monte_carlo_study(
+        run,
+        dgp,
+        n_reps=n_reps,
+        key=_MC_KEY,
+        theta_init=_WOnly(theta_w=_G0),
+        theta0=_WOnly(theta_w=_G0),
+        statistics={"p_K_sub": _p_K_sub, "p_K_full": _p_K_full},
+    )
+
+
+def _size(study, name: str, alpha: float = 0.05) -> float:
+    p = np.asarray(study.records.extra[name])
+    p = p[np.isfinite(p)]
+    return float((p < alpha).mean())
+
+
+class TestSubvectorCalibrationMC:
+    @pytest.mark.slow
+    def test_strong_nuisance_subvector_nominal_fullvector_conservative(self):
+        # The core #179 claim, demonstrated through the studies harness: under
+        # strong nuisance ID the subvector dof (df = dim(interest) = 1) is much
+        # closer to nominal 5% size than the pre-#179 full-vector dof
+        # (df = p_id = 2), which systematically under-rejects (conservative,
+        # over-wide sets). Asserted as seed-robust *inequalities* rather than a
+        # tight band on a 300-rep size estimate.
+        study = _run_subvector_study(strong_nuisance=True)
+        size_sub = _size(study, "p_K_sub")
+        size_full = _size(study, "p_K_full")
+        # The fix: the subvector reference is strictly closer to nominal...
+        assert abs(size_sub - 0.05) < abs(size_full - 0.05)
+        # ...the full-vector dof is strictly more conservative...
+        assert size_full < size_sub
+        # ...clearly below nominal (it under-rejects)...
+        assert size_full < 0.035
+        # ...and the subvector reference does not over-reject.
+        assert size_sub <= 0.10
+        # Native-harness leg: the restricted over-id J (chi^2_{M - dim_nuisance})
+        # stays calibrated, read off the same records by size_power.
+        ar = float(np.asarray(study.size_power.reject_nominal)[1])  # alpha=0.05
+        assert 0.02 <= ar <= 0.10
+        # The custom statistic also materializes in to_pandas (the #179 channel).
+        assert "p_K_sub" in study.records.to_pandas().columns
