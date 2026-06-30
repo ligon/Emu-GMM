@@ -15,7 +15,12 @@ in force in the Monte-Carlo / repeated-sampling area (=emu_gmm.studies=,
   summarizers, and the conditional/coupled queries over them. First populated to
   ground *#167* (conditional/coupled queries) under the *#144* =EstimatorLaw=
   umbrella (landed on =main= via *PR #168*, merged 2026-06-25; the
-  =conditioning.py= =path:line= refs below resolve on =main=).
+  =conditioning.py= =path:line= refs below resolve on =main=). *Extended
+  2026-06-30* (Section 7) to the /identification-strength + identification-robust
+  set/ surface -- *#177* (per-block =identification_strength=), *#176* (profiled
+  =k_confidence_set=), and the *#178* review that fixed the frozen-=V*= contract.
+  Those =path:line= refs resolve on branch =claude/review-feature-requests-d9fqyc=
+  (PR #178).
 
 * Section 1 -- Task, restated (repo vocabulary)
 
@@ -200,3 +205,114 @@ ripgrep-floor "new" decisions at the call-graph tier.
    skill-default Markdown to match the workspace's Org-mode prose convention
    (ASCII-only; =verbatim= for identifiers; description lists in place of the
    Sec. 5 table). =.coder/= is git-tracked (not gitignored).
+
+* Section 7 -- Identification-strength / robust-set surface (#177 / #176 / #178)
+
+The GMM /curvature/ surface, distinct from the empirical-law surface above: how
+the information matrix \(G' \Lambda G\) and the Kleibergen \(K\)-set are reused
+across diagnostics. Added 2026-06-30 to record the anchors the #178 review
+turned on.
+
+** 7.1 -- Task, restated
+
+Two consumer-pulled (K-Aggregators) additions: =identification_strength= (#177)
+reports the /per-block concentration parameters/ -- eigenvalues of the
+Schur-complemented \(\mathcal{I} = G' \Lambda G\) after concentrating out the
+other coordinates (the FWL / partial-first-stage analogue); and
+=profiled_k_confidence_set= (#176) inverts the \(K/S/J\) statistic while
+*re-optimising* the nuisance leaves (a =PSDFixedRank= =Gamma= factor included)
+at each grid value, vs the fixed-curve =k_confidence_set=. Both are
+compositions of existing curvature/gauge/estimator machinery, not new math.
+
+** 7.2 -- Existing machinery reused (path:line / tested?)
+
+- =information_matrix(G, V*)= -- =diagnostics.py:271= (NEW, factored out): the
+  single \(G' \Lambda G\) builder (Cholesky of \(V^*\); =Z'Z=). =compute_cond_info=
+  now calls it (=diagnostics.py:413=), so cond-number and per-block concentration
+  measure curvature off /one/ construction. Tested:
+  =tests/test_diagnostics.py=, =tests/inference/test_identification.py= (Schur +
+  block-inverse identity).
+- =pinv_eigvalrule(info, drop_smallest=)= -- =_internal/pinv_eigvalrule.py:53=.
+  The gauge-aware inverse (drop =total_gauge_dim= smallest eigvals BY COUNT, not
+  by threshold). Reused by =identification_strength= for the /complement/ inverse
+  (=identification.py= =_block_strength=, =:294=) and already by the
+  =Sigma_theta= bread (=estimator.py:858=) and =cond_info['exclude_gauge']=.
+- =estimate= -- =estimator.py:1256=. =profiled_k_confidence_set= runs it for the
+  /inner/ nuisance re-optimise, so the manifold gauge is handled by the existing
+  quotient-aware path (=G_riem= horizontal projection + =pinv_eigvalrule= bread,
+  =estimator.py:764-861=); auto-dispatch picks =riemannian_lm= for a manifold
+  nuisance. No gauge logic re-derived at the call site.
+- =k_statistic= / =_assemble_set= / =_validate_grid_args= --
+  =inference/k_statistic.py=, =confidence_set.py:400= / =:157=. The profiled path
+  shares the set-assembly + grid-validation tail with =k_confidence_set=
+  (=:232=); =profile=None= keeps the plain path bitwise unchanged.
+
+** 7.3 -- Definitions / conventions in force (quote, don't paraphrase)
+
+- *Efficient metric.* =identification_strength= always uses \(\Lambda =
+  (V^*)^{-1}\) (=information_matrix=), independent of the weighting used to
+  estimate -- it measures identification of the /moment system/, matching
+  =cond_info=. Documented in =identification.py= module docstring.
+- *Frozen-ridge \(V^*\) (the #178 Finding-1 contract).* The diagnostic builds
+  \(\mathcal{I}\) off =result.V_X= -- which /is/ =V_star_hat=, the
+  anchor-once-then-freeze \(V^*\) at \(\hat\theta\) (=estimator.py:1101=; ridge
+  anchored at =theta_init=, =:519=). It MUST NOT recompute
+  =regularization.apply(V(theta_hat))=: =DiagonalTikhonov.apply= is /stateless/
+  and re-bisects a different =tau=, diverging from =cond_info= / =Sigma_theta=
+  when the ridge binds. Default =V_star = result.V_X= at
+  =identification.py:436=; the =V_star== kwarg is the only override. Guard:
+  =TestBindingRidgeUsesFrozenVX=.
+- *gauge = drop-by-count, never threshold.* CLAUDE.md commitment; a fixed leaf
+  must sit wholly inside or wholly outside a block (=identification.py=
+  =_subset_gauge_dim= refuses a split); =profiled_k_confidence_set= profiles by
+  whole field (=_ProfileReducer=, =confidence_set.py:464=) so a =PSDFixedRank=
+  leaf is never split.
+
+** 7.4 -- Invariants / landmines
+
+1. *=result.V_X= == =V_star_hat=, not raw \(V\).* =estimator.py:1101= labels the
+   /regularised/ \(V^*\). The block-inverse identity test and the binding-ridge
+   guard both depend on this; if =V_X= ever changes to carry raw \(V\), the
+   diagnostic's metric silently changes.
+2. *Block-inverse identity is regime-bounded (the #178 Finding-2 boundary).*
+   \(\mathcal{I}_{b\cdot c}^{-1} = (\Sigma_\theta)_{bb}\) holds EXACTLY only under
+   efficient weighting at a non-binding ridge (where \(\Sigma_\theta = B^{-1}\)).
+   Under =Identity= / =Fixed(V0)= or a binding ridge, \(\Sigma_\theta\) is the
+   #133 weighting-aware sandwich \(B^+ (G' \Lambda V \Lambda G) B^+\)
+   (=estimator.py:858-861=), NOT \(B^{-1}\). The concentration ranking /
+   =.weakest= stay valid (the efficient metric is deliberate); the reciprocal tie
+   does not. Hedged in the =identification.py= docstring; the
+   =test_block_inverse_identity_against_sigma_theta= fixture stays in the CU /
+   \(\tau \approx 0\) regime by design.
+3. *=min_eigenvalue= can be slightly negative from roundoff* on a near-singular
+   Schur complement (pseudo-inverse keeps PSD only up to rounding). =.weakest= /
+   =< threshold= are robust; do not assert =>= 0= exactly.
+4. *Profiling cost.* One full inner =estimate= per grid point; the closure
+   captures the fixed value, so each retraces -- =jax.clear_caches()= per grid
+   point (CLAUDE.md per-call-leak rule). Estimate-running tests are
+   =@pytest.mark.slow=.
+
+** 7.5 -- Reuse decisions (per quantity)
+
+- =information_matrix= factoring :: *extend (reuse)* -- the \(Z'Z\) construction
+  already lived inline in =compute_cond_info= and the estimator; extracted so
+  =identification_strength= measures curvature off the same matrix (bitwise-equal
+  for =cond_info=). The anti-reinvention move the owner flagged.
+- per-block Schur complement / concentration eigenvalues :: *new* -- no existing
+  per-block partial-information readout; =cond_info['exclude_gauge']= is the
+  /global/ gauge-aware conditioning, this is its per-block generalisation.
+- complement gauge inverse :: *reuse (symbol)* -- =pinv_eigvalrule=, the one
+  drop-by-count rule; no new gauge logic.
+- =profiled_k_confidence_set= inner solve :: *reuse (=estimate=)* -- the issue's
+  whole point: the hand-rolled re-optimising =theta_builder= is replaced by the
+  production estimator so the gauge is not re-derived. Verified byte-identical to
+  a hand-rolled builder on =(Euclidean x PSDFixedRank)=
+  (=test_profile_euclidean_reoptimise_psd_matches_hand_rolled=).
+- set assembly / grid validation :: *extend (reuse)* -- =_assemble_set= /
+  =_validate_grid_args= factored out of =k_confidence_set= and shared; the
+  =profile=[...]= hook on =k_confidence_set= delegates.
+
+Verify-against-ledger result for #177/#176: *OK* -- no =REINVENTION= (curvature
+and gauge both route through the shared =information_matrix= / =pinv_eigvalrule=)
+and no =CONTRADICTION= (the #178 review closed the one drift: the diagnostic now
+honors the frozen-=V*= / anchor-once convention rather than re-anchoring).
