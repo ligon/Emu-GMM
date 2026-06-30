@@ -1,20 +1,27 @@
 r"""Tests for typed, versioned law persistence (#181).
 
-Covers the first slice: persisting an :class:`AsymptoticLaw` to an inert,
-versioned ``.npz`` artifact and reloading it into a queryable, moments-backed
-law --- with NO live :class:`EstimationResult` on the reload path.
+Persisting a fitted law to an inert, versioned ``.npz`` artifact and reloading
+it into a queryable law --- with NO live :class:`EstimationResult` on the
+reload path.
 
+Asymptotic grade:
 (a) Round-trip fidelity on a ``Product(PSDFixedRank(5,2), Euclidean(1))`` fit:
     ``se`` / ``eigenvalue_se`` / ``gamma_se`` / a functional query all match the
     live law bit-for-bit, and the reloaded law has no live ``.result``.
-(b) Round-trip on a v1 / all-scalar (Euclidean) fit.
+(b) Round-trip on a v1 / all-scalar (Euclidean) fit; a file-like (BytesIO) target.
 (c) ``from_moments`` reconstructs the asymptotic grade directly from arrays.
 (d) The manifold tag codec round-trips (Euclidean / PSDFixedRank / Positive /
     Interval).
-(e) Guardrails: schema-version mismatch refuses; a bare ``.npz`` (no manifest)
-    refuses; saving an ``EmpiricalLaw`` refuses (next slice); ``given`` / ``prob``
-    still refuse on a reloaded law; a no-PSD reloaded law refuses
-    ``eigenvalue_se``.
+
+Empirical grade:
+(e) Records-backed round-trip: ``se`` / ``size_power`` (J) / ``given`` / ``couple``
+    all work on reload through the existing ``emu_gmm.studies`` reuse.
+(f) Draws-backed round-trip with ``events``: ``se`` / ``pvalue`` / ``given``.
+
+Guardrails:
+(g) Schema-version mismatch / bare ``.npz`` / conditioned-law save /
+    non-JSON-able coupling_id / reloaded-asymptotic ``given``-``prob`` /
+    no-PSD ``eigenvalue_se`` all refuse.
 """
 
 from __future__ import annotations
@@ -248,6 +255,119 @@ class TestFromMomentsAndCodec:
         assert int(rebuilt.gauge_dim) == int(manifold.gauge_dim)
 
 
+# ---------------------------------------------------------------------------
+# Empirical-grade round-trip (records-backed + draws-backed).
+# ---------------------------------------------------------------------------
+
+
+def _fake_mcrecords(seed: int = 0, n: int = 80, d: int = 2):
+    import jax
+    from emu_gmm.studies.driver import MCRecords
+    from emu_gmm.types import FitRecord
+
+    rng = np.random.default_rng(seed)
+    rec = FitRecord(
+        theta_flat=jnp.asarray(rng.normal(size=(n, d))),
+        se=jnp.asarray(np.abs(rng.normal(size=(n, d)))),
+        J_stat=jnp.asarray(rng.chisquare(3, size=n)),
+        J_pvalue=jnp.asarray(rng.uniform(size=n)),
+        J_pvalue_adjusted=jnp.asarray(rng.uniform(size=n)),
+        converged=jnp.asarray((rng.uniform(size=n) < 0.95).astype(float)),
+        tau_realised=jnp.asarray(np.abs(rng.normal(size=n)) * 0.01),
+        binding_ridge=jnp.asarray((rng.uniform(size=n) < 0.25).astype(float)),
+        sigma_meat_indefinite=jnp.asarray((rng.uniform(size=n) < 0.1).astype(float)),
+        J_dof=1,
+        param_names=("a", "b"),
+    )
+    return MCRecords(
+        records=rec, key=jax.random.PRNGKey(seed), n_reps=n, coupling_id=seed
+    )
+
+
+class TestEmpiricalRoundTrip:
+    def test_records_backed_round_trip(self, tmp_path):
+        from emu_gmm import EmpiricalLaw
+
+        law = EmpiricalLaw.from_records(_fake_mcrecords())
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        r = load_law(p)
+
+        assert r.grade == "empirical"
+        assert r.n_draws == law.n_draws and r.n_used == law.n_used
+        np.testing.assert_array_equal(np.asarray(r.se()), np.asarray(law.se()))
+        # J-test rejection rates round-trip (size_power reuses the records).
+        np.testing.assert_array_equal(
+            r.size_power().reject_nominal, law.size_power().reject_nominal
+        )
+
+    def test_records_given_works_on_reload(self, tmp_path):
+        import warnings
+
+        from emu_gmm import EmpiricalLaw
+
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=2))
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        r = load_law(p)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            live = law.given("binding_ridge", acknowledge_conditional=True)
+            reloaded = r.given("binding_ridge", acknowledge_conditional=True)
+        assert reloaded.n_used == live.n_used
+        np.testing.assert_array_equal(
+            np.asarray(reloaded.mean()), np.asarray(live.mean())
+        )
+
+    def test_records_couple_works_on_reload(self, tmp_path):
+        # Two CRN-coupled arms (same key + coupling_id) round-trip and still couple.
+        from emu_gmm import EmpiricalLaw
+
+        a = EmpiricalLaw.from_records(_fake_mcrecords(seed=5))
+        b = EmpiricalLaw.from_records(_fake_mcrecords(seed=5))  # same key/coupling
+        save_law(a, tmp_path / "a.npz")
+        save_law(b, tmp_path / "b.npz")
+        ra = load_law(tmp_path / "a.npz")
+        rb = load_law(tmp_path / "b.npz")
+        coupled = ra.couple(rb)  # raises if the CRN provenance was lost
+        assert coupled is not None
+
+    def test_draws_backed_round_trip_with_events(self, tmp_path):
+        import warnings
+
+        from emu_gmm import EmpiricalLaw
+
+        rng = np.random.default_rng(3)
+        draws = rng.normal(size=(120, 2))
+        events = {"binding_ridge": (rng.uniform(size=120) < 0.3).astype(float)}
+        law = EmpiricalLaw.from_draws(draws, names=("x", "y"), events=events)
+        p = tmp_path / "draws.npz"
+        save_law(law, p)
+        r = load_law(p)
+
+        assert r.grade == "empirical"
+        assert r.param_names == ("x", "y")
+        assert r.event_names == ("binding_ridge",)
+        np.testing.assert_array_equal(np.asarray(r.se()), np.asarray(law.se()))
+        assert np.isclose(r.pvalue(0.0), law.pvalue(0.0))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert r.given("binding_ridge").n_used == law.given("binding_ridge").n_used
+
+    def test_non_jsonable_coupling_id_refused(self, tmp_path):
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies.driver import MCRecords
+
+        mc = _fake_mcrecords(seed=8)
+        # A non-JSON-able coupling token (a numpy array) can't ride the manifest.
+        mc_bad = MCRecords(
+            records=mc.records, key=mc.key, n_reps=mc.n_reps, coupling_id=np.arange(3)
+        )
+        law = EmpiricalLaw.from_records(mc_bad)
+        with pytest.raises(TypeError, match="coupling_id"):
+            save_law(law, tmp_path / "x.npz")
+
+
 class TestGuardrails:
     def test_schema_version_mismatch_refuses(self, tmp_path):
         law = AsymptoticLaw(_fit_scalar())
@@ -269,10 +389,17 @@ class TestGuardrails:
         with pytest.raises(ValueError, match="no __manifest__"):
             load_law(p)
 
-    def test_empirical_law_save_refused(self, tmp_path):
-        law = EmpiricalLaw.from_draws(np.random.default_rng(0).normal(size=(50, 2)))
-        with pytest.raises(NotImplementedError, match="empirical grade|EmpiricalLaw"):
-            save_law(law, tmp_path / "x.npz")
+    def test_conditioned_empirical_law_save_refused(self, tmp_path):
+        import warnings
+
+        draws = np.random.default_rng(0).normal(size=(60, 2))
+        ev = {"binding_ridge": (np.random.default_rng(1).uniform(size=60) < 0.4)}
+        law = EmpiricalLaw.from_draws(draws, names=("a", "b"), events=ev)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            conditioned = law.given("binding_ridge")
+        with pytest.raises(NotImplementedError, match="conditioned"):
+            save_law(conditioned, tmp_path / "x.npz")
 
     def test_reloaded_given_and_prob_refuse(self, tmp_path):
         law = AsymptoticLaw(_fit_scalar())

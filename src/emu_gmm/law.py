@@ -252,6 +252,7 @@ class EmpiricalLaw(EstimatorLaw):
         records: MCRecords | FitRecord | None = None,
         coupling_id: Any = None,
         key: Any = None,
+        events: dict[str, np.ndarray] | None = None,
         label: str = "empirical",
         conditioned: bool = False,
     ) -> None:
@@ -268,6 +269,13 @@ class EmpiricalLaw(EstimatorLaw):
         self._records = records
         self._coupling_id = coupling_id
         self._key = key
+        # Optional {flag_name: (n,) mask} carried by a raw-draws law so it can be
+        # conditioned (given()) without a FitRecord (#181). Normalised to bool.
+        self._events: dict[str, np.ndarray] | None = (
+            None
+            if events is None
+            else {k: np.asarray(v).ravel() > 0.5 for k, v in events.items()}
+        )
         self._label = label
         self._conditioned = bool(conditioned)
 
@@ -336,6 +344,7 @@ class EmpiricalLaw(EstimatorLaw):
         *,
         names: tuple[str, ...] | None = None,
         component_shapes: tuple[tuple[int, ...], ...] | None = None,
+        events: dict[str, Any] | None = None,
         label: str | None = None,
     ) -> EmpiricalLaw:
         """Build the law from a bare array of statistic draws.
@@ -344,8 +353,14 @@ class EmpiricalLaw(EstimatorLaw):
         ``J_boot`` --- the empirical law of :math:`Q`) or ``(n, p)``. Non-finite
         rows (e.g. a diverged refit) are excluded from the functional but kept
         in the denominator (the ``used`` mask), so a degenerate resampling world
-        cannot masquerade as precision. This law carries no event flags, so
-        :meth:`given` on a flag name and :meth:`couple` are unavailable.
+        cannot masquerade as precision.
+
+        Pass ``events={name: mask}`` (each ``mask`` an ``(n,)`` 0/1 or boolean
+        array aligned with the draws) to let an array / CSV-backed bootstrap
+        carry conditionable flags (#181): :meth:`given` on a named event then
+        returns the conditioned sub-population. Without ``events`` (and without a
+        backing :class:`FitRecord`) :meth:`given` and :meth:`couple` remain
+        unavailable, as before.
         """
         arr = np.asarray(values, dtype=float)
         if arr.ndim == 1:
@@ -358,6 +373,14 @@ class EmpiricalLaw(EstimatorLaw):
         used = np.all(np.isfinite(arr), axis=1)
         if names is None:
             names = tuple(f"s{j}" for j in range(arr.shape[1]))
+        if events is not None:
+            n = arr.shape[0]
+            for nm, mask in events.items():
+                if np.asarray(mask).ravel().shape[0] != n:
+                    raise ValueError(
+                        f"EmpiricalLaw.from_draws: event {nm!r} mask has length "
+                        f"{np.asarray(mask).ravel().shape[0]} != n_draws {n}."
+                    )
         return cls(
             draws=arr,
             used=used,
@@ -366,6 +389,7 @@ class EmpiricalLaw(EstimatorLaw):
             records=None,
             coupling_id=None,
             key=None,
+            events=events,
             label=label or "empirical(draws)",
             conditioned=False,
         )
@@ -389,6 +413,21 @@ class EmpiricalLaw(EstimatorLaw):
     def conditioned(self) -> bool:
         """Whether this law is a :meth:`given` sub-population (not CRN-pairable)."""
         return self._conditioned
+
+    @property
+    def event_names(self) -> tuple[str, ...]:
+        """Names of the event flags this law can be :meth:`given`-conditioned on.
+
+        The :class:`FitRecord` flag fields for a records-backed law, or the keys
+        of the ``events`` dict for a raw-draws law; empty if neither.
+        """
+        if self._events is not None:
+            return tuple(self._events)
+        if self._records is not None:
+            from emu_gmm.studies.conditioning import FLAG_FIELDS
+
+            return FLAG_FIELDS
+        return ()
 
     # -- codomain projection (the per-draw gauge-invariant glue) ------------
     def _codomain(self, f: Functional) -> tuple[np.ndarray, tuple[str, ...]]:
@@ -536,11 +575,8 @@ class EmpiricalLaw(EstimatorLaw):
         condition a paired contrast).
         """
         if self._records is None:
-            raise TypeError(
-                "EmpiricalLaw.given() needs an event-flag-carrying records-backed "
-                "law (built via from_records); this law was built from raw draws "
-                "(no FitRecord event flags). Use a predicate on the draws array "
-                "directly, or build the law from records."
+            return self._given_from_events(
+                event, negate=negate, acknowledge_conditional=acknowledge_conditional
             )
         masked = given(
             self._records,
@@ -557,6 +593,62 @@ class EmpiricalLaw(EstimatorLaw):
             coupling_id=None,
             key=None,
             label=f"{self._label} | given",
+            conditioned=True,
+        )
+
+    def _given_from_events(
+        self, event: Any, *, negate: bool, acknowledge_conditional: bool
+    ) -> EmpiricalLaw:
+        """:meth:`given` for a raw-draws law carrying an ``events`` dict (#181).
+
+        Masks the draws (and every event flag) by ``events[event]``, mirroring
+        the records-backed path's selection-conditional soft gate so a
+        ``binding_ridge`` / ``sigma_meat_indefinite`` subset still warns. The
+        result is a conditioned raw-draws law (never CRN-pairable).
+        """
+        import warnings
+
+        from emu_gmm.studies.conditioning import (
+            SELECTION_CONDITIONAL_FLAGS,
+            SelectionConditionalWarning,
+        )
+
+        if (
+            self._events is None
+            or not isinstance(event, str)
+            or event not in self._events
+        ):
+            available = tuple(self._events) if self._events is not None else ()
+            raise TypeError(
+                "EmpiricalLaw.given() needs either a records-backed law (built "
+                "via from_records, carrying FitRecord event flags) or a raw-draws "
+                f"law with a matching events= entry. Got event {event!r}; this "
+                f"law's events are {available}. (Build with "
+                "EmpiricalLaw.from_draws(..., events={name: mask}).)"
+            )
+        mask = np.asarray(self._events[event])
+        if negate:
+            mask = ~mask
+        if event in SELECTION_CONDITIONAL_FLAGS and not acknowledge_conditional:
+            warnings.warn(
+                f"EmpiricalLaw.given({event!r}): conditioning on an "
+                "estimator-internal flag is selection-conditional, not nominal "
+                "(the event is a function of the same draws as the statistic). "
+                "Pass acknowledge_conditional=True to silence this.",
+                SelectionConditionalWarning,
+                stacklevel=3,
+            )
+        sub_events = {k: v[mask] for k, v in self._events.items()}
+        return EmpiricalLaw(
+            draws=self._draws[mask],
+            used=self._used[mask],
+            names=self._names,
+            component_shapes=self._component_shapes,
+            records=None,
+            coupling_id=None,
+            key=None,
+            events=sub_events,
+            label=f"{self._label} | given({event})",
             conditioned=True,
         )
 

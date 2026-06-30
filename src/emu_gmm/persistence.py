@@ -14,25 +14,31 @@ plus a JSON manifest, reconstructed through the normal constructors
 (:meth:`AsymptoticLaw.from_moments`, the :func:`tag_to_manifold` codec) rather
 than by resurrecting a live object.
 
-**Scope (first slice).** The *asymptotic* grade --- SEs, ``eigenvalue_se`` /
-``gamma_se``, functional SEs read off :math:`\mathcal N(\hat\theta,
-\Sigma_\theta)`. This covers the homogeneous clustered / BLP standard errors.
+**Both grades are supported.**
 
-The *empirical* grade (``EmpiricalLaw``: stacked draws + ``{0,1}^E`` event
-flags + coupling provenance) is the **immediate next slice and the consumer's
-primary need** --- the K-Aggregators heterogeneous law is bootstrap-only (no
-frozen analytic :math:`\Sigma_\theta`), the reported over-identification test
-is the cluster-wild Hansen :math:`J` (the empirical law of :math:`Q`), and the
-binding-ridge / indefinite-meat conditionals are ``given`` queries. None of
-those is asymptotic. Until that slice lands, :func:`save_law` refuses the
-empirical grade loudly rather than writing an artifact that drops the
-event/coupling provenance that makes ``given`` / ``couple`` sound (PR #182
-review).
+- *Asymptotic* --- SEs / ``eigenvalue_se`` / ``gamma_se`` / functional SEs off
+  :math:`\mathcal N(\hat\theta, \Sigma_\theta)` (the homogeneous clustered / BLP
+  standard errors). Reloads moments-backed (no live ``EstimationResult``).
+- *Empirical* --- the consumer's primary need (the K-Aggregators heterogeneous
+  law is bootstrap-only, the over-identification test is the cluster-wild Hansen
+  :math:`J` = the empirical law of :math:`Q`, and the binding-ridge / indefinite
+  -meat conditionals are ``given`` queries). Two backings round-trip:
+
+  * *records-backed* (``EmpiricalLaw.from_records`` over an ``MCRecords`` /
+    ``FitRecord`` stack): the full :class:`FitRecord` arrays + ``coupling_id`` /
+    ``key`` provenance are persisted, so a reloaded law's ``given`` / ``couple``
+    / ``size_power`` (J) / ``se`` all work through the existing
+    ``emu_gmm.studies`` reuse --- nothing re-implemented.
+  * *draws-backed* (``from_draws``, e.g. a wild-bootstrap ``J_boot``): the draws
+    + ``{0,1}^E`` event flags round-trip, so ``pvalue`` / ``se`` / ``quantile``
+    and ``given`` over the persisted events work on reload.
+
+  A *conditioned* (``given``-masked) law is refused --- persist the whole sweep
+  and re-condition on reload.
 
 **Companion, not successor** (the issue's recommendation): ``LawState`` is the
 durable projection; :class:`~emu_gmm.types.EstimationResult` stays the live,
-compute-coupled estimation output and is *not* on the reload path --- a reloaded
-law is moments-backed and never reconstructs the live result.
+compute-coupled estimation output and is *not* on the reload path.
 """
 
 from __future__ import annotations
@@ -51,7 +57,22 @@ from emu_gmm._internal.law_state import (
     manifold_to_tag,
     tag_to_manifold,
 )
-from emu_gmm.law import AsymptoticLaw, EstimatorLaw
+from emu_gmm.law import AsymptoticLaw, EmpiricalLaw, EstimatorLaw
+from emu_gmm.studies.driver import MCRecords
+from emu_gmm.types import FitRecord
+
+# The stackable (per-rep array) fields of a FitRecord, in declaration order.
+_FITRECORD_ARRAY_FIELDS = (
+    "theta_flat",
+    "se",
+    "J_stat",
+    "J_pvalue",
+    "J_pvalue_adjusted",
+    "converged",
+    "tau_realised",
+    "binding_ridge",
+    "sigma_meat_indefinite",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,13 +117,25 @@ class LawState:
     grade: str
     param_names: tuple[str, ...]
     leaf_tags: tuple[dict[str, Any], ...]
-    component_shapes: tuple[tuple[int, ...], ...]
-    theta_components: tuple[np.ndarray, ...]
-    sigma_theta: np.ndarray | None
-    psd_index: int | None
-    psd_rank: int | None
+    component_shapes: tuple[tuple[int, ...], ...] | None
     diagnostics: dict[str, Any]
     factory_spec: dict[str, Any] | None = None
+    # -- asymptotic grade --
+    theta_components: tuple[np.ndarray, ...] | None = None
+    sigma_theta: np.ndarray | None = None
+    psd_index: int | None = None
+    psd_rank: int | None = None
+    # -- empirical grade --
+    backing: str | None = None  # "records" | "draws"
+    record_arrays: dict[str, np.ndarray] | None = None  # the FitRecord fields
+    j_dof: int | None = None
+    n_reps: int | None = None
+    draws: np.ndarray | None = None  # draws-backed
+    used: np.ndarray | None = None
+    events: dict[str, np.ndarray] | None = None
+    coupling_id: Any = None
+    key: np.ndarray | None = None
+    conditioned: bool = False
 
 
 def _asymptotic_state(law: AsymptoticLaw) -> LawState:
@@ -163,49 +196,158 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
     )
 
 
-def _write_state(state: LawState, path: Any) -> None:
+def _jsonable(value: Any, *, what: str) -> Any:
+    """Return ``value`` if it round-trips through JSON, else raise a clear error."""
+    try:
+        json.loads(json.dumps(value))
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"save_law: {what} of type {type(value).__name__} is not "
+            "JSON-serialisable, so it cannot ride the inert manifest. Use a "
+            "JSON-able token (int / str / None) for it."
+        ) from exc
+    return value
+
+
+def _empirical_state(law: EmpiricalLaw) -> LawState:
+    """Build a :class:`LawState` from an empirical law (records- or draws-backed)."""
+    if law._conditioned:
+        raise NotImplementedError(
+            "save_law: a conditioned (given()-masked) EmpiricalLaw is a "
+            "sub-population, not a durable artifact -- persist the whole-sweep "
+            "law and re-condition with given() on reload."
+        )
+    shapes = (
+        None
+        if law._component_shapes is None
+        else tuple(tuple(int(s) for s in sh) for sh in law._component_shapes)
+    )
+
+    if law._records is not None:
+        # Records-backed: persist the FitRecord stack (+ MCRecords provenance).
+        rec = (
+            law._records.records
+            if isinstance(law._records, MCRecords)
+            else law._records
+        )
+        record_arrays = {
+            f: np.asarray(getattr(rec, f)) for f in _FITRECORD_ARRAY_FIELDS
+        }
+        key = None
+        coupling_id = None
+        n_reps = int(np.asarray(rec.theta_flat).shape[0])
+        if isinstance(law._records, MCRecords):
+            key = None if law._records.key is None else np.asarray(law._records.key)
+            coupling_id = _jsonable(law._records.coupling_id, what="coupling_id")
+            n_reps = int(law._records.n_reps)
+        return LawState(
+            schema_version=SCHEMA_VERSION,
+            grade="empirical",
+            param_names=tuple(rec.param_names),
+            leaf_tags=(),
+            component_shapes=shapes,
+            diagnostics={},
+            backing="records",
+            record_arrays=record_arrays,
+            j_dof=int(rec.J_dof),
+            n_reps=n_reps,
+            key=key,
+            coupling_id=coupling_id,
+        )
+
+    # Draws-backed: persist the raw draws + {0,1}^E event flags.
+    events = (
+        None
+        if law._events is None
+        else {k: np.asarray(v, dtype=bool) for k, v in law._events.items()}
+    )
+    return LawState(
+        schema_version=SCHEMA_VERSION,
+        grade="empirical",
+        param_names=tuple(law._names),
+        leaf_tags=(),
+        component_shapes=shapes,
+        diagnostics={},
+        backing="draws",
+        draws=np.asarray(law._draws),
+        used=np.asarray(law._used, dtype=bool),
+        events=events,
+    )
+
+
+def _write_state(state: LawState, target: Any) -> None:
     """Write ``state`` to a single ``.npz`` (arrays) + embedded JSON manifest."""
-    manifest = {
+    manifest: dict[str, Any] = {
         "schema_version": state.schema_version,
         "grade": state.grade,
         "param_names": list(state.param_names),
         "leaf_tags": list(state.leaf_tags),
-        "component_shapes": [list(s) for s in state.component_shapes],
-        "psd_index": state.psd_index,
-        "psd_rank": state.psd_rank,
+        "component_shapes": (
+            None
+            if state.component_shapes is None
+            else [list(s) for s in state.component_shapes]
+        ),
         "diagnostics": state.diagnostics,
         "factory_spec": state.factory_spec,
-        "n_components": len(state.theta_components),
-        "has_sigma": state.sigma_theta is not None,
+        "backing": state.backing,
     }
-    arrays: dict[str, np.ndarray] = {
-        f"comp_{i}": np.asarray(c) for i, c in enumerate(state.theta_components)
-    }
-    if state.sigma_theta is not None:
-        arrays["sigma_theta"] = np.asarray(state.sigma_theta)
+    arrays: dict[str, np.ndarray] = {}
+
+    if state.grade == "asymptotic":
+        assert state.theta_components is not None
+        manifest.update(
+            psd_index=state.psd_index,
+            psd_rank=state.psd_rank,
+            n_components=len(state.theta_components),
+            has_sigma=state.sigma_theta is not None,
+        )
+        for i, c in enumerate(state.theta_components):
+            arrays[f"comp_{i}"] = np.asarray(c)
+        if state.sigma_theta is not None:
+            arrays["sigma_theta"] = np.asarray(state.sigma_theta)
+    elif state.backing == "records":
+        assert state.record_arrays is not None
+        manifest.update(
+            j_dof=state.j_dof,
+            n_reps=state.n_reps,
+            coupling_id=state.coupling_id,
+            has_key=state.key is not None,
+        )
+        for f, a in state.record_arrays.items():
+            arrays[f"rec_{f}"] = np.asarray(a)
+        if state.key is not None:
+            arrays["key"] = np.asarray(state.key)
+    else:  # draws-backed
+        assert state.draws is not None and state.used is not None
+        ev_names = [] if state.events is None else sorted(state.events)
+        manifest.update(event_names=ev_names, conditioned=state.conditioned)
+        arrays["draws"] = np.asarray(state.draws)
+        arrays["used"] = np.asarray(state.used)
+        for nm in ev_names:
+            arrays[f"event_{nm}"] = np.asarray(state.events[nm])  # type: ignore[index]
+
     # The manifest rides as a 0-d unicode array -> no pickle needed on load.
     arrays["__manifest__"] = np.asarray(json.dumps(manifest))
     # typeshed's savez stub doesn't model keyword array names (only *args +
     # allow_pickle), hence the suppression.
-    if hasattr(path, "write"):
+    if hasattr(target, "write"):
         # An already-open binary file-like / buffer (an fsspec target, BytesIO,
-        # ...): write to it directly so an object-store law store composes with
-        # no write-to-temp round-trip. np.savez does NOT append ".npz" to a
-        # file object, so the bytes are literal.
-        np.savez(path, **arrays)  # type: ignore[arg-type]
+        # ...): write directly, no temp round-trip. np.savez does NOT append
+        # ".npz" to a file object, so the bytes are literal.
+        np.savez(target, **arrays)  # type: ignore[arg-type]
     else:
         # A filesystem path: open it ourselves so the path is LITERAL (np.savez
         # would append ".npz" to a bare path, mismatching load_law's open).
-        with open(path, "wb") as fh:
+        with open(target, "wb") as fh:
             np.savez(fh, **arrays)  # type: ignore[arg-type]
 
 
-def _read_state(path: Any) -> LawState:
-    """Read + validate a :class:`LawState` from a ``.npz`` written by :func:`_write_state`."""
-    with np.load(path, allow_pickle=False) as data:
+def _read_state(target: Any) -> LawState:
+    """Read + validate a :class:`LawState` written by :func:`_write_state`."""
+    with np.load(target, allow_pickle=False) as data:
         if "__manifest__" not in data.files:
             raise ValueError(
-                f"load_law: {path!r} has no __manifest__ entry; it was not "
+                f"load_law: {target!r} has no __manifest__ entry; it was not "
                 "written by emu_gmm.save_law (or is a bare array .npz)."
             )
         manifest = json.loads(str(data["__manifest__"]))
@@ -217,28 +359,61 @@ def _read_state(path: Any) -> LawState:
                 "emu_gmm; no migration is registered for it yet. (A future "
                 "version adds an upgrader table keyed on schema_version.)"
             )
-        n = int(manifest["n_components"])
-        comps = tuple(np.asarray(data[f"comp_{i}"]) for i in range(n))
-        sigma = np.asarray(data["sigma_theta"]) if manifest.get("has_sigma") else None
-    return LawState(
-        schema_version=ver,
-        grade=manifest["grade"],
-        param_names=tuple(manifest["param_names"]),
-        leaf_tags=tuple(manifest["leaf_tags"]),
-        component_shapes=tuple(
-            tuple(int(s) for s in sh) for sh in manifest["component_shapes"]
-        ),
-        theta_components=comps,
-        sigma_theta=sigma,
-        psd_index=manifest["psd_index"],
-        psd_rank=manifest["psd_rank"],
-        diagnostics=manifest["diagnostics"],
-        factory_spec=manifest["factory_spec"],
-    )
+        shapes = (
+            None
+            if manifest.get("component_shapes") is None
+            else tuple(tuple(int(s) for s in sh) for sh in manifest["component_shapes"])
+        )
+        common = dict(
+            schema_version=ver,
+            grade=manifest["grade"],
+            param_names=tuple(manifest["param_names"]),
+            leaf_tags=tuple(manifest["leaf_tags"]),
+            component_shapes=shapes,
+            diagnostics=manifest["diagnostics"],
+            factory_spec=manifest.get("factory_spec"),
+            backing=manifest.get("backing"),
+        )
+        if manifest["grade"] == "asymptotic":
+            n = int(manifest["n_components"])
+            return LawState(
+                **common,
+                theta_components=tuple(np.asarray(data[f"comp_{i}"]) for i in range(n)),
+                sigma_theta=(
+                    np.asarray(data["sigma_theta"])
+                    if manifest.get("has_sigma")
+                    else None
+                ),
+                psd_index=manifest["psd_index"],
+                psd_rank=manifest["psd_rank"],
+            )
+        if manifest.get("backing") == "records":
+            return LawState(
+                **common,
+                record_arrays={
+                    f: np.asarray(data[f"rec_{f}"]) for f in _FITRECORD_ARRAY_FIELDS
+                },
+                j_dof=int(manifest["j_dof"]),
+                n_reps=int(manifest["n_reps"]),
+                coupling_id=manifest.get("coupling_id"),
+                key=np.asarray(data["key"]) if manifest.get("has_key") else None,
+            )
+        ev_names = manifest.get("event_names") or []
+        return LawState(
+            **common,
+            draws=np.asarray(data["draws"]),
+            used=np.asarray(data["used"]),
+            events=(
+                None
+                if not ev_names
+                else {nm: np.asarray(data[f"event_{nm}"]) for nm in ev_names}
+            ),
+            conditioned=bool(manifest.get("conditioned", False)),
+        )
 
 
-def _state_to_law(state: LawState) -> AsymptoticLaw:
-    """Reconstruct a queryable (moments-backed) :class:`AsymptoticLaw` from ``state``.
+def _state_to_asymptotic(state: LawState) -> AsymptoticLaw:
+    """Reconstruct a moments-backed :class:`AsymptoticLaw` from ``state``.
 
     Rebuilds the leaf manifolds through their normal constructors
     (:func:`tag_to_manifold`) and re-derives the PSD-leaf ``(index, rank)`` from
@@ -247,12 +422,13 @@ def _state_to_law(state: LawState) -> AsymptoticLaw:
     """
     leaf_manifolds = tuple(tag_to_manifold(t) for t in state.leaf_tags)
     psd_index, psd_rank = locate_psd_leaf(leaf_manifolds)
+    assert state.theta_components is not None  # asymptotic grade invariant
     backing = MomentsBacking(
         components=state.theta_components,
         sigma=np.asarray(state.sigma_theta),
         names=state.param_names,
         leaf_tags=state.leaf_tags,
-        component_shapes=state.component_shapes,
+        component_shapes=state.component_shapes or (),
         psd_index=psd_index,
         psd_rank=psd_rank,
         diagnostics=dict(state.diagnostics),
@@ -261,16 +437,57 @@ def _state_to_law(state: LawState) -> AsymptoticLaw:
     return AsymptoticLaw(_backing=backing, label="asymptotic(loaded)")
 
 
+def _state_to_empirical(state: LawState) -> EmpiricalLaw:
+    """Reconstruct a queryable :class:`EmpiricalLaw` from ``state``.
+
+    Records-backed: rebuild the :class:`FitRecord` (and its :class:`MCRecords`
+    provenance) and go through ``from_records``, so ``given`` / ``couple`` /
+    ``size_power`` / ``se`` reuse the existing ``emu_gmm.studies`` machinery.
+    Draws-backed: ``from_draws`` with the persisted event flags.
+    """
+    import jax.numpy as jnp
+
+    if state.backing == "records":
+        assert state.record_arrays is not None
+        record = FitRecord(
+            **{f: jnp.asarray(state.record_arrays[f]) for f in _FITRECORD_ARRAY_FIELDS},
+            J_dof=int(state.j_dof),  # type: ignore[arg-type]
+            param_names=tuple(state.param_names),
+        )
+        if state.key is not None:
+            mc = MCRecords(
+                records=record,
+                key=jnp.asarray(state.key),
+                n_reps=int(state.n_reps),  # type: ignore[arg-type]
+                coupling_id=state.coupling_id,
+            )
+            return EmpiricalLaw.from_records(
+                mc, component_shapes=state.component_shapes, label="empirical(loaded)"
+            )
+        return EmpiricalLaw.from_records(
+            record, component_shapes=state.component_shapes, label="empirical(loaded)"
+        )
+
+    # Draws-backed.
+    return EmpiricalLaw.from_draws(
+        np.asarray(state.draws),
+        names=tuple(state.param_names),
+        component_shapes=state.component_shapes,
+        events=state.events,
+        label="empirical(loaded)",
+    )
+
+
 def save_law(law: EstimatorLaw, target: Any) -> None:
     """Persist ``law`` as a typed, versioned :class:`LawState` (#181).
 
     Parameters
     ----------
     law
-        The law to persist. The asymptotic grade is implemented; an
-        :class:`~emu_gmm.law.EmpiricalLaw` is refused loudly (rather than
-        silently dropping the event/coupling provenance) until the empirical
-        slice lands.
+        The law to persist --- :class:`~emu_gmm.law.AsymptoticLaw` or
+        :class:`~emu_gmm.law.EmpiricalLaw`. A *conditioned* (``given``-masked)
+        empirical law is refused (persist the whole sweep, re-condition on
+        reload).
     target
         A filesystem path **or** an already-open binary file-like / buffer
         (``io.BytesIO``, an ``fsspec`` handle, ...). Passing a file-like lets an
@@ -280,14 +497,13 @@ def save_law(law: EstimatorLaw, target: Any) -> None:
     """
     if isinstance(law, AsymptoticLaw):
         _write_state(_asymptotic_state(law), target)
-        return
-    raise NotImplementedError(
-        f"save_law: persistence of {type(law).__name__} is not implemented yet "
-        "(only the asymptotic grade). The empirical grade (stacked draws x "
-        "event flags x coupling) is the next #181 slice; persisting it without "
-        "the event/coupling provenance would lose exactly what makes given() / "
-        "couple() sound."
-    )
+    elif isinstance(law, EmpiricalLaw):
+        _write_state(_empirical_state(law), target)
+    else:
+        raise NotImplementedError(
+            f"save_law: don't know how to persist {type(law).__name__}; expected "
+            "an AsymptoticLaw or EmpiricalLaw."
+        )
 
 
 def load_law(target: Any) -> EstimatorLaw:
@@ -295,17 +511,20 @@ def load_law(target: Any) -> EstimatorLaw:
 
     ``target`` is a filesystem path or an open binary file-like / buffer (an
     ``fsspec`` handle, ``io.BytesIO``, ...) --- symmetric with :func:`save_law`.
-    Returns a moments-backed :class:`~emu_gmm.law.AsymptoticLaw` --- queryable
-    (``se`` / ``functional_se`` / ``eigenvalue_se`` / ``gamma_se`` / ``sample``)
-    with no live :class:`~emu_gmm.types.EstimationResult` required. Validates the
-    ``schema_version`` and refuses an unknown one.
+    Returns a queryable law with no live :class:`~emu_gmm.types.EstimationResult`
+    required: a moments-backed :class:`~emu_gmm.law.AsymptoticLaw` (``se`` /
+    ``functional_se`` / ``eigenvalue_se`` / ``gamma_se`` / ``sample``) or an
+    :class:`~emu_gmm.law.EmpiricalLaw` (records-backed -> ``given`` / ``couple`` /
+    ``size_power`` / ``se``; draws-backed -> ``pvalue`` / ``se`` / ``given``).
+    Validates the ``schema_version`` and refuses an unknown one.
     """
     state = _read_state(target)
     if state.grade == "asymptotic":
-        return _state_to_law(state)
-    raise NotImplementedError(
-        f"load_law: grade {state.grade!r} is not supported yet (only "
-        "'asymptotic'). The empirical grade is the next #181 slice."
+        return _state_to_asymptotic(state)
+    if state.grade == "empirical":
+        return _state_to_empirical(state)
+    raise ValueError(
+        f"load_law: unknown grade {state.grade!r} in the artifact manifest."
     )
 
 
