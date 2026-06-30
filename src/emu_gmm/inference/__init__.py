@@ -16,6 +16,11 @@ Currently exposed:
   K-statistic (or J/S for Anderson--Rubin-style sets), with explicit
   empty / interval / disconnected / open-edge topology. See
   :mod:`emu_gmm.inference.confidence_set`.
+- :func:`profiled_k_confidence_set` --- the profiled (nuisance-concentrated)
+  sibling of :func:`k_confidence_set`: re-optimises the nuisance parameter
+  leaves (a manifold ``PSDFixedRank`` factor included) at each grid value
+  before inverting the K/S/J statistic. Also reachable via
+  ``k_confidence_set(..., profile=[...])`` (#176).
 - :func:`j_test` and :class:`JTestResult` --- zero-parameter test of
   over-identifying restrictions. Returns ``J = m' V^{-1} m ~ chi^2_M``
   evaluated at a user-supplied ``theta_null``, without invoking the
@@ -56,7 +61,11 @@ from emu_gmm.inference.cluster_bootstrap import (
     ClusterBootstrapResult,
     cluster_bootstrap,
 )
-from emu_gmm.inference.confidence_set import KConfidenceSet, k_confidence_set
+from emu_gmm.inference.confidence_set import (
+    KConfidenceSet,
+    k_confidence_set,
+    profiled_k_confidence_set,
+)
 from emu_gmm.inference.functional_se import (
     eigenvalue_se,
     functional_se,
@@ -101,5 +110,6 @@ __all__ = [
     "k_confidence_set",
     "k_statistic",
     "moment_wild_bootstrap",
+    "profiled_k_confidence_set",
     "vech_indices",
 ]

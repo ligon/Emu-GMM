@@ -77,6 +77,7 @@ from emu_gmm.inference import (
     k_confidence_set,
     k_statistic,
     moment_wild_bootstrap,
+    profiled_k_confidence_set,
 )
 from emu_gmm.manifolds import (
     Euclidean,
@@ -136,6 +137,7 @@ __all__ = [
     "build_estimator",
     # Inference
     "k_confidence_set",
+    "profiled_k_confidence_set",
     "k_statistic",
     "KConfidenceSet",
     "KStatisticResult",

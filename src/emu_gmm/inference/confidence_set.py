@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import jax
 import numpy as np
@@ -153,6 +154,28 @@ class KConfidenceSet:
         return "\n".join(lines)
 
 
+def _validate_grid_args(
+    grid: Sequence[float] | np.ndarray, statistic: str, alpha: float
+) -> np.ndarray:
+    """Validate ``grid`` / ``statistic`` / ``alpha`` (shared by both paths)."""
+    grid_arr = np.asarray(grid, dtype=float)
+    if grid_arr.ndim != 1 or grid_arr.shape[0] < 2:
+        raise ValueError(
+            f"k_confidence_set: grid must be 1-D with at least 2 points; "
+            f"got shape {grid_arr.shape}."
+        )
+    if not np.all(np.diff(grid_arr) > 0):
+        raise ValueError("k_confidence_set: grid must be strictly increasing.")
+    if statistic not in _STATISTICS:
+        raise ValueError(
+            f"k_confidence_set: statistic must be one of {_STATISTICS}; "
+            f"got {statistic!r}."
+        )
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"k_confidence_set: alpha must be in (0, 1); got {alpha!r}.")
+    return grid_arr
+
+
 def _connected_runs(mask: np.ndarray) -> list[tuple[int, int]]:
     """Inclusive index runs ``(i0, i1)`` where ``mask`` is True."""
     runs: list[tuple[int, int]] = []
@@ -222,8 +245,26 @@ def k_confidence_set(
     gauge_nullspace_dim: int | None = None,
     strong_id_fallback: bool = False,
     keep_results: bool = False,
+    profile: Sequence[str] | None = None,
+    nuisance_optimizer: Any = None,
+    nuisance_weighting: Any = None,
 ) -> KConfidenceSet:
     """Invert the K-statistic over a 1-D grid of nulls (#41 PR (b)).
+
+    Profiling hook (#176)
+    ---------------------
+    By default this evaluates the K-statistic along the **fixed curve**
+    ``theta_builder(g)`` — the nuisance coordinates are whatever the builder
+    set, *not* re-optimised. Pass ``profile=[<field names>]`` to instead get a
+    *profiled* (concentrated) set: at each grid value the named fields are held
+    fixed at ``theta_builder(g)`` and the remaining parameter leaves — a
+    manifold nuisance such as a ``PSDFixedRank`` ``Gamma`` factor included — are
+    **re-optimised** before the K/S/J p-value is evaluated. This delegates to
+    :func:`profiled_k_confidence_set`; see it for the full contract (the inner
+    re-optimisation reuses :func:`emu_gmm.estimate`, so the manifold gauge is
+    handled by the existing quotient-aware path). ``nuisance_optimizer`` /
+    ``nuisance_weighting`` configure the inner solve. ``profile`` must be
+    ``None`` for the default fixed-curve behaviour.
 
     Evaluates :func:`emu_gmm.inference.k_statistic` at
     ``theta_builder(g)`` for every ``g`` in ``grid`` and returns the
@@ -290,21 +331,41 @@ def k_confidence_set(
     marginal set for one coordinate. Projection (profiling the K over
     nuisance directions) is deliberately out of scope here.
     """
-    grid_arr = np.asarray(grid, dtype=float)
-    if grid_arr.ndim != 1 or grid_arr.shape[0] < 2:
-        raise ValueError(
-            f"k_confidence_set: grid must be 1-D with at least 2 points; "
-            f"got shape {grid_arr.shape}."
+    # #176 profiling hook: delegate to the re-optimising path when the caller
+    # names fixed (interest) fields. ``profile=None`` keeps the fixed-curve
+    # default bitwise unchanged.
+    if profile is not None:
+        # The delegation never requests return_profiled_points, so the result
+        # is always a KConfidenceSet (not the tuple variant).
+        return cast(
+            KConfidenceSet,
+            profiled_k_confidence_set(
+                theta_builder,
+                grid,
+                measure,
+                covariance,
+                model,
+                profile=profile,
+                alpha=alpha,
+                statistic=statistic,
+                regularization=regularization,
+                score_cov_fn=score_cov_fn,
+                V=V,
+                L=L,
+                gauge_nullspace_dim=gauge_nullspace_dim,
+                strong_id_fallback=strong_id_fallback,
+                keep_results=keep_results,
+                nuisance_optimizer=nuisance_optimizer,
+                nuisance_weighting=nuisance_weighting,
+            ),
         )
-    if not np.all(np.diff(grid_arr) > 0):
-        raise ValueError("k_confidence_set: grid must be strictly increasing.")
-    if statistic not in _STATISTICS:
+    if nuisance_optimizer is not None or nuisance_weighting is not None:
         raise ValueError(
-            f"k_confidence_set: statistic must be one of {_STATISTICS}; "
-            f"got {statistic!r}."
+            "k_confidence_set: nuisance_optimizer / nuisance_weighting only "
+            "apply to the profiled path; pass profile=[...] to use them."
         )
-    if not 0.0 < alpha < 1.0:
-        raise ValueError(f"k_confidence_set: alpha must be in (0, 1); got {alpha!r}.")
+
+    grid_arr = _validate_grid_args(grid, statistic, alpha)
 
     def _eval(theta_0: ParamsLike) -> KStatisticResult:
         return k_statistic(
@@ -333,6 +394,27 @@ def k_confidence_set(
     for g in grid_arr[1:]:
         results.append(eval_jit(theta_builder(float(g))))
 
+    return _assemble_set(grid_arr, results, statistic, alpha, keep_results)
+
+
+def _assemble_set(
+    grid_arr: np.ndarray,
+    results: Sequence[KStatisticResult],
+    statistic: str,
+    alpha: float,
+    keep_results: bool,
+) -> KConfidenceSet:
+    """Classify a grid of :class:`KStatisticResult` into a :class:`KConfidenceSet`.
+
+    The shared tail of :func:`k_confidence_set` and
+    :func:`profiled_k_confidence_set`: extract the chosen p-value per grid
+    point, mark invalid (NaN-p) points as an event (#140), find the
+    accepted runs, interpolate component edges, classify the topology. Both
+    callers produce a ``results`` list of one :class:`KStatisticResult` per
+    grid point — whether by evaluating the K-statistic along a fixed curve
+    (``k_confidence_set``) or at a re-optimised profiled point
+    (``profiled_k_confidence_set``) — so the classification is identical.
+    """
     attr = f"p_{statistic}"
     p_grid = np.array(
         [float(np.asarray(getattr(r, attr))) for r in results], dtype=float
@@ -379,4 +461,220 @@ def k_confidence_set(
     )
 
 
-__all__ = ["KConfidenceSet", "k_confidence_set"]
+class _ProfileReducer:
+    """Freeze the ``profile`` fields of a flat parameter dataclass (#176).
+
+    The named ``profile`` fields are the **interest** coordinates held fixed at
+    each grid value; every other field is **nuisance**, re-optimised. The
+    reducer materialises a slim ``@jdc.pytree_dataclass`` of just the nuisance
+    fields (built once, reused across grid points) so the inner
+    :func:`emu_gmm.estimate` optimises the *reduced* parameter while the model
+    still receives the full ``theta``: :meth:`free_init` projects a full
+    ``theta`` to the reduced start, and :meth:`recombine` lifts a reduced
+    ``theta`` back, splicing the fixed fields in.
+
+    Whole-field granularity (#176 scope): a fixed field freezes its entire
+    leaf. A manifold field (e.g. a ``PSDFixedRank`` ``Gamma`` factor) is
+    therefore either wholly fixed or wholly free — never split — so the inner
+    ``estimate`` re-optimises it through the existing quotient-aware manifold
+    path and the gauge is handled there, never hand-rolled. The framework's
+    flat-dataclass convention (each field is one leaf — a scalar or a
+    ``ManifoldLeaf``) makes field-level == leaf-level. Declare each scalar
+    coordinate you may want to profile as its own field.
+    """
+
+    def __init__(self, template: ParamsLike, profile: Sequence[str]) -> None:
+        import dataclasses
+
+        import jax_dataclasses as jdc
+
+        if not dataclasses.is_dataclass(template):
+            raise ValueError(
+                "profiled_k_confidence_set: profiling by field name requires a "
+                "@jdc.pytree_dataclass parameter; theta_builder returned a "
+                f"{type(template).__name__}."
+            )
+        self._cls: Any = type(template)
+        all_names = [f.name for f in dataclasses.fields(template)]
+        fixed = list(profile)
+        if not fixed:
+            raise ValueError("profiled_k_confidence_set: profile must name >= 1 field.")
+        unknown = [nm for nm in fixed if nm not in all_names]
+        if unknown:
+            raise ValueError(
+                f"profiled_k_confidence_set: profile names {unknown} are not "
+                f"parameter fields; available fields are {all_names}."
+            )
+        self._fixed = fixed
+        self._free = [nm for nm in all_names if nm not in set(fixed)]
+        if not self._free:
+            raise ValueError(
+                "profiled_k_confidence_set: every parameter field is fixed by "
+                "profile, leaving nothing to optimise. Leave at least one "
+                "nuisance field out of profile."
+            )
+        # Slim nuisance dataclass, registered as a pytree once (reused across
+        # the grid; field order matches the original so leaf-walk order is
+        # preserved for the manifold spec / gauge handling). Build a plain
+        # annotated class and let jdc.pytree_dataclass generate the frozen
+        # dataclass + __init__ (make_dataclass' own __init__ uses setattr,
+        # which the frozen pytree blocks).
+        reduced_cls = type(
+            "_ReducedProfileParams",
+            (),
+            {"__annotations__": {nm: Any for nm in self._free}},
+        )
+        self._reduced_cls: Any = jdc.pytree_dataclass(reduced_cls)
+
+    def free_init(self, theta_full: ParamsLike) -> Any:
+        """Project a full ``theta`` to the reduced (nuisance-only) start."""
+        return self._reduced_cls(**{nm: getattr(theta_full, nm) for nm in self._free})
+
+    def recombine(self, theta_full: ParamsLike, reduced: Any) -> ParamsLike:
+        """Lift a reduced ``theta`` back, splicing in the fixed fields of ``theta_full``."""
+        kwargs = {nm: getattr(theta_full, nm) for nm in self._fixed}
+        kwargs.update({nm: getattr(reduced, nm) for nm in self._free})
+        return self._cls(**kwargs)
+
+
+def profiled_k_confidence_set(
+    theta_builder: Callable[[float], ParamsLike],
+    grid: Sequence[float] | np.ndarray,
+    measure: Measure,
+    covariance: CovarianceStrategy,
+    model: StructuralModel,
+    *,
+    profile: Sequence[str],
+    alpha: float = 0.05,
+    statistic: str = "K",
+    nuisance_optimizer: Any = None,
+    nuisance_weighting: Any = None,
+    regularization: RegularizationStrategy | None = None,
+    score_cov_fn: Callable[..., Float[Array, "p M M"]] | None = None,
+    V: Float[Array, "M M"] | None = None,
+    L: Float[Array, "M M"] | None = None,
+    gauge_nullspace_dim: int | None = None,
+    strong_id_fallback: bool = False,
+    keep_results: bool = False,
+    return_profiled_points: bool = False,
+) -> KConfidenceSet | tuple[KConfidenceSet, tuple[ParamsLike, ...]]:
+    r"""Profiled identification-robust set: concentrate out the nuisance (#176).
+
+    The profiling sibling of :func:`k_confidence_set`. At each grid value the
+    fields named in ``profile`` are held fixed at ``theta_builder(g)`` while the
+    remaining parameter leaves — **including a manifold nuisance** such as a
+    ``PSDFixedRank`` ``Gamma`` factor — are re-optimised by an inner
+    :func:`emu_gmm.estimate`; the K/S/J p-value is then evaluated at the
+    resulting profiled point. The returned set has the *same* topology
+    classification (empty / interval / disconnected / open-edge) the
+    full-vector :func:`k_confidence_set` produces, via the shared
+    :func:`_assemble_set` core.
+
+    This is the in-framework version of the hand-rolled re-optimising
+    ``theta_builder`` workaround: the inner solve reuses the production
+    estimator, so the manifold gauge (the ``k(k-1)/2`` quotient directions of a
+    ``PSDFixedRank`` factor) is handled by the existing quotient-aware path
+    (horizontal ``G_riem``, ``pinv_eigvalrule`` bread) rather than re-derived at
+    the call site. The final p-value's ``gauge_nullspace_dim`` is auto-detected
+    from the full profiled ``theta`` (override via ``gauge_nullspace_dim``).
+
+    Parameters
+    ----------
+    theta_builder : callable ``float -> ParamsLike``
+        Lifts a scalar grid value to the FULL parameter PyTree. The fields in
+        ``profile`` are read at their built values (the constraint); the other
+        leaves' built values are the **warm start** for the inner re-optimise.
+        Must return the same PyTree structure for every grid value.
+    grid, measure, covariance, model, alpha, statistic
+        As for :func:`k_confidence_set`.
+    profile : sequence of str
+        The interest field names held fixed at each grid value (whole-leaf
+        granularity; see :func:`_freeze_fixed_leaves`). Everything else is the
+        re-optimised nuisance.
+    nuisance_optimizer : optional
+        Optimiser for the inner re-optimise. ``None`` (default) lets
+        :func:`emu_gmm.estimate` auto-dispatch — ``optimistix_lm`` for a scalar
+        nuisance, ``riemannian_lm`` when the nuisance carries a manifold leaf.
+        Pass e.g. ``riemannian_tr()`` for a demonstrably non-convex manifold
+        criterion.
+    nuisance_weighting : optional
+        Weighting for the inner re-optimise; defaults to
+        :class:`~emu_gmm.weighting.ContinuouslyUpdated` (the estimator default).
+    regularization, score_cov_fn, V, L, gauge_nullspace_dim, strong_id_fallback
+        Forwarded to the inner :func:`emu_gmm.estimate` (``regularization``
+        only) and to the per-point :func:`emu_gmm.inference.k_statistic` (all),
+        exactly as :func:`k_confidence_set` forwards them.
+    keep_results : bool, default False
+        Retain the per-grid :class:`KStatisticResult` on the returned set.
+    return_profiled_points : bool, default False
+        Also return the tuple of profiled full-``theta`` PyTrees (one per grid
+        value) alongside the set, for inspecting the concentrated nuisance path.
+
+    Returns
+    -------
+    :class:`KConfidenceSet`, or ``(KConfidenceSet, tuple_of_theta)`` when
+    ``return_profiled_points`` is True.
+
+    Notes
+    -----
+    Cost: one full inner estimation per grid point (the issue's acknowledged
+    expense). ``jax.clear_caches()`` is called per grid value to avoid the
+    per-call JAX cache growth documented in CLAUDE.md (each grid point traces a
+    fresh reduced-model closure). Eager-only.
+    """
+    from emu_gmm.estimator import estimate
+    from emu_gmm.weighting import ContinuouslyUpdated
+
+    grid_arr = _validate_grid_args(grid, statistic, alpha)
+    if nuisance_weighting is None:
+        nuisance_weighting = ContinuouslyUpdated()
+
+    # Build the reduced (nuisance-only) parameter dataclass once from the first
+    # grid point; its structure is identical across the grid.
+    reducer = _ProfileReducer(theta_builder(float(grid_arr[0])), profile)
+
+    results: list[KStatisticResult] = []
+    profiled_points: list[ParamsLike] = []
+    for g in grid_arr:
+        theta_full_init = theta_builder(float(g))
+        free_init = reducer.free_init(theta_full_init)
+
+        def _reduced_model(x: Any, free: Any, _tf: Any = theta_full_init) -> Any:
+            return model(x, reducer.recombine(_tf, free))
+
+        inner = estimate(
+            _reduced_model,
+            measure,
+            covariance=covariance,
+            weighting=nuisance_weighting,
+            regularization=regularization,
+            optimizer=nuisance_optimizer,
+            theta_init=free_init,
+        )
+        theta_prof = reducer.recombine(theta_full_init, inner.theta_hat)
+        ks = k_statistic(
+            theta_prof,
+            measure,
+            covariance,
+            model,
+            regularization=regularization,
+            score_cov_fn=score_cov_fn,
+            V=V,
+            L=L,
+            gauge_nullspace_dim=gauge_nullspace_dim,
+            strong_id_fallback=strong_id_fallback,
+        )
+        results.append(ks)
+        profiled_points.append(theta_prof)
+        # Per-iter cache clear: each grid point builds a fresh reduced-model
+        # closure (the fixed value is captured), so estimate retraces and the
+        # global JAX caches would otherwise grow ~per call (CLAUDE.md).
+        jax.clear_caches()
+
+    cs = _assemble_set(grid_arr, results, statistic, alpha, keep_results)
+    if return_profiled_points:
+        return cs, tuple(profiled_points)
+    return cs
+
+
+__all__ = ["KConfidenceSet", "k_confidence_set", "profiled_k_confidence_set"]
