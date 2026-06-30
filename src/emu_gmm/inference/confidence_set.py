@@ -56,7 +56,11 @@ import jax
 import numpy as np
 from jaxtyping import Array, Float
 
-from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
+from emu_gmm.inference.k_statistic import (
+    KStatisticResult,
+    _kappa_chi2_sf,
+    k_statistic,
+)
 from emu_gmm.types import (
     CovarianceStrategy,
     Measure,
@@ -322,14 +326,21 @@ def k_confidence_set(
 
     Notes
     -----
-    The K-statistic tests the FULL parameter vector at each null; this
-    routine scans a one-dimensional family of nulls. For a
-    multi-parameter model, ``theta_builder`` therefore traces a curve
-    through the parameter space (e.g. varying one coordinate with the
-    others held at calibrated values) — the resulting set is a slice of
-    the joint robust set along that curve, NOT a projection-based
-    marginal set for one coordinate. Projection (profiling the K over
-    nuisance directions) is deliberately out of scope here.
+    With ``profile=None`` (the default) the K-statistic tests the FULL
+    parameter vector at each null and this routine scans a one-dimensional
+    family of nulls: ``theta_builder`` traces a curve through the parameter
+    space (e.g. varying one coordinate with the others held at calibrated
+    values), so the resulting set is a *slice* of the joint robust set along
+    that curve, NOT a marginal subvector set for one coordinate.
+
+    For a marginal subvector set, pass ``profile=[...]`` (see
+    :func:`profiled_k_confidence_set`), which **concentrates** the nuisance
+    (re-optimises it at each grid value) rather than holding it fixed — and
+    note that *concentration / profiling* (plug in the restricted nuisance
+    estimate) is a different procedure from *projection* (sup the statistic
+    over the nuisance); they have different validity conditions. See
+    :func:`profiled_k_confidence_set` for the subvector reference
+    distribution and its strong-nuisance-identification precondition.
     """
     # #176 profiling hook: delegate to the re-optimising path when the caller
     # names fixed (interest) fields. ``profile=None`` keeps the fixed-curve
@@ -617,6 +628,42 @@ def profiled_k_confidence_set(
 
     Notes
     -----
+    **Subvector reference distribution (#179).** Because the nuisance is
+    *concentrated out* (re-optimised at each grid value) rather than held fixed,
+    the per-point statistics are referenced to their **subvector** dofs, not the
+    full-vector dofs :func:`~emu_gmm.inference.k_statistic` returns:
+
+    - :math:`K \sim \chi^2_{d_I}` where ``d_I = dim(interest)`` is the identified
+      dimension of the profiled fields (ambient size minus gauge dim per leaf).
+      At the concentrated point the nuisance score is zero by the inner FOC, so
+      the full-vector :math:`K` collapses onto the interest block of dimension
+      :math:`d_I` (Kleibergen--Mavroeidis 2009).
+    - the restricted-model :math:`J \sim \chi^2_{M - d_N}`, with ``d_N`` the
+      identified nuisance dimension;
+    - :math:`S = J - K \sim \chi^2_{M - p_{id}}` is **unchanged** from the
+      full-vector value (``df_K + df_S = df_J`` continues to hold).
+
+    Referencing the profiled :math:`K` to the full-vector :math:`\chi^2_{p_{id}}`
+    (as the pre-#179 code did) over-states the dof and makes the set
+    systematically **conservative** — badly so when the nuisance is
+    high-dimensional (e.g. a ``PSDFixedRank`` factor).
+
+    **Precondition: the nuisance must be strongly identified.** The plug-in
+    concentration above is the subvector statistic *evaluated at the restricted
+    CUE*, which is identification-robust **in the interest direction** but
+    assumes the nuisance is well-identified at each null (the inner solve
+    returns a well-separated minimiser and the concentrated score genuinely
+    vanishes). If the nuisance is itself weak, this plug-in is not robust and
+    the fully-robust alternative is *projection* — sup the statistic over the
+    nuisance rather than concentrating it (not implemented here; see the
+    :func:`k_confidence_set` Notes for the concentration-vs-projection
+    distinction). The interest direction may be weak (an unbounded / open-edge
+    set is the honest report); it is the **nuisance** that must be strong.
+    Check the nuisance block with
+    :func:`~emu_gmm.inference.identification.identification_strength` (pass the
+    profiled-out fields as a block) before trusting a profiled set: a weak
+    nuisance block invalidates the subvector reference distribution.
+
     Cost: one full inner estimation per grid point (the issue's acknowledged
     expense). ``jax.clear_caches()`` is called per grid value to avoid the
     per-call JAX cache growth documented in CLAUDE.md (each grid point traces a
@@ -631,7 +678,9 @@ def profiled_k_confidence_set(
 
     # Build the reduced (nuisance-only) parameter dataclass once from the first
     # grid point; its structure is identical across the grid.
-    reducer = _ProfileReducer(theta_builder(float(grid_arr[0])), profile)
+    theta0 = theta_builder(float(grid_arr[0]))
+    reducer = _ProfileReducer(theta0, profile)
+    interest_dim = _interest_identified_dim(theta0, profile)
 
     results: list[KStatisticResult] = []
     profiled_points: list[ParamsLike] = []
@@ -664,7 +713,12 @@ def profiled_k_confidence_set(
             gauge_nullspace_dim=gauge_nullspace_dim,
             strong_id_fallback=strong_id_fallback,
         )
-        results.append(ks)
+        # Re-reference to the SUBVECTOR null distribution (#179): the nuisance
+        # is concentrated, so K -> chi^2_{dim(interest)} and the restricted-model
+        # J -> chi^2_{M - dim(nuisance)}, NOT the full-vector dofs k_statistic
+        # returns. Using the full-vector dofs makes the set systematically
+        # conservative (badly so with a high-dimensional nuisance).
+        results.append(_rescore_subvector(ks, interest_dim))
         profiled_points.append(theta_prof)
         # Per-iter cache clear: each grid point builds a fresh reduced-model
         # closure (the fixed value is captured), so estimate retraces and the
@@ -675,6 +729,61 @@ def profiled_k_confidence_set(
     if return_profiled_points:
         return cs, tuple(profiled_points)
     return cs
+
+
+def _interest_identified_dim(theta_full: ParamsLike, profile: Sequence[str]) -> int:
+    r"""Identified dimension of the profiled (interest) fields --- the subvector dof.
+
+    The subvector test references the profiled K to :math:`\chi^2` on the
+    *interest* dimension, which for a gauge-bearing interest leaf is its ambient
+    size minus its gauge dimension (the same drop-by-count rule as everywhere
+    else). For the usual scalar-field interest this is just the number of fixed
+    coordinates.
+    """
+    from emu_gmm._internal.params import manifold_spec_from_params
+
+    fixed = set(profile)
+    spec = manifold_spec_from_params(theta_full)
+    total = 0
+    for ls in spec.leaf_specs:
+        if ls.field_name in fixed:
+            size = int(np.prod(ls.ambient_shape)) if ls.ambient_shape != () else 1
+            total += size - int(ls.manifold.gauge_dim)
+    return total
+
+
+def _rescore_subvector(ks: KStatisticResult, interest_dim: int) -> KStatisticResult:
+    r"""Re-reference a concentrated :class:`KStatisticResult` to the subvector dof (#179).
+
+    At a nuisance-concentrated point the Kleibergen--Mavroeidis subvector
+    statistics are :math:`K \sim \chi^2_{d_I}` (``d_I = dim(interest)``, recovered
+    because the concentrated nuisance score is zero) and the restricted-model
+    :math:`J \sim \chi^2_{M - d_N}` (``d_N`` the concentrated nuisance
+    dimension), while :math:`S = J - K \sim \chi^2_{M - p_{id}}` is **unchanged**
+    from the full-vector value. The statistic *values* are the same as
+    :func:`k_statistic` returns; only the reference dofs (and hence the p-values)
+    change. Valid when the **nuisance is strongly identified** (see
+    :func:`profiled_k_confidence_set`).
+    """
+    M = int(ks.df_J)  # k_statistic sets df_J == M
+    p_id = int(ks.df_K)  # k_statistic sets df_K == full identified dim
+    d_i = int(interest_dim)
+    df_K = d_i
+    df_S = int(ks.df_S)  # == M - p_id, unchanged under concentration
+    df_J = M - p_id + d_i  # restricted-model over-id; == df_K + df_S
+    p_K = _kappa_chi2_sf(ks.K, df_K)
+    p_J = _kappa_chi2_sf(ks.J, df_J)
+    return KStatisticResult(
+        K=ks.K,
+        S=ks.S,
+        J=ks.J,
+        p_K=p_K,
+        p_S=ks.p_S,
+        p_J=p_J,
+        df_K=df_K,
+        df_S=df_S,
+        df_J=df_J,
+    )
 
 
 __all__ = ["KConfidenceSet", "k_confidence_set", "profiled_k_confidence_set"]

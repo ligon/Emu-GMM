@@ -135,6 +135,11 @@ class TestMatchesHandRolled:
 
         # Hand-rolled re-optimising builder (the documented workaround): at each
         # grid value, re-estimate theta_s with theta_w fixed, then k_statistic.
+        # #179: the profiled set re-references the concentrated K to the
+        # SUBVECTOR dof (here dim(interest) == 1), so the hand-rolled reference
+        # applies the same chi^2_1 rescoring to K. The K *statistic values* are
+        # what the re-optimisation machinery must reproduce; only the reference
+        # distribution (df=1, not the full-vector df=2=p_id) changes.
         hand = []
         for g in grid:
 
@@ -150,9 +155,8 @@ class TestMatchesHandRolled:
                 theta_init=_SOnly(theta_s=ts),
             )
             full = IVParams(theta_s=inner.theta_hat.theta_s, theta_w=float(g))
-            hand.append(
-                float(k_statistic(full, measure, IIDCovariance(), _iv_model).p_K)
-            )
+            ks = k_statistic(full, measure, IIDCovariance(), _iv_model)
+            hand.append(float(jax.scipy.stats.chi2.sf(ks.K, 1)))
             jax.clear_caches()
 
         np.testing.assert_allclose(cs.p_grid, np.array(hand), rtol=1e-10, atol=1e-10)
