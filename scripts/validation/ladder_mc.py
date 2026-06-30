@@ -91,6 +91,9 @@ from emu_gmm.studies import (
     StudyResult,
     bias_sd,
     coverage,
+    crn_pair,
+    event_share,
+    given,
     j_calibration,
     monte_carlo_study,
     size_power,
@@ -433,6 +436,10 @@ def run_arm(
         key=key,
         theta_init=theta_init,
         theta0=BETA_TRUE,
+        # CRN-coupling token: arms drawn from the same (design, seed) share
+        # the per-rep data stream (draw_measure depends only on design + key);
+        # the covariance arm is applied AFTER the draw. crn_pair verifies this.
+        coupling_id=(repr(design.spec), seed),
     )
     return ArmResult(
         name=arm,
@@ -495,7 +502,12 @@ def run_arm_per_rep_anchor(
         if (r_i + 1) % 25 == 0:
             jax.clear_caches()
     stacked = jtu.tree_map(lambda *xs: jnp.stack(xs), *recs)
-    records = MCRecords(records=stacked, key=jnp.asarray(key), n_reps=n_reps)
+    records = MCRecords(
+        records=stacked,
+        key=jnp.asarray(key),
+        n_reps=n_reps,
+        coupling_id=(repr(design.spec), seed),
+    )
     study = StudyResult(
         records=records,
         bias_sd=bias_sd(records, BETA_TRUE),
@@ -579,17 +591,21 @@ def paired_dof_readout(a: ArmResult, b: ArmResult, label: str) -> None:
     n_reps; under CRN the per-rep differences can: the dof arm's wider
     CIs flip coverage ONE-directionally, so the flip counts are a sign
     test. Also reports the mean paired J difference.
+
+    Routed through :func:`emu_gmm.studies.crn_pair` (#167), which verifies
+    the two arms share a CRN stream (matching ``coupling_id``) before
+    zipping -- a guard against silently pairing un-coupled draws.
     """
+    cp = crn_pair(a.study.records, b.study.records)  # refuses if not CRN-coupled
     ca, cb = _b1_cover_indicator(a), _b1_cover_indicator(b)
-    both = np.isfinite(ca) & np.isfinite(cb)
-    gain = int(np.sum((cb[both] == 1) & (ca[both] == 0)))  # dof covers, base not
-    lose = int(np.sum((cb[both] == 0) & (ca[both] == 1)))
+    both = cp.both_finite(ca, cb)
+    fl = cp.flips(ca, cb, where=both)  # gain = dof covers & base not
     Ja = np.asarray(a.study.records.records.J_stat)
     Jb = np.asarray(b.study.records.records.J_stat)
-    jd = Jb[both] - Ja[both]
+    mean_dj = cp.mean_paired_diff(Ja, Jb, where=both)
     print(
-        f"|paired {label} | n={int(both.sum())} | b1-cover flips "
-        f"+{gain}/-{lose} (dof gains/loses) | mean dJ {np.nanmean(jd):+.4f} |"
+        f"|paired {label} | n={fl.n_both} | b1-cover flips "
+        f"+{fl.gain}/-{fl.lose} (dof gains/loses) | mean dJ {mean_dj:+.4f} |"
     )
 
 
@@ -600,9 +616,9 @@ def jadj_readout(r: ArmResult, label: str) -> None:
     should be ~U(0,1) (small KS) where the nominal one is not. Refuse
     to read the contrast off an arm whose binding frequency is ~0.
     """
-    rec = r.study.records.records
+    mc = r.study.records
+    rec = mc.records
     used = np.asarray(rec.converged) > 0
-    binding = (np.asarray(rec.binding_ridge) > 0) & used
     deciles = np.arange(1, 10) / 10.0
 
     def _ks(p: np.ndarray) -> float:
@@ -612,14 +628,23 @@ def jadj_readout(r: ArmResult, label: str) -> None:
         ecdf = np.array([(p <= d).mean() for d in deciles])
         return float(np.max(np.abs(ecdf - deciles)))
 
+    # The binding subpopulation via given() (#167); event_share() supplies the
+    # loud counts (selected & converged vs total converged). The within-subset
+    # nominal-vs-adjusted p-value contrast is the *blessed* conditional query:
+    # a within-selection calibration contrast, NOT a coverage claim -- so it
+    # acknowledges the selection-conditional gate (#167 Section 6 Q1).
+    cond = given(mc, "binding_ridge", acknowledge_conditional=True)
+    share = event_share(mc, "binding_ridge")
+    bconv = np.asarray(cond.converged) > 0.5  # binding AND converged
     p_nom = np.asarray(rec.J_pvalue)
     p_adj = np.asarray(rec.J_pvalue_adjusted)
-    nb = int(binding.sum())
+    pnb = np.asarray(cond.J_pvalue)[bconv]
+    pab = np.asarray(cond.J_pvalue_adjusted)[bconv]
+    nb = share.n_selected_converged
     print(
-        f"|jadj {label} | binding {nb}/{int(used.sum())} | "
+        f"|jadj {label} | binding {nb}/{share.n_total_converged} | "
         f"KS nom/adj (all): {_ks(p_nom[used]):.3f}/{_ks(p_adj[used]):.3f} | "
-        f"KS nom/adj (binding): {_ks(p_nom[binding]):.3f}/"
-        f"{_ks(p_adj[binding]):.3f} |"
+        f"KS nom/adj (binding): {_ks(pnb):.3f}/{_ks(pab):.3f} |"
         + (
             f"  [only {nb} binding events (<25): contrast NOT readable]"
             if nb < 25

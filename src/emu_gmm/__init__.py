@@ -54,25 +54,30 @@ from emu_gmm.diagnostics import (
     build_diagnostics,
     build_optimizer_health,
     compute_cond_info,
+    regularization_adjusted_pvalue,
 )
 from emu_gmm.estimator import build_estimator, estimate
 from emu_gmm.inference import (
     AdaptiveBootstrapResult,
+    BlockStrength,
     BootstrapMean,
     BootstrapPValue,
     BootstrapQuantile,
     BootstrapSE,
     ClusterBootstrapResult,
+    IdentificationStrength,
     JTestResult,
     KConfidenceSet,
     KStatisticResult,
     WildBootstrapResult,
     adaptive_bootstrap,
     cluster_bootstrap,
+    identification_strength,
     j_test,
     k_confidence_set,
     k_statistic,
     moment_wild_bootstrap,
+    profiled_k_confidence_set,
 )
 from emu_gmm.manifolds import (
     Euclidean,
@@ -132,6 +137,7 @@ __all__ = [
     "build_estimator",
     # Inference
     "k_confidence_set",
+    "profiled_k_confidence_set",
     "k_statistic",
     "KConfidenceSet",
     "KStatisticResult",
@@ -170,6 +176,10 @@ __all__ = [
     "ClusterBootstrapResult",
     "j_test",
     "JTestResult",
+    # Per-block identification-strength diagnostic (#177)
+    "identification_strength",
+    "IdentificationStrength",
+    "BlockStrength",
     # Result / diagnostics types
     "EstimationResult",
     "FitRecord",
@@ -182,6 +192,7 @@ __all__ = [
     "build_diagnostics",
     "build_optimizer_health",
     "compute_cond_info",
+    "regularization_adjusted_pvalue",
     # Inference
     "moment_wild_bootstrap",
     "WildBootstrapResult",
