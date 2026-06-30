@@ -59,21 +59,31 @@ from emu_gmm.diagnostics import (
 from emu_gmm.estimator import build_estimator, estimate
 from emu_gmm.inference import (
     AdaptiveBootstrapResult,
+    BlockStrength,
     BootstrapMean,
     BootstrapPValue,
     BootstrapQuantile,
     BootstrapSE,
     ClusterBootstrapResult,
+    IdentificationStrength,
     JTestResult,
     KConfidenceSet,
     KStatisticResult,
     WildBootstrapResult,
     adaptive_bootstrap,
     cluster_bootstrap,
+    identification_strength,
     j_test,
     k_confidence_set,
     k_statistic,
     moment_wild_bootstrap,
+    profiled_k_confidence_set,
+)
+from emu_gmm.law import (
+    AsymptoticLaw,
+    EmpiricalLaw,
+    EstimatorLaw,
+    couple,
 )
 from emu_gmm.manifolds import (
     Euclidean,
@@ -133,6 +143,7 @@ __all__ = [
     "build_estimator",
     # Inference
     "k_confidence_set",
+    "profiled_k_confidence_set",
     "k_statistic",
     "KConfidenceSet",
     "KStatisticResult",
@@ -171,6 +182,10 @@ __all__ = [
     "ClusterBootstrapResult",
     "j_test",
     "JTestResult",
+    # Per-block identification-strength diagnostic (#177)
+    "identification_strength",
+    "IdentificationStrength",
+    "BlockStrength",
     # Result / diagnostics types
     "EstimationResult",
     "FitRecord",
@@ -210,6 +225,15 @@ __all__ = [
     # ManifoldLeaf pytree (a valid theta_init) consumed by estimate(parameters=).
     "ParameterSpace",
     "on",
+    # EstimatorLaw (#144): the law of the estimator as one query algebra over
+    # the statistic's codomain, with grade-fixing implementations. EmpiricalLaw
+    # (stacked draws x event-flags x validity counts x provenance; given /
+    # couple / Bootstrap*-routed cov/quantile/prob) and AsymptoticLaw (the
+    # Gaussian N(theta_hat, Sigma_theta) delta-method grade; given refuses).
+    "EstimatorLaw",
+    "EmpiricalLaw",
+    "AsymptoticLaw",
+    "couple",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",

@@ -15,7 +15,12 @@ in force in the Monte-Carlo / repeated-sampling area (=emu_gmm.studies=,
   summarizers, and the conditional/coupled queries over them. First populated to
   ground *#167* (conditional/coupled queries) under the *#144* =EstimatorLaw=
   umbrella (landed on =main= via *PR #168*, merged 2026-06-25; the
-  =conditioning.py= =path:line= refs below resolve on =main=).
+  =conditioning.py= =path:line= refs below resolve on =main=). *Extended
+  2026-06-30* (Section 7) to the /identification-strength + identification-robust
+  set/ surface -- *#177* (per-block =identification_strength=), *#176* (profiled
+  =k_confidence_set=), and the *#178* review that fixed the frozen-=V*= contract.
+  Those =path:line= refs resolve on branch =claude/review-feature-requests-d9fqyc=
+  (PR #178).
 
 * Section 1 -- Task, restated (repo vocabulary)
 
@@ -200,3 +205,500 @@ ripgrep-floor "new" decisions at the call-graph tier.
    skill-default Markdown to match the workspace's Org-mode prose convention
    (ASCII-only; =verbatim= for identifiers; description lists in place of the
    Sec. 5 table). =.coder/= is git-tracked (not gitignored).
+
+* Section 7 -- Identification-strength / robust-set surface (#177 / #176 / #178)
+
+The GMM /curvature/ surface, distinct from the empirical-law surface above: how
+the information matrix \(G' \Lambda G\) and the Kleibergen \(K\)-set are reused
+across diagnostics. Added 2026-06-30 to record the anchors the #178 review
+turned on.
+
+** 7.1 -- Task, restated
+
+Two consumer-pulled (K-Aggregators) additions: =identification_strength= (#177)
+reports the /per-block concentration parameters/ -- eigenvalues of the
+Schur-complemented \(\mathcal{I} = G' \Lambda G\) after concentrating out the
+other coordinates (the FWL / partial-first-stage analogue); and
+=profiled_k_confidence_set= (#176) inverts the \(K/S/J\) statistic while
+*re-optimising* the nuisance leaves (a =PSDFixedRank= =Gamma= factor included)
+at each grid value, vs the fixed-curve =k_confidence_set=. Both are
+compositions of existing curvature/gauge/estimator machinery, not new math.
+
+** 7.2 -- Existing machinery reused (path:line / tested?)
+
+- =information_matrix(G, V*)= -- =diagnostics.py:271= (NEW, factored out): the
+  single \(G' \Lambda G\) builder (Cholesky of \(V^*\); =Z'Z=). =compute_cond_info=
+  now calls it (=diagnostics.py:413=), so cond-number and per-block concentration
+  measure curvature off /one/ construction. Tested:
+  =tests/test_diagnostics.py=, =tests/inference/test_identification.py= (Schur +
+  block-inverse identity).
+- =pinv_eigvalrule(info, drop_smallest=)= -- =_internal/pinv_eigvalrule.py:53=.
+  The gauge-aware inverse (drop =total_gauge_dim= smallest eigvals BY COUNT, not
+  by threshold). Reused by =identification_strength= for the /complement/ inverse
+  (=identification.py= =_block_strength=, =:294=) and already by the
+  =Sigma_theta= bread (=estimator.py:858=) and =cond_info['exclude_gauge']=.
+- =estimate= -- =estimator.py:1256=. =profiled_k_confidence_set= runs it for the
+  /inner/ nuisance re-optimise, so the manifold gauge is handled by the existing
+  quotient-aware path (=G_riem= horizontal projection + =pinv_eigvalrule= bread,
+  =estimator.py:764-861=); auto-dispatch picks =riemannian_lm= for a manifold
+  nuisance. No gauge logic re-derived at the call site.
+- =k_statistic= / =_assemble_set= / =_validate_grid_args= --
+  =inference/k_statistic.py=, =confidence_set.py:400= / =:157=. The profiled path
+  shares the set-assembly + grid-validation tail with =k_confidence_set=
+  (=:232=); =profile=None= keeps the plain path bitwise unchanged.
+
+** 7.3 -- Definitions / conventions in force (quote, don't paraphrase)
+
+- *Efficient metric.* =identification_strength= always uses \(\Lambda =
+  (V^*)^{-1}\) (=information_matrix=), independent of the weighting used to
+  estimate -- it measures identification of the /moment system/, matching
+  =cond_info=. Documented in =identification.py= module docstring.
+- *Frozen-ridge \(V^*\) (the #178 Finding-1 contract).* The diagnostic builds
+  \(\mathcal{I}\) off =result.V_X= -- which /is/ =V_star_hat=, the
+  anchor-once-then-freeze \(V^*\) at \(\hat\theta\) (=estimator.py:1101=; ridge
+  anchored at =theta_init=, =:519=). It MUST NOT recompute
+  =regularization.apply(V(theta_hat))=: =DiagonalTikhonov.apply= is /stateless/
+  and re-bisects a different =tau=, diverging from =cond_info= / =Sigma_theta=
+  when the ridge binds. Default =V_star = result.V_X= at
+  =identification.py:436=; the =V_star== kwarg is the only override. Guard:
+  =TestBindingRidgeUsesFrozenVX=.
+- *gauge = drop-by-count, never threshold.* CLAUDE.md commitment; a fixed leaf
+  must sit wholly inside or wholly outside a block (=identification.py=
+  =_subset_gauge_dim= refuses a split); =profiled_k_confidence_set= profiles by
+  whole field (=_ProfileReducer=, =confidence_set.py:464=) so a =PSDFixedRank=
+  leaf is never split.
+
+** 7.4 -- Invariants / landmines
+
+1. *=result.V_X= == =V_star_hat=, not raw \(V\).* =estimator.py:1101= labels the
+   /regularised/ \(V^*\). The block-inverse identity test and the binding-ridge
+   guard both depend on this; if =V_X= ever changes to carry raw \(V\), the
+   diagnostic's metric silently changes.
+2. *Block-inverse identity is regime-bounded (the #178 Finding-2 boundary).*
+   \(\mathcal{I}_{b\cdot c}^{-1} = (\Sigma_\theta)_{bb}\) holds EXACTLY only under
+   efficient weighting at a non-binding ridge (where \(\Sigma_\theta = B^{-1}\)).
+   Under =Identity= / =Fixed(V0)= or a binding ridge, \(\Sigma_\theta\) is the
+   #133 weighting-aware sandwich \(B^+ (G' \Lambda V \Lambda G) B^+\)
+   (=estimator.py:858-861=), NOT \(B^{-1}\). The concentration ranking /
+   =.weakest= stay valid (the efficient metric is deliberate); the reciprocal tie
+   does not. Hedged in the =identification.py= docstring; the
+   =test_block_inverse_identity_against_sigma_theta= fixture stays in the CU /
+   \(\tau \approx 0\) regime by design.
+3. *=min_eigenvalue= can be slightly negative from roundoff* on a near-singular
+   Schur complement (pseudo-inverse keeps PSD only up to rounding). =.weakest= /
+   =< threshold= are robust; do not assert =>= 0= exactly.
+4. *Profiling cost.* One full inner =estimate= per grid point; the closure
+   captures the fixed value, so each retraces -- =jax.clear_caches()= per grid
+   point (CLAUDE.md per-call-leak rule). Estimate-running tests are
+   =@pytest.mark.slow=.
+
+** 7.5 -- Reuse decisions (per quantity)
+
+- =information_matrix= factoring :: *extend (reuse)* -- the \(Z'Z\) construction
+  already lived inline in =compute_cond_info= and the estimator; extracted so
+  =identification_strength= measures curvature off the same matrix (bitwise-equal
+  for =cond_info=). The anti-reinvention move the owner flagged.
+- per-block Schur complement / concentration eigenvalues :: *new* -- no existing
+  per-block partial-information readout; =cond_info['exclude_gauge']= is the
+  /global/ gauge-aware conditioning, this is its per-block generalisation.
+- complement gauge inverse :: *reuse (symbol)* -- =pinv_eigvalrule=, the one
+  drop-by-count rule; no new gauge logic.
+- =profiled_k_confidence_set= inner solve :: *reuse (=estimate=)* -- the issue's
+  whole point: the hand-rolled re-optimising =theta_builder= is replaced by the
+  production estimator so the gauge is not re-derived. Verified byte-identical to
+  a hand-rolled builder on =(Euclidean x PSDFixedRank)=
+  (=test_profile_euclidean_reoptimise_psd_matches_hand_rolled=).
+- set assembly / grid validation :: *extend (reuse)* -- =_assemble_set= /
+  =_validate_grid_args= factored out of =k_confidence_set= and shared; the
+  =profile=[...]= hook on =k_confidence_set= delegates.
+
+Verify-against-ledger result for #177/#176: *OK* -- no =REINVENTION= (curvature
+and gauge both route through the shared =information_matrix= / =pinv_eigvalrule=)
+and no =CONTRADICTION= (the #178 review closed the one drift: the diagnostic now
+honors the frozen-=V*= / anchor-once convention rather than re-anchoring).
+
+* Section 8 -- =EstimatorLaw= CORE (#144): the empirical-law carrier umbrella
+
+The carrier-class generalisation of the #167 point/tuple slice (Sec. 1-6):
+one query algebra (=cov= / =quantile= / =prob= / =given= / =sample=) over the
+frequentist law of the estimator, unifying the five scattered carriers
+(=design.org:447-449,463=). Folded in here 2026-06-29 from the #144-charter
+grounding pass (path:line re-pinned on =main= = =b7e2f36=; supersedes the
+working =.coder/ledger.md=, now removed per decision #4). The #144 charter §6
+(PI-delegated) resolves the four grounding blockers the pass raised -- recorded
+in 8.6 as decisions, not open questions. #144 unifies carriers 1-4; carrier 5
+(the test-inversion / random-CLOSED-SET dual) is *FORKED OUT to issue #180*
+(=RandomSetLaw=) -- do NOT build the set grade here.
+
+** 8.1 -- Task, restated (repo vocabulary)
+
+Build =EstimatorLaw= (one INTERFACE) + two concrete grade instances --
+=EmpiricalLaw= (stacked draws \(\times\) event-flags \(\{0,1\}^E\) \(\times\)
+validity counts \(\times\) provenance) and =AsymptoticLaw= (\(\Sigma_\theta\) +
+delta method) -- with a uniform query algebra. =given(event)= is a closure
+returning another =EstimatorLaw=, GRADE-AWARE (REFUSES, does not approximate,
+where the conditional lacks a closed form). A joint/coupling constructor
+verifies key/provenance before zipping (the CRN contract). Retrofit
+=summaries.py= + the =Bootstrap*= functionals onto the carrier with
+NUMERIC-IDENTICAL results (regression-pinned). Codomain is generic:
+=PSDFixedRank= \(\Gamma\) functionals (eigenvalues / =gamma=) queryable,
+manifold/gauge-aware. Proven by routing the K-Agg het multi-grade result AND
+the #130 harness through the ONE interface.
+
+No =EstimatorLaw= / =EmpiricalLaw= / =AsymptoticLaw= *class* exists yet (grep:
+only docstring refs in =studies/__init__.py:22= and =conditioning.py:3,7=).
+#144 is net-new carrier classes that DELEGATE to existing tested machinery.
+
+** 8.2 -- Existing machinery (path:line / tested?)
+
+Carrier storage (REUSE as the backing stack -- do NOT re-stack):
+- =FitRecord= :: =types.py:494=. Per-rep pytree: =theta_flat= (=:532=, ambient
+  flat, the axis \(\Sigma_\theta\) is sized by), =se=, J-triple, =converged=,
+  =tau_realised= (=:538=), =binding_ridge= (=:539=, 0/1), =sigma_meat_indefinite=
+  (=:540=, 0/1; the #138/#143 NaN-SE event), static =J_dof= / =param_names=.
+  THIS is the "draws \(\times\) event-flags" atom. Tested =tests/test_types.py=,
+  =tests/studies/test_summaries.py=.
+- =MCRecords= :: =driver.py:47=. Stacked =FitRecord= (leading =n_reps=) +
+  master =key= (=:70=) + static =coupling_id= (=:82=). =.converged_mask= (=:85=,
+  =>0.5=), =.n_converged= (=:90=), =.n_excluded= (=:95=), =.to_pandas=.
+  Provenance carrier. Tested =tests/studies/test_replicate.py=.
+- =replicate= / =replicate_coupled= :: =driver.py:132= / =:288=. CRN: rep =r=
+  sees =fold_in(key,r)= (=:265=); =replicate_coupled= (#171) stamps one shared
+  =coupling_id= (sound coupling by construction).
+- =EstimationResult= :: =types.py:546=; =.record()= (=:1048=) ambient-flattens
+  to a =FitRecord= (sets all three event flags, =:1090-1095=); =.components()=
+  (=:619=) per-leaf ambient \((A,\phi,\dots)\); =.Sigma_theta= (=:556=, NamedArray
+  ambient =[Params, ParamsDual]=). The asymptotic-grade inputs.
+
+Query-algebra prior art (REUSE / route through -- single-correct-impl, §3):
+- Summarizers =summaries.py= (all tested =tests/studies/test_summaries.py=):
+  =bias_sd:93=, =coverage:146=, =size_power:198=, =tau_binding:245=,
+  =j_calibration:295=; helpers =_stacked:34=, =_used:41= (mask =>0.5=),
+  =_as_flat_theta0:48=, =_nan_vec:70=. Exclude-but-count + per-summary
+  =n_valid_se= (#140). The =EmpiricalLaw= reductions must DELEGATE here
+  byte-identically (charter §2.2).
+- =Bootstrap*= functionals =inference/adaptive.py=: =BootstrapMean:134=,
+  =BootstrapSE:150=, =BootstrapQuantile:173=, =BootstrapPValue:204= (each
+  =evaluate(values) -> (value, mcse)= + =label=); =maritz_jarrett_quantile_se:75=;
+  driver =adaptive_bootstrap:314=. "Already a query algebra over the empirical
+  law" (=design.org:448=). The carrier's =quantile= / =prob= / SE queries route
+  here. Tested =tests/inference/test_adaptive.py=.
+- Conditional/coupled (#167) =studies/conditioning.py= (tested
+  =tests/studies/test_conditioning.py=): =given:147= (masked =FitRecord=),
+  =event_share:240= / =EventShare:214=, =crn_pair:343= / =CoupledRecords:285=
+  (=both_finite= / =flips= / =paired_diff= / =mean_paired_diff=), =Flips:270=,
+  helpers =_unwrap:86= / =_event_mask:102=, =FLAG_FIELDS:60=,
+  =SELECTION_CONDITIONAL_FLAGS:74=, =SelectionConditionalWarning:80=. These ARE
+  charter items (b) =given= and (c) CRN coupling -- already FUNCTIONS; #144
+  wraps them into the law object.
+
+Asymptotic grade + gauge-aware codomain (REUSE -- charter (e)/(f)):
+- =inference/functional_se.py= (tested =test_estimator_inference_phase4.py= +
+  phase7 acceptance): =functional_se:120= (delta method \(J_f \Sigma_\theta
+  J_f'\)), =gamma_se:249=, =gamma_vech:237=, =eigenvalue_se:290=,
+  =gamma_eigenvalues:268=, =count_nonzero_eigenvalues:336=, =vech_indices:224=.
+  Mirrored on =EstimationResult=: =functional_se:654= / =gamma_se:729= /
+  =gamma_covariance:712= / =eigenvalue_se:753=, with =_gamma_leaf:804= (locates
+  the unique =PSDFixedRank= leaf via manifold spec, #117) and =_gamma_rank:858=.
+  Already gauge-invariant by construction (\(\Sigma_\theta\) gauge nullspace
+  pinned out, =estimator.py:858=). NOT re-derive.
+- The flat<->components glue =functional_se._unflatten_to_components:96= +
+  =_gamma_from_components:198=: the map a NEW empirical-grade gauge-aware query
+  needs to apply a \(\Gamma\)/eigval functional PER MC DRAW
+  (=theta_flat[r]= \(\to A \to \Gamma=AA'\to\) =eigvalsh=).
+
+Law-of-Q + the forked set carrier:
+- =WildBootstrapResult= =inference/wild_bootstrap.py:100=: =J_boot= (=:132=, =(B,)=)
+  + =p_value= (=:133=). The law of \(Q(\hat\theta)\) -- an =EmpiricalLaw= whose
+  draws are J replicates (carrier #4; codomain generic, S=Q). REUSE; no new
+  bootstrap.
+- =ClusterBootstrapResult= =inference/cluster_bootstrap.py:134=: =theta_boot=
+  (=:193=, NamedArray =B x K=) + =J_boot= (=:194=). The empirical theta-law
+  (carrier #2 storage).
+- =KConfidenceSet= =inference/confidence_set.py:72= + =k_confidence_set:232= /
+  =profiled_k_confidence_set:540=: the test-inversion DUAL = the =RandomSetLaw=
+  grade. *FORKED to #180*; #144 shares the interface only -- do NOT pull
+  =KConfidenceSet= into the carrier (charter §6.4).
+
+Second fixture (#130 harness) :: =scripts/validation/ladder_mc.py= already
+IMPORTS the #167 functions (=:90-96=, =MCRecords= / =crn_pair= / =event_share= /
+=given=) and CONSUMES them: =paired_dof_readout:587= -> =crn_pair=,
+=jadj_readout:612= -> =given= + =event_share=, with =run_arm:402= /
+=run_arm_per_rep_anchor:454= building =MCRecords= (=:505=). Charter (6b) =
+repoint these readouts at the =EstimatorLaw= interface, results identical.
+
+Fixture firability (charter §6.2 -- both named events are KNOWN-FIRABLE in-emu):
+- =sigma_meat_indefinite= set in =diagnostics.py:54,123=; fired by
+  =tests/test_sigma_sandwich.py= (the #138 indefinite-meat path).
+- =binding_ridge= fired by =tests/test_estimator_binding_ridge.py=
+  (=_ill_conditioned_cov= triggers =DiagonalTikhonov= at =kappa_target=1e3=).
+- K-Agg het consumer artifacts (point / analytic-SE / cluster-wild-J grades)
+  live in the K-Aggregators repo. *Refresh 2026-06-29*: the
+  =var/lf_bartik_het_exp_tikhonov_v2_iterated_L0.01/mgmm_lf_K2.pickle= path the
+  prior pass cited is GONE; the live artifacts carrying the §2.6(a) grades are the
+  JSONs =var/_het_cluster_boot_emu.json= (point: =theta_0=6.27=, =lambda=(8.58,
+  0.25)=, the 15 =Gamma= entries + 5 =c_*= slopes; the empirical theta-law /
+  pooled cluster bootstrap, 2000 reps) and =var/_deltaJ_het.json= (cluster-wild J:
+  =J_cluster_observed=231.07=, =J_hansen_cluster=183.03=, =p=0=, 43 instruments) --
+  plus result dir =var/boot_het_exp_iterated_L0.01/= (per-task CSVs); estimator
+  =src/cereal_emu_het.py= + =src/emu_inference.py= (both present). NOTE
+  (unchanged): that consumer code does NOT route through =record()=, so it carries
+  NO =sigma_meat_indefinite= flag and is a SINGLE point (not a sweep) -- the
+  =given()=-conditionable indefinite-meat fixture must be a real Emu MC SWEEP of a
+  K-Agg-shaped het/degenerate DGP that fires the event PARTIALLY (§6.2; see 8.6
+  verify-first item). So the missing live pickle is NOT load-bearing: the §2.6(a)
+  point/SE grade is reconstructed in-emu (or frozen from the JSONs) and the
+  given()-firing grade is a fresh in-emu sweep regardless.
+
+** 8.3 -- Definitions / conventions in force (quote, don't paraphrase)
+
+- Flag / converged threshold is =>0.5= :: =summaries._used:43=,
+  =MCRecords.converged_mask= (=driver.py:86=), =conditioning._event_mask=
+  (=:104,199=). Flags are bool->float64 in =record()= (=types.py:1089-1096=),
+  so =>0.5= == =>0= == ===1= today; any new flag query MUST use =>0.5=.
+- =given= is SELECTION-CONDITIONAL, not nominal :: conditioning on
+  =binding_ridge= / =sigma_meat_indefinite= correlates with =theta_hat= / =se=;
+  =given= emits =SelectionConditionalWarning= unless =acknowledge_conditional=True=
+  (=conditioning.py:189-208=, #167 Sec. 6.1). The law's =given= must preserve
+  this soft gate (warn-loudly, #138 pattern).
+- CRN coupling needs same DGP, not just same key :: master-key equality is
+  necessary-but-NOT-sufficient (=driver.py:21-28=); =crn_pair= requires matching
+  =coupling_id= or explicit =assert_coupled= (Sec. 4.2). THIS already satisfies
+  charter (4) "joint constructor verifies key/provenance; mismatch raises."
+- Grade-dependence / refuse-not-approximate :: =design.org:459= -- "=given=
+  returns another =EstimatorLaw= ... most conditionals do not exist in closed
+  form at the asymptotic grade -- the implementation REFUSES rather than
+  approximates." => =AsymptoticLaw.given(...)= MUST RAISE (charter §2.3).
+- Conditioning-is-part-of-T :: =design.org:456=; realized data-dependent anchors
+  recorded via =_emu_gmm_factory_spec= (=driver.py:194,232=,
+  =replicate(anchor_per_rep=)=). The law carries T's identity/provenance.
+- Delta-method coordinate contract :: =f= is a function of the ambient
+  components in convention-B scale; \(\Sigma_\theta\) is in those coordinates
+  (=functional_se.py:53-60=); gauge-invariance is the caller's responsibility,
+  satisfied for the shipped \(\Gamma\)/eigval functionals.
+- Per-coordinate \(N_j\) scaling / no explicit-N criterion :: CLAUDE.md
+  commitment 9; criterion -> \(\chi^2_{M-K}\); never \(\times N\) a criterion.
+- emu J scaling (K-Agg consumer gotcha) :: emu Fixed-weighting =J_stat= is
+  Hansen/\(N\); the K-Agg cluster-wild J recomputes \(N\,\bar g'\Omega^{-1}\bar g\).
+  The fixture's J numbers must DECLARE which scaling they carry.
+- =make check= runs the FULL suite INCLUDING slow tests (=Makefile= =check:=
+  has empty =PYTEST_FLAGS=; =quick-check= is the =-m "not slow"= variant). So
+  estimate-running fixture tests (marked =slow=) DO gate §2.7 -- keep them cheap.
+
+** 8.4 -- Invariants / landmines
+
+1. Single-correct-implementation (charter §3) :: do NOT duplicate
+   =functional_se=, the =Bootstrap*= functionals, =MCRecords=, the summarizers,
+   or =conditioning.py=. The carrier DELEGATES; the regression test (§2.2) pins
+   numeric identity to today's free-function outputs.
+2. =studies= is NOT top-level-exported today :: =studies/__init__.py:36=
+   "Deliberately not re-exported at the =emu_gmm= top level yet." Charter §2.1
+   requires the three classes in =emu_gmm.__all__=. =functional_se= / =gamma_se=
+   / =eigenvalue_se= are likewise NOT in =emu_gmm.__all__= (only under
+   =emu_gmm.inference=); =AsymptoticLaw= is their first top-level surfacing.
+   Placement decision: a NEW module (e.g. =emu_gmm/law.py=) so the three classes
+   enter =__all__= without prematurely freezing the whole =studies= surface.
+3. Gauge-arbitrary raw =theta_flat= :: a =PSDFixedRank= leaf's raw =theta_flat=
+   entries are gauge-arbitrary (=FitRecord= docstring =:513-519=). An EMPIRICAL
+   eigenvalue/gamma query MUST apply the gauge-INVARIANT functional per draw
+   (=theta_flat[r]= \(\to A \to \Gamma \to\) =eigvalsh=), NEVER reduce raw
+   =theta_flat= columns. The asymptotic grade is already safe (=functional_se=
+   annihilates the pinned nullspace). The per-draw glue needs the component
+   SPEC/template (shapes) -- =FitRecord= stores only =theta_flat= + =param_names=,
+   so the =EmpiricalLaw= must thread the spec (e.g. a reference =EstimationResult=
+   or =.components()= template) to unflatten draws to \(\Gamma\).
+4. Masking destroys rep-index alignment :: =given= returns a masked
+   =FitRecord=; a conditioned law can NEVER be CRN-paired
+   (=conditioning.py:39-41=, =crn_pair= rejects non-=MCRecords=). Pair first,
+   THEN condition via =flips(..., where=mask)=. The law's =given= +
+   joint-constructor must keep this ordering invariant.
+5. Multi-grade = one-interface-two-implementations, NOT one-object-all-grades ::
+   =design.org:463= + charter §6.3. Acceptance (6a) "point + analytic SE +
+   cluster-wild J + MC sweep through ONE =EstimatorLaw=" mixes grades (analytic
+   SE = asymptotic; cluster-wild J = empirical law of Q; MC sweep = empirical law
+   of theta); "ONE" is scored as "one INTERFACE used uniformly", with grade
+   instances that compose via =given= / the joint constructor.
+6. Empty-subset / NaN safety :: summarizers return NaN (not crash) on empty
+   selection (=coverage= / =bias_sd= =n_used==0= guards); =given= of an empty
+   mask must too. Bootstrap MCSE stays strictly positive at empty tails (=+1=
+   correction, =adaptive.py:253=).
+
+** 8.5 -- Reuse decisions (per quantity the charter needs)
+
+- empirical-law carrier (a) :: *new* class =EmpiricalLaw=; *reuse*
+  =MCRecords= / =FitRecord= as the backing stack (draws + flags + counts +
+  provenance already there). Do not re-stack or re-implement =to_pandas=.
+- =given(event)= closure (b) :: *extend* =conditioning.given= / =_event_mask= /
+  =FLAG_FIELDS= / =SELECTION_CONDITIONAL_FLAGS= / =SelectionConditionalWarning=.
+  Wrap the masked-=FitRecord= back into an =EmpiricalLaw= (the closure the
+  charter wants); preserve the selection-conditional warning gate.
+- verified CRN coupling (c) :: *reuse* =crn_pair= / =CoupledRecords= /
+  =coupling_id= verbatim as the law's joint constructor -- it already "verifies
+  key/provenance before zipping; mismatch raises" (charter §2.4 satisfied).
+- retrofit summarizers + =Bootstrap*= (d) :: *extend* -- carrier query methods
+  (=cov= / =quantile= / =prob=) DELEGATE to =summaries.*= and
+  =adaptive.Bootstrap*=. Regression-pin numeric identity (§2.2).
+- =AsymptoticLaw= wrapper (e) :: *new* class; *reuse*
+  =EstimationResult.Sigma_theta= + =inference.functional_se=. =cov= / =quantile=
+  / =prob= = Gaussian closed forms over the delta-method cov; =given= REFUSES
+  (raises) at this grade.
+- manifold/gauge-aware codomain (f) :: *reuse* =gamma_se= / =eigenvalue_se= /
+  =gamma_eigenvalues= / =gamma_vech= (+ =_gamma_leaf= / =_gamma_rank=) at the
+  asymptotic grade; *new* small glue to apply =gamma_eigenvalues= / =gamma_vech=
+  per MC draw via =_unflatten_to_components= for the empirical grade (landmine 3).
+- law-of-Q (carrier 4) :: *reuse* =WildBootstrapResult.J_boot= as an
+  =EmpiricalLaw= over S=Q. No new bootstrap.
+- random-SET grade (carrier 5) :: *out of scope* -- forked to #180; share the
+  interface only (the consumer =profiled_k_confidence_set= #176 already exists).
+- top-level export + placement (§2.1) :: *new* module decision (see landmine 2).
+
+Verify-against-ledger result for #144: *OK (pending implementation)* -- no
+=REINVENTION= (every carrier maps to existing tested machinery; the only NEW
+code is the carrier classes + the per-draw gauge glue + the top-level wiring)
+and no =CONTRADICTION= with the =>0.5= / CRN / exclude-but-count /
+refuse-not-approximate / gauge conventions, PROVIDED the implementer DELEGATES
+(§3) rather than re-implements.
+
+** 8.6 -- Charter §6 resolutions (the four grounding blockers, CLEARED) +
+   one residual verify-first item
+
+The #144-grounding pass raised four blockers (B1-B4); charter §6 (PI-delegated)
+resolves all four -- recorded here as decisions, not open questions:
+
+1. *LEDGER PATH/FORMAT (was B1). RESOLVED (§6.1).* Canonical ledger is this
+   =.coder/ledger.org= (Org; Markdown rejected per Sec. 6 decision #4). The #144
+   inventory is THIS Section 8 (Org); the competing working =.coder/ledger.md=
+   is REMOVED -- no competing =.md= kept.
+2. *FIXTURE PROVENANCE (was B2). RESOLVED (§6.2): REAL fixtures, NO declared
+   flags.* §2.6(a) conditions on =sigma_meat_indefinite= (the #138 event for the
+   K-Agg het =lambda_2= SE); =binding_ridge= comes from a small REAL Emu MC sweep
+   of a het/degenerate DGP where the =DiagonalTikhonov= V-ridge fires, frozen as
+   a fixture. If a K-Agg artifact for a grade is not reconstructable in-emu, use
+   a real Emu MC sweep of a K-Agg-SHAPED DGP that genuinely fires the event --
+   NEVER declared flags.
+3. *MULTI-GRADE SHAPE (was B3). RESOLVED (§6.3): one INTERFACE.* =AsymptoticLaw=
+   and =EmpiricalLaw= are SEPARATE grade instances composing via =given= and the
+   joint/coupling constructor (=design.org:463=). "ONE =EstimatorLaw=" in §2.6(a)
+   is scored as "one interface used uniformly across all grades", NOT one literal
+   object carrying \(\Sigma_\theta\) AND theta-draws AND J-draws.
+4. *SCOPE (was B4). RESOLVED (§6.4): carrier 5 OUT.* The =KConfidenceSet= /
+   test-inversion dual is forked to #180; §2.6(a)'s cluster-wild J is carrier 4
+   (the empirical law of Q via =WildBootstrapResult=), NOT the set grade.
+
+*Residual verify-first item (NOT a charter-halting blocker; low severity).* The
+§2.6(a) =given(sigma_meat_indefinite)= demonstration needs a STACK whose event
+fires PARTIALLY (\(0 < \mathrm{share} < 1\)) -- the single K-Agg het point result
+is not =given=-conditionable, and §6.2 forbids declared flags. Both events are
+known-firable in isolation (=test_sigma_sandwich.py=, =test_estimator_binding_ridge.py=),
+so a K-Agg-shaped het/degenerate SWEEP firing the event in some-but-not-all reps
+is constructible; the implementer should RUN the candidate sweep and confirm the
+partial-firing share BEFORE freezing the fixture (a degenerate 0%/100% share
+would make the conditional demo vacuous). De-risk early; not a sign-off blocker.
+
+** 8.7 -- Re-verification stamp (2026-06-29 grounding re-pass, HEAD =b7e2f36=)
+
+Section 8 re-checked against the current tree this pass; *VERDICT: OK, ZERO
+blockers* (charter §6 pre-resolved B1-B4; this pass confirms nothing new is
+load-bearing). Spot-confirmed at =b7e2f36= (= =git rev-parse HEAD=):
+- All =path:line= refs in 8.2 RESOLVE exactly: =conditioning.py= (=given:147=,
+  =event_share:240=, =EventShare:214=, =crn_pair:343=, =CoupledRecords:285=,
+  =Flips:270=, =_unwrap:86=, =_event_mask:102=, =FLAG_FIELDS:60=,
+  =SELECTION_CONDITIONAL_FLAGS:74=, =SelectionConditionalWarning:80=);
+  =functional_se.py= (=functional_se:120=, =_unflatten_to_components:96=,
+  =_gamma_from_components:198=, =vech_indices:224=, =gamma_vech:237=,
+  =gamma_se:249=, =gamma_eigenvalues:268=, =eigenvalue_se:290=,
+  =count_nonzero_eigenvalues:336=); =types.py= (=FitRecord:494=,
+  =EstimationResult:546=, =components:619=, =functional_se:654=,
+  =gamma_covariance:712=, =gamma_se:729=, =eigenvalue_se:753=, =_gamma_leaf:804=,
+  =_gamma_rank:858=, =record:1048=); =wild_bootstrap.py= (=WildBootstrapResult:100=,
+  =J_boot:132=, =p_value:133=); =cluster_bootstrap.py= (=ClusterBootstrapResult:134=,
+  =theta_boot:193=, =J_boot:194=); =confidence_set.py= (=KConfidenceSet:72=,
+  =k_confidence_set:232=, =profiled_k_confidence_set:540=);
+  =adaptive.py= (=BootstrapMean:134=, =BootstrapSE:150=, =BootstrapQuantile:173=,
+  =BootstrapPValue:204=, =maritz_jarrett_quantile_se:75=, =adaptive_bootstrap:314=);
+  =design.org= (sketch =:441=, bootstrap-laws =:448=, the interface =:451=,
+  conditioning-is-part-of-T =:456=, refuse-not-approximate =:459=, couplings-verify
+  =:460=, adoption-gate =:463=).
+- Export landmine (8.4 #2) CONFIRMED: =grep -i 'law\|studies\|functional_se\|
+  gamma_se\|eigenvalue' src/emu_gmm/__init__.py= over the =__all__= block returns
+  NOTHING -- =EstimatorLaw= / =EmpiricalLaw= / =AsymptoticLaw= do not exist as
+  classes (only docstring refs in =studies/__init__.py:22=, =conditioning.py:3,7=),
+  and =studies= / =functional_se= / =gamma_se= / =eigenvalue_se= are not top-level
+  exported. The NEW-module placement decision stands.
+- =make check= gate CONFIRMED (=Makefile:51-52=): =check: lint black mypy= then
+  =pytest= with EMPTY =PYTEST_FLAGS= (full suite, incl. =slow=); =quick-check=
+  (=:48-49=) is the =-m "not slow"= variant. So slow estimate-running fixture
+  tests DO gate §2.7 (8.3 note holds) -- keep them cheap.
+- =.coder/ledger.md= CONFIRMED absent (decision #4 / §6.1 honored); this
+  =.coder/ledger.org= is the sole ledger.
+- Fixture-firing tests present: =tests/test_sigma_sandwich.py= asserts
+  =sigma_meat_indefinite==1.0= on the #138 indefinite path (=:263,274=);
+  =tests/test_estimator_binding_ridge.py= forces =DiagonalTikhonov= at
+  =kappa_target=1e3= (=_ill_conditioned_cov=, =:63-65=). Both events firable.
+
+Framing judgement (this pass): the charter is INTERNALLY COHERENT and well-scoped
+-- multi-grade = one-interface (§6.3), carrier 5 forked to #180 (§6.4), real
+fixtures no-declared-flags (§6.2), Org ledger (§6.1). Minor non-blocking notes
+for the implementer (not unknowns): (i) the repo-local =.coder/charter.md= §2.8
+says "a PR on ligon/Emu-GMM"; the AUTHORITATIVE charter + REPOSITORY DIRECTIVE
+say *local branch + PR description, do NOT push* (ligon =no_push=) -- follow the
+no-push form. (ii) §2.2 reads "byte/numeric-identical" in =charter.md= but
+"numeric-IDENTICAL" in the signed charter; the =Bootstrap*= / summarizer
+reductions are deterministic float64 numpy, so literal delegation makes
+byte-identity achievable -- pin numeric identity (8.5 d). Neither is a
+load-bearing unknown; *Ground returns ZERO blockers* per §6 and this verification.
+
+** 8.8 -- Implementation record (#144 EstimatorLaw, branch =feat/144-estimator-law=)
+
+Built per 8.5 reuse decisions; NO statistic re-implemented (every query
+delegates). New code is the carrier classes + the per-draw gauge glue + the
+top-level wiring only (8.4 #1 honored).
+
+*New module* =src/emu_gmm/law.py= (the 8.4 #2 placement decision):
+- =EstimatorLaw(abc.ABC)= -- the ONE interface (=mean= / =cov= / =se= /
+  =quantile= / =prob= / =sample= / =given=); each query takes an optional
+  gauge-invariant component functional =f=. =grade= class attr.
+- =EmpiricalLaw= -- carrier (a): draws x event-flags x validity x provenance.
+  =from_records= (MCRecords/FitRecord backing; optional =component_shapes=),
+  =from_records_with_template= (shapes off a template =.components()=),
+  =from_draws= (bare statistic draws = the law of Q, carrier #4). =se= / =mean=
+  / =quantile= / =pvalue= route through =adaptive.Bootstrap{SE,Mean,Quantile,
+  PValue}= (8.5 d); =bias_sd= / =coverage= / =size_power= / =tau_binding= /
+  =j_calibration= delegate to =studies.summaries.*= verbatim (8.5 d);
+  =given= extends =conditioning.given= (returns another =EmpiricalLaw=,
+  =conditioned=True=, preserves =SelectionConditionalWarning=); =event_share=
+  reuses =conditioning.event_share=; =couple= reuses =crn_pair= verbatim
+  (refuses conditioned/raw-draws -- landmine 4). Empirical gauge-aware queries
+  apply the invariant functional PER DRAW via =_unflatten_to_components= +
+  =vmap= (landmine 3): =eigenvalue_se= / =eigenvalue_quantile= / =gamma_se=.
+- =AsymptoticLaw= -- N(theta_hat, Sigma_theta). =cov= / =se= delegate to
+  =EstimationResult.functional_se= (=f=None= -> =Sigma_theta= /
+  =standard_errors=); =quantile= = Gaussian marginal =mean + z_q se= (closed
+  form, exact); =sample= = =multivariate_normal(method="svd")= (gauge nullspace
+  rank-deficient -> svd); =eigenvalue_se= / =gamma_se= reuse
+  =EstimationResult.{eigenvalue_se,gamma_se}= (=_gamma_leaf= #117). =given=
+  RAISES (8.3 refuse-not-approximate, charter §2.3); =prob= RAISES (no closed
+  form for a general predicate indicator under the Gaussian).
+- module helpers =eigenvalue_functional= / =gamma_functional= (closures over
+  =functional_se.gamma_{eigenvalues,vech}=); free fn =couple=.
+- Exported from =emu_gmm.__all__= (§2.1): =EstimatorLaw=, =EmpiricalLaw=,
+  =AsymptoticLaw=, =couple=.
+
+*Fixtures (§6.2 -- REAL events, NO declared flags)*: =tests/test_law.py=. The
+preferred =sigma_meat_indefinite= event fires PARTIALLY (=0.5=) in a real Emu MC
+sweep of a het/degenerate DGP -- a location model with a poison covariance
+=[[1,-1.2],[-1.2,1]]= whose NEGATIVE eigendirection =(1,1)= aligns with the
+moment gradient =G=, so the #138 sandwich-meat goes indefinite (SE NaN'd) AND
+the ridge binds; =anchor_per_rep=True= + key =PRNGKey(6)= gives the mixed
+schedule. =binding_ridge= co-fires =0.5=. The cluster-wild J grade is a real
+=moment_wild_bootstrap.J_boot=; the gauge-aware grade a real
+=Product(PSDFixedRank(5,2),Euclidean(1))= estimate (phase7 DGP). §2.6a routes
+all three grades through the one interface; §2.6b reproduces the ladder_mc
+=jadj_readout= (given+event_share) and =paired_dof_readout= (couple/crn_pair)
+through the carrier byte-identically.
+
+*Gate*: =make check= green. Pre-existing black asymmetry fixed -- ruff already
+=extend-exclude=[..,examples]= but black had no exclude, so the 2026-06-?? BLP
+example (=examples/blp/*=, commit =6adc81e=) failed =black --check .= on =main=
+independent of #144; added a mirroring =force-exclude= to =[tool.black]=
+(=pyproject.toml=). 47 new tests (40 fast + 7 slow), all pass.

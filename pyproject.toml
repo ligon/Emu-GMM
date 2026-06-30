@@ -67,6 +67,10 @@ markers = [
 [tool.black]
 target-version = ["py311"]
 line-length = 88
+# Mirror ruff's exclusion (tool.ruff.extend-exclude): the example scripts under
+# examples/ are illustrative, not part of the gated package surface, so the
+# `make check` black step skips them just as the ruff step does.
+force-exclude = '''/(\.claude|\.coder-session|examples)/'''
 
 [tool.ruff]
 target-version = "py311"
