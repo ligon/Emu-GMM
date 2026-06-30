@@ -16,10 +16,19 @@ Currently exposed:
   K-statistic (or J/S for Anderson--Rubin-style sets), with explicit
   empty / interval / disconnected / open-edge topology. See
   :mod:`emu_gmm.inference.confidence_set`.
+- :func:`profiled_k_confidence_set` --- the profiled (nuisance-concentrated)
+  sibling of :func:`k_confidence_set`: re-optimises the nuisance parameter
+  leaves (a manifold ``PSDFixedRank`` factor included) at each grid value
+  before inverting the K/S/J statistic. Also reachable via
+  ``k_confidence_set(..., profile=[...])`` (#176).
 - :func:`j_test` and :class:`JTestResult` --- zero-parameter test of
   over-identifying restrictions. Returns ``J = m' V^{-1} m ~ chi^2_M``
   evaluated at a user-supplied ``theta_null``, without invoking the
   :func:`emu_gmm.estimate` minimisation loop.
+- :func:`identification_strength` and :class:`IdentificationStrength` ---
+  per-parameter-block identification-strength diagnostic (the
+  concentration / partial-first-stage curvature of each block, gauge-aware).
+  See :mod:`emu_gmm.inference.identification`.
 - :func:`moment_wild_bootstrap` and :class:`WildBootstrapResult` ---
   cluster-wild Rademacher / Mammen J-statistic bootstrap for moment
   models with NaN-masked moments and few clusters. See
@@ -52,13 +61,22 @@ from emu_gmm.inference.cluster_bootstrap import (
     ClusterBootstrapResult,
     cluster_bootstrap,
 )
-from emu_gmm.inference.confidence_set import KConfidenceSet, k_confidence_set
+from emu_gmm.inference.confidence_set import (
+    KConfidenceSet,
+    k_confidence_set,
+    profiled_k_confidence_set,
+)
 from emu_gmm.inference.functional_se import (
     eigenvalue_se,
     functional_se,
     gamma_se,
     gamma_vech,
     vech_indices,
+)
+from emu_gmm.inference.identification import (
+    BlockStrength,
+    IdentificationStrength,
+    identification_strength,
 )
 from emu_gmm.inference.j_test import JTestResult, j_test
 from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
@@ -69,11 +87,13 @@ from emu_gmm.inference.wild_bootstrap import (
 
 __all__ = [
     "AdaptiveBootstrapResult",
+    "BlockStrength",
     "BootstrapMean",
     "BootstrapPValue",
     "BootstrapQuantile",
     "BootstrapSE",
     "ClusterBootstrapResult",
+    "IdentificationStrength",
     "JTestResult",
     "KConfidenceSet",
     "KStatisticResult",
@@ -85,9 +105,11 @@ __all__ = [
     "functional_se",
     "gamma_se",
     "gamma_vech",
+    "identification_strength",
     "j_test",
     "k_confidence_set",
     "k_statistic",
     "moment_wild_bootstrap",
+    "profiled_k_confidence_set",
     "vech_indices",
 ]
