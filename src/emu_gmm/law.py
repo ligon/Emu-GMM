@@ -59,6 +59,18 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.stats
 
+from emu_gmm._internal.law_state import (
+    MomentsBacking as _MomentsBacking,
+)
+from emu_gmm._internal.law_state import (
+    euclidean_tag as _euclidean_tag,
+)
+from emu_gmm._internal.law_state import (
+    locate_psd_leaf as _locate_psd_leaf,
+)
+from emu_gmm._internal.law_state import (
+    manifold_to_tag as _manifold_to_tag,
+)
 from emu_gmm.inference.adaptive import (
     BootstrapMean,
     BootstrapPValue,
@@ -189,6 +201,19 @@ class EstimatorLaw(abc.ABC):
         Grade-aware: where the conditional has no closed form (the asymptotic
         grade) the implementation REFUSES rather than approximates.
         """
+
+    def save(self, path: Any) -> None:
+        """Persist this law to ``path`` as a typed, versioned :class:`LawState` (#181).
+
+        Writes an inert, cross-version artifact (a single ``.npz`` with a JSON
+        manifest) via :func:`emu_gmm.persistence.save_law` --- NOT a pickle: no
+        class references or model code are entombed, so it reloads under a
+        future emu through :func:`emu_gmm.persistence.load_law`. The asymptotic
+        grade is supported; the empirical grade is the next slice.
+        """
+        from emu_gmm.persistence import save_law
+
+        save_law(self, path)
 
 
 # ---------------------------------------------------------------------------
@@ -655,15 +680,91 @@ class AsymptoticLaw(EstimatorLaw):
 
     grade = "asymptotic"
 
-    def __init__(self, result: EstimationResult, *, label: str | None = None) -> None:
+    def __init__(
+        self,
+        result: EstimationResult | None = None,
+        *,
+        label: str | None = None,
+        _backing: "_MomentsBacking | None" = None,
+    ) -> None:
+        # Two backings (one query algebra): a LIVE EstimationResult, or a
+        # moments-only record reconstructed from persisted arrays
+        # (``from_moments`` / a reloaded LawState, #181). The query methods
+        # route to the SAME delta-method machinery either way --- the moments
+        # path calls ``inference.functional_se`` directly, so no statistic is
+        # re-implemented for the reloaded grade.
+        if _backing is not None:
+            self._result = None
+            self._backing: _MomentsBacking | None = _backing
+            self._names = _backing.names
+            self._label = label or "asymptotic(from_moments)"
+            return
         if not isinstance(result, EstimationResult):
             raise TypeError(
                 "AsymptoticLaw wraps an EstimationResult (the emu_gmm.estimate "
-                f"output); got {type(result).__name__}."
+                f"output); got {type(result).__name__}. To reconstruct without "
+                "a live result use AsymptoticLaw.from_moments(...)."
             )
         self._result = result
+        self._backing = None
         self._label = label or "asymptotic(N(theta_hat, Sigma_theta))"
-        self._names: tuple[str, ...] = tuple(result.record().param_names)
+        self._names = tuple(result.record().param_names)
+
+    # -- moments-only constructor (#181) ------------------------------------
+    @classmethod
+    def from_moments(
+        cls,
+        theta_components: Any,
+        sigma_theta: Any,
+        *,
+        leaf_specs: Any = None,
+        names: tuple[str, ...] | None = None,
+        label: str | None = None,
+    ) -> AsymptoticLaw:
+        r"""Reconstruct the asymptotic law from raw moments --- no live result.
+
+        The reload target for a persisted asymptotic law (#181): a queryable
+        :math:`\mathcal N(\hat\theta, \Sigma_\theta)` built from the component
+        arrays and :math:`\Sigma_\theta` alone. ``se`` / ``functional_se`` /
+        ``eigenvalue_se`` / ``gamma_se`` route through
+        :mod:`emu_gmm.inference.functional_se` exactly as the result-backed law
+        does. ``given`` / ``prob`` still refuse (no closed form at this grade).
+
+        Parameters
+        ----------
+        theta_components
+            The per-leaf ambient arrays ``(A, phi, ...)`` --- what
+            :meth:`EstimationResult.components` returns.
+        sigma_theta
+            The ambient ``(D, D)`` covariance, gauge nullspace pinned to zero.
+            ``D`` must equal the total flat size of ``theta_components``.
+        leaf_specs
+            Optional per-leaf manifold instances (``Euclidean`` /
+            ``PSDFixedRank`` / ...), aligned with ``theta_components``. Used
+            only to locate the unique ``PSDFixedRank`` factor (and its rank) so
+            :meth:`eigenvalue_se` / :meth:`gamma_se` work; omit for an
+            all-Euclidean law (those conveniences then raise, as on a
+            no-PSD-leaf result).
+        names
+            Ambient tangent labels (length ``D``); positional by default.
+        """
+        comps = tuple(np.asarray(c, dtype=float) for c in theta_components)
+        sigma = np.atleast_2d(np.asarray(sigma_theta, dtype=float))
+        psd_index, psd_rank = _locate_psd_leaf(leaf_specs)
+        leaf_tags = (
+            tuple(_manifold_to_tag(m) for m in leaf_specs)
+            if leaf_specs is not None
+            else tuple(_euclidean_tag(c) for c in comps)
+        )
+        backing = _MomentsBacking.build(
+            components=comps,
+            sigma=sigma,
+            names=names,
+            leaf_tags=leaf_tags,
+            psd_index=psd_index,
+            psd_rank=psd_rank,
+        )
+        return cls(_backing=backing, label=label)
 
     @property
     def param_names(self) -> tuple[str, ...]:
@@ -671,26 +772,52 @@ class AsymptoticLaw(EstimatorLaw):
 
     @property
     def result(self) -> EstimationResult:
-        """The wrapped :class:`~emu_gmm.types.EstimationResult`."""
+        """The wrapped :class:`~emu_gmm.types.EstimationResult` (live-backed only).
+
+        Raises if this law was reconstructed via :meth:`from_moments` (a
+        reloaded law has no live result --- query it directly).
+        """
+        if self._result is None:
+            raise AttributeError(
+                "AsymptoticLaw.result: this law was reconstructed from moments "
+                "(from_moments / a reloaded LawState) and has no live "
+                "EstimationResult. Query the law directly (se, functional_se, "
+                "eigenvalue_se, gamma_se)."
+            )
         return self._result
 
+    # -- backing-aware accessors (one algebra, two backings) ----------------
+    def _components(self) -> tuple[Any, ...]:
+        return (
+            self._result.components()
+            if self._result is not None
+            else self._backing.components  # type: ignore[union-attr]
+        )
+
+    def _functional_cov(self, f: Functional) -> np.ndarray:
+        # ``f`` is non-None here (cov() routes f=None to the plain covariance).
+        assert f is not None
+        if self._result is not None:
+            _se, cov = self._result.functional_se(f)
+            return np.atleast_2d(np.asarray(cov))
+        from emu_gmm.inference.functional_se import functional_se as _fse
+
+        assert self._backing is not None
+        _se, cov = _fse(f, self._backing.components, jnp.asarray(self._backing.sigma))
+        return np.atleast_2d(np.asarray(cov))
+
     def mean(self, f: Functional = None) -> np.ndarray:
-        comps = self._result.components()
+        comps = self._components()
         if f is None:
             return np.asarray(_flatten_components(comps))
         return np.asarray(jnp.atleast_1d(jnp.asarray(f(tuple(comps)))))
 
     def cov(self, f: Functional = None) -> np.ndarray:
         if f is None:
-            return np.asarray(self._result.Sigma_theta.array)
-        _se, cov = self._result.functional_se(f)
-        return np.atleast_2d(np.asarray(cov))
-
-    def se(self, f: Functional = None) -> np.ndarray:
-        if f is None:
-            return np.asarray(self._result.standard_errors.array)
-        se, _cov = self._result.functional_se(f)
-        return np.asarray(se)
+            if self._result is not None:
+                return np.asarray(self._result.Sigma_theta.array)
+            return np.asarray(self._backing.sigma)  # type: ignore[union-attr]
+        return self._functional_cov(f)
 
     def quantile(self, q: float, f: Functional = None) -> np.ndarray:
         """The Gaussian marginal ``q``-quantile, ``mean + z_q * se`` (closed form).
@@ -748,19 +875,57 @@ class AsymptoticLaw(EstimatorLaw):
     def eigenvalue_se(self, rank: int | None = None) -> np.ndarray:
         """Delta-method SE of the nonzero eigenvalues of ``Gamma = A @ A.T``.
 
-        Reuses :meth:`~emu_gmm.types.EstimationResult.eigenvalue_se` (which
-        locates the unique ``PSDFixedRank`` leaf via the manifold spec, #117,
-        and defaults ``rank`` to its rank). Gauge-invariant by construction.
+        Result-backed: reuses :meth:`EstimationResult.eigenvalue_se` (which
+        locates the unique ``PSDFixedRank`` leaf via the manifold spec, #117).
+        Moments-backed (reloaded): routes through
+        :func:`emu_gmm.inference.functional_se.eigenvalue_se` with the persisted
+        PSD-leaf index and rank. Gauge-invariant by construction; raises if the
+        law carries no ``PSDFixedRank`` factor.
         """
-        return np.asarray(self._result.eigenvalue_se(rank))
+        if self._result is not None:
+            return np.asarray(self._result.eigenvalue_se(rank))
+        from emu_gmm.inference.functional_se import eigenvalue_se as _ev
+
+        b, idx, k = self._require_psd("eigenvalue_se")
+        se, _cov = _ev(
+            b.components,
+            jnp.asarray(b.sigma),
+            int(rank) if rank is not None else int(k),
+            index=idx,
+        )
+        return np.asarray(se)
 
     def gamma_se(self) -> np.ndarray:
         """Delta-method SE of ``vech(Gamma)`` (gauge-invariant; #117 leaf)."""
-        return np.asarray(self._result.gamma_se())
+        if self._result is not None:
+            return np.asarray(self._result.gamma_se())
+        from emu_gmm.inference.functional_se import gamma_se as _gse
+
+        b, idx, _k = self._require_psd("gamma_se")
+        se, _cov = _gse(b.components, jnp.asarray(b.sigma), index=idx)
+        return np.asarray(se)
 
     def gamma_covariance(self) -> np.ndarray:
         """Delta-method covariance of ``vech(Gamma)``."""
-        return np.asarray(self._result.gamma_covariance())
+        if self._result is not None:
+            return np.asarray(self._result.gamma_covariance())
+        from emu_gmm.inference.functional_se import gamma_se as _gse
+
+        b, idx, _k = self._require_psd("gamma_covariance")
+        _se, cov = _gse(b.components, jnp.asarray(b.sigma), index=idx)
+        return np.asarray(cov)
+
+    def _require_psd(self, what: str) -> tuple[_MomentsBacking, int, int]:
+        """Return ``(backing, psd_index, psd_rank)`` for a moments-backed law, or raise."""
+        b = self._backing
+        if b is None or b.psd_index is None or b.psd_rank is None:
+            raise TypeError(
+                f"AsymptoticLaw.{what}: this (moments-backed) law carries no "
+                "PSDFixedRank factor, so Gamma = A @ A.T is undefined. Pass "
+                "leaf_specs with the PSDFixedRank leaf to from_moments, or use "
+                "functional_se(f) with an explicit functional."
+            )
+        return b, int(b.psd_index), int(b.psd_rank)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return f"AsymptoticLaw(grade={self.grade!r}, names={self._names})"
