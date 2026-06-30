@@ -268,6 +268,50 @@ def regularization_adjusted_pvalue(
     return jax.scipy.stats.chi2.sf(J_stat / c, v)
 
 
+def information_matrix(
+    G: Float[Array, "M K"],
+    V_star: Float[Array, "M M"],
+) -> Float[Array, "K K"]:
+    r"""The GMM information matrix :math:`G' \Lambda G`, :math:`\Lambda = (V^\star)^{-1}`.
+
+    The single construction shared by every consumer of the curvature
+    (CLAUDE.md commitment 5: the information matrix is built directly as
+    :math:`G' \Lambda G`, never as a numerical Hessian). Realised via the
+    Cholesky factor of :math:`V^\star` rather than an explicit inverse: with
+    :math:`Z = L^{-1} G` (``L L' = V^\star``) the matrix is ``Z' Z``, which
+    is symmetric PSD by construction and avoids forming :math:`(V^\star)^{-1}`.
+
+    Factored out so :func:`compute_cond_info` and
+    :func:`emu_gmm.inference.identification_strength` measure curvature off
+    the *same* matrix rather than re-deriving it independently. For a
+    gauge-bearing (e.g. :class:`~emu_gmm.manifolds.PSDFixedRank`) parameter
+    the moment function is exactly gauge-invariant, so the ambient ``G``
+    annihilates the vertical directions and ``Z' Z`` carries the
+    ``total_gauge_dim`` exact-zero eigenvalues by construction — callers drop
+    them BY COUNT (the ``pinv_eigvalrule`` rule), never by a magnitude
+    threshold.
+
+    Parameters
+    ----------
+    G : (M, K) array
+        Moment-Jacobian ``E_mu[grad_theta psi]`` (ambient columns; the same
+        ``(M, total_dimension)`` layout ``Sigma_theta`` is sized by).
+    V_star : (M, M) array
+        Regularised moment-variance matrix at the evaluation point. Assumed
+        symmetric PD (the regulariser's job, commitment 3).
+
+    Returns
+    -------
+    (K, K) array
+        ``Z' Z`` with ``Z = L^{-1} G`` — the symmetric PSD information matrix.
+    """
+    G_arr = jnp.asarray(G)
+    V_arr = jnp.asarray(V_star)
+    L = jnp.linalg.cholesky(V_arr)
+    Z = jax.scipy.linalg.solve_triangular(L, G_arr, lower=True)
+    return Z.T @ Z
+
+
 def compute_cond_info(
     G: Float[Array, "M K"],
     V_star: Float[Array, "M M"],
@@ -363,14 +407,10 @@ def compute_cond_info(
             "compute_cond_info: gauge_nullspace_dim must be >= 0, got "
             f"{gauge_nullspace_dim}"
         )
-    G_arr = jnp.asarray(G)
-    V_arr = jnp.asarray(V_star)
-    # Information matrix via Cholesky of V*. Match estimator.py's
-    # construction so the reported cond is the cond of the same matrix
-    # used for Sigma_theta.
-    L = jnp.linalg.cholesky(V_arr)
-    Z = jax.scipy.linalg.solve_triangular(L, G_arr, lower=True)
-    info_matrix_data = Z.T @ Z  # G' Lambda G, data-only.
+    # Information matrix via Cholesky of V* (shared builder, so the reported
+    # cond is the cond of the *same* matrix used for Sigma_theta and the
+    # per-block identification_strength diagnostic).
+    info_matrix_data = information_matrix(G, V_star)  # G' Lambda G, data-only.
 
     # Data-only condition: never includes the penalty.
     data_only_arr = jnp.linalg.cond(info_matrix_data)
@@ -538,6 +578,7 @@ __all__ = [
     "build_diagnostics",
     "build_optimizer_health",
     "compute_cond_info",
+    "information_matrix",
     "log_to_stdout",
     "regularization_adjusted_pvalue",
 ]
