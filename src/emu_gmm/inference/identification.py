@@ -34,15 +34,32 @@ strength is the **Schur complement** — the curvature of the criterion in the
 
 This is the FWL / partial-first-stage analogue: the eigenvalues of
 :math:`\mathcal I_{b\cdot c}` are the (sample-size-scaled, since
-:math:`V^\star \sim 1/N`) **concentration parameters** of block :math:`b`, and
-its inverse is exactly the block-:math:`b` sub-block of the (efficient)
-:math:`\Sigma_\theta` (the block-inverse identity), so a weak block has small
-:math:`\min\mathrm{eig}(\mathcal I_{b\cdot c})` and a large marginal variance.
-The smallest identified eigenvalue is the *binding* concentration parameter
-for the block — the direction that drives the weak-identification-robust /
-Wald divergence (#41's K-statistic): where it is small, the Wald CI from
-:math:`\Sigma_\theta` understates uncertainty while the K-statistic stays
-valid.
+:math:`V^\star \sim 1/N`) **concentration parameters** of block :math:`b`. The
+smallest identified eigenvalue is the *binding* concentration parameter for the
+block — the direction that drives the weak-identification-robust / Wald
+divergence (#41's K-statistic): where it is small, a Wald CI understates
+uncertainty while the K-statistic stays valid.
+
+The curvature is built off :math:`V^\star = ` ``result.V_X`` — the *frozen-ridge*
+:math:`V^\star` the fit used at :math:`\hat\theta`, so :math:`\mathcal I` is the
+**same matrix** :func:`emu_gmm.diagnostics.compute_cond_info` conditions
+(``data_only`` / ``exclude_gauge``), bit-for-bit, including when the ridge binds.
+
+The clean **block-inverse identity** — :math:`\mathcal I_{b\cdot c}^{-1}` equals
+the block-:math:`b` sub-block of :math:`\Sigma_\theta`, so a weak block has both
+a small :math:`\min\mathrm{eig}(\mathcal I_{b\cdot c})` and a large marginal
+variance — holds **exactly only under efficient weighting at a non-binding
+ridge** (``ContinuouslyUpdated`` with :math:`\tau = 0`). There
+:math:`\Sigma_\theta` collapses to :math:`\mathcal I^{-1}`. Under an
+``Identity`` / ``Fixed(V0)`` two-step fit, or a binding ridge,
+:math:`\Sigma_\theta` is the #133 weighting-aware sandwich
+:math:`B^+(G'\Lambda V\Lambda G)B^+` (with the weighting :math:`\Lambda`
+actually used and *unregularised* :math:`V` as meat), which is **not**
+:math:`\mathcal I^{-1}`; the diagnostic deliberately keeps the *efficient*
+metric :math:`\Lambda = (V^\star)^{-1}` regardless (it measures identification
+of the moment system, not of the analyst's weighting), so the concentration
+ranking and ``.weakest`` stay meaningful but the exact reciprocal tie to
+:math:`\Sigma_\theta` no longer holds.
 
 Gauge-bearing blocks (manifolds)
 --------------------------------
@@ -80,10 +97,8 @@ from jaxtyping import Array, Float
 from emu_gmm._internal.params import manifold_spec_from_params
 from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.diagnostics import information_matrix
-from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     EstimationResult,
-    RegularizationStrategy,
     StructuralModel,
 )
 
@@ -126,7 +141,13 @@ class BlockStrength:
         binding (weakest) direction.
     min_eigenvalue
         ``eigenvalues[0]`` as a 0-d array — the block's concentration
-        parameter; the headline scalar for ranking blocks by strength.
+        parameter; the headline scalar for ranking blocks by strength. The
+        Schur complement of the PSD :math:`\\mathcal I = Z'Z` is PSD in exact
+        arithmetic, but the generalised complement via a pseudo-inverse keeps
+        :math:`\\ge 0` only up to rounding, so on a near-singular (very weak)
+        block this can come back slightly negative — a near-zero concentration,
+        not a sign-bearing quantity. ``.weakest`` and any ``> threshold`` test
+        are robust to it; do not rely on ``min_eigenvalue >= 0`` exactly.
     partial_information
         The full ``(len(indices), len(indices))`` Schur complement
         :math:`\\mathcal I_{b\\cdot c}` (gauge directions included as exact
@@ -329,7 +350,6 @@ def identification_strength(
     model: StructuralModel,
     *,
     blocks: Mapping[str, Sequence[int]] | None = None,
-    regularization: RegularizationStrategy | None = None,
     V_star: Float[Array, "M M"] | None = None,
 ) -> IdentificationStrength:
     r"""Per-block identification strength (concentration / partial first stage).
@@ -363,15 +383,13 @@ def identification_strength(
         dataclass field name — exactly the ``θ = (level, c-slopes, Γ)``
         decomposition the K-Aggregators consumer wants. A gauge-bearing leaf
         (e.g. a :class:`PSDFixedRank` factor) must lie wholly within one block.
-    regularization
-        Regulariser used to form :math:`V^\star` from
-        ``covariance.covariance(model, theta_hat, measure)``. Defaults to the
-        result's own strategy, or :class:`~emu_gmm.regularization.DiagonalTikhonov`
-        when the result carries none. Ignored when ``V_star`` is supplied.
     V_star
-        Optional pre-computed regularised variance to reuse the exact ridge
-        frozen during :func:`emu_gmm.estimate` (bypasses the
-        ``covariance`` / ``regularization`` recompute).
+        Optional regularised variance override. Defaults to ``result.V_X`` —
+        the frozen-ridge :math:`V^\star` the fit actually used at
+        ``theta_hat`` (the same matrix ``cond_info`` conditions and the
+        ``Sigma_theta`` bread uses). Pass this only to supply a custom
+        :math:`V^\star`; the default is correct and bit-consistent with the
+        result's own inference even when the ridge binds.
 
     Returns
     -------
@@ -381,14 +399,16 @@ def identification_strength(
 
     Notes
     -----
-    The metric is the *efficient* :math:`\Lambda = (V^\star)^{-1}`,
-    independent of the weighting actually used to estimate, so the diagnostic
-    measures identification of the moment system itself (consistent with
-    ``cond_info``). Eager-only.
+    The metric is the *efficient* :math:`\Lambda = (V^\star)^{-1}` with
+    :math:`V^\star = ` ``result.V_X`` (the frozen-ridge variance the fit used),
+    independent of the weighting actually used to estimate. So the diagnostic
+    measures identification of the moment system itself and is bit-consistent
+    with ``cond_info`` even when the ridge binds. The exact reciprocal tie to
+    :math:`\Sigma_\theta` holds only under efficient weighting at a non-binding
+    ridge (see the module docstring). Eager-only.
     """
     theta_hat = result.theta_hat
     measure = result.measure
-    covariance = result.covariance
 
     manifold_spec = result.manifold_spec
     if manifold_spec is None:
@@ -402,11 +422,18 @@ def identification_strength(
     # the exact gauge zeros — same precondition compute_cond_info relies on.
     G = _to_plain(measure.jacobian(model, theta_hat))
 
+    # Default V* = result.V_X, the *frozen-ridge* regularised variance the fit
+    # actually used at theta_hat (estimator.py: V_X == V_star_hat, the
+    # anchored-tau V*). Reading it rather than recomputing
+    # ``regularization.apply(V(theta_hat))`` is both the correctness contract
+    # (the diagnostic's curvature is then the SAME matrix cond_info conditions
+    # and the Sigma_theta bread uses, including when the ridge binds) and the
+    # right reuse of a package-owned quantity: DiagonalTikhonov.apply is
+    # stateless, so a recompute would re-anchor a DIFFERENT tau at theta_hat
+    # (a silent divergence under a binding ridge; PR #178 review). The
+    # ``V_star=`` override stays for callers supplying a custom V*.
     if V_star is None:
-        if regularization is None:
-            regularization = result.regularization or DiagonalTikhonov()
-        V = _to_plain(covariance.covariance(model, theta_hat, measure))
-        V_star_arr, _tau = regularization.apply(V)
+        V_star_arr = _to_plain(result.V_X)
     else:
         V_star_arr = jnp.asarray(V_star)
 

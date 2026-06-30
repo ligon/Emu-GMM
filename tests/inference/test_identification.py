@@ -41,6 +41,7 @@ import numpy as np
 import pytest
 from emu_gmm import (
     ContinuouslyUpdated,
+    DiagonalTikhonov,
     EmpiricalMeasure,
     IIDCovariance,
     estimate,
@@ -251,6 +252,89 @@ class TestRobustVsWaldDivergence:
         ks = k_statistic(result, result.measure, IIDCovariance(), _iv_model)
         assert bool(jnp.isfinite(ks.K))
         assert bool(jnp.isfinite(ks.p_K))
+
+
+# ---------------------------------------------------------------------------
+# (c') Binding-ridge regime (PR #178 review, Finding 1): the diagnostic must
+#      build its curvature off the FROZEN result.V_X, not a fresh ridge
+#      re-anchored at theta_hat. DiagonalTikhonov.apply is stateless, so a
+#      recompute would re-bisect a different tau; reading result.V_X keeps the
+#      info matrix bit-consistent with cond_info / Sigma_theta when tau binds.
+# ---------------------------------------------------------------------------
+
+
+@jdc.pytree_dataclass
+class _QuadParams:
+    a: float
+    b: float
+
+
+def _quad_model(x, theta):
+    y = x[0]
+    r = x[1]
+    z = x[2:5]
+    return z * (y - theta.a * r - theta.b * r * r)
+
+
+def _fit_binding_ridge(seed: int = 3, n: int = 2000):
+    """Near-collinear instruments + small kappa_target -> tau binds.
+
+    The start is deliberately FAR from theta_hat so the anchored ridge (frozen
+    at theta_init) differs materially from one re-anchored at theta_hat — the
+    regime where reading result.V_X vs recomputing actually diverges.
+    """
+    rng = np.random.default_rng(seed)
+    r = rng.normal(size=n)
+    z1 = r + 0.05 * rng.normal(size=n)
+    z2 = z1 + 0.001 * rng.normal(size=n)  # near-collinear with z1
+    z3 = r * r + 0.05 * rng.normal(size=n)
+    Z = np.column_stack([z1, z2, z3])
+    y = 1.0 * r + 0.5 * r * r + rng.normal(size=n) * 0.2
+    X = np.column_stack([y, r, Z])
+    measure = EmpiricalMeasure.from_arrays(jnp.asarray(X), M=3)
+    reg = DiagonalTikhonov(kappa_target=50.0)
+    result = estimate(
+        _quad_model,
+        measure,
+        covariance=IIDCovariance(),
+        weighting=ContinuouslyUpdated(),
+        regularization=reg,
+        optimizer=optimistix_lm(),
+        theta_init=_QuadParams(a=7.0, b=-5.0),  # far start
+    )
+    return result, reg
+
+
+class TestBindingRidgeUsesFrozenVX:
+    def test_diagnostic_reads_frozen_V_X_not_a_reanchor(self):
+        result, reg = _fit_binding_ridge()
+        # The ridge genuinely binds here (the regime the prior fixtures could
+        # not reach).
+        assert float(result.diagnostics.tau_realised) > 0.0
+        assert bool(result.diagnostics.binding_ridge)
+
+        # The re-anchored V* (the OLD default: regularization.apply at
+        # theta_hat) differs materially from the frozen result.V_X.
+        V_th = IIDCovariance().covariance(_quad_model, result.theta_hat, result.measure)
+        V_th = jnp.asarray(getattr(V_th, "array", V_th))
+        V_reanchor, _tau = reg.apply(V_th)
+        V_reanchor = np.asarray(V_reanchor)
+        V_X = np.asarray(result.V_X.array)
+        assert not np.allclose(V_X, V_reanchor)
+
+        default = identification_strength(result, _quad_model)
+        via_vx = identification_strength(result, _quad_model, V_star=V_X)
+        via_reanchor = identification_strength(result, _quad_model, V_star=V_reanchor)
+
+        for name in default.blocks:
+            d = float(default[name].min_eigenvalue)
+            vx = float(via_vx[name].min_eigenvalue)
+            re = float(via_reanchor[name].min_eigenvalue)
+            # Default == the frozen-V_X path, exactly (the fix).
+            np.testing.assert_allclose(d, vx, rtol=1e-12)
+            # ... and differs from the re-anchored path by a non-trivial margin
+            # (proving it is NOT silently recomputing the ridge).
+            assert abs(d - re) > 1e-3 * abs(d)
 
 
 # ---------------------------------------------------------------------------
