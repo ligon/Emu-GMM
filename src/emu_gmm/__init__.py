@@ -105,6 +105,13 @@ from emu_gmm.numerics import ridge_inverse
 from emu_gmm.optimizer import linear_solver, optimistix_lm, scipy_lm
 from emu_gmm.parameter_space import ParameterSpace, on
 from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
+from emu_gmm.persistence import (
+    FactorySpec,
+    LawState,
+    load_law,
+    load_law_state,
+    save_law,
+)
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.runtime import configure, recommended_env
 from emu_gmm.types import (
@@ -234,6 +241,13 @@ __all__ = [
     "EmpiricalLaw",
     "AsymptoticLaw",
     "couple",
+    # Typed, versioned law persistence (#181): inert, cross-version artifact
+    # (LawState schema + save_law/load_law), NOT pickle. Both grades.
+    "LawState",
+    "FactorySpec",
+    "save_law",
+    "load_law",
+    "load_law_state",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",
