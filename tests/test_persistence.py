@@ -119,6 +119,19 @@ class TestManifoldRoundTrip:
         assert {"type": "PSDFixedRank", "n": 5, "k": 2} in manifest["leaf_tags"]
         assert manifest["psd_rank"] == 2
 
+    def test_save_load_accepts_a_file_like_buffer(self):
+        # An object-store / fsspec target is an open binary buffer, not a path.
+        import io
+
+        law = self._law()
+        buf = io.BytesIO()
+        save_law(law, buf)  # write to the buffer directly (no temp file)
+        buf.seek(0)
+        reloaded = load_law(buf)  # read back from the buffer
+        np.testing.assert_array_equal(
+            np.asarray(reloaded.eigenvalue_se()), np.asarray(law.eigenvalue_se())
+        )
+
     def test_resave_of_reloaded_law_is_idempotent(self, tmp_path):
         law = self._law()
         p1, p2 = tmp_path / "a.npz", tmp_path / "b.npz"

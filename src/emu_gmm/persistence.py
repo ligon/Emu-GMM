@@ -14,12 +14,20 @@ plus a JSON manifest, reconstructed through the normal constructors
 (:meth:`AsymptoticLaw.from_moments`, the :func:`tag_to_manifold` codec) rather
 than by resurrecting a live object.
 
-**Scope (first slice).** The *asymptotic* grade --- the paper's primary need
-(SEs, ``eigenvalue_se`` / ``gamma_se``, functional SEs read off
-:math:`\mathcal N(\hat\theta, \Sigma_\theta)`). The *empirical* grade
-(``EmpiricalLaw`` draws + ``{0,1}^E`` event flags + coupling, for ``given`` /
-bootstrap queries) is the next slice; :func:`save_law` refuses it loudly rather
-than writing a half-supported artifact.
+**Scope (first slice).** The *asymptotic* grade --- SEs, ``eigenvalue_se`` /
+``gamma_se``, functional SEs read off :math:`\mathcal N(\hat\theta,
+\Sigma_\theta)`. This covers the homogeneous clustered / BLP standard errors.
+
+The *empirical* grade (``EmpiricalLaw``: stacked draws + ``{0,1}^E`` event
+flags + coupling provenance) is the **immediate next slice and the consumer's
+primary need** --- the K-Aggregators heterogeneous law is bootstrap-only (no
+frozen analytic :math:`\Sigma_\theta`), the reported over-identification test
+is the cluster-wild Hansen :math:`J` (the empirical law of :math:`Q`), and the
+binding-ridge / indefinite-meat conditionals are ``given`` queries. None of
+those is asymptotic. Until that slice lands, :func:`save_law` refuses the
+empirical grade loudly rather than writing an artifact that drops the
+event/coupling provenance that makes ``given`` / ``couple`` sound (PR #182
+review).
 
 **Companion, not successor** (the issue's recommendation): ``LawState`` is the
 durable projection; :class:`~emu_gmm.types.EstimationResult` stays the live,
@@ -177,12 +185,19 @@ def _write_state(state: LawState, path: Any) -> None:
         arrays["sigma_theta"] = np.asarray(state.sigma_theta)
     # The manifest rides as a 0-d unicode array -> no pickle needed on load.
     arrays["__manifest__"] = np.asarray(json.dumps(manifest))
-    # Write through an explicit file handle so the path is LITERAL: np.savez
-    # appends ".npz" to a bare path, which would then mismatch load_law's
-    # literal open. typeshed's savez stub doesn't model keyword array names
-    # (only *args + allow_pickle), hence the suppression.
-    with open(path, "wb") as fh:
-        np.savez(fh, **arrays)  # type: ignore[arg-type]
+    # typeshed's savez stub doesn't model keyword array names (only *args +
+    # allow_pickle), hence the suppression.
+    if hasattr(path, "write"):
+        # An already-open binary file-like / buffer (an fsspec target, BytesIO,
+        # ...): write to it directly so an object-store law store composes with
+        # no write-to-temp round-trip. np.savez does NOT append ".npz" to a
+        # file object, so the bytes are literal.
+        np.savez(path, **arrays)  # type: ignore[arg-type]
+    else:
+        # A filesystem path: open it ourselves so the path is LITERAL (np.savez
+        # would append ".npz" to a bare path, mismatching load_law's open).
+        with open(path, "wb") as fh:
+            np.savez(fh, **arrays)  # type: ignore[arg-type]
 
 
 def _read_state(path: Any) -> LawState:
@@ -246,15 +261,25 @@ def _state_to_law(state: LawState) -> AsymptoticLaw:
     return AsymptoticLaw(_backing=backing, label="asymptotic(loaded)")
 
 
-def save_law(law: EstimatorLaw, path: Any) -> None:
-    """Persist ``law`` to ``path`` as a typed, versioned :class:`LawState` (#181).
+def save_law(law: EstimatorLaw, target: Any) -> None:
+    """Persist ``law`` as a typed, versioned :class:`LawState` (#181).
 
-    Asymptotic grade only in this slice; an :class:`~emu_gmm.law.EmpiricalLaw`
-    is refused loudly (its draws + event-flag persistence is the next slice)
-    rather than silently dropping the events / coupling provenance.
+    Parameters
+    ----------
+    law
+        The law to persist. The asymptotic grade is implemented; an
+        :class:`~emu_gmm.law.EmpiricalLaw` is refused loudly (rather than
+        silently dropping the event/coupling provenance) until the empirical
+        slice lands.
+    target
+        A filesystem path **or** an already-open binary file-like / buffer
+        (``io.BytesIO``, an ``fsspec`` handle, ...). Passing a file-like lets an
+        object-store / URI-addressed law store (e.g. ``s3://``) write directly
+        with no temp round-trip --- symmetric with :func:`load_law`, which goes
+        through :func:`numpy.load` and already accepts a buffer.
     """
     if isinstance(law, AsymptoticLaw):
-        _write_state(_asymptotic_state(law), path)
+        _write_state(_asymptotic_state(law), target)
         return
     raise NotImplementedError(
         f"save_law: persistence of {type(law).__name__} is not implemented yet "
@@ -265,15 +290,17 @@ def save_law(law: EstimatorLaw, path: Any) -> None:
     )
 
 
-def load_law(path: Any) -> EstimatorLaw:
+def load_law(target: Any) -> EstimatorLaw:
     """Load a law persisted by :func:`save_law`.
 
+    ``target`` is a filesystem path or an open binary file-like / buffer (an
+    ``fsspec`` handle, ``io.BytesIO``, ...) --- symmetric with :func:`save_law`.
     Returns a moments-backed :class:`~emu_gmm.law.AsymptoticLaw` --- queryable
     (``se`` / ``functional_se`` / ``eigenvalue_se`` / ``gamma_se`` / ``sample``)
     with no live :class:`~emu_gmm.types.EstimationResult` required. Validates the
     ``schema_version`` and refuses an unknown one.
     """
-    state = _read_state(path)
+    state = _read_state(target)
     if state.grade == "asymptotic":
         return _state_to_law(state)
     raise NotImplementedError(
