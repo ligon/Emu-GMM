@@ -79,6 +79,12 @@ from emu_gmm.inference import (
     moment_wild_bootstrap,
     profiled_k_confidence_set,
 )
+from emu_gmm.law import (
+    AsymptoticLaw,
+    EmpiricalLaw,
+    EstimatorLaw,
+    couple,
+)
 from emu_gmm.manifolds import (
     Euclidean,
     Interval,
@@ -219,6 +225,15 @@ __all__ = [
     # ManifoldLeaf pytree (a valid theta_init) consumed by estimate(parameters=).
     "ParameterSpace",
     "on",
+    # EstimatorLaw (#144): the law of the estimator as one query algebra over
+    # the statistic's codomain, with grade-fixing implementations. EmpiricalLaw
+    # (stacked draws x event-flags x validity counts x provenance; given /
+    # couple / Bootstrap*-routed cov/quantile/prob) and AsymptoticLaw (the
+    # Gaussian N(theta_hat, Sigma_theta) delta-method grade; given refuses).
+    "EstimatorLaw",
+    "EmpiricalLaw",
+    "AsymptoticLaw",
+    "couple",
     # Protocols (for type-checking user code)
     "Measure",
     "CovarianceStrategy",
