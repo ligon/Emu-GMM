@@ -61,6 +61,107 @@ from emu_gmm.law import AsymptoticLaw, EmpiricalLaw, EstimatorLaw
 from emu_gmm.studies.driver import MCRecords
 from emu_gmm.types import FitRecord
 
+
+@dataclasses.dataclass(frozen=True)
+class FactorySpec:
+    r"""Typed record of the estimator configuration that is part of T's identity (#142).
+
+    The frequentist law is the law of the *estimator* ``T``, and ``T``'s identity
+    includes the analyst-chosen configuration (weighting, regularisation,
+    covariance, optimiser, ...; ``docs/design.org`` §EstimatorLaw, the #142
+    anchor). This typed slot records that configuration alongside a persisted
+    law so a reloaded artifact is self-describing --- a typed record, not a loose
+    ``dict``.
+
+    The strategy *objects* themselves are not serialisable (and are model code,
+    which must not ride a data artifact), so each is recorded as its **type
+    name** (a string). ``extra`` is a free, JSON-serialisable slot for the
+    consumer's own ``Spec`` payload (e.g. CerealDemand's estimator spec).
+
+    Attributes
+    ----------
+    weighting, regularization, covariance, optimizer, penalty, model
+        Type-name strings of the resolved strategies (or ``None``).
+    moment_names
+        The moment labels, when known.
+    extra
+        Consumer-defined JSON-able payload (the embedded ``Spec``).
+    """
+
+    weighting: str | None = None
+    regularization: str | None = None
+    covariance: str | None = None
+    optimizer: str | None = None
+    penalty: str | None = None
+    model: str | None = None
+    moment_names: tuple[str, ...] | None = None
+    extra: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+    @classmethod
+    def from_estimator(
+        cls, factory_spec: dict[str, Any], *, extra: dict[str, Any] | None = None
+    ) -> FactorySpec:
+        """Build from a ``build_estimator`` ``_emu_gmm_factory_spec`` dict.
+
+        Records each resolved strategy as its type name (the objects are model
+        code and never persisted). ``extra`` carries the consumer's own Spec.
+        """
+
+        def _name(obj: Any) -> str | None:
+            if obj is None:
+                return None
+            return getattr(type(obj), "__name__", None) or repr(type(obj))
+
+        mn = factory_spec.get("moment_names")
+        return cls(
+            weighting=_name(factory_spec.get("weighting")),
+            regularization=_name(factory_spec.get("regularization")),
+            covariance=_name(factory_spec.get("covariance")),
+            optimizer=_name(factory_spec.get("optimizer")),
+            penalty=_name(factory_spec.get("penalty")),
+            model=_name(factory_spec.get("model")),
+            moment_names=None if mn is None else tuple(str(m) for m in mn),
+            extra=dict(extra or {}),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        """A plain JSON-serialisable dict (rides the inert manifest)."""
+        d = dataclasses.asdict(self)
+        d["moment_names"] = (
+            None if self.moment_names is None else list(self.moment_names)
+        )
+        return d
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> FactorySpec:
+        """Inverse of :meth:`to_json`."""
+        mn = d.get("moment_names")
+        return cls(
+            weighting=d.get("weighting"),
+            regularization=d.get("regularization"),
+            covariance=d.get("covariance"),
+            optimizer=d.get("optimizer"),
+            penalty=d.get("penalty"),
+            model=d.get("model"),
+            moment_names=None if mn is None else tuple(mn),
+            extra=dict(d.get("extra") or {}),
+        )
+
+
+def _coerce_factory_spec(value: Any) -> FactorySpec | None:
+    """Accept a :class:`FactorySpec`, a plain dict (-> ``extra``), or ``None``."""
+    if value is None or isinstance(value, FactorySpec):
+        return value
+    if isinstance(value, dict):
+        # Back-compat with the old dict[str, Any] usage: treat a bare dict as the
+        # consumer's payload.
+        return FactorySpec(extra=_jsonable(value, what="factory_spec"))
+    raise TypeError(
+        f"save_law: factory_spec must be a FactorySpec, a dict, or None; got "
+        f"{type(value).__name__}."
+    )
+
+
 # The stackable (per-rep array) fields of a FitRecord, in declaration order.
 _FITRECORD_ARRAY_FIELDS = (
     "theta_flat",
@@ -109,8 +210,9 @@ class LawState:
     diagnostics
         Scalar provenance (``J_stat``, ``J_dof``, ``gauge_nullspace_dim``, ...).
     factory_spec
-        Optional estimator-configuration record (#142 anchor); ``None`` when
-        the source law did not carry one.
+        Optional typed :class:`FactorySpec` recording the estimator
+        configuration that is part of T's identity (#142 anchor); ``None`` when
+        none was supplied.
     """
 
     schema_version: int
@@ -119,7 +221,7 @@ class LawState:
     leaf_tags: tuple[dict[str, Any], ...]
     component_shapes: tuple[tuple[int, ...], ...] | None
     diagnostics: dict[str, Any]
-    factory_spec: dict[str, Any] | None = None
+    factory_spec: FactorySpec | None = None
     # -- asymptotic grade --
     theta_components: tuple[np.ndarray, ...] | None = None
     sigma_theta: np.ndarray | None = None
@@ -288,7 +390,9 @@ def _write_state(state: LawState, target: Any) -> None:
             else [list(s) for s in state.component_shapes]
         ),
         "diagnostics": state.diagnostics,
-        "factory_spec": state.factory_spec,
+        "factory_spec": (
+            None if state.factory_spec is None else state.factory_spec.to_json()
+        ),
         "backing": state.backing,
     }
     arrays: dict[str, np.ndarray] = {}
@@ -371,7 +475,11 @@ def _read_state(target: Any) -> LawState:
             leaf_tags=tuple(manifest["leaf_tags"]),
             component_shapes=shapes,
             diagnostics=manifest["diagnostics"],
-            factory_spec=manifest.get("factory_spec"),
+            factory_spec=(
+                None
+                if manifest.get("factory_spec") is None
+                else FactorySpec.from_json(manifest["factory_spec"])
+            ),
             backing=manifest.get("backing"),
         )
         if manifest["grade"] == "asymptotic":
@@ -478,7 +586,9 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
     )
 
 
-def save_law(law: EstimatorLaw, target: Any) -> None:
+def save_law(
+    law: EstimatorLaw, target: Any, *, factory_spec: FactorySpec | dict | None = None
+) -> None:
     """Persist ``law`` as a typed, versioned :class:`LawState` (#181).
 
     Parameters
@@ -494,16 +604,28 @@ def save_law(law: EstimatorLaw, target: Any) -> None:
         object-store / URI-addressed law store (e.g. ``s3://``) write directly
         with no temp round-trip --- symmetric with :func:`load_law`, which goes
         through :func:`numpy.load` and already accepts a buffer.
+    factory_spec
+        Optional typed :class:`FactorySpec` recording the estimator
+        configuration that is part of T's identity (#142): which weighting /
+        regularisation / covariance / optimiser produced the law, plus an
+        ``extra`` slot for the consumer's own ``Spec``. A plain ``dict`` is
+        accepted and stored as the ``extra`` payload (back-compat). Round-trips
+        on the inert manifest (no model code; type-name strings only) and comes
+        back on ``LawState.factory_spec`` / via :func:`load_law_state`.
     """
     if isinstance(law, AsymptoticLaw):
-        _write_state(_asymptotic_state(law), target)
+        state = _asymptotic_state(law)
     elif isinstance(law, EmpiricalLaw):
-        _write_state(_empirical_state(law), target)
+        state = _empirical_state(law)
     else:
         raise NotImplementedError(
             f"save_law: don't know how to persist {type(law).__name__}; expected "
             "an AsymptoticLaw or EmpiricalLaw."
         )
+    resolved = _coerce_factory_spec(factory_spec)
+    if resolved is not None:
+        state = dataclasses.replace(state, factory_spec=resolved)
+    _write_state(state, target)
 
 
 def load_law(target: Any) -> EstimatorLaw:
@@ -528,4 +650,16 @@ def load_law(target: Any) -> EstimatorLaw:
     )
 
 
-__all__ = ["LawState", "save_law", "load_law"]
+def load_law_state(target: Any) -> LawState:
+    """Read the typed :class:`LawState` from an artifact without rebuilding a law.
+
+    The cheap inspection path: returns the validated record (``grade``,
+    ``param_names``, ``diagnostics``, the typed :class:`FactorySpec`, ...) so a
+    consumer can read a persisted law's provenance / configuration without
+    reconstructing the queryable law. ``target`` is a path or a file-like, as for
+    :func:`load_law`.
+    """
+    return _read_state(target)
+
+
+__all__ = ["LawState", "FactorySpec", "save_law", "load_law", "load_law_state"]

@@ -40,6 +40,7 @@ from emu_gmm import (
     EmpiricalLaw,
     EmpiricalMeasure,
     Euclidean,
+    FactorySpec,
     IIDCovariance,
     Interval,
     LawState,
@@ -47,6 +48,7 @@ from emu_gmm import (
     PSDFixedRank,
     estimate,
     load_law,
+    load_law_state,
     save_law,
 )
 from emu_gmm._internal.law_state import (
@@ -366,6 +368,56 @@ class TestEmpiricalRoundTrip:
         law = EmpiricalLaw.from_records(mc_bad)
         with pytest.raises(TypeError, match="coupling_id"):
             save_law(law, tmp_path / "x.npz")
+
+
+class TestFactorySpec:
+    def test_typed_factory_spec_round_trips(self, tmp_path):
+        law = AsymptoticLaw(_fit_scalar())
+        fs = FactorySpec(
+            weighting="ContinuouslyUpdated",
+            covariance="IIDCovariance",
+            extra={"paper": "CerealDemand", "model": "heterogeneous_K"},
+        )
+        p = tmp_path / "law.npz"
+        save_law(law, p, factory_spec=fs)
+        # load_law_state exposes the typed record without rebuilding the law.
+        state = load_law_state(p)
+        assert isinstance(state.factory_spec, FactorySpec)
+        assert state.factory_spec == fs
+        assert state.factory_spec.extra["paper"] == "CerealDemand"
+
+    def test_dict_factory_spec_is_back_compat_extra(self, tmp_path):
+        law = AsymptoticLaw(_fit_scalar())
+        p = tmp_path / "law.npz"
+        save_law(law, p, factory_spec={"any": "payload"})
+        state = load_law_state(p)
+        assert isinstance(state.factory_spec, FactorySpec)
+        assert state.factory_spec.extra == {"any": "payload"}
+
+    def test_from_estimator_records_type_names(self):
+        fs = FactorySpec.from_estimator(
+            {
+                "weighting": ContinuouslyUpdated(),
+                "covariance": IIDCovariance(),
+                "moment_names": ("m0", "m1"),
+            },
+            extra={"k": 1},
+        )
+        assert fs.weighting == "ContinuouslyUpdated"
+        assert fs.covariance == "IIDCovariance"
+        assert fs.moment_names == ("m0", "m1")
+        assert fs.extra == {"k": 1}
+
+    def test_none_factory_spec_default(self, tmp_path):
+        law = AsymptoticLaw(_fit_scalar())
+        p = tmp_path / "law.npz"
+        save_law(law, p)  # no factory_spec
+        assert load_law_state(p).factory_spec is None
+
+    def test_non_jsonable_factory_spec_dict_refused(self, tmp_path):
+        law = AsymptoticLaw(_fit_scalar())
+        with pytest.raises(TypeError, match="factory_spec"):
+            save_law(law, tmp_path / "x.npz", factory_spec={"bad": np.arange(3)})
 
 
 class TestGuardrails:

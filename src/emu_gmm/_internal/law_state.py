@@ -140,7 +140,9 @@ class MomentsBacking:
     psd_index: int | None
     psd_rank: int | None
     diagnostics: dict[str, Any] = dataclasses.field(default_factory=dict)
-    factory_spec: dict[str, Any] | None = None
+    # The typed FactorySpec (emu_gmm.persistence) rides opaquely here so this
+    # _internal carrier stays decoupled from the public persistence type.
+    factory_spec: Any = None
 
     @classmethod
     def build(

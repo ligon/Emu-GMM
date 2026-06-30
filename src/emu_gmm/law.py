@@ -202,18 +202,20 @@ class EstimatorLaw(abc.ABC):
         grade) the implementation REFUSES rather than approximates.
         """
 
-    def save(self, path: Any) -> None:
+    def save(self, path: Any, *, factory_spec: Any = None) -> None:
         """Persist this law to ``path`` as a typed, versioned :class:`LawState` (#181).
 
         Writes an inert, cross-version artifact (a single ``.npz`` with a JSON
         manifest) via :func:`emu_gmm.persistence.save_law` --- NOT a pickle: no
         class references or model code are entombed, so it reloads under a
-        future emu through :func:`emu_gmm.persistence.load_law`. The asymptotic
-        grade is supported; the empirical grade is the next slice.
+        future emu through :func:`emu_gmm.persistence.load_law`. Both the
+        asymptotic and empirical grades are supported. Pass ``factory_spec`` (a
+        :class:`emu_gmm.persistence.FactorySpec`) to record the estimator
+        configuration that is part of T's identity (#142).
         """
         from emu_gmm.persistence import save_law
 
-        save_law(self, path)
+        save_law(self, path, factory_spec=factory_spec)
 
 
 # ---------------------------------------------------------------------------
