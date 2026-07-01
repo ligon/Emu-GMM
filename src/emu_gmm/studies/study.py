@@ -10,7 +10,7 @@ summarizer (or a new one) over ``StudyResult.records`` directly.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import jax
@@ -74,6 +74,7 @@ def monte_carlo_study(
     alpha: tuple[float, ...] = (0.01, 0.05, 0.10),
     anchor_per_rep: bool = False,
     coupling_id: Any = None,
+    statistics: Mapping[str, Callable[[EstimationResult, Measure], Any]] | None = None,
 ) -> StudyResult:
     """Run a study and compute the standard summary battery.
 
@@ -101,6 +102,10 @@ def monte_carlo_study(
         Wald CI level for :func:`coverage`.
     alpha
         Rejection levels for :func:`size_power`.
+    statistics
+        Optional custom per-draw extractors, forwarded verbatim to
+        :func:`replicate` and surfaced on ``StudyResult.records.extra``
+        (#179). See :func:`replicate` for the contract.
     """
     records = replicate(
         run,
@@ -110,6 +115,7 @@ def monte_carlo_study(
         theta_init=theta_init,
         anchor_per_rep=anchor_per_rep,
         coupling_id=coupling_id,
+        statistics=statistics,
     )
     return StudyResult(
         records=records,

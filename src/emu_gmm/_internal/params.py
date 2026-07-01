@@ -18,6 +18,7 @@ the manifold spec calls :func:`manifold_spec_from_params` alongside.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from typing import Any
 
 import jax
@@ -532,6 +533,52 @@ def manifold_spec_from_params(params: Any) -> ManifoldSpec:
     return spec
 
 
+def interest_identified_dim(params: Any, fields: Sequence[str]) -> int:
+    r"""Identified (quotient) dimension carried by the named leaves of ``params``.
+
+    Sums, over each leaf whose ``field_name`` is in ``fields``, its ambient
+    size minus its gauge dimension --- the same drop-by-count quotient rule
+    :func:`emu_gmm._internal.pinv_eigvalrule.pinv_eigvalrule` and the gauge-aware
+    ``Sigma_theta`` path use. For a fully Euclidean / scalar tree this is just
+    the count of named coordinates; for a gauge-bearing leaf (e.g. a
+    ``PSDFixedRank(n, K)`` factor) it is ``nK - K(K-1)/2``.
+
+    This is the *subvector* degrees-of-freedom of an interest block --- the
+    reference :math:`\chi^2` dimension for a Kleibergen :math:`K`-statistic whose
+    nuisance has been concentrated out (Kleibergen--Mavroeidis 2009; see
+    :func:`emu_gmm.inference.k_statistic.k_statistic`'s ``interest`` argument and
+    :func:`emu_gmm.inference.profiled_k_confidence_set`). Shared by both so the
+    subvector dof lives in exactly one place.
+
+    Parameters
+    ----------
+    params
+        A parameter PyTree (same contract as :func:`manifold_spec_from_params`).
+    fields
+        Field names of the interest leaves (a subset of the tree's leaves).
+
+    Returns
+    -------
+    int
+        The summed quotient dimension of the named leaves.
+    """
+    requested = set(fields)
+    spec = manifold_spec_from_params(params)
+    available = {ls.field_name for ls in spec.leaf_specs if ls.field_name is not None}
+    missing = requested - available
+    if missing:
+        raise ValueError(
+            f"interest_identified_dim: field(s) {sorted(missing)} not found among "
+            f"the parameter leaves {sorted(n for n in available)}."
+        )
+    total = 0
+    for ls in spec.leaf_specs:
+        if ls.field_name in requested:
+            size = int(np.prod(ls.ambient_shape)) if ls.ambient_shape != () else 1
+            total += size - int(ls.manifold.gauge_dim)
+    return total
+
+
 def flatten_params_for_ad(
     params: Any,
 ) -> tuple[Float[Array, " D"], jax.tree_util.PyTreeDef, ManifoldSpec | None]:
@@ -576,4 +623,5 @@ __all__ = [
     "unflatten_params",
     "param_names",
     "manifold_spec_from_params",
+    "interest_identified_dim",
 ]
