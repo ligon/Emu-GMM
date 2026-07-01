@@ -222,6 +222,10 @@ class LawState:
     component_shapes: tuple[tuple[int, ...], ...] | None
     diagnostics: dict[str, Any]
     factory_spec: FactorySpec | None = None
+    # Per-leaf field names (aligned with ``theta_components``); ``None`` for
+    # artifacts written before leaf-name persistence (additive, back-compatible:
+    # absence just means leaves are unaddressable by name on reload).
+    leaf_field_names: tuple[str | None, ...] | None = None
     # -- asymptotic grade --
     theta_components: tuple[np.ndarray, ...] | None = None
     sigma_theta: np.ndarray | None = None
@@ -251,6 +255,7 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
             param_names=b.names,
             leaf_tags=b.leaf_tags,
             component_shapes=b.component_shapes,
+            leaf_field_names=getattr(b, "field_names", None),
             theta_components=b.components,
             sigma_theta=b.sigma,
             psd_index=b.psd_index,
@@ -268,10 +273,15 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
         leaf_manifolds = [ls.manifold for ls in spec.leaf_specs]
         leaf_tags = tuple(manifold_to_tag(m) for m in leaf_manifolds)
         psd_index, psd_rank = locate_psd_leaf(leaf_manifolds)
+        leaf_field_names: tuple[str | None, ...] | None = tuple(
+            ls.field_name for ls in spec.leaf_specs
+        )
     else:
-        # v1 / all-scalar tree: every component is a Euclidean leaf, no gauge.
+        # v1 / all-scalar tree: every component is a Euclidean leaf, no gauge;
+        # the parameter names ARE the per-leaf field names (one scalar each).
         leaf_tags = tuple(euclidean_tag(c) for c in comps)
         psd_index, psd_rank = None, None
+        leaf_field_names = tuple(law.param_names)
     component_shapes = tuple(tuple(int(s) for s in np.shape(c)) for c in comps)
 
     diag = result.diagnostics
@@ -289,6 +299,7 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
         param_names=tuple(law.param_names),
         leaf_tags=leaf_tags,
         component_shapes=component_shapes,
+        leaf_field_names=leaf_field_names,
         theta_components=comps,
         sigma_theta=sigma,
         psd_index=psd_index,
@@ -389,6 +400,9 @@ def _write_state(state: LawState, target: Any) -> None:
             if state.component_shapes is None
             else [list(s) for s in state.component_shapes]
         ),
+        "leaf_field_names": (
+            None if state.leaf_field_names is None else list(state.leaf_field_names)
+        ),
         "diagnostics": state.diagnostics,
         "factory_spec": (
             None if state.factory_spec is None else state.factory_spec.to_json()
@@ -468,12 +482,14 @@ def _read_state(target: Any) -> LawState:
             if manifest.get("component_shapes") is None
             else tuple(tuple(int(s) for s in sh) for sh in manifest["component_shapes"])
         )
+        lfn = manifest.get("leaf_field_names")
         common = dict(
             schema_version=ver,
             grade=manifest["grade"],
             param_names=tuple(manifest["param_names"]),
             leaf_tags=tuple(manifest["leaf_tags"]),
             component_shapes=shapes,
+            leaf_field_names=None if lfn is None else tuple(lfn),
             diagnostics=manifest["diagnostics"],
             factory_spec=(
                 None
@@ -541,6 +557,7 @@ def _state_to_asymptotic(state: LawState) -> AsymptoticLaw:
         psd_rank=psd_rank,
         diagnostics=dict(state.diagnostics),
         factory_spec=state.factory_spec,
+        field_names=state.leaf_field_names,
     )
     return AsymptoticLaw(_backing=backing, label="asymptotic(loaded)")
 

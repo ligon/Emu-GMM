@@ -37,20 +37,30 @@ at the asymptotic grade -- the implementation REFUSES rather than approximates")
   closed form, and the framework refuses rather than approximates.
 
 The codomain is generic: a gauge-invariant *functional* ``f`` of the parameter
-components projects the law onto the quantity of interest. For a
-``PSDFixedRank`` :math:`\Gamma = A A^\top` factor the shipped functionals
-:func:`~emu_gmm.inference.functional_se.gamma_eigenvalues` /
-:func:`~emu_gmm.inference.functional_se.gamma_vech` make eigenvalues / ``vech``
-queryable, manifold/gauge-aware: at the asymptotic grade through the
-gauge-invariant delta method (the gauge nullspace is already pinned out of
-:math:`\Sigma_\theta`); at the empirical grade through the gauge-invariant
-functional applied PER DRAW (``theta_flat[r]`` :math:`\to A \to \Gamma \to`
-``eigvalsh``), never reducing the gauge-arbitrary raw ``theta_flat`` columns.
+components projects the law onto the quantity of interest, evaluated at the
+law's grade (delta method / per-draw), never reducing the gauge-arbitrary raw
+``theta_flat`` columns.
+
+**Geometry supplies the queries (the leaf view).** Rather than hard-coding one
+application's parameters on the law, the *manifold* each leaf lives on declares
+its canonical gauge-invariant functionals (:meth:`ManifoldParam.invariants` ---
+``PSDFixedRank`` -> ``eigenvalues`` / ``gamma`` of :math:`\Gamma = A A^\top`;
+flat leaves -> ``value``), and the law --- which carries its parameter geometry
+via :attr:`~EstimatorLaw.leaf_specs` --- routes them through its query algebra::
+
+    law.leaf("Gamma").se("eigenvalues")   # PSDFixedRank leaf, either grade
+    law.leaf("phi").se()                  # flat leaf, invariant "value"
+
+So a sensible per-leaf query set falls out of the geometry, uniformly across
+grades and applications --- no parameter-specific law subclass. (The older
+model-specific ``eigenvalue_se`` / ``gamma_se`` / ``gamma_covariance`` methods
+remain as deprecated shims that delegate to the leaf view.)
 """
 
 from __future__ import annotations
 
 import abc
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -71,6 +81,9 @@ from emu_gmm._internal.law_state import (
 from emu_gmm._internal.law_state import (
     manifold_to_tag as _manifold_to_tag,
 )
+from emu_gmm._internal.law_state import (
+    tag_to_manifold as _tag_to_manifold,
+)
 from emu_gmm.inference.adaptive import (
     BootstrapMean,
     BootstrapPValue,
@@ -84,6 +97,8 @@ from emu_gmm.inference.functional_se import (
     gamma_eigenvalues,
     gamma_vech,
 )
+from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.spec import LeafSpec
 from emu_gmm.studies import summaries as _summaries
 from emu_gmm.studies.conditioning import (
     CoupledRecords,
@@ -99,6 +114,7 @@ __all__ = [
     "EstimatorLaw",
     "EmpiricalLaw",
     "AsymptoticLaw",
+    "LeafView",
     "couple",
     "eigenvalue_functional",
     "gamma_functional",
@@ -131,6 +147,136 @@ def gamma_functional(index: int = 0) -> Callable[[tuple[Any, ...]], Any]:
     Thin closure over :func:`emu_gmm.inference.functional_se.gamma_vech`.
     """
     return lambda comps: gamma_vech(comps, index)
+
+
+def _scalar_leaf_specs(names: tuple[str, ...]) -> tuple[LeafSpec, ...]:
+    """Synthesize per-scalar ``Euclidean()`` leaf specs for a v1 all-scalar tree.
+
+    A v1 estimate carries no :class:`ManifoldSpec` (every leaf is a 0-d scalar).
+    Each named parameter is then a scalar :class:`Euclidean` leaf, so the
+    leaf-view addresses it by its field name with the ``"value"`` invariant.
+    """
+    return tuple(
+        LeafSpec(offset=i, ambient_shape=(), manifold=Euclidean(), field_name=nm)
+        for i, nm in enumerate(names)
+    )
+
+
+def _psd_leaf_index_rank(law: EstimatorLaw, what: str) -> tuple[int, int]:
+    """``(component_index, rank)`` of the unique ``PSDFixedRank`` leaf, or raise.
+
+    Shared by the deprecated ``eigenvalue_se`` / ``gamma_se`` shims: they locate
+    the canonical Gamma factor by *manifold type* (the #117 rule --- exactly one
+    ``PSDFixedRank`` leaf), so a law with none / several is refused with the same
+    message shape the old code used.
+    """
+    specs = law.leaf_specs
+    if specs is not None:
+        idx, k = _locate_psd_leaf([ls.manifold for ls in specs])
+        if idx is not None and k is not None:
+            return idx, k
+    raise TypeError(
+        f"{type(law).__name__}.{what}: no unique PSDFixedRank leaf, so "
+        "Gamma = A @ A.T is undefined. Use a per-leaf view, law.leaf(name), or "
+        "law.se(f) with an explicit functional."
+    )
+
+
+def _warn_gamma_deprecation(method: str, replacement: str) -> None:
+    warnings.warn(
+        f"EstimatorLaw.{method} is deprecated and will be removed in a future "
+        f"release: it hard-codes the K-Aggregators Gamma parameterisation on the "
+        f"general law. Use the manifold-driven per-leaf view instead --- "
+        f"{replacement}.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+class LeafView:
+    """A per-leaf query handle: manifold invariants routed through a law's algebra.
+
+    Bound to ``(law, component_index, leaf_spec)``. Each invariant the leaf's
+    manifold declares (see :meth:`ManifoldParam.invariants`) becomes a query
+    ``se`` / ``cov`` / ``quantile`` / ``mean`` / ``prob`` / ``sample`` on the
+    *derived* codomain, evaluated at the law's epistemic grade: the delta method
+    for an :class:`AsymptoticLaw`, the per-draw empirical measure for an
+    :class:`EmpiricalLaw`. The view lifts a single-leaf functional
+    ``f(A) -> R^p`` to the components functional ``comps -> f(comps[index])`` the
+    law's algebra consumes, so nothing is re-implemented per leaf.
+
+    Obtain one via :meth:`EstimatorLaw.leaf`::
+
+        law.leaf("Gamma").se("eigenvalues")   # PSDFixedRank leaf
+        law.leaf("phi").se()                  # flat leaf, default invariant "value"
+        law.leaf("Gamma").invariants          # ("eigenvalues", "gamma")
+    """
+
+    def __init__(self, law: EstimatorLaw, index: int, spec: LeafSpec) -> None:
+        self._law = law
+        self._index = index
+        self._spec = spec
+        self._invariants = spec.manifold.invariants()
+
+    @property
+    def name(self) -> str | None:
+        """The leaf's field name."""
+        return self._spec.field_name
+
+    @property
+    def manifold(self) -> Any:
+        """The :class:`ManifoldParam` this leaf lives on."""
+        return self._spec.manifold
+
+    @property
+    def invariants(self) -> tuple[str, ...]:
+        """Names of the queryable gauge-invariant functionals for this leaf."""
+        return tuple(self._invariants)
+
+    def _functional(self, invariant: str) -> Callable[[tuple[Any, ...]], Any]:
+        try:
+            leaf_fn = self._invariants[invariant]
+        except KeyError:
+            raise KeyError(
+                f"leaf {self.name!r} on {self.manifold!r} has no invariant "
+                f"{invariant!r}; available: {self.invariants}."
+            ) from None
+        index = self._index
+        return lambda comps: jnp.atleast_1d(
+            jnp.ravel(jnp.asarray(leaf_fn(comps[index])))
+        )
+
+    def mean(self, invariant: str = "value") -> np.ndarray:
+        """Point estimate of ``invariant(leaf)`` under the law."""
+        return self._law.mean(self._functional(invariant))
+
+    def cov(self, invariant: str = "value") -> np.ndarray:
+        """Covariance of ``invariant(leaf)`` under the law."""
+        return self._law.cov(self._functional(invariant))
+
+    def se(self, invariant: str = "value") -> np.ndarray:
+        """Standard errors of ``invariant(leaf)`` under the law."""
+        return self._law.se(self._functional(invariant))
+
+    def quantile(self, q: float, invariant: str = "value") -> np.ndarray:
+        """Per-coordinate ``q``-quantile of ``invariant(leaf)`` under the law."""
+        return self._law.quantile(q, self._functional(invariant))
+
+    def prob(
+        self, predicate: Callable[[np.ndarray], Any], invariant: str = "value"
+    ) -> float:
+        """``P(predicate(invariant(leaf)))`` under the law."""
+        return self._law.prob(predicate, self._functional(invariant))
+
+    def sample(self, key: jax.Array, n: int, invariant: str = "value") -> np.ndarray:
+        """``n`` draws of ``invariant(leaf)`` from the law."""
+        return self._law.sample(key, n, self._functional(invariant))
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return (
+            f"LeafView(name={self.name!r}, manifold={self.manifold!r}, "
+            f"invariants={self.invariants})"
+        )
 
 
 class EstimatorLaw(abc.ABC):
@@ -202,6 +348,55 @@ class EstimatorLaw(abc.ABC):
         grade) the implementation REFUSES rather than approximates.
         """
 
+    # -- manifold geometry & per-leaf views (#GH: leaf-view) ----------------
+    @property
+    def leaf_specs(self) -> tuple[LeafSpec, ...] | None:
+        """Per-leaf manifold geometry (a :class:`LeafSpec` tuple), or ``None``.
+
+        ``None`` when this law does not carry its parameter geometry (a raw
+        :meth:`EmpiricalLaw.from_draws` law, or a records-backed law built
+        without ``leaf_specs``). Overridden by the concrete grades.
+        """
+        return None
+
+    @property
+    def leaves(self) -> tuple[tuple[str | None, Any], ...]:
+        """``((name, manifold), ...)`` for each parameter leaf, in flat order.
+
+        Empty when the law carries no geometry (:attr:`leaf_specs` is ``None``).
+        """
+        specs = self.leaf_specs
+        if specs is None:
+            return ()
+        return tuple((ls.field_name, ls.manifold) for ls in specs)
+
+    def leaf(self, name: str) -> LeafView:
+        """A :class:`LeafView` bound to the leaf named ``name``.
+
+        The view exposes the leaf manifold's canonical gauge-invariant queries
+        (``PSDFixedRank`` -> ``eigenvalues`` / ``gamma``; flat leaves ->
+        ``value``) routed through this law's grade-correct query algebra --- e.g.
+        ``law.leaf("Gamma").se("eigenvalues")``. Raises if the law carries no
+        geometry, or has no leaf of that name.
+        """
+        specs = self.leaf_specs
+        if specs is None:
+            raise TypeError(
+                f"{type(self).__name__}.leaf({name!r}): this law carries no "
+                "manifold geometry, so its leaves are not addressable. Build it "
+                "from a live result / template / leaf_specs (AsymptoticLaw(result), "
+                "EmpiricalLaw.from_records_with_template(records, template), or "
+                "from_records(..., leaf_specs=...))."
+            )
+        for i, ls in enumerate(specs):
+            if ls.field_name == name:
+                return LeafView(self, i, ls)
+        available = [ls.field_name for ls in specs]
+        raise KeyError(
+            f"{type(self).__name__}.leaf({name!r}): no leaf with that name. "
+            f"Available leaves: {available}."
+        )
+
     def save(self, path: Any, *, factory_spec: Any = None) -> None:
         """Persist this law to ``path`` as a typed, versioned :class:`LawState` (#181).
 
@@ -255,6 +450,7 @@ class EmpiricalLaw(EstimatorLaw):
         coupling_id: Any = None,
         key: Any = None,
         events: dict[str, np.ndarray] | None = None,
+        leaf_specs: tuple[LeafSpec, ...] | None = None,
         label: str = "empirical",
         conditioned: bool = False,
     ) -> None:
@@ -263,6 +459,11 @@ class EmpiricalLaw(EstimatorLaw):
         self._draws = np.atleast_2d(np.asarray(draws, dtype=float))
         self._used = np.asarray(used, dtype=bool).ravel()
         self._names = tuple(names)
+        self._leaf_specs = None if leaf_specs is None else tuple(leaf_specs)
+        # Component shapes drive per-draw unflattening; leaf_specs (when given)
+        # imply them, so a caller need only supply one.
+        if component_shapes is None and self._leaf_specs is not None:
+            component_shapes = tuple(ls.ambient_shape for ls in self._leaf_specs)
         self._component_shapes = (
             None
             if component_shapes is None
@@ -288,6 +489,7 @@ class EmpiricalLaw(EstimatorLaw):
         records: MCRecords | FitRecord,
         *,
         component_shapes: tuple[tuple[int, ...], ...] | None = None,
+        leaf_specs: tuple[LeafSpec, ...] | None = None,
         label: str | None = None,
     ) -> EmpiricalLaw:
         """Build the law from a repeated-sampling / bootstrap record stack.
@@ -314,6 +516,7 @@ class EmpiricalLaw(EstimatorLaw):
             used=np.asarray(rec.converged) > 0.5,
             names=tuple(rec.param_names),
             component_shapes=component_shapes,
+            leaf_specs=leaf_specs,
             records=records,
             coupling_id=coupling_id,
             key=key,
@@ -331,13 +534,23 @@ class EmpiricalLaw(EstimatorLaw):
     ) -> EmpiricalLaw:
         """:meth:`from_records` with ``component_shapes`` read off ``template``.
 
-        Convenience for the manifold case: the per-leaf ambient shapes are
-        taken from ``template.components()`` (a representative estimate sharing
-        the records' parameter structure), so eigenvalue / ``gamma`` queries
-        work without the caller spelling the shapes out.
+        Convenience for the manifold case: the per-leaf ambient shapes AND the
+        leaf geometry (manifolds + field names) are taken from ``template`` (a
+        representative estimate sharing the records' parameter structure), so
+        both the ``f``-functional queries and the per-leaf views
+        (``law.leaf("Gamma").se("eigenvalues")``) work without the caller
+        spelling anything out.
         """
         shapes = tuple(_component_shapes(template.components()))
-        return cls.from_records(records, component_shapes=shapes, label=label)
+        spec = template.manifold_spec
+        leaf_specs = (
+            tuple(spec.leaf_specs)
+            if spec is not None
+            else _scalar_leaf_specs(tuple(template.record().param_names))
+        )
+        return cls.from_records(
+            records, component_shapes=shapes, leaf_specs=leaf_specs, label=label
+        )
 
     @classmethod
     def from_draws(
@@ -346,6 +559,7 @@ class EmpiricalLaw(EstimatorLaw):
         *,
         names: tuple[str, ...] | None = None,
         component_shapes: tuple[tuple[int, ...], ...] | None = None,
+        leaf_specs: tuple[LeafSpec, ...] | None = None,
         events: dict[str, Any] | None = None,
         label: str | None = None,
     ) -> EmpiricalLaw:
@@ -388,6 +602,7 @@ class EmpiricalLaw(EstimatorLaw):
             used=used,
             names=tuple(names),
             component_shapes=component_shapes,
+            leaf_specs=leaf_specs,
             records=None,
             coupling_id=None,
             key=None,
@@ -400,6 +615,17 @@ class EmpiricalLaw(EstimatorLaw):
     @property
     def param_names(self) -> tuple[str, ...]:
         return self._names
+
+    @property
+    def leaf_specs(self) -> tuple[LeafSpec, ...] | None:
+        """Per-leaf geometry, when the law was built with it (else ``None``).
+
+        Supplied via ``from_records(..., leaf_specs=...)`` /
+        ``from_records_with_template`` / ``from_draws(..., leaf_specs=...)``.
+        Without it the law still answers the generic query algebra, but
+        :meth:`leaf` (per-leaf invariants) is unavailable.
+        """
+        return self._leaf_specs
 
     @property
     def n_draws(self) -> int:
@@ -591,6 +817,7 @@ class EmpiricalLaw(EstimatorLaw):
             used=np.asarray(masked.converged) > 0.5,
             names=tuple(masked.param_names),
             component_shapes=self._component_shapes,
+            leaf_specs=self._leaf_specs,
             records=masked,  # a bare masked FitRecord -> not CRN-pairable
             coupling_id=None,
             key=None,
@@ -646,6 +873,7 @@ class EmpiricalLaw(EstimatorLaw):
             used=self._used[mask],
             names=self._names,
             component_shapes=self._component_shapes,
+            leaf_specs=self._leaf_specs,
             records=None,
             coupling_id=None,
             key=None,
@@ -692,21 +920,25 @@ class EmpiricalLaw(EstimatorLaw):
             )
         return crn_pair(self._records, other._records, assert_coupled=assert_coupled)
 
-    # -- gauge-aware codomain conveniences ----------------------------------
+    # -- gauge-aware codomain conveniences (DEPRECATED; use leaf views) ------
     def eigenvalue_se(self, rank: int, *, index: int = 0) -> np.ndarray:
-        """Empirical SE of the ``rank`` nonzero eigenvalues of ``Gamma = A A^T``.
+        """Deprecated: use ``law.leaf(name).se("eigenvalues")``.
 
-        Applies the gauge-invariant eigenvalue functional per draw (landmine 3)
-        and routes the SE through :class:`~emu_gmm.inference.BootstrapSE`.
+        Empirical SE of the ``rank`` nonzero eigenvalues of ``Gamma = A A^T``.
         """
+        _warn_gamma_deprecation("eigenvalue_se", 'law.leaf(name).se("eigenvalues")')
         return self.se(eigenvalue_functional(rank, index))
 
     def eigenvalue_quantile(self, q: float, rank: int, *, index: int = 0) -> np.ndarray:
-        """Empirical ``q``-quantile of the ``rank`` nonzero eigenvalues of Gamma."""
+        """Deprecated: use ``law.leaf(name).quantile(q, "eigenvalues")``."""
+        _warn_gamma_deprecation(
+            "eigenvalue_quantile", 'law.leaf(name).quantile(q, "eigenvalues")'
+        )
         return self.quantile(q, eigenvalue_functional(rank, index))
 
     def gamma_se(self, *, index: int = 0) -> np.ndarray:
-        """Empirical SE of ``vech(Gamma)``, ``Gamma = A @ A.T`` (gauge-invariant)."""
+        """Deprecated: use ``law.leaf(name).se("gamma")``."""
+        _warn_gamma_deprecation("gamma_se", 'law.leaf(name).se("gamma")')
         return self.se(gamma_functional(index))
 
     # -- summarizer delegations (charter item d; numeric-identical) ----------
@@ -813,6 +1045,7 @@ class AsymptoticLaw(EstimatorLaw):
         *,
         leaf_specs: Any = None,
         names: tuple[str, ...] | None = None,
+        field_names: tuple[str | None, ...] | None = None,
         label: str | None = None,
     ) -> AsymptoticLaw:
         r"""Reconstruct the asymptotic law from raw moments --- no live result.
@@ -841,6 +1074,11 @@ class AsymptoticLaw(EstimatorLaw):
             no-PSD-leaf result).
         names
             Ambient tangent labels (length ``D``); positional by default.
+        field_names
+            Optional per-leaf field names (aligned with ``theta_components``), so
+            the reloaded law addresses leaves by name (``law.leaf("Gamma")``).
+            Omit to leave leaves unnamed (still queryable by the type-located
+            gamma conveniences and by ``law.se(f)``).
         """
         comps = tuple(np.asarray(c, dtype=float) for c in theta_components)
         sigma = np.atleast_2d(np.asarray(sigma_theta, dtype=float))
@@ -857,12 +1095,50 @@ class AsymptoticLaw(EstimatorLaw):
             leaf_tags=leaf_tags,
             psd_index=psd_index,
             psd_rank=psd_rank,
+            field_names=field_names,
         )
         return cls(_backing=backing, label=label)
 
     @property
     def param_names(self) -> tuple[str, ...]:
         return self._names
+
+    @property
+    def leaf_specs(self) -> tuple[LeafSpec, ...] | None:
+        """Per-leaf geometry from the live ``manifold_spec`` or the moments backing.
+
+        Live-backed: the result's :class:`ManifoldSpec` leaf specs (with the
+        user's field names); a v1 / all-scalar result has no spec, so per-scalar
+        :class:`Euclidean` leaves are synthesized from the parameter names.
+        Moments-backed (reloaded): reconstructed from the persisted leaf tags and
+        component shapes, with the persisted per-leaf field names when present
+        (older artifacts carry none, so those leaves are unaddressable by name --
+        the type-located ``eigenvalue_se`` / ``gamma_se`` still work).
+        """
+        if self._result is not None:
+            spec = self._result.manifold_spec
+            if spec is not None:
+                return tuple(spec.leaf_specs)
+            return _scalar_leaf_specs(self._names)
+        b = self._backing
+        assert b is not None
+        field_names = getattr(b, "field_names", None)
+        specs: list[LeafSpec] = []
+        offset = 0
+        for i, (tag, shape) in enumerate(
+            zip(b.leaf_tags, b.component_shapes, strict=False)
+        ):
+            shp = tuple(int(s) for s in shape)
+            specs.append(
+                LeafSpec(
+                    offset=offset,
+                    ambient_shape=shp,
+                    manifold=_tag_to_manifold(tag),
+                    field_name=field_names[i] if field_names is not None else None,
+                )
+            )
+            offset += int(np.prod(shp)) if shp != () else 1
+        return tuple(specs)
 
     @property
     def result(self) -> EstimationResult:
@@ -965,61 +1241,29 @@ class AsymptoticLaw(EstimatorLaw):
             "empirical grade (EmpiricalLaw.given over a record stack)."
         )
 
-    # -- gauge-aware codomain conveniences (reuse #117 leaf detection) ------
+    # -- gauge-aware codomain conveniences (DEPRECATED; use leaf views) ------
     def eigenvalue_se(self, rank: int | None = None) -> np.ndarray:
-        """Delta-method SE of the nonzero eigenvalues of ``Gamma = A @ A.T``.
+        """Deprecated: use ``law.leaf(name).se("eigenvalues")``.
 
-        Result-backed: reuses :meth:`EstimationResult.eigenvalue_se` (which
-        locates the unique ``PSDFixedRank`` leaf via the manifold spec, #117).
-        Moments-backed (reloaded): routes through
-        :func:`emu_gmm.inference.functional_se.eigenvalue_se` with the persisted
-        PSD-leaf index and rank. Gauge-invariant by construction; raises if the
-        law carries no ``PSDFixedRank`` factor.
+        Delta-method SE of the nonzero eigenvalues of ``Gamma = A @ A.T``. Now a
+        thin shim: it type-locates the unique ``PSDFixedRank`` leaf and routes
+        through the general algebra (identical numerics, both backings).
         """
-        if self._result is not None:
-            return np.asarray(self._result.eigenvalue_se(rank))
-        from emu_gmm.inference.functional_se import eigenvalue_se as _ev
-
-        b, idx, k = self._require_psd("eigenvalue_se")
-        se, _cov = _ev(
-            b.components,
-            jnp.asarray(b.sigma),
-            int(rank) if rank is not None else int(k),
-            index=idx,
-        )
-        return np.asarray(se)
+        _warn_gamma_deprecation("eigenvalue_se", 'law.leaf(name).se("eigenvalues")')
+        idx, k = _psd_leaf_index_rank(self, "eigenvalue_se")
+        return self.se(eigenvalue_functional(int(rank) if rank is not None else k, idx))
 
     def gamma_se(self) -> np.ndarray:
-        """Delta-method SE of ``vech(Gamma)`` (gauge-invariant; #117 leaf)."""
-        if self._result is not None:
-            return np.asarray(self._result.gamma_se())
-        from emu_gmm.inference.functional_se import gamma_se as _gse
-
-        b, idx, _k = self._require_psd("gamma_se")
-        se, _cov = _gse(b.components, jnp.asarray(b.sigma), index=idx)
-        return np.asarray(se)
+        """Deprecated: use ``law.leaf(name).se("gamma")``."""
+        _warn_gamma_deprecation("gamma_se", 'law.leaf(name).se("gamma")')
+        idx, _k = _psd_leaf_index_rank(self, "gamma_se")
+        return self.se(gamma_functional(idx))
 
     def gamma_covariance(self) -> np.ndarray:
-        """Delta-method covariance of ``vech(Gamma)``."""
-        if self._result is not None:
-            return np.asarray(self._result.gamma_covariance())
-        from emu_gmm.inference.functional_se import gamma_se as _gse
-
-        b, idx, _k = self._require_psd("gamma_covariance")
-        _se, cov = _gse(b.components, jnp.asarray(b.sigma), index=idx)
-        return np.asarray(cov)
-
-    def _require_psd(self, what: str) -> tuple[_MomentsBacking, int, int]:
-        """Return ``(backing, psd_index, psd_rank)`` for a moments-backed law, or raise."""
-        b = self._backing
-        if b is None or b.psd_index is None or b.psd_rank is None:
-            raise TypeError(
-                f"AsymptoticLaw.{what}: this (moments-backed) law carries no "
-                "PSDFixedRank factor, so Gamma = A @ A.T is undefined. Pass "
-                "leaf_specs with the PSDFixedRank leaf to from_moments, or use "
-                "functional_se(f) with an explicit functional."
-            )
-        return b, int(b.psd_index), int(b.psd_rank)
+        """Deprecated: use ``law.leaf(name).cov("gamma")``."""
+        _warn_gamma_deprecation("gamma_covariance", 'law.leaf(name).cov("gamma")')
+        idx, _k = _psd_leaf_index_rank(self, "gamma_covariance")
+        return self.cov(gamma_functional(idx))
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return f"AsymptoticLaw(grade={self.grade!r}, names={self._names})"

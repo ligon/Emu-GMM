@@ -45,6 +45,7 @@ fields so it is hashable and rides as a static field through ``jit``.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any
 
 import jax
@@ -172,6 +173,16 @@ class Interval:
     def tangent_basis_names(self, field_name: str) -> list[str]:
         """Scalar leaf: ``[field_name]`` (matches ``Positive()`` / ``Euclidean()``)."""
         return [field_name]
+
+    def invariants(self) -> dict[str, Callable[[Any], Any]]:
+        """The bounded value itself --- no gauge to quotient (``gauge_dim == 0``).
+
+        The single ``"value"`` functional returns the raveled scalar (length 1);
+        ``Sigma_theta`` is on the natural ``x`` scale (see
+        :meth:`retraction_differential`), so ``value`` is the coordinate a caller
+        wants an SE on.
+        """
+        return {"value": lambda x: jnp.ravel(jnp.asarray(x))}
 
 
 __all__ = ["Interval"]

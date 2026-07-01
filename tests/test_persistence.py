@@ -73,11 +73,32 @@ def _load_phase4_fixture():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # exercises gamma shims
 class TestManifoldRoundTrip:
     def _law(self):
         ph4 = _load_phase4_fixture()
         result, _spec, _M, _ = ph4._run_estimate(2, seed=300)
         return AsymptoticLaw(result)
+
+    def test_reloaded_supports_leaf_view_by_name(self, tmp_path):
+        """Per-leaf field names round-trip, so a reloaded law is addressable by
+        name (law.leaf("Y").se("eigenvalues")) --- not just by type-located
+        gamma conveniences."""
+        law = self._law()
+        p = tmp_path / "law.npz"
+        save_law(law, p)
+        reloaded = load_law(p)
+        assert dict(reloaded.leaves).keys() == dict(law.leaves).keys()
+        # the PSD leaf's name is discoverable and queryable on the reloaded law
+        psd_name = next(n for n, m in reloaded.leaves if isinstance(m, PSDFixedRank))
+        np.testing.assert_array_equal(
+            reloaded.leaf(psd_name).se("eigenvalues"),
+            law.leaf(psd_name).se("eigenvalues"),
+        )
+        # and the persisted manifest actually carries the names
+        with np.load(p, allow_pickle=False) as data:
+            manifest = json.loads(str(data["__manifest__"]))
+        assert psd_name in manifest["leaf_field_names"]
 
     def test_queries_match_live_after_reload(self, tmp_path):
         law = self._law()
@@ -190,6 +211,7 @@ def _fit_scalar(seed: int = 0, n: int = 2000):
     )
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # exercises gamma shims
 class TestScalarRoundTrip:
     def test_all_euclidean_round_trip(self, tmp_path):
         law = AsymptoticLaw(_fit_scalar())
@@ -216,6 +238,7 @@ class TestScalarRoundTrip:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # exercises gamma shims
 class TestFromMomentsAndCodec:
     def test_from_moments_matches_live(self):
         ph4 = _load_phase4_fixture()
