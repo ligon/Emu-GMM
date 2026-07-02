@@ -15,7 +15,10 @@ Asymptotic grade:
 
 Empirical grade:
 (e) Records-backed round-trip: ``se`` / ``size_power`` (J) / ``given`` / ``couple``
-    all work on reload through the existing ``emu_gmm.studies`` reuse.
+    all work on reload through the existing ``emu_gmm.studies`` reuse, and the
+    #183 per-draw custom statistics (``MCRecords.extra``) survive exactly
+    (``None`` round-trips to ``None``; a pre-#183 artifact loads with
+    ``extra=None``; a wrong-leading-axis column is refused on save).
 (f) Draws-backed round-trip with ``events``: ``se`` / ``pvalue`` / ``given``.
 
 Guardrails:
@@ -262,7 +265,7 @@ class TestFromMomentsAndCodec:
 # ---------------------------------------------------------------------------
 
 
-def _fake_mcrecords(seed: int = 0, n: int = 80, d: int = 2):
+def _fake_mcrecords(seed: int = 0, n: int = 80, d: int = 2, extra=None):
     import jax
     from emu_gmm.studies.driver import MCRecords
     from emu_gmm.types import FitRecord
@@ -282,7 +285,11 @@ def _fake_mcrecords(seed: int = 0, n: int = 80, d: int = 2):
         param_names=("a", "b"),
     )
     return MCRecords(
-        records=rec, key=jax.random.PRNGKey(seed), n_reps=n, coupling_id=seed
+        records=rec,
+        key=jax.random.PRNGKey(seed),
+        n_reps=n,
+        coupling_id=seed,
+        extra=extra,
     )
 
 
@@ -333,6 +340,76 @@ class TestEmpiricalRoundTrip:
         rb = load_law(tmp_path / "b.npz")
         coupled = ra.couple(rb)  # raises if the CRN provenance was lost
         assert coupled is not None
+
+    def test_records_extra_statistics_round_trip(self, tmp_path):
+        # The #183 per-draw custom-statistics channel (MCRecords.extra) must
+        # survive persistence: names, dtype, values, and shape all exact.
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies.driver import MCRecords
+
+        rng = np.random.default_rng(9)
+        extra = {
+            "k_pvalue": jnp.asarray(rng.uniform(size=80)),
+            "id_strength": jnp.asarray(rng.chisquare(2, size=80)),
+        }
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=9, extra=extra))
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        r = load_law(p)
+
+        rec = r._records  # the reconstructed MCRecords provenance
+        assert isinstance(rec, MCRecords)
+        assert rec.extra is not None
+        assert set(rec.extra) == {"k_pvalue", "id_strength"}
+        for nm, col in extra.items():
+            got = np.asarray(rec.extra[nm])
+            assert got.shape == (80,)
+            assert got.dtype == np.float64
+            np.testing.assert_array_equal(got, np.asarray(col))
+        # The typed LawState exposes them too (the cheap inspection path).
+        state = load_law_state(p)
+        assert state.extra_arrays is not None
+        assert set(state.extra_arrays) == {"k_pvalue", "id_strength"}
+
+    def test_records_extra_none_round_trips_to_none(self, tmp_path):
+        from emu_gmm import EmpiricalLaw
+
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=4))
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        assert load_law(p)._records.extra is None
+        assert load_law_state(p).extra_arrays is None
+
+    def test_pre_extra_artifact_loads_with_extra_none(self, tmp_path):
+        # An artifact written before the #183 channel existed carries neither
+        # an "extra_names" manifest key nor rec_extra__* arrays; it must still
+        # load (fully additive schema -- no version bump).
+        from emu_gmm import EmpiricalLaw
+
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=6))
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        with np.load(p, allow_pickle=False) as data:
+            arrays = {k: data[k] for k in data.files}
+        manifest = json.loads(str(arrays["__manifest__"]))
+        del manifest["extra_names"]  # simulate the pre-#183 layout
+        arrays["__manifest__"] = np.asarray(json.dumps(manifest))
+        np.savez(p, **arrays)
+
+        r = load_law(p)
+        assert r.grade == "empirical"
+        assert r._records.extra is None
+        np.testing.assert_array_equal(np.asarray(r.se()), np.asarray(law.se()))
+
+    def test_records_extra_wrong_leading_axis_refused(self, tmp_path):
+        # Each extra column must carry the same leading n_reps axis as the
+        # FitRecord fields; a mismatched column is a clear save-time error.
+        from emu_gmm import EmpiricalLaw
+
+        bad = {"k_pvalue": jnp.zeros(7)}  # n_reps is 80
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=7, extra=bad))
+        with pytest.raises(ValueError, match="k_pvalue.*n_reps=80"):
+            save_law(law, tmp_path / "x.npz")
 
     def test_draws_backed_round_trip_with_events(self, tmp_path):
         import warnings

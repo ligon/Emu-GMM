@@ -26,9 +26,10 @@ than by resurrecting a live object.
 
   * *records-backed* (``EmpiricalLaw.from_records`` over an ``MCRecords`` /
     ``FitRecord`` stack): the full :class:`FitRecord` arrays + ``coupling_id`` /
-    ``key`` provenance are persisted, so a reloaded law's ``given`` / ``couple``
-    / ``size_power`` (J) / ``se`` all work through the existing
-    ``emu_gmm.studies`` reuse --- nothing re-implemented.
+    ``key`` provenance are persisted --- and the #183 per-draw custom
+    statistics (``MCRecords.extra``) ride along --- so a reloaded law's
+    ``given`` / ``couple`` / ``size_power`` (J) / ``se`` all work through the
+    existing ``emu_gmm.studies`` reuse --- nothing re-implemented.
   * *draws-backed* (``from_draws``, e.g. a wild-bootstrap ``J_boot``): the draws
     + ``{0,1}^E`` event flags round-trip, so ``pvalue`` / ``se`` / ``quantile``
     and ``given`` over the persisted events work on reload.
@@ -230,6 +231,9 @@ class LawState:
     # -- empirical grade --
     backing: str | None = None  # "records" | "draws"
     record_arrays: dict[str, np.ndarray] | None = None  # the FitRecord fields
+    # The #183 per-draw custom statistics (``MCRecords.extra``), leading
+    # ``n_reps`` axis on every column; ``None`` when none were collected.
+    extra_arrays: dict[str, np.ndarray] | None = None
     j_dof: int | None = None
     n_reps: int | None = None
     draws: np.ndarray | None = None  # draws-backed
@@ -337,11 +341,26 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
         }
         key = None
         coupling_id = None
+        extra_arrays = None
         n_reps = int(np.asarray(rec.theta_flat).shape[0])
         if isinstance(law._records, MCRecords):
             key = None if law._records.key is None else np.asarray(law._records.key)
             coupling_id = _jsonable(law._records.coupling_id, what="coupling_id")
             n_reps = int(law._records.n_reps)
+            if law._records.extra is not None:
+                # The #183 per-draw statistics channel: every column carries
+                # the same leading n_reps axis as the FitRecord fields.
+                extra_arrays = {
+                    str(nm): np.asarray(v) for nm, v in law._records.extra.items()
+                }
+                for nm, a in extra_arrays.items():
+                    if a.shape[:1] != (n_reps,):
+                        raise ValueError(
+                            f"save_law: extra statistic {nm!r} has shape "
+                            f"{a.shape}; every MCRecords.extra column must "
+                            f"carry the leading n_reps={n_reps} replication "
+                            "axis, like the FitRecord fields."
+                        )
         return LawState(
             schema_version=SCHEMA_VERSION,
             grade="empirical",
@@ -351,6 +370,7 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
             diagnostics={},
             backing="records",
             record_arrays=record_arrays,
+            extra_arrays=extra_arrays,
             j_dof=int(rec.J_dof),
             n_reps=n_reps,
             key=key,
@@ -411,14 +431,21 @@ def _write_state(state: LawState, target: Any) -> None:
             arrays["sigma_theta"] = np.asarray(state.sigma_theta)
     elif state.backing == "records":
         assert state.record_arrays is not None
+        extra_names = [] if state.extra_arrays is None else sorted(state.extra_arrays)
         manifest.update(
             j_dof=state.j_dof,
             n_reps=state.n_reps,
             coupling_id=state.coupling_id,
             has_key=state.key is not None,
+            extra_names=extra_names,
         )
         for f, a in state.record_arrays.items():
             arrays[f"rec_{f}"] = np.asarray(a)
+        # "rec_extra__<name>" cannot collide with the fixed "rec_<field>" keys
+        # above (no _FITRECORD_ARRAY_FIELDS entry starts with "extra__"), nor
+        # with "key" / the draws-backed keys (a different branch entirely).
+        for nm in extra_names:
+            arrays[f"rec_extra__{nm}"] = np.asarray(state.extra_arrays[nm])  # type: ignore[index]
         if state.key is not None:
             arrays["key"] = np.asarray(state.key)
     else:  # draws-backed
@@ -496,11 +523,20 @@ def _read_state(target: Any) -> LawState:
                 psd_rank=manifest["psd_rank"],
             )
         if manifest.get("backing") == "records":
+            # Absent on pre-#183 artifacts -> extra=None (fully additive).
+            extra_names = manifest.get("extra_names") or []
             return LawState(
                 **common,
                 record_arrays={
                     f: np.asarray(data[f"rec_{f}"]) for f in _FITRECORD_ARRAY_FIELDS
                 },
+                extra_arrays=(
+                    None
+                    if not extra_names
+                    else {
+                        nm: np.asarray(data[f"rec_extra__{nm}"]) for nm in extra_names
+                    }
+                ),
                 j_dof=int(manifest["j_dof"]),
                 n_reps=int(manifest["n_reps"]),
                 coupling_id=manifest.get("coupling_id"),
@@ -563,11 +599,17 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
             param_names=tuple(state.param_names),
         )
         if state.key is not None:
+            extra = (
+                None
+                if state.extra_arrays is None
+                else {nm: jnp.asarray(a) for nm, a in state.extra_arrays.items()}
+            )
             mc = MCRecords(
                 records=record,
                 key=jnp.asarray(state.key),
                 n_reps=int(state.n_reps),  # type: ignore[arg-type]
                 coupling_id=state.coupling_id,
+                extra=extra,
             )
             return EmpiricalLaw.from_records(
                 mc, component_shapes=state.component_shapes, label="empirical(loaded)"
