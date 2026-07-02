@@ -110,30 +110,67 @@ def _check_mask_psi_compatibility(
     The aggregator combines a stored ``(N, M_mask)`` mask with a
     ``(N, M_psi)`` per-observation residual matrix via
     ``jnp.where(mask, psi_batch, 0.0)`` and ``mask * weights[:, None] *
-    psi_batch``. If ``M_mask != M_psi`` JAX raises a generic broadcast
-    error that does not say which side is wrong. The typical cause is
-    constructing the measure via :meth:`EmpiricalMeasure.from_nan_aware`
-    without passing ``M=`` when the user's :math:`\\psi` returns
-    ``M != D`` moments (e.g. Hansen-Singleton, where ``x`` has three
-    columns but the moment is scalar). This helper fires at JAX
-    trace-time -- shapes are static during tracing -- and points the
-    user at the ``M=`` kwarg.
+    psi_batch``. Three failure classes are caught here, all at JAX
+    trace-time (shapes are static during tracing):
+
+    1. **psi returns a 0-d scalar per observation.** ``vmap`` then
+       yields a 1-D ``(N,)`` batch, and JAX raises *no* error:
+       ``jnp.where(mask_bool, psi_batch, 0.0)`` silently broadcasts the
+       ``(N,)`` batch against the ``(N, 1)`` mask into an ``(N, N)``
+       matrix, and ``expectation`` returns an ``(N,)`` vector of
+       per-observation residuals as "moments". For ``K = 1`` the whole
+       pipeline runs end-to-end on garbage with no error, so deferring
+       to JAX here would let the defect through silently.
+    2. **Any other non-2-D psi batch** (e.g. psi returning a 2-D block
+       per observation, giving a 3-D batch): rejected with a generic
+       message rather than deferred.
+    3. **M mismatch** between a 2-D mask and a 2-D psi batch. The
+       typical cause is constructing the measure via
+       :meth:`EmpiricalMeasure.from_nan_aware` without passing ``M=``
+       when the user's :math:`\\psi` returns ``M != D`` moments (e.g.
+       Hansen-Singleton, where ``x`` has three columns but the moment
+       is scalar); the message points the user at the ``M=`` kwarg.
 
     Parameters
     ----------
     mask_shape : tuple of int
         Shape of ``self.mask``; expected ``(N, M_mask)``.
     psi_shape : tuple of int
-        Shape of ``vmap(psi)(x)`` output; expected ``(N, M_psi)``.
+        Batch shape of psi's per-observation output; expected
+        ``(N, M_psi)``. The Jacobian paths pass ``grad_batch.shape[:-1]``
+        (the batch shape with the trailing parameter axis removed), so a
+        0-d-scalar psi surfaces as a 1-D shape there too.
 
     Raises
     ------
     ValueError
-        If the moment dimensions disagree.
+        If psi's batch shape is not 2-D, or if the moment dimensions
+        disagree.
     """
-    if len(mask_shape) != 2 or len(psi_shape) != 2:
-        # Defer to JAX's own error for non-2D oddities; the standard
-        # path produces (N, M)-shaped tensors.
+    if len(psi_shape) == 1 and len(mask_shape) == 2:
+        raise ValueError(
+            f"EmpiricalMeasure: psi must return a 1-D array of shape (M,) "
+            f"per observation, but it returned a 0-d scalar (the vmapped "
+            f"per-observation batch has 1-D shape {psi_shape} instead of "
+            f"(N, M); the mask has shape {mask_shape}). JAX raises no "
+            f"error for this: the scalar batch silently broadcasts "
+            f"against the (N, M) mask (to (N, N) when M == 1) and the "
+            f"'moments' become per-observation residuals -- garbage that "
+            f"runs end-to-end for K = 1. Wrap psi's return value so that "
+            f"a single moment has shape (1,): e.g. "
+            f"'return jnp.array([expr])' or 'return jnp.atleast_1d(expr)'."
+        )
+    if len(psi_shape) != 2:
+        raise ValueError(
+            f"EmpiricalMeasure: expected psi's vmapped per-observation "
+            f"batch to have shape (N, M) -- i.e. psi returns a 1-D array "
+            f"of shape (M,) per observation -- but got shape {psi_shape}. "
+            f"Return a 1-D (M,) array from psi (flatten any "
+            f"multi-dimensional moment block, e.g. with jnp.ravel)."
+        )
+    if len(mask_shape) != 2:
+        # The constructors all enforce a 2-D (N, M) mask; a hand-built
+        # measure with an exotic mask falls through to JAX's own error.
         return
     n_mask, m_mask = mask_shape
     n_psi, m_psi = psi_shape
@@ -438,7 +475,12 @@ class EmpiricalMeasure:
         grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
         # Trace-time shape check; surface the same helpful message as
         # :meth:`expectation_and_contributions` if mask vs psi disagree.
-        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:2])
+        # Slice off the trailing parameter axis (K) rather than taking
+        # the leading two axes: a psi that returns a 0-d scalar yields a
+        # 2-D (N, K) grad batch whose ``shape[:2]`` masquerades as a
+        # valid (N, M) pair, whereas ``shape[:-1] == (N,)`` exposes the
+        # missing moment axis to the scalar-return check.
+        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:-1])
         # NaN-safe: zero the gradient at masked-out (i, j) cells before
         # weight multiplication so 0 * NaN cannot poison the (M, K) sum.
         mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
@@ -506,8 +548,11 @@ class EmpiricalMeasure:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
 
         grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
-        # Same trace-time shape check as the other methods.
-        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:2])
+        # Same trace-time shape check as the other methods; slice off
+        # the trailing K axis (not ``shape[:2]``) so a 0-d-scalar psi's
+        # 2-D (N, K) grad batch is caught by the scalar-return check
+        # (see :meth:`jacobian`).
+        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:-1])
         mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
         grad_safe = jnp.where(mask_bool, grad_batch, 0.0)  # (N, M, K)
         weight_mask = self.mask * self.weights[:, None]  # (N, M)

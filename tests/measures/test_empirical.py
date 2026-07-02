@@ -945,3 +945,120 @@ class TestNonFiniteWeightsRejected:
         with pytest.raises(ValueError) as excinfo:
             EmpiricalMeasure.from_nan_aware(x, weights=[1.0, float("nan")])
         assert "from_nan_aware" in str(excinfo.value)
+
+
+class TestScalarPsiRejected:
+    """A psi returning a 0-d scalar per observation must raise, loudly.
+
+    Regression guard for the silent-broadcast bug: with the documented
+    Hansen-Singleton ``from_nan_aware(x, M=1)`` recipe, a user psi that
+    forgets the ``jnp.array([...])`` wrapper (``return beta*r*ratio - 1.0``)
+    returns a 0-d scalar per observation. ``vmap`` yields an ``(N,)``
+    batch, JAX raises *no* error, and
+    ``jnp.where(mask_bool[(N, 1)], psi_batch[(N,)], 0.0)`` silently
+    broadcasts to ``(N, N)``; ``expectation`` then returns an ``(N,)``
+    vector of per-observation residuals as "moments" and, for ``K = 1``,
+    the full pipeline runs end-to-end on garbage. The shape guard must
+    reject the scalar return at trace time in every psi-batch consumer.
+    """
+
+    @staticmethod
+    def _scalar_psi(xi, theta):
+        # Missing jnp.array([...]) wrapper: returns a 0-d scalar.
+        return theta.a + theta.b * xi[0]
+
+    def _measure(self, n: int = 10):
+        rng = np.random.default_rng(0)
+        return EmpiricalMeasure.from_nan_aware(rng.normal(size=(n, 3)), M=1)
+
+    def _assert_scalar_message(self, excinfo):
+        msg = str(excinfo.value)
+        # Names the defect: psi returned a 0-d scalar per observation.
+        assert "0-d scalar" in msg
+        # Names the requirement: a 1-D array of shape (M,).
+        assert "(M,)" in msg
+        # Names a remediation: wrap the return value.
+        assert "jnp.array" in msg or "jnp.atleast_1d" in msg
+
+    def test_expectation_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().expectation(self._scalar_psi, _LinearParams(0.0, 1.0))
+        self._assert_scalar_message(excinfo)
+
+    def test_moment_contributions_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().moment_contributions(
+                self._scalar_psi, _LinearParams(0.0, 1.0)
+            )
+        self._assert_scalar_message(excinfo)
+
+    def test_jacobian_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().jacobian(self._scalar_psi, _LinearParams(0.0, 1.0))
+        self._assert_scalar_message(excinfo)
+
+    def test_jacobian_contributions_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().jacobian_contributions(
+                self._scalar_psi, _LinearParams(0.0, 1.0)
+            )
+        self._assert_scalar_message(excinfo)
+
+    def test_raises_at_trace_time_under_jit(self):
+        """The guard fires while tracing, so jit does not swallow it."""
+        meas = self._measure()
+
+        @jax.jit
+        def compute(m, t):
+            return m.expectation(self._scalar_psi, t)
+
+        with pytest.raises(ValueError) as excinfo:
+            compute(meas, _LinearParams(0.0, 1.0))
+        self._assert_scalar_message(excinfo)
+
+    def test_full_estimate_path_raises(self):
+        """The end-to-end estimate() call surfaces the same clear error
+        instead of converging on garbage moments (the K = 1 silent-run
+        failure mode)."""
+        from emu_gmm.covariance import IIDCovariance
+        from emu_gmm.estimator import estimate
+
+        with pytest.raises(ValueError) as excinfo:
+            estimate(
+                model=self._scalar_psi,
+                measure=self._measure(),
+                covariance=IIDCovariance(),
+                theta_init=_LinearParams(a=0.0, b=1.0),
+            )
+        self._assert_scalar_message(excinfo)
+
+    def test_higher_rank_psi_raises_generic_error(self):
+        """A psi returning a 2-D block per observation (3-D batch) is
+        rejected with a clear message instead of deferring to JAX."""
+        meas = self._measure()
+
+        def matrix_psi(xi, theta):
+            return jnp.ones((2, 2)) * theta.a
+
+        with pytest.raises(ValueError) as excinfo:
+            meas.expectation(matrix_psi, _LinearParams(0.0, 1.0))
+        msg = str(excinfo.value)
+        assert "(N, M)" in msg
+        assert "(M,)" in msg
+
+    def test_correctly_wrapped_psi_still_works(self):
+        """The documented recipe with the jnp.array([...]) wrapper is
+        untouched by the guard and produces the same moment as before."""
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(10, 3))
+        meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+
+        def psi(xi, theta):
+            return jnp.array([theta.a + theta.b * xi[0]])
+
+        m = meas.expectation(psi, _LinearParams(a=0.0, b=1.0))
+        assert m.shape == (1,)
+        np.testing.assert_allclose(float(m[0]), float(np.mean(x[:, 0])), rtol=1e-6)
+        # Jacobian path likewise unaffected.
+        G = meas.jacobian(psi, _LinearParams(a=0.0, b=1.0))
+        assert G.shape == (1, 2)
