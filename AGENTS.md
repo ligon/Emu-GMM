@@ -136,9 +136,14 @@ been through four reviewer iterations; the abstractions are deliberate.
    stable in finite samples.
 6. **Labelled outputs via the LabelContext**. The estimator probes the
    model's return value to detect a `haliax.NamedArray` with a `Moments`
-   axis and uses its labels; else `moment_names` kwarg; else positional
-   `m_0, m_1, ...`. Don't mutate label state from inside the residual
-   closure — it rides as a static closure variable.
+   axis and uses its **per-coordinate labels when the axis carries any —
+   a plain haliax `Axis` never does, so today that branch only validates
+   the axis size**; else `moment_names` kwarg; else positional
+   `m_0, m_1, ...`. (#190 flipped this: the NamedArray branch previously
+   outranked an explicit kwarg with positional names — an inversion,
+   since the axis carries zero label information.) Don't mutate label
+   state from inside the residual closure — it rides as a static
+   closure variable.
 7. **JAX float64 enabled at package import.** `src/emu_gmm/__init__.py`
    calls `jax.config.update("jax_enable_x64", True)` before any
    sub-module import. JAX defaults to float32 (a deep-learning

@@ -131,17 +131,51 @@ class TestResolveMomentNames:
         with pytest.raises(ValueError, match="length 1, expected 2"):
             labels.resolve_moment_names(model_return=None, kwarg_names=("euler",), m=2)
 
-    def test_model_return_wins_over_kwarg(self):
+    def test_kwarg_wins_when_axis_has_no_coordinate_labels(self):
+        # Issue #190: a plain haliax Axis carries zero per-coordinate
+        # label information, so the NamedArray-return branch must not
+        # override an explicit ``moment_names`` kwarg with positional
+        # ``m_0, m_1, ...``. The user's real labels win.
         Moments = axes_mod.moments_axis(2)
         named_return = ha.named(jnp.zeros(2), (Moments,))
         names = labels.resolve_moment_names(
             model_return=named_return,
-            kwarg_names=("ignored",),
+            kwarg_names=("euler", "excess"),
             m=2,
         )
-        # Model-return path produces positional names (haliax axes don't
-        # carry per-coord names), but it takes precedence over the kwarg.
-        assert names == ("m_0", "m_1")
+        assert names == ("euler", "excess")
+
+    def test_named_return_without_kwarg_is_positional(self):
+        # NamedArray return + no kwarg -> positional fallback (unchanged).
+        Moments = axes_mod.moments_axis(3)
+        named_return = ha.named(jnp.zeros(3), (Moments,))
+        names = labels.resolve_moment_names(
+            model_return=named_return,
+            kwarg_names=None,
+            m=3,
+        )
+        assert names == ("m_0", "m_1", "m_2")
+
+    def test_named_return_with_wrong_length_kwarg_raises(self):
+        # NamedArray return falls through to the kwarg path, which keeps
+        # its M-consistency validation.
+        Moments = axes_mod.moments_axis(2)
+        named_return = ha.named(jnp.zeros(2), (Moments,))
+        with pytest.raises(ValueError, match="length 1, expected 2"):
+            labels.resolve_moment_names(
+                model_return=named_return,
+                kwarg_names=("only_one",),
+                m=2,
+            )
+
+    def test_plain_array_return_with_kwarg_uses_kwarg(self):
+        # Plain (non-NamedArray) model return + kwarg -> kwarg (unchanged).
+        names = labels.resolve_moment_names(
+            model_return=jnp.zeros(2),
+            kwarg_names=("a", "b"),
+            m=2,
+        )
+        assert names == ("a", "b")
 
     def test_model_return_size_mismatch_raises(self):
         Moments = axes_mod.moments_axis(3)

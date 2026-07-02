@@ -209,6 +209,21 @@ def normalise_mask(
     return arr.astype(jnp.float32)
 
 
+def _axis_coordinate_labels(axis: ha.Axis) -> tuple[str, ...] | None:
+    """Per-coordinate labels carried by a haliax axis, if any.
+
+    A plain :class:`haliax.Axis` is a ``(name, size)`` pair --- it carries
+    **no** per-coordinate labels, so this returns ``None`` today, always.
+    The helper exists to make the precedence intent in
+    :func:`resolve_moment_names` explicit (issue #190): if haliax ever
+    grows per-coordinate axis labels, return them here and the
+    model-return branch will once again outrank the ``moment_names``
+    kwarg. Until then, a labelled-return probe contributes only its axis
+    *size* (validated against ``m``), never names.
+    """
+    return None
+
+
 def resolve_moment_names(
     model_return: Any | None,
     kwarg_names: tuple[str, ...] | None,
@@ -218,10 +233,12 @@ def resolve_moment_names(
 
     Precedence (highest first):
 
-    1. If ``model_return`` is a :class:`haliax.NamedArray` with a
-       ``moments`` axis, use the axis name's coordinates (positional
-       fallback inside the axis, since haliax axes don't carry
-       per-coordinate names by default).
+    1. Per-coordinate labels carried by the ``moments`` axis of a
+       :class:`haliax.NamedArray` ``model_return``. A plain haliax
+       ``Axis`` carries none (see :func:`_axis_coordinate_labels`), so
+       today this branch only validates the axis size against ``m`` and
+       falls through --- it never overrides an explicit kwarg with
+       positional names (issue #190).
     2. If ``kwarg_names`` is provided, use it.
     3. Positional fallback: ``("m_0", "m_1", ...)``.
 
@@ -253,8 +270,12 @@ def resolve_moment_names(
                     f"resolve_moment_names: model returned NamedArray with "
                     f"moments axis size {ax.size}, expected {m}"
                 )
-            # Per-coordinate names not carried by Axis; positional inside the axis.
-            return tuple(f"m_{i}" for i in range(m))
+            coord_labels = _axis_coordinate_labels(ax)
+            if coord_labels is not None:  # pragma: no cover - future haliax
+                return tuple(str(n) for n in coord_labels)
+            # The axis carries zero per-coordinate label information, so
+            # an explicit ``moment_names`` kwarg must win over positional
+            # ``m_0, m_1, ...`` --- fall through (issue #190).
 
     if kwarg_names is not None:
         if len(kwarg_names) != m:
