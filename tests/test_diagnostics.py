@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import io
+import warnings
 from contextlib import redirect_stdout
 
 import haliax as ha
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 import pytest
 from emu_gmm._internal import axes as axes_mod
-from emu_gmm.covariance import AnalyticalCovariance
+from emu_gmm.covariance import AnalyticalCovariance, IIDCovariance
 from emu_gmm.diagnostics import (
     build_diagnostics,
     build_optimizer_health,
@@ -18,9 +20,9 @@ from emu_gmm.diagnostics import (
     log_to_stdout,
 )
 from emu_gmm.estimator import estimate
-from emu_gmm.measures import AnalyticalMeasure
+from emu_gmm.measures import AnalyticalMeasure, EmpiricalMeasure
 from emu_gmm.optimizer import optimistix_lm
-from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.regularization import _TAU_MAX, DiagonalTikhonov
 from emu_gmm.types import Diagnostics, OptimizerInfo
 from emu_gmm.weighting import ContinuouslyUpdated
 
@@ -282,6 +284,26 @@ class TestBuildDiagnosticsExtraFields:
         assert d.cond_info["exclude_gauge"] == pytest.approx(2.0)
         assert d.optimizer_health["iters"] == 5
 
+    def test_v_star_indefinite_passthrough_and_default(self):
+        """``v_star_indefinite`` rides ``build_diagnostics`` like
+        ``sigma_meat_indefinite`` and defaults to False."""
+        Moments = axes_mod.moments_axis(1)
+        common = dict(
+            tau_realised=0.0,
+            kappa_V=1.0,
+            binding_ridge=False,
+            cholesky_pivot_min=1.0,
+            final_objective=0.0,
+            final_gradient_norm=0.0,
+            N_j_array=jnp.array([1.0]),
+            moment_residual_array=jnp.array([0.0]),
+            moments_axis=Moments,
+            optimizer_info=_stub_optimizer_info(),
+        )
+        assert bool(build_diagnostics(**common).v_star_indefinite) is False
+        d = build_diagnostics(**common, v_star_indefinite=jnp.asarray(True))
+        assert bool(d.v_star_indefinite) is True
+
     def test_defaults_to_empty_dicts(self):
         """Backwards-compat: caller may omit cond_info/optimizer_health
         and receive an empty dict (rather than e.g. ``None``)."""
@@ -535,3 +557,94 @@ class TestAdjustedPvalueGaugeAware:
             s1, s2 = w.sum(), (w**2).sum()
             p_old = float(st.chi2.sf(3.7 / (s2 / s1), s1**2 / s2))
             assert abs(p_old - p_new) > 1e-3, (p_old, p_new)
+
+
+# ---------------------------------------------------------------------------
+# v_star_indefinite: the regulariser-saturation diagnostic. Unit pin of the
+# non-repairable-V contract lives in
+# tests/test_regularization.py::TestZeroDiagonalSaturation; here we drive
+# estimate() end-to-end on the realistic trigger -- a zero-support moment
+# (all-zero mask column), whose empirical V has an exact-zero row/column
+# that the multiplicative diagonal ridge can never make PD.
+# ---------------------------------------------------------------------------
+
+
+@jdc.pytree_dataclass
+class _TwoParamEmp:
+    """Parameter container for the masked-empirical fixture."""
+
+    a: float
+    b: float
+
+
+def _psi_three(x_row, theta):
+    """psi(x_i, theta) = (x_i0 - a, x_i1 - b, x_i2 - (a + b)): M=3, K=2."""
+    return jnp.stack(
+        [
+            x_row[0] - theta.a,
+            x_row[1] - theta.b,
+            x_row[2] - (theta.a + theta.b),
+        ]
+    )
+
+
+def _empirical_measure(zero_support_col: int | None = None) -> EmpiricalMeasure:
+    """Tiny deterministic empirical measure (N=12, M=3).
+
+    With ``zero_support_col`` set, that mask column is all zeros: the
+    moment has zero support (``N_j == 0``), so its row/column of the
+    IID ``V`` is exactly zero -- the non-repairable case.
+    """
+    rng = np.random.default_rng(0)
+    x = jnp.asarray(rng.normal(loc=(1.0, 2.0, 3.0), scale=0.5, size=(12, 3)))
+    mask = jnp.ones((12, 3))
+    if zero_support_col is not None:
+        mask = mask.at[:, zero_support_col].set(0.0)
+    return EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(12))
+
+
+class TestVStarIndefiniteDiagnostic:
+    """The silent-NaN hazard is surfaced loudly: when no tau can repair V
+    (zero-support moment), ``DiagonalTikhonov.apply`` saturates and returns
+    a non-PD ``V*``; ``estimate()`` must flag ``v_star_indefinite`` and
+    warn eagerly instead of NaN-ing J and the SEs with no signal.
+    """
+
+    @staticmethod
+    def _estimate(measure: EmpiricalMeasure):
+        return estimate(
+            model=_psi_three,
+            measure=measure,
+            covariance=IIDCovariance(),
+            weighting=ContinuouslyUpdated(),
+            regularization=DiagonalTikhonov(),
+            optimizer=optimistix_lm(rtol=1e-8, atol=1e-8),
+            theta_init=_TwoParamEmp(a=0.5, b=1.5),
+        )
+
+    def test_zero_support_moment_sets_flag_and_warns(self):
+        measure = _empirical_measure(zero_support_col=2)
+        with pytest.warns(UserWarning, match="not positive-definite"):
+            res = self._estimate(measure)
+        # The traced flag rides Diagnostics (mirrors sigma_meat_indefinite).
+        assert bool(res.diagnostics.v_star_indefinite)
+        # The warning's suggested inspection points really do tell the
+        # story: the zero-support moment shows up in N_j and tau
+        # saturated at the bisection cap.
+        assert float(res.diagnostics.N_j.array[2]) == 0.0
+        assert float(res.diagnostics.tau_realised) == pytest.approx(_TAU_MAX)
+        # And the downstream symptom the diagnostic explains: the
+        # Cholesky-driven statistics are NaN.
+        assert np.isnan(float(res.J_stat))
+        assert np.isnan(np.asarray(res.standard_errors.array)).any()
+
+    def test_healthy_fixture_flag_false_and_silent(self):
+        measure = _empirical_measure()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = self._estimate(measure)
+        assert not bool(res.diagnostics.v_star_indefinite)
+        assert not any("not positive-definite" in str(w.message) for w in caught)
+        # Healthy fit: finite J and SEs (the flag is not a false alarm).
+        assert bool(jnp.isfinite(res.J_stat))
+        assert not np.isnan(np.asarray(res.standard_errors.array)).any()

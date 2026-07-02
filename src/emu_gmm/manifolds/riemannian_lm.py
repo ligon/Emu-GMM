@@ -108,6 +108,7 @@ from jaxtyping import Array, Float
 
 from emu_gmm._internal import params as params_mod
 from emu_gmm._internal.fn_cache import FunctionKeyedCache
+from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.positive import Positive
 from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
 
@@ -117,6 +118,10 @@ if TYPE_CHECKING:
 
 def _is_positive(manifold: Any) -> bool:
     return isinstance(manifold, Positive)
+
+
+def _is_euclidean(manifold: Any) -> bool:
+    return isinstance(manifold, Euclidean)
 
 
 # Default gauge lambda-floor coefficient. Multiplied by ``total_gauge_dim``
@@ -312,8 +317,10 @@ class _RiemannianLM:
                 pt = _block(x, offset, size)
                 vv = _block(v_flat, offset, size)
                 if shape == ():
-                    # Scalar leaf: projection is identity for both
-                    # Euclidean and Positive; keep the 0-d-as-(1,) layout.
+                    # Scalar leaf: the tangent space of a 1-D manifold is all
+                    # of R, so the projection is the identity for EVERY scalar
+                    # leaf (Euclidean, Positive, Interval, future scalars);
+                    # keep the 0-d-as-(1,) layout.
                     parts.append(vv)
                     continue
                 pt_m = jnp.reshape(pt, shape)
@@ -342,15 +349,21 @@ class _RiemannianLM:
                 pt = _block(x, offset, size)
                 dd = _block(d, offset, size)
                 if shape == ():
-                    # Native scalar leaf. Reproduce the original
-                    # coordinate-wise retraction exactly: Positive
-                    # x*exp(d/x), Euclidean x+d (red-team R18/R23).
+                    # Native scalar leaf. Positive / Euclidean keep the
+                    # original inline coordinate-wise retraction bitwise:
+                    # Positive x*exp(d/x), Euclidean x+d (red-team R18/R23).
+                    # Any OTHER scalar manifold (Interval today, future
+                    # scalar geometries tomorrow) supplies its OWN
+                    # retraction -- an additive fallback would defeat e.g.
+                    # Interval's bound preservation.
                     p0 = pt[0]
                     d0 = dd[0]
                     if _is_positive(manifold):
                         new = p0 * jnp.exp(d0 / p0)
-                    else:
+                    elif _is_euclidean(manifold):
                         new = p0 + d0
+                    else:
+                        new = manifold.retraction(p0, d0)
                     parts.append(jnp.reshape(new, (1,)))
                     continue
                 pt_m = jnp.reshape(pt, shape)
@@ -361,8 +374,10 @@ class _RiemannianLM:
 
         # ----------------------------------------------------------------
         # Diagonal metric for the convergence norm. Per-coordinate
-        # 1/x^2 for a scalar Positive leaf, 1 otherwise (PSDFixedRank uses
-        # the embedded Frobenius metric == identity in ambient coords).
+        # 1/x^2 for a scalar Positive leaf; the leaf's own scalar metric
+        # weight g_x(1, 1) for any other non-Euclidean scalar leaf (e.g.
+        # phi'(x)^2 for Interval); 1 otherwise (PSDFixedRank uses the
+        # embedded Frobenius metric == identity in ambient coords).
         # Built as a flat (K,) static-structured weight (red-team R29).
         # ----------------------------------------------------------------
         def metric_diag(x: Float[Array, " K"]) -> Float[Array, " K"]:
@@ -371,6 +386,14 @@ class _RiemannianLM:
                 pt = _block(x, offset, size)
                 if shape == () and _is_positive(manifold):
                     parts.append(jnp.reshape(1.0 / (pt[0] ** 2), (1,)))
+                elif shape == () and not _is_euclidean(manifold):
+                    # Generic scalar leaf (e.g. Interval): its metric weight
+                    # enters the convergence norm exactly as Positive's
+                    # 1/x^2 does.
+                    one = jnp.ones((), dtype=x.dtype)
+                    parts.append(
+                        jnp.reshape(manifold.inner_product(pt[0], one, one), (1,))
+                    )
                 else:
                     parts.append(jnp.ones((size,), dtype=x.dtype))
             return jnp.concatenate(parts)

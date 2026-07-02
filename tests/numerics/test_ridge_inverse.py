@@ -141,6 +141,56 @@ class TestSymmetry:
 
 
 # ---------------------------------------------------------------------------
+# (d) Saturation: the ridge cannot achieve PD
+# ---------------------------------------------------------------------------
+
+
+class TestSaturated:
+    def test_zero_diagonal_entry_saturates_and_inverse_is_nan(self):
+        """A PSD matrix with an exact zero diagonal entry cannot be
+        repaired by the diagonal-Tikhonov ridge (tau * M[i, i] == 0
+        there), so the Cholesky NaNs: saturated must flag it and the
+        returned inverse is all-NaN. Note kappa_after alone cannot
+        catch this -- jnp.linalg.cond is an SVD ratio of absolute
+        singular values, blind to the zero eigenvalue (CLAUDE.md
+        commitment 3)."""
+        # PSD: PD 2x2 top-left block, zero third row/column (a PSD
+        # matrix with M[i, i] == 0 must have a zero row/col i), nonzero
+        # off-diagonals elsewhere.
+        M = jnp.array(
+            [
+                [1.0, 0.5, 0.0],
+                [0.5, 2.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ]
+        )
+        M_inv_named, info = ridge_inverse(M, target_condition=1.0e6)
+        assert info["saturated"] is True
+        assert bool(jnp.all(jnp.isnan(M_inv_named.array)))
+
+    def test_healthy_matrix_not_saturated(self):
+        """A PD input yields saturated=False, a finite inverse, and the
+        pre-existing info keys unchanged."""
+        M = jnp.diag(jnp.array([1.0, 2.0, 4.0]))
+        M_inv_named, info = ridge_inverse(M, target_condition=1.0e6)
+        assert info["saturated"] is False
+        assert bool(jnp.all(jnp.isfinite(M_inv_named.array)))
+        # Existing keys/values are untouched by the saturation probe.
+        assert info["tau"] == pytest.approx(0.0, abs=1e-12)
+        assert info["binding"] is False
+        assert info["kappa_before"] == pytest.approx(4.0, rel=1e-6)
+        assert info["kappa_after"] == pytest.approx(4.0, rel=1e-6)
+
+    def test_ill_conditioned_but_repairable_not_saturated(self):
+        """A repairable ill-conditioned PD input is ridged, not
+        saturated."""
+        M = _ill_conditioned_M(target_kappa=1.0e6, dim=3)
+        M_inv_named, info = ridge_inverse(M, target_condition=1.0e3)
+        assert info["saturated"] is False
+        assert bool(jnp.all(jnp.isfinite(M_inv_named.array)))
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -172,7 +222,13 @@ class TestInfoDict:
     def test_keys_present(self):
         M = _ill_conditioned_M(target_kappa=1.0e6, dim=3)
         _, info = ridge_inverse(M, target_condition=1.0e3)
-        assert set(info.keys()) == {"tau", "kappa_before", "kappa_after", "binding"}
+        assert set(info.keys()) == {
+            "tau",
+            "kappa_before",
+            "kappa_after",
+            "binding",
+            "saturated",
+        }
 
     def test_types_are_python_scalars(self):
         """The info dict carries plain Python floats and a bool so it
@@ -183,3 +239,4 @@ class TestInfoDict:
         assert isinstance(info["kappa_before"], float)
         assert isinstance(info["kappa_after"], float)
         assert isinstance(info["binding"], bool)
+        assert isinstance(info["saturated"], bool)

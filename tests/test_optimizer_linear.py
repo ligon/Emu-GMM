@@ -22,6 +22,7 @@ from emu_gmm import (
     EmpiricalMeasure,
     Identity,
     IIDCovariance,
+    OptimizerInfo,
     estimate,
 )
 from emu_gmm.optimizer import linear_solver, optimistix_lm
@@ -248,6 +249,125 @@ def test_jit_nonlinear_falls_back_via_cond():
     # The fallback ran inside the cond: more than one step, and it converged.
     assert int(info.steps) > 1
     assert np.allclose(np.asarray(theta_hat) ** 2, np.asarray(c), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# #78 under jit: the traced branch must thread the REAL ``done`` flag through
+# the lax.cond -- a fallback that failed to converge must NOT be reported
+# converged just because the rebuilt info's static status reads "converged"
+# ---------------------------------------------------------------------------
+
+
+class _StubNonConvergedFallback:
+    """Fallback stub simulating an iterative run that hit its step budget.
+
+    Satisfies the :class:`~emu_gmm.types.Optimizer` protocol and is
+    jit-traceable. Its :class:`OptimizerInfo` carries the REAL traced
+    convergence flag ``done=jnp.asarray(False)`` (the #78 channel), exactly
+    as an iterative backend does when its while_loop exits on ``max_steps``
+    rather than on a convergence criterion.
+    """
+
+    def __call__(self, residual_fn, theta_init, *, args=None):
+        r = residual_fn(theta_init) if args is None else residual_fn(theta_init, args)
+        info = OptimizerInfo(
+            steps=jnp.asarray(37, jnp.int32),
+            final_objective=0.5 * jnp.sum(r * r),
+            status="max_iterations",
+            backend="stub",
+            done=jnp.asarray(False),
+        )
+        return theta_init, info
+
+
+def test_jit_fallback_done_false_survives_the_cond():
+    """Regression (#78 on the traced branch): under jit, a fallback whose
+    ``done`` is False must surface ``done`` False on the returned info.
+
+    Before the fix, the lax.cond discarded ``finfo.done`` and rebuilt
+    ``OptimizerInfo(status="converged", done=None)``, so the estimator's
+    status-string fallback reported every jitted fallback run -- including
+    one that hit max_steps -- as converged.
+    """
+    c = jnp.asarray([2.0, 5.0])
+
+    def residual_fn(theta):
+        return theta**2 - c  # genuinely nonlinear: the certificate fails
+
+    solver = linear_solver(fallback=_StubNonConvergedFallback())
+    _theta, info = jax.jit(lambda t0: solver(residual_fn, t0))(jnp.asarray([1.0, 1.0]))
+
+    assert info.done is not None
+    assert not bool(info.done)  # the fallback's done=False survived the cond
+    assert int(info.steps) == 37  # the fallback branch (not the linear one) ran
+
+
+def test_jit_fallback_done_true_when_fallback_converges():
+    """Under jit, the default optimistix fallback converges on this problem
+    and its traced ``done=True`` is propagated through the cond."""
+    c = jnp.asarray([2.0, 5.0])
+
+    def residual_fn(theta):
+        return theta**2 - c
+
+    solver = linear_solver()
+    _theta, info = jax.jit(lambda t0: solver(residual_fn, t0))(jnp.asarray([1.0, 1.0]))
+    assert info.done is not None
+    assert bool(info.done)
+    assert int(info.steps) > 1  # the fallback branch ran
+
+
+def test_jit_affine_reports_done_true():
+    """The affine fast path under jit certifies the one-step solution and
+    reports a truthy traced ``done``."""
+    rng = np.random.default_rng(7)
+    A = jnp.asarray(rng.standard_normal((3, 3)))
+    b = jnp.asarray(rng.standard_normal(3))
+
+    def residual_fn(theta):
+        return A @ theta - b
+
+    solver = linear_solver()
+    _theta, info = jax.jit(lambda t0: solver(residual_fn, t0))(jnp.zeros(3))
+    assert int(info.steps) == 1  # the linear branch ran
+    assert info.done is not None
+    assert bool(info.done)
+
+
+def test_eager_paths_unchanged_no_done():
+    """Eager behavior is bitwise unchanged by the traced-branch fix: the
+    eager accepted-certificate path and the ``verify=False`` path still
+    return ``done=None`` (their static status is real, not structural, so
+    the estimator's status-string fallback remains correct there)."""
+    rng = np.random.default_rng(3)
+    A = jnp.asarray(rng.standard_normal((3, 3)))
+    b = jnp.asarray(rng.standard_normal(3))
+
+    def residual_fn(theta):
+        return A @ theta - b
+
+    _theta, info = linear_solver()(residual_fn, jnp.zeros(3))
+    assert info.done is None
+    _theta, info = linear_solver(verify=False)(residual_fn, jnp.zeros(3))
+    assert info.done is None
+
+
+def test_estimate_nonconverged_fallback_reports_not_converged():
+    """estimate()-level: a fallback info carrying ``done=False`` makes
+    ``result.converged`` False (the eager delegation surfaces the fallback's
+    info verbatim and the estimator prefers ``done`` over the status)."""
+    data, _beta_true, _beta_hat = _ols_panel(seed=0)
+    n = data.shape[0]
+    measure = EmpiricalMeasure(x=data, mask=jnp.ones((n, 2)), weights=jnp.ones(n))
+
+    result = estimate(
+        model=_ols_residual,
+        measure=measure,
+        covariance=IIDCovariance(),
+        optimizer=linear_solver(fallback=_StubNonConvergedFallback()),
+        theta_init=OLSParams(b0=0.0, b1=0.0),
+    )  # default CU weighting -> non-affine whitened residual -> fallback runs
+    assert not result.converged
 
 
 # ---------------------------------------------------------------------------

@@ -33,16 +33,18 @@ missingness layout is captured as a dedicated boolean structure". At
 the I/O boundary, however, NaN is the natural sentinel for many
 real-data workflows (an asset return is missing for a non-holder; a
 seasonal contribution is missing for a household with no contemporary
-holdings of asset :math:`j`). To bridge the two, two facilities are
-provided:
+holdings of asset :math:`j`). Non-finiteness is handled uniformly on
+``isfinite``: a ``+/-inf`` cell is treated exactly like NaN (missing),
+because a surviving ``inf`` poisons :math:`\\psi` and reverse-mode AD
+the same way NaN does. To bridge the two, two facilities are provided:
 
-1. :meth:`from_pandas` infers the per-coordinate mask from
-   ``~df.isna()`` when no explicit mask is supplied, and replaces NaN
-   cells in the stored ``x`` array with the per-column mean of the
-   *observed* rows of that column (see
-   :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`). The mean is a
-   strictly stronger guarantee than the previous ``0.0`` constant: it
-   lies inside the domain of ``log``, ``1/x``, ``sqrt`` and similar
+1. :meth:`from_pandas` infers the per-coordinate mask from cell
+   finiteness (``~df.isna()`` extended to ``+/-inf``) when no explicit
+   mask is supplied, and replaces non-finite cells in the stored ``x``
+   array with the per-column mean of the *observed* rows of that column
+   (see :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`). The mean
+   is a strictly stronger guarantee than the previous ``0.0`` constant:
+   it lies inside the domain of ``log``, ``1/x``, ``sqrt`` and similar
    partial residuals whenever any observed cell does, and so prevents
    the user's :math:`\\psi` from producing NaN / Inf at masked-out
    cells. The mask still controls aggregation, so the primal value is
@@ -110,30 +112,67 @@ def _check_mask_psi_compatibility(
     The aggregator combines a stored ``(N, M_mask)`` mask with a
     ``(N, M_psi)`` per-observation residual matrix via
     ``jnp.where(mask, psi_batch, 0.0)`` and ``mask * weights[:, None] *
-    psi_batch``. If ``M_mask != M_psi`` JAX raises a generic broadcast
-    error that does not say which side is wrong. The typical cause is
-    constructing the measure via :meth:`EmpiricalMeasure.from_nan_aware`
-    without passing ``M=`` when the user's :math:`\\psi` returns
-    ``M != D`` moments (e.g. Hansen-Singleton, where ``x`` has three
-    columns but the moment is scalar). This helper fires at JAX
-    trace-time -- shapes are static during tracing -- and points the
-    user at the ``M=`` kwarg.
+    psi_batch``. Three failure classes are caught here, all at JAX
+    trace-time (shapes are static during tracing):
+
+    1. **psi returns a 0-d scalar per observation.** ``vmap`` then
+       yields a 1-D ``(N,)`` batch, and JAX raises *no* error:
+       ``jnp.where(mask_bool, psi_batch, 0.0)`` silently broadcasts the
+       ``(N,)`` batch against the ``(N, 1)`` mask into an ``(N, N)``
+       matrix, and ``expectation`` returns an ``(N,)`` vector of
+       per-observation residuals as "moments". For ``K = 1`` the whole
+       pipeline runs end-to-end on garbage with no error, so deferring
+       to JAX here would let the defect through silently.
+    2. **Any other non-2-D psi batch** (e.g. psi returning a 2-D block
+       per observation, giving a 3-D batch): rejected with a generic
+       message rather than deferred.
+    3. **M mismatch** between a 2-D mask and a 2-D psi batch. The
+       typical cause is constructing the measure via
+       :meth:`EmpiricalMeasure.from_nan_aware` without passing ``M=``
+       when the user's :math:`\\psi` returns ``M != D`` moments (e.g.
+       Hansen-Singleton, where ``x`` has three columns but the moment
+       is scalar); the message points the user at the ``M=`` kwarg.
 
     Parameters
     ----------
     mask_shape : tuple of int
         Shape of ``self.mask``; expected ``(N, M_mask)``.
     psi_shape : tuple of int
-        Shape of ``vmap(psi)(x)`` output; expected ``(N, M_psi)``.
+        Batch shape of psi's per-observation output; expected
+        ``(N, M_psi)``. The Jacobian paths pass ``grad_batch.shape[:-1]``
+        (the batch shape with the trailing parameter axis removed), so a
+        0-d-scalar psi surfaces as a 1-D shape there too.
 
     Raises
     ------
     ValueError
-        If the moment dimensions disagree.
+        If psi's batch shape is not 2-D, or if the moment dimensions
+        disagree.
     """
-    if len(mask_shape) != 2 or len(psi_shape) != 2:
-        # Defer to JAX's own error for non-2D oddities; the standard
-        # path produces (N, M)-shaped tensors.
+    if len(psi_shape) == 1 and len(mask_shape) == 2:
+        raise ValueError(
+            f"EmpiricalMeasure: psi must return a 1-D array of shape (M,) "
+            f"per observation, but it returned a 0-d scalar (the vmapped "
+            f"per-observation batch has 1-D shape {psi_shape} instead of "
+            f"(N, M); the mask has shape {mask_shape}). JAX raises no "
+            f"error for this: the scalar batch silently broadcasts "
+            f"against the (N, M) mask (to (N, N) when M == 1) and the "
+            f"'moments' become per-observation residuals -- garbage that "
+            f"runs end-to-end for K = 1. Wrap psi's return value so that "
+            f"a single moment has shape (1,): e.g. "
+            f"'return jnp.array([expr])' or 'return jnp.atleast_1d(expr)'."
+        )
+    if len(psi_shape) != 2:
+        raise ValueError(
+            f"EmpiricalMeasure: expected psi's vmapped per-observation "
+            f"batch to have shape (N, M) -- i.e. psi returns a 1-D array "
+            f"of shape (M,) per observation -- but got shape {psi_shape}. "
+            f"Return a 1-D (M,) array from psi (flatten any "
+            f"multi-dimensional moment block, e.g. with jnp.ravel)."
+        )
+    if len(mask_shape) != 2:
+        # The constructors all enforce a 2-D (N, M) mask; a hand-built
+        # measure with an exotic mask falls through to JAX's own error.
         return
     n_mask, m_mask = mask_shape
     n_psi, m_psi = psi_shape
@@ -177,7 +216,17 @@ def _assert_finite_weights(
     source : str
         Name of the calling constructor, used to disambiguate the
         error message (e.g. ``"from_pandas"`` vs ``"from_nan_aware"``).
+
+    Notes
+    -----
+    This is an *eager* value check on concrete inputs. When the array
+    is a JAX tracer (construction inside ``jit`` / ``vmap``, possible
+    via :meth:`EmpiricalMeasure.from_arrays`), the check is skipped so
+    tracing still works --- a traced value cannot be inspected without
+    aborting the trace.
     """
+    if isinstance(weights, jax.core.Tracer):
+        return
     if not bool(jnp.all(jnp.isfinite(weights))):
         raise ValueError(
             f"EmpiricalMeasure.{source}: weights contain non-finite values "
@@ -185,6 +234,111 @@ def _assert_finite_weights(
             f"mask * weights and poisons the per-coordinate sum, regardless "
             f"of any per-cell mask. Drop or impute the offending rows before "
             f"constructing the measure."
+        )
+
+
+def _assert_mask_columns_supported(
+    mask: Float[Array, "N M"],
+    *,
+    source: str,
+) -> None:
+    """Raise if some mask column has no supported observation at all.
+
+    An all-zero mask column means :math:`N_j = 0` for that moment: the
+    moment mean is degenerate (``_safe_divide`` records zero), and every
+    downstream statistic that touches coordinate ``j`` --- ``V_X``, the
+    criterion, ``J_stat``, ``Sigma_theta`` --- is undefined, so the fit
+    exits as a silent all-NaN result. A dead moment is always a
+    construction-time defect (a fully-missing column, a mis-built
+    mask), so surface it loudly at the input boundary with the dead
+    indices named.
+
+    Parameters
+    ----------
+    mask : (N, M) jax array
+        The resolved 0/1 observability mask.
+    source : str
+        Name of the calling constructor, for the error message.
+
+    Notes
+    -----
+    Eager value check; skipped when ``mask`` is a JAX tracer (see
+    :func:`_assert_finite_weights`).
+    """
+    if isinstance(mask, jax.core.Tracer):
+        return
+    support = jnp.sum(mask > 0.0, axis=0)  # (M,)
+    dead = [int(j) for j in jnp.nonzero(support == 0)[0]]
+    if dead:
+        raise ValueError(
+            f"EmpiricalMeasure.{source}: mask column(s) {dead} have no "
+            f"supported observations (every entry is zero), so N_j = 0 "
+            f"for those moments and every statistic that touches them "
+            f"(moment mean, V_X, J_stat, Sigma_theta) is undefined -- "
+            f"the fit would exit as a silent all-NaN result. Drop the "
+            f"dead moment(s) or fix the mask / missingness pattern "
+            f"before constructing the measure."
+        )
+
+
+def _assert_complete_data_under_mask(
+    x: Float[Array, "N D"],
+    mask: Float[Array, "N M"],
+    *,
+    source: str,
+) -> None:
+    """Raise if a non-finite ``x`` cell sits at a mask-ON position.
+
+    :meth:`EmpiricalMeasure.from_arrays` documents that it *asserts
+    complete data* rather than inferring missingness from NaN; this is
+    the enforcement. Cells the mask turns OFF may hold anything (the
+    hot path scrubs them via
+    :func:`emu_gmm._internal.nan_safety.safe_x_for_psi` before ``psi``
+    ever sees them), but a non-finite cell at a mask-ON position would
+    either poison the moment sum or --- worse, after the hot-path
+    scrub --- be silently rewritten to the column mean and enter the
+    sum as a fabricated observation, biasing ``N_j`` and the moment
+    value.
+
+    Two mask layouts are handled:
+
+    - ``mask.shape == x.shape`` (``M == D``): cell-aligned check ---
+      ``x[i, j]`` must be finite wherever ``mask[i, j]`` is ON.
+    - otherwise (``M != D``): ``psi`` reads the full data row to build
+      each moment, so every row supported by *any* moment must be fully
+      finite.
+
+    Parameters
+    ----------
+    x : (N, D) jax array
+        The stored observation matrix.
+    mask : (N, M) jax array
+        The resolved 0/1 observability mask.
+    source : str
+        Name of the calling constructor, for the error message.
+
+    Notes
+    -----
+    Eager value check; skipped when either input is a JAX tracer (see
+    :func:`_assert_finite_weights`).
+    """
+    if isinstance(x, jax.core.Tracer) or isinstance(mask, jax.core.Tracer):
+        return
+    finite = jnp.isfinite(x)  # (N, D)
+    if mask.shape == x.shape:
+        bad_rows = jnp.any(~finite & (mask > 0.0), axis=1)  # (N,)
+    else:
+        supported = jnp.any(mask > 0.0, axis=1)  # (N,)
+        bad_rows = supported & ~jnp.all(finite, axis=1)  # (N,)
+    if bool(jnp.any(bad_rows)):
+        rows = [int(i) for i in jnp.nonzero(bad_rows)[0][:10]]
+        raise ValueError(
+            f"EmpiricalMeasure.{source}: x contains non-finite cells "
+            f"(NaN or +/-inf) at mask-ON positions (rows {rows}). "
+            f"{source} asserts complete data: every cell the mask marks "
+            f"observable must be finite. Use from_nan_aware / "
+            f"from_pandas for NaN-as-missing semantics, or mask the "
+            f"offending rows/cells off."
         )
 
 
@@ -438,7 +592,12 @@ class EmpiricalMeasure:
         grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
         # Trace-time shape check; surface the same helpful message as
         # :meth:`expectation_and_contributions` if mask vs psi disagree.
-        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:2])
+        # Slice off the trailing parameter axis (K) rather than taking
+        # the leading two axes: a psi that returns a 0-d scalar yields a
+        # 2-D (N, K) grad batch whose ``shape[:2]`` masquerades as a
+        # valid (N, M) pair, whereas ``shape[:-1] == (N,)`` exposes the
+        # missing moment axis to the scalar-return check.
+        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:-1])
         # NaN-safe: zero the gradient at masked-out (i, j) cells before
         # weight multiplication so 0 * NaN cannot poison the (M, K) sum.
         mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
@@ -506,8 +665,11 @@ class EmpiricalMeasure:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
 
         grad_batch = jax.vmap(grad_at)(x_safe)  # (N, M, K)
-        # Same trace-time shape check as the other methods.
-        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:2])
+        # Same trace-time shape check as the other methods; slice off
+        # the trailing K axis (not ``shape[:2]``) so a 0-d-scalar psi's
+        # 2-D (N, K) grad batch is caught by the scalar-return check
+        # (see :meth:`jacobian`).
+        _check_mask_psi_compatibility(self.mask.shape, grad_batch.shape[:-1])
         mask_bool = (self.mask > 0.0)[:, :, None]  # (N, M, 1)
         grad_safe = jnp.where(mask_bool, grad_batch, 0.0)  # (N, M, K)
         weight_mask = self.mask * self.weights[:, None]  # (N, M)
@@ -537,9 +699,10 @@ class EmpiricalMeasure:
         df : :class:`pandas.DataFrame`
             Observations. Each column becomes a coordinate of ``x``.
             When ``nan_aware`` is true (the default) and no explicit
-            ``mask`` is supplied, NaN cells are treated as missing: the
-            mask is inferred as ``~df.isna()`` and NaN cells in ``x``
-            are replaced with the per-column mean of the observed rows
+            ``mask`` is supplied, non-finite cells (NaN or ``+/-inf``)
+            are treated as missing: the mask is 1 exactly where the
+            cell is finite, and non-finite cells in ``x`` are replaced
+            with the per-column mean of the observed rows
             (see :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`).
         weights : :class:`pandas.Series` or array-like, optional
             Per-observation weights. Defaults to all-ones.
@@ -547,15 +710,16 @@ class EmpiricalMeasure:
             optional. Per-coordinate observability. When supplied, it
             takes precedence over NaN-inferred missingness, but it is
             an error to combine an explicit mask with a data array
-            that still contains NaN (see "Raises" below). When omitted
-            and ``nan_aware`` is true, ``~df.isna()`` is used; otherwise
-            an all-ones mask is constructed.
+            that still contains non-finite values (see "Raises"
+            below). When omitted and ``nan_aware`` is true, per-cell
+            finiteness is used; otherwise an all-ones mask is
+            constructed.
         nan_aware : bool, keyword-only, default True
-            When true, NaN cells in ``df`` indicate per-cell
+            When true, non-finite cells in ``df`` indicate per-cell
             missingness and drive both the inferred mask (when no
-            explicit ``mask`` is given) and the NaN-cleaning of ``x``.
+            explicit ``mask`` is given) and the cleaning of ``x``.
             Set to false to preserve the legacy behaviour of all-ones
-            masking and verbatim NaN propagation in ``x``.
+            masking and verbatim NaN / inf propagation in ``x``.
 
         Returns
         -------
@@ -565,12 +729,18 @@ class EmpiricalMeasure:
         ------
         ValueError
             If ``nan_aware`` is true, ``mask`` is supplied, and ``df``
-            still contains NaN cells. The combination is ambiguous: the
-            user's mask might mark a NaN cell observable, in which case
-            silently rewriting it to a sentinel would bias :math:`N_j`
-            and the moment sum. Drop the explicit mask (let NaN-inference
-            run), scrub NaN in ``df`` before calling, or pass
-            ``nan_aware=False`` to opt back into NaN-passthrough.
+            still contains non-finite cells. The combination is
+            ambiguous: the user's mask might mark a non-finite cell
+            observable, in which case silently rewriting it to a
+            sentinel would bias :math:`N_j` and the moment sum. Drop
+            the explicit mask (let finiteness-inference run), scrub
+            NaN / inf in ``df`` before calling, or pass
+            ``nan_aware=False`` to opt back into passthrough.
+
+            Also raised when some column of the resolved mask has no
+            supported observation at all (``N_j = 0``): a dead moment
+            makes every downstream statistic that touches it undefined,
+            so it is rejected here with the dead indices named.
 
         Notes
         -----
@@ -608,18 +778,20 @@ class EmpiricalMeasure:
             m = int(m_shape[1])
             mask_arr = labels_mod.normalise_mask(mask, n, m)
         elif nan_aware:
-            # Infer mask from NaN cells: 1 where finite, 0 where NaN.
-            finite_mask = jnp.where(jnp.isnan(x_arr), 0.0, 1.0)
-            mask_arr = finite_mask.astype(jnp.float32)
+            # Infer mask from cell finiteness: 1 where finite, 0 where
+            # NaN or +/-inf. Both are "missing" -- an inf cell left
+            # mask-ON would be silently rewritten by safe_x_for_psi
+            # below, fabricating an observation.
+            mask_arr = jnp.isfinite(x_arr).astype(jnp.float32)
             m = int(x_arr.shape[1])
         else:
             m = int(x_arr.shape[1])
             mask_arr = labels_mod.normalise_mask(None, n, m)
 
-        # NaN-clean x so downstream JAX arithmetic / vmap of psi is
-        # safe even where the user's psi happens to read masked-out
-        # cells. The mask still controls aggregation; this is purely a
-        # defensive substitution at the I/O boundary.
+        # Clean non-finite cells in x so downstream JAX arithmetic /
+        # vmap of psi is safe even where the user's psi happens to read
+        # masked-out cells. The mask still controls aggregation; this
+        # is purely a defensive substitution at the I/O boundary.
         #
         # The sentinel used is the per-column mean of the *observed*
         # rows of that column (see
@@ -632,26 +804,30 @@ class EmpiricalMeasure:
         # mask zeroed the primal contribution.
         #
         # Gating: scrub x only when ``nan_aware`` is true AND the mask
-        # was inferred from NaN. If the user supplied an explicit mask
-        # alongside NaN-laden x, silently rewriting NaN cells would
-        # turn an unobserved value into a "real" observation at any
-        # (i, j) the user marked observable, biasing N_j and the
-        # moment sum. The conflict is almost always user error, so
-        # raise loudly instead of guessing.
+        # was inferred from finiteness. If the user supplied an
+        # explicit mask alongside non-finite x, silently rewriting the
+        # non-finite cells would turn an unobserved value into a "real"
+        # observation at any (i, j) the user marked observable, biasing
+        # N_j and the moment sum. The conflict is almost always user
+        # error, so raise loudly instead of guessing. The check is on
+        # isfinite, not isnan: an inf cell is exactly as biasing, since
+        # the hot path's safe_x_for_psi pass now rewrites it too.
         if nan_aware and mask is None:
             x_arr = safe_x_for_psi(x_arr)
-        elif nan_aware and mask is not None and bool(jnp.any(jnp.isnan(x_arr))):
+        elif nan_aware and mask is not None and not bool(jnp.all(jnp.isfinite(x_arr))):
             raise ValueError(
                 "EmpiricalMeasure.from_pandas: an explicit mask was supplied "
-                "alongside NaN values in the data. Silently rewriting NaN to "
-                "zero would bias the per-coordinate sums at cells the mask "
-                "marks observable. Either (a) drop the mask argument so "
-                "nan_aware can infer it from ~df.isna(), or (b) scrub NaN in "
-                "the data before calling from_pandas (e.g. df.fillna(0) or "
+                "alongside NaN or infinite values in the data. Silently "
+                "rewriting non-finite cells to a sentinel would bias the "
+                "per-coordinate sums at cells the mask marks observable. "
+                "Either (a) drop the mask argument so nan_aware can infer it "
+                "from the finite cells, or (b) scrub NaN / inf in the data "
+                "before calling from_pandas (e.g. df.fillna(0) or "
                 "df.dropna()), or (c) pass nan_aware=False to keep the legacy "
-                "all-ones-mask / NaN-passthrough behaviour."
+                "all-ones-mask / passthrough behaviour."
             )
 
+        _assert_mask_columns_supported(mask_arr, source="from_pandas")
         return cls(x=x_arr, mask=mask_arr, weights=w_arr)
 
     @classmethod
@@ -662,13 +838,14 @@ class EmpiricalMeasure:
         *,
         M: int | None = None,
     ) -> "EmpiricalMeasure":
-        """Construct an :class:`EmpiricalMeasure` from an array containing NaN.
+        """Construct an :class:`EmpiricalMeasure` from an array with missing cells.
 
         Convenience wrapper for the NaN-as-missing semantics described
-        in the module docstring. NaN cells in the stored ``x`` are
-        replaced with the per-column observed mean so the hot path is
-        NaN-free, and a per-coordinate mask is inferred from
-        ``~jnp.isnan(x)``. Accepts any 2-D array-like that
+        in the module docstring; ``+/-inf`` cells are treated exactly
+        like NaN. Non-finite cells in the stored ``x`` are replaced
+        with the per-column observed mean so the hot path is finite,
+        and a per-coordinate mask is inferred from
+        ``jnp.isfinite(x)``. Accepts any 2-D array-like that
         :func:`jax.numpy.asarray` can coerce; for
         :class:`pandas.DataFrame` inputs use :meth:`from_pandas`
         instead (which preserves column-label semantics).
@@ -688,7 +865,8 @@ class EmpiricalMeasure:
         Parameters
         ----------
         x : array-like, shape (N, D)
-            Observations with NaN as the missing-cell sentinel.
+            Observations with NaN (or ``+/-inf``) as the missing-cell
+            sentinel.
         weights : array-like of length N, optional
             Per-observation weights. Defaults to all-ones.
         M : int, keyword-only, optional
@@ -696,11 +874,11 @@ class EmpiricalMeasure:
             supplied, the constructed mask has shape ``(N, M)``: row
             :math:`i` contributes to every moment iff *every* observed
             column of ``x[i, :]`` is finite (i.e. the row is fully
-            observed; any NaN in ``x[i, :]`` knocks the entire row out of
-            every moment's sum). This matches the typical structural
-            model where each scalar moment is a function of the full
-            row, so a single NaN component makes the row unusable for
-            any moment.
+            observed; any non-finite cell in ``x[i, :]`` knocks the
+            entire row out of every moment's sum). This matches the
+            typical structural model where each scalar moment is a
+            function of the full row, so a single missing component
+            makes the row unusable for any moment.
 
             When ``None`` (the default), the mask has shape ``(N, D)``,
             i.e. the legacy column-wise behaviour: row :math:`i`
@@ -718,7 +896,11 @@ class EmpiricalMeasure:
         ------
         ValueError
             If ``x`` is not 2-D, or if ``M`` is supplied as a
-            non-positive integer.
+            non-positive integer. Also raised when some column of the
+            inferred mask has no supported observation at all
+            (``N_j = 0``): a dead moment makes every downstream
+            statistic that touches it undefined, so it is rejected
+            here with the dead indices named.
 
         Examples
         --------
@@ -747,14 +929,18 @@ class EmpiricalMeasure:
         _assert_finite_weights(w_arr, source="from_nan_aware")
 
         if M is None:
-            # Legacy behaviour: per-column NaN mask, shape (N, D). This
-            # is correct only when the user's psi returns M == D moments
-            # and the column-to-moment mapping is the identity. The
-            # ``mask`` lookup is silently broadcast against psi at
-            # expectation time, so a (N, D) mask with M != D produces an
-            # opaque shape error from inside the hot path -- pass M=
-            # explicitly to avoid that trap.
-            mask_arr = jnp.where(jnp.isnan(x_arr), 0.0, 1.0).astype(jnp.float32)
+            # Legacy behaviour: per-column finiteness mask, shape
+            # (N, D). Uses isfinite -- not isnan -- so +/-inf cells are
+            # masked out exactly like the M= branch below; an inf left
+            # mask-ON would be silently rewritten by safe_x_for_psi,
+            # fabricating an observation. This branch is correct only
+            # when the user's psi returns M == D moments and the
+            # column-to-moment mapping is the identity. The ``mask``
+            # lookup is silently broadcast against psi at expectation
+            # time, so a (N, D) mask with M != D produces an opaque
+            # shape error from inside the hot path -- pass M= explicitly
+            # to avoid that trap.
+            mask_arr = jnp.isfinite(x_arr).astype(jnp.float32)
         else:
             if not isinstance(M, int) or M <= 0:
                 raise ValueError(
@@ -771,12 +957,13 @@ class EmpiricalMeasure:
             row_finite = jnp.all(jnp.isfinite(x_arr), axis=1)  # (N,)
             mask_arr = jnp.broadcast_to(row_finite[:, None], (n, M)).astype(jnp.float32)
 
-        # Substitute the per-column observed-mean sentinel at NaN cells
-        # rather than ``0.0`` so that partial residuals like
-        # ``log(x[0])`` or ``1.0 / x[1]`` cannot produce a NaN cotangent
-        # at masked-out cells under reverse-mode AD (see
-        # :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`).
+        # Substitute the per-column observed-mean sentinel at
+        # non-finite cells rather than ``0.0`` so that partial
+        # residuals like ``log(x[0])`` or ``1.0 / x[1]`` cannot produce
+        # a NaN cotangent at masked-out cells under reverse-mode AD
+        # (see :func:`emu_gmm._internal.nan_safety.safe_x_for_psi`).
         x_clean = safe_x_for_psi(x_arr)
+        _assert_mask_columns_supported(mask_arr, source="from_nan_aware")
         return cls(x=x_clean, mask=mask_arr, weights=w_arr)
 
     @classmethod
@@ -818,20 +1005,50 @@ class EmpiricalMeasure:
         Returns
         -------
         measure : :class:`EmpiricalMeasure`
+
+        Raises
+        ------
+        ValueError
+            If ``weights`` is not a 1-D length-``N`` vector of finite
+            values; if an explicit ``mask`` is not 2-D with ``N`` rows;
+            if ``x`` holds non-finite cells (NaN or ``+/-inf``) at
+            mask-ON positions (this constructor *asserts* complete
+            data --- use the NaN-aware constructors for missingness);
+            or if some mask column has no supported observation at all
+            (``N_j = 0``, a dead moment).
+
+        Notes
+        -----
+        Shape checks are static and always enforced (they work under
+        ``jit`` / ``vmap`` tracing). The value-dependent checks
+        (finite weights, complete data, dead mask columns) are eager
+        and are skipped when the corresponding input is a JAX tracer,
+        so traced construction still traces.
         """
         x_arr = jnp.asarray(x, dtype=jnp.float64)
         n = x_arr.shape[0]
         m = M if M is not None else x_arr.shape[1]
-        mask_arr = (
-            jnp.ones((n, m), dtype=jnp.float64)
-            if mask is None
-            else jnp.asarray(mask, dtype=jnp.float64)
-        )
-        w_arr = (
-            jnp.ones((n,), dtype=jnp.float64)
-            if weights is None
-            else jnp.asarray(weights, dtype=jnp.float64)
-        )
+        if mask is None:
+            mask_arr = jnp.ones((n, m), dtype=jnp.float64)
+        else:
+            mask_arr = jnp.asarray(mask, dtype=jnp.float64)
+            if mask_arr.ndim != 2 or mask_arr.shape[0] != n:
+                raise ValueError(
+                    f"EmpiricalMeasure.from_arrays: mask must be 2-D with "
+                    f"shape (N={n}, M); got shape {tuple(mask_arr.shape)}"
+                )
+        if weights is None:
+            w_arr = jnp.ones((n,), dtype=jnp.float64)
+        else:
+            w_arr = jnp.asarray(weights, dtype=jnp.float64)
+            if w_arr.ndim != 1 or w_arr.shape[0] != n:
+                raise ValueError(
+                    f"EmpiricalMeasure.from_arrays: weights must be 1-D with "
+                    f"length N={n}; got shape {tuple(w_arr.shape)}"
+                )
+        _assert_finite_weights(w_arr, source="from_arrays")
+        _assert_complete_data_under_mask(x_arr, mask_arr, source="from_arrays")
+        _assert_mask_columns_supported(mask_arr, source="from_arrays")
         return cls(x=x_arr, mask=mask_arr, weights=w_arr)
 
 

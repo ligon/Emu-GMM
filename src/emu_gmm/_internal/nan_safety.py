@@ -34,11 +34,20 @@ column mean of the *observed* rows. Concretely, for each x-column
    \\frac{\\sum_i \\mathbf{1}[x_{id}\\ \\mathrm{finite}]\\, x_{id}}
         {\\sum_i \\mathbf{1}[x_{id}\\ \\mathrm{finite}]},
 
-and replace each NaN cell ``x[i, d]`` with ``sentinel_d``. The sentinel
-is in :math:`\\psi`'s domain whenever any observed cell in column
-:math:`d` is, so ``log``, ``1/x``, ``sqrt``, and similar partial
-operations never see an out-of-domain argument inside the vmap. The mask
-then zeroes the result, so the primal value is unchanged.
+and replace each *non-finite* cell ``x[i, d]`` --- NaN or ``+/-inf``
+alike --- with ``sentinel_d``. The sentinel is in :math:`\\psi`'s domain
+whenever any observed cell in column :math:`d` is, so ``log``, ``1/x``,
+``sqrt``, and similar partial operations never see an out-of-domain
+argument inside the vmap. The mask then zeroes the result, so the
+primal value is unchanged.
+
+Non-finiteness is handled uniformly on ``isfinite``: a ``+/-inf`` cell
+is exactly as poisonous as a NaN cell (``psi(inf)`` produces NaN / inf
+intermediates whose reverse-mode cotangents leak through the masked
+``where`` in the same way), so it is replaced by the same sentinel. An
+earlier revision replaced only ``isnan`` cells, which let a masked-out
+``inf`` survive into the ``psi`` evaluation and silently poison
+reverse-mode AD.
 
 If a column has *no* observed cells, the sentinel falls back to ``0.0``
 to avoid ``0 / 0``; in that degenerate case every row of that column is
@@ -54,12 +63,12 @@ from jaxtyping import Array, Float
 
 
 def column_mean_sentinel(x: Float[Array, "N D"]) -> Float[Array, " D"]:
-    """Per-column mean over finite cells; zero where a column is all-NaN.
+    """Per-column mean over finite cells; zero where no cell is finite.
 
     Parameters
     ----------
     x : (N, D) jax array
-        Observations. May contain NaN cells.
+        Observations. May contain non-finite (NaN / +/-inf) cells.
 
     Returns
     -------
@@ -70,8 +79,8 @@ def column_mean_sentinel(x: Float[Array, "N D"]) -> Float[Array, " D"]:
     """
 
     finite = jnp.isfinite(x).astype(x.dtype)  # (N, D) 0/1
-    # Replace NaN with 0 inside the sum so the contribution is exactly
-    # zero on non-finite cells without poisoning the accumulator.
+    # Zero the non-finite cells inside the sum so their contribution is
+    # exactly zero without poisoning the accumulator.
     x_finite_zeroed = jnp.where(finite > 0.0, x, 0.0)
     numer = jnp.sum(x_finite_zeroed, axis=0)  # (D,)
     denom = jnp.sum(finite, axis=0)  # (D,)
@@ -84,14 +93,19 @@ def column_mean_sentinel(x: Float[Array, "N D"]) -> Float[Array, " D"]:
 
 
 def safe_x_for_psi(x: Float[Array, "N D"]) -> Float[Array, "N D"]:
-    """Replace NaN cells in ``x`` with the per-column observed mean.
+    """Replace non-finite cells in ``x`` with the per-column observed mean.
 
-    The returned array is guaranteed to be NaN-free and, at every cell,
-    to lie within the convex hull of the observed values of its column.
-    This is the strongest in-domain guarantee available without
-    user-supplied bounds: ``log``, ``1/x``, and ``sqrt`` are all safe
-    under it whenever any observed cell of the relevant column is in
-    their domain.
+    All non-finite cells --- NaN and ``+/-inf`` alike --- are replaced,
+    matching the ``isfinite`` convention used everywhere else at the
+    input boundary. (An earlier revision replaced only ``isnan`` cells,
+    so a masked-out ``inf`` survived into ``psi`` and poisoned
+    reverse-mode AD through the masked ``where``; see the module
+    docstring.) The returned array is guaranteed to be finite and, at
+    every cell, to lie within the convex hull of the finite observed
+    values of its column. This is the strongest in-domain guarantee
+    available without user-supplied bounds: ``log``, ``1/x``, and
+    ``sqrt`` are all safe under it whenever any observed cell of the
+    relevant column is in their domain.
 
     The mask must still be applied to the *output* of ``psi`` to zero
     out the masked-out contributions; this helper only ensures the
@@ -102,17 +116,18 @@ def safe_x_for_psi(x: Float[Array, "N D"]) -> Float[Array, "N D"]:
     Parameters
     ----------
     x : (N, D) jax array
-        Observations, possibly containing NaN cells.
+        Observations, possibly containing non-finite (NaN / +/-inf)
+        cells.
 
     Returns
     -------
     x_eval : (N, D) jax array
-        Same shape as ``x``; NaN cells replaced by the per-column
-        observed mean, all other cells unchanged.
+        Same shape as ``x``; non-finite cells replaced by the
+        per-column observed mean, all other cells unchanged.
     """
 
     sentinel = column_mean_sentinel(x)  # (D,)
-    return jnp.where(jnp.isnan(x), sentinel[None, :], x)
+    return jnp.where(jnp.isfinite(x), x, sentinel[None, :])
 
 
 __all__ = ["column_mean_sentinel", "safe_x_for_psi"]

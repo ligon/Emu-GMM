@@ -405,8 +405,10 @@ class TestNaNAware:
                 "r1": [10.0, 20.0, 30.0],
             }
         )
-        # Force moment 1 fully off via the explicit mask.
-        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
+        # Force moment 1 mostly off via the explicit mask (one row of
+        # support is kept: an all-zero column is now rejected as a dead
+        # moment, see TestDeadMaskColumnRejected).
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 1.0]})
         meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
         np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
 
@@ -852,7 +854,10 @@ class TestFromPandasExplicitMaskNaNConflict:
                 "r1": [10.0, 20.0, 30.0],
             }
         )
-        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 0.0, 0.0]})
+        # Each mask column keeps at least one supported row: an
+        # all-zero column is now rejected as a dead moment (see
+        # TestDeadMaskColumnRejected).
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0, 1.0], "m1": [0.0, 1.0, 0.0]})
         meas = EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
         np.testing.assert_allclose(np.asarray(meas.mask), explicit_mask.to_numpy())
 
@@ -945,3 +950,401 @@ class TestNonFiniteWeightsRejected:
         with pytest.raises(ValueError) as excinfo:
             EmpiricalMeasure.from_nan_aware(x, weights=[1.0, float("nan")])
         assert "from_nan_aware" in str(excinfo.value)
+
+
+class TestScalarPsiRejected:
+    """A psi returning a 0-d scalar per observation must raise, loudly.
+
+    Regression guard for the silent-broadcast bug: with the documented
+    Hansen-Singleton ``from_nan_aware(x, M=1)`` recipe, a user psi that
+    forgets the ``jnp.array([...])`` wrapper (``return beta*r*ratio - 1.0``)
+    returns a 0-d scalar per observation. ``vmap`` yields an ``(N,)``
+    batch, JAX raises *no* error, and
+    ``jnp.where(mask_bool[(N, 1)], psi_batch[(N,)], 0.0)`` silently
+    broadcasts to ``(N, N)``; ``expectation`` then returns an ``(N,)``
+    vector of per-observation residuals as "moments" and, for ``K = 1``,
+    the full pipeline runs end-to-end on garbage. The shape guard must
+    reject the scalar return at trace time in every psi-batch consumer.
+    """
+
+    @staticmethod
+    def _scalar_psi(xi, theta):
+        # Missing jnp.array([...]) wrapper: returns a 0-d scalar.
+        return theta.a + theta.b * xi[0]
+
+    def _measure(self, n: int = 10):
+        rng = np.random.default_rng(0)
+        return EmpiricalMeasure.from_nan_aware(rng.normal(size=(n, 3)), M=1)
+
+    def _assert_scalar_message(self, excinfo):
+        msg = str(excinfo.value)
+        # Names the defect: psi returned a 0-d scalar per observation.
+        assert "0-d scalar" in msg
+        # Names the requirement: a 1-D array of shape (M,).
+        assert "(M,)" in msg
+        # Names a remediation: wrap the return value.
+        assert "jnp.array" in msg or "jnp.atleast_1d" in msg
+
+    def test_expectation_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().expectation(self._scalar_psi, _LinearParams(0.0, 1.0))
+        self._assert_scalar_message(excinfo)
+
+    def test_moment_contributions_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().moment_contributions(
+                self._scalar_psi, _LinearParams(0.0, 1.0)
+            )
+        self._assert_scalar_message(excinfo)
+
+    def test_jacobian_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().jacobian(self._scalar_psi, _LinearParams(0.0, 1.0))
+        self._assert_scalar_message(excinfo)
+
+    def test_jacobian_contributions_raises(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._measure().jacobian_contributions(
+                self._scalar_psi, _LinearParams(0.0, 1.0)
+            )
+        self._assert_scalar_message(excinfo)
+
+    def test_raises_at_trace_time_under_jit(self):
+        """The guard fires while tracing, so jit does not swallow it."""
+        meas = self._measure()
+
+        @jax.jit
+        def compute(m, t):
+            return m.expectation(self._scalar_psi, t)
+
+        with pytest.raises(ValueError) as excinfo:
+            compute(meas, _LinearParams(0.0, 1.0))
+        self._assert_scalar_message(excinfo)
+
+    def test_full_estimate_path_raises(self):
+        """The end-to-end estimate() call surfaces the same clear error
+        instead of converging on garbage moments (the K = 1 silent-run
+        failure mode)."""
+        from emu_gmm.covariance import IIDCovariance
+        from emu_gmm.estimator import estimate
+
+        with pytest.raises(ValueError) as excinfo:
+            estimate(
+                model=self._scalar_psi,
+                measure=self._measure(),
+                covariance=IIDCovariance(),
+                theta_init=_LinearParams(a=0.0, b=1.0),
+            )
+        self._assert_scalar_message(excinfo)
+
+    def test_higher_rank_psi_raises_generic_error(self):
+        """A psi returning a 2-D block per observation (3-D batch) is
+        rejected with a clear message instead of deferring to JAX."""
+        meas = self._measure()
+
+        def matrix_psi(xi, theta):
+            return jnp.ones((2, 2)) * theta.a
+
+        with pytest.raises(ValueError) as excinfo:
+            meas.expectation(matrix_psi, _LinearParams(0.0, 1.0))
+        msg = str(excinfo.value)
+        assert "(N, M)" in msg
+        assert "(M,)" in msg
+
+    def test_correctly_wrapped_psi_still_works(self):
+        """The documented recipe with the jnp.array([...]) wrapper is
+        untouched by the guard and produces the same moment as before."""
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(10, 3))
+        meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+
+        def psi(xi, theta):
+            return jnp.array([theta.a + theta.b * xi[0]])
+
+        m = meas.expectation(psi, _LinearParams(a=0.0, b=1.0))
+        assert m.shape == (1,)
+        np.testing.assert_allclose(float(m[0]), float(np.mean(x[:, 0])), rtol=1e-6)
+        # Jacobian path likewise unaffected.
+        G = meas.jacobian(psi, _LinearParams(a=0.0, b=1.0))
+        assert G.shape == (1, 2)
+
+
+class TestInfAsMissing:
+    """+/-inf cells are treated exactly like NaN at the input boundary.
+
+    Regression guard for the isnan / isfinite scrub disagreement (review
+    item M6): ``from_nan_aware(M=...)`` masked rows by ``isfinite`` while
+    the legacy ``M=None`` branch used ``isnan``, and ``safe_x_for_psi``
+    replaced only ``isnan`` cells --- so a +/-inf cell was masked out of
+    every moment on the ``M=`` branch yet SURVIVED into the stored ``x``.
+    ``psi(inf)`` then produced NaN / inf intermediates whose reverse-mode
+    cotangents poison the gradient through the masked ``where`` --- the
+    exact hazard the module docstring documents for NaN. All
+    non-finiteness handling is now uniform on ``isfinite``.
+    """
+
+    def test_inf_masked_out_on_legacy_branch(self):
+        """M=None branch: +/-inf cells are masked out per column."""
+        x = np.array(
+            [
+                [1.0, 10.0],
+                [np.inf, 20.0],
+                [3.0, -np.inf],
+                [5.0, 40.0],
+            ]
+        )
+        meas = EmpiricalMeasure.from_nan_aware(x)
+        expected_mask = np.array([[1.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]])
+        np.testing.assert_allclose(np.asarray(meas.mask), expected_mask)
+        # Stored x is fully finite: inf cells replaced by the
+        # per-column observed (finite) mean --- col 0: mean{1, 3, 5} = 3,
+        # col 1: mean{10, 20, 40} = 70/3.
+        assert bool(jnp.all(jnp.isfinite(meas.x)))
+        np.testing.assert_allclose(
+            np.asarray(meas.x),
+            np.array(
+                [
+                    [1.0, 10.0],
+                    [3.0, 20.0],
+                    [3.0, 70.0 / 3.0],
+                    [5.0, 40.0],
+                ]
+            ),
+        )
+
+    def test_inf_masked_out_on_M_branch(self):
+        """M= branch: a row bearing +/-inf is knocked out of all moments."""
+        x = np.array([[1.0, 2.0], [np.inf, 4.0], [5.0, 6.0]])
+        meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+        np.testing.assert_allclose(np.asarray(meas.mask), [[1.0], [0.0], [1.0]])
+        # The inf never reaches the stored x either.
+        assert bool(jnp.all(jnp.isfinite(meas.x)))
+
+    def test_inf_never_reaches_psi(self):
+        """A psi that NaNs on inf (0 * inf) stays finite end-to-end."""
+        x = np.array([[1.0], [np.inf], [3.0]])
+        meas = EmpiricalMeasure.from_nan_aware(x, M=1)
+        assert bool(jnp.all(jnp.isfinite(meas.x)))
+
+        def psi(xi, theta):
+            # 0.0 * inf == NaN: a detector that poisons iff the raw inf
+            # cell reaches psi.
+            return jnp.array([theta.a + theta.b * (0.0 * xi[0])])
+
+        theta = _LinearParams(a=0.7, b=2.0)
+        m = meas.expectation(psi, theta)
+        assert bool(jnp.all(jnp.isfinite(m)))
+        assert float(m[0]) == pytest.approx(0.7, rel=1e-12)
+        G = meas.jacobian(psi, theta)
+        assert bool(jnp.all(jnp.isfinite(G)))
+
+    def test_gradient_finite_at_masked_inf_cell(self):
+        """AD-poisoning regression: reverse-mode grad through a masked
+        inf cell is finite.
+
+        Under the old isnan-only ``safe_x_for_psi`` the inf survived
+        into psi, and the vjp multiplied the (zero) cotangent by the
+        infinite intermediate --- ``0 * inf == NaN`` --- poisoning the
+        gradient even though the primal was finite.
+        """
+        x = jnp.array([[1.0, jnp.inf], [3.0, -jnp.inf], [2.0, 7.0]])
+        mask = jnp.array([[1.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+        meas = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(3))
+
+        def psi(xi, theta):
+            return jnp.array([theta.a * xi[0], theta.b * xi[1]])
+
+        def total(t_flat):
+            theta = _LinearParams(a=t_flat[0], b=t_flat[1])
+            return jnp.sum(meas.expectation(psi, theta))
+
+        g = jax.grad(total)(jnp.array([0.5, 2.0]))
+        assert bool(jnp.all(jnp.isfinite(g)))
+
+    def test_from_pandas_infers_mask_from_inf(self):
+        """from_pandas masks inf cells like NaN and scrubs the stored x."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [10.0, np.inf, 30.0],
+            }
+        )
+        meas = EmpiricalMeasure.from_pandas(df)
+        np.testing.assert_allclose(
+            np.asarray(meas.mask), [[1.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+        )
+        assert bool(jnp.all(jnp.isfinite(meas.x)))
+        # inf replaced by the column mean of {10, 30} = 20.
+        np.testing.assert_allclose(float(meas.x[1, 1]), 20.0)
+
+    def test_from_pandas_explicit_mask_plus_inf_raises(self):
+        """inf alongside an explicit mask is as ambiguous as NaN."""
+        df = pd.DataFrame({"r0": [1.0, np.inf]})
+        explicit_mask = pd.DataFrame({"m0": [1.0, 1.0]})
+        with pytest.raises(ValueError, match=r"explicit mask.*alongside NaN"):
+            EmpiricalMeasure.from_pandas(df, mask=explicit_mask)
+
+
+class TestFromArraysValidation:
+    """``from_arrays`` enforces its documented complete-data contract.
+
+    Regression guard for review item M7: the constructor was bare
+    ``jnp.asarray`` coercion --- a NaN weight silently NaN'd every
+    moment and ``N_j``, weights length and mask shape went unchecked,
+    and the docstring's "asserts complete data" claim was unenforced.
+    Value-dependent checks are eager-only: traced construction (inside
+    ``jit`` / ``vmap``) skips them and still traces.
+    """
+
+    def test_nan_weight_raises(self):
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_arrays(
+                np.ones((3, 1)), weights=[1.0, float("nan"), 1.0]
+            )
+
+    def test_inf_weight_raises(self):
+        with pytest.raises(ValueError, match=r"weights contain non-finite"):
+            EmpiricalMeasure.from_arrays(np.ones((3, 1)), weights=[1.0, np.inf, 1.0])
+
+    def test_error_message_names_from_arrays(self):
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_arrays(np.ones((2, 1)), weights=[1.0, float("nan")])
+        assert "from_arrays" in str(excinfo.value)
+
+    def test_wrong_length_weights_raises(self):
+        with pytest.raises(ValueError, match=r"weights must be 1-D"):
+            EmpiricalMeasure.from_arrays(np.ones((3, 1)), weights=[1.0, 2.0])
+
+    def test_non_1d_weights_raises(self):
+        with pytest.raises(ValueError, match=r"weights must be 1-D"):
+            EmpiricalMeasure.from_arrays(np.ones((3, 1)), weights=np.ones((3, 1)))
+
+    def test_wrong_row_count_mask_raises(self):
+        with pytest.raises(ValueError, match=r"mask must be 2-D"):
+            EmpiricalMeasure.from_arrays(np.ones((3, 2)), mask=np.ones((4, 2)))
+
+    def test_non_2d_mask_raises(self):
+        with pytest.raises(ValueError, match=r"mask must be 2-D"):
+            EmpiricalMeasure.from_arrays(np.ones((3, 2)), mask=np.ones(3))
+
+    def test_nan_x_at_mask_on_raises(self):
+        x = np.array([[1.0, 2.0], [np.nan, 4.0]])
+        with pytest.raises(ValueError, match=r"asserts complete data"):
+            EmpiricalMeasure.from_arrays(x)
+
+    def test_inf_x_at_mask_on_raises(self):
+        x = np.array([[1.0], [np.inf]])
+        with pytest.raises(ValueError, match=r"asserts complete data"):
+            EmpiricalMeasure.from_arrays(x)
+
+    def test_nan_x_at_mask_off_passes(self):
+        """Cells the mask turns OFF may hold anything (M == D layout)."""
+        x = np.array([[1.0, 2.0], [np.nan, 4.0]])
+        mask = np.array([[1.0, 1.0], [0.0, 1.0]])
+        meas = EmpiricalMeasure.from_arrays(x, mask=mask)
+        # Stored verbatim; the hot path scrubs it before psi runs.
+        assert bool(jnp.isnan(meas.x[1, 0]))
+        m = meas.expectation(_two_moment_residual, _LinearParams(a=0.0, b=1.0))
+        assert bool(jnp.all(jnp.isfinite(m)))
+        # Moment 0 = mean of x[:, 0] over row 0 only = 1.
+        assert float(m[0]) == pytest.approx(1.0, rel=1e-12)
+
+    def test_row_masked_off_everywhere_allows_non_finite_when_M_ne_D(self):
+        """With M != D the check is row-wise: unsupported rows may hold
+        anything; a supported row with a non-finite cell raises."""
+        x = np.array([[1.0, 2.0, 3.0], [np.nan, 4.0, 5.0]])
+        # Row 1 (the NaN-bearing one) is masked off the single moment.
+        meas = EmpiricalMeasure.from_arrays(x, mask=np.array([[1.0], [0.0]]))
+        assert meas.mask.shape == (2, 1)
+        # Flipping the support onto the NaN-bearing row raises.
+        with pytest.raises(ValueError, match=r"asserts complete data"):
+            EmpiricalMeasure.from_arrays(x, mask=np.array([[0.0], [1.0]]))
+
+    def test_traced_construction_still_traces(self):
+        """A jit-wrapped from_arrays call traces: the eager value checks
+        skip tracer inputs instead of aborting the trace."""
+
+        @jax.jit
+        def build_and_evaluate(x, w):
+            meas = EmpiricalMeasure.from_arrays(x, M=1, weights=w)
+            return meas.expectation(_linear_residual, _LinearParams(a=0.5, b=2.0))
+
+        x = jnp.array([[1.0], [2.0], [3.0]])
+        out = build_and_evaluate(x, jnp.ones(3))
+        assert out.shape == (1,)
+        # mean(x) = 2, so a + b * mean = 0.5 + 4.0.
+        assert float(out[0]) == pytest.approx(4.5, rel=1e-12)
+
+    def test_clean_inputs_unchanged(self):
+        """Sanity: the happy path is untouched by the new validation."""
+        x = np.array([[1.0, 2.0], [3.0, 4.0]])
+        meas = EmpiricalMeasure.from_arrays(x, weights=np.array([1.0, 2.0]))
+        np.testing.assert_allclose(np.asarray(meas.x), x)
+        np.testing.assert_allclose(np.asarray(meas.weights), [1.0, 2.0])
+
+
+class TestDeadMaskColumnRejected:
+    """Every mask column must carry at least one supported observation.
+
+    An all-zero mask column means ``N_j = 0`` for that moment: the
+    moment mean degenerates and every downstream statistic touching it
+    (``V_X``, the criterion, ``J_stat``, ``Sigma_theta``) is undefined,
+    so the fit previously exited as a silent all-NaN result. All three
+    eager constructors now reject dead columns at the input boundary,
+    naming the dead moment indices.
+    """
+
+    def test_from_arrays_all_zero_mask_column_raises(self):
+        mask = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_arrays(np.ones((3, 2)), mask=mask)
+        msg = str(excinfo.value)
+        assert "from_arrays" in msg
+        assert "[1]" in msg
+
+    def test_from_pandas_explicit_mask_all_zero_column_raises(self):
+        df = pd.DataFrame({"r0": [1.0, 2.0]})
+        mask = pd.DataFrame({"m0": [1.0, 1.0], "m1": [0.0, 0.0]})
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_pandas(df, mask=mask)
+        msg = str(excinfo.value)
+        assert "from_pandas" in msg
+        assert "[1]" in msg
+
+    def test_from_pandas_all_nan_column_raises(self):
+        """A fully-missing df column is a dead moment on the inferred mask."""
+        df = pd.DataFrame(
+            {
+                "r0": [1.0, 2.0, 3.0],
+                "r1": [float("nan")] * 3,
+            }
+        )
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_pandas(df)
+        msg = str(excinfo.value)
+        assert "from_pandas" in msg
+        assert "[1]" in msg
+
+    def test_from_nan_aware_all_nan_column_raises(self):
+        x = np.array([[1.0, np.nan], [2.0, np.nan]])
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_nan_aware(x)
+        msg = str(excinfo.value)
+        assert "from_nan_aware" in msg
+        assert "[1]" in msg
+
+    def test_from_nan_aware_M_branch_no_complete_row_raises(self):
+        """On the M= branch every row bearing a NaN is knocked out of
+        all moments; with no complete row, all M columns are dead."""
+        x = np.array([[np.nan, 1.0], [2.0, np.nan]])
+        with pytest.raises(ValueError) as excinfo:
+            EmpiricalMeasure.from_nan_aware(x, M=2)
+        msg = str(excinfo.value)
+        assert "from_nan_aware" in msg
+        assert "[0, 1]" in msg
+
+    def test_partial_support_still_passes(self):
+        """Sanity: a single supported row per column is enough."""
+        mask = np.array([[1.0, 0.0], [0.0, 1.0]])
+        meas = EmpiricalMeasure.from_arrays(np.ones((2, 2)), mask=mask)
+        np.testing.assert_allclose(np.asarray(meas.mask), mask)

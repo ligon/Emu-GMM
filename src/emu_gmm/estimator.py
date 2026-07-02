@@ -716,6 +716,7 @@ def build_estimator(
         Float[Array, ""],  # J_pvalue
         Float[Array, ""],  # J_pvalue_adjusted
         Float[Array, ""],  # sigma_meat_indefinite (0/1; #138)
+        Float[Array, ""],  # v_star_indefinite (0/1; regulariser saturated)
     ]:
         theta_local = params_mod.unflatten_params(
             theta_flat, treedef, manifold_spec=unflatten_spec
@@ -865,6 +866,16 @@ def build_estimator(
         # negative; standard_errors maps that to NaN BY DESIGN. Surface
         # the event as a traced flag rather than silently emitting NaN.
         sigma_meat_indefinite_local = jnp.any(jnp.diag(Sigma_local) < 0.0)
+        # Regulariser-saturation guard (diagnose-loudly): the diagonal
+        # ridge family cannot repair every V -- an exactly-zero diagonal
+        # entry (a zero-support moment) is invariant under
+        # V + tau*diag(V), so apply() saturates at its tau upper bound
+        # and V* stays singular / indefinite. cholesky(V*) then NaNs the
+        # criterion, J and the SEs BY DESIGN; surface the event as a
+        # traced flag off the FINAL V* whose Cholesky drives J/SEs. The
+        # negated predicate maps NaN eigenvalues to True (flagged).
+        lam_min_v_star = jnp.linalg.eigvalsh(0.5 * (V_star_local + V_star_local.T))[0]
+        v_star_indefinite_local = ~(lam_min_v_star > 0.0)
         kappa_local = jnp.linalg.cond(V_star_local)
         pivot_min_local = jnp.min(jnp.diag(L_local))
 
@@ -907,6 +918,7 @@ def build_estimator(
             J_pv,
             J_pv_adj,
             sigma_meat_indefinite_local,
+            v_star_indefinite_local,
         )
 
     # The traced-argument inference kernel (#124): jitted ONCE at factory
@@ -1073,6 +1085,7 @@ def build_estimator(
             J_pvalue,
             J_pvalue_adjusted,
             sigma_meat_indefinite,
+            v_star_indefinite,
         ) = (
             # The outer-loop args branch (#124 PR B) uses the SAME
             # traced inference kernel as the single-solve path: the
@@ -1117,6 +1130,30 @@ def build_estimator(
                     "cluster_bootstrap / moment_wild_bootstrap for "
                     "inference here, and treat the analytic SEs as "
                     "unavailable rather than zero.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        except (jax.errors.TracerBoolConversionError, TypeError):
+            pass
+
+        # Regulariser-saturation guard: warn LOUDLY at the eager boundary
+        # when the FINAL regularised V* is not PD (the diagonal-ridge
+        # family could not repair V; the tau bisection saturated). Under
+        # jit/vmap the flag is a tracer; it still rides Diagnostics.
+        try:
+            if bool(v_star_indefinite):
+                import warnings as _warnings
+
+                _warnings.warn(
+                    "The regularised covariance V* at theta_hat is not "
+                    "positive-definite: DiagonalTikhonov's diagonal-ridge "
+                    "family could not repair V and the tau bisection "
+                    "saturated at its upper bound. cholesky(V*) returns "
+                    "NaN by design, so the criterion, J_stat and the "
+                    "standard errors are expected NaN. Inspect "
+                    "result.diagnostics.N_j (an all-zero-support moment "
+                    "coordinate is the common cause) and "
+                    "result.diagnostics.tau_realised.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -1180,6 +1217,7 @@ def build_estimator(
             optimizer_health=optimizer_health,
             gauge_nullspace_dim=manifold_spec.total_gauge_dim,
             sigma_meat_indefinite=sigma_meat_indefinite,
+            v_star_indefinite=v_star_indefinite,
         )
 
         # #78: prefer the optimiser's REAL traced ``done`` flag when the

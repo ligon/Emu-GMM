@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pytest
 from emu_gmm._internal import axes as axes_mod
+from emu_gmm.manifolds import Euclidean, ManifoldLeaf, PSDFixedRank
 from emu_gmm.measures.analytical import AnalyticalMeasure
 from emu_gmm.types import Measure
 
@@ -142,6 +143,84 @@ class TestJacobian:
         G = meas.jacobian(_dummy_psi, theta)
         assert not isinstance(G, ha.NamedArray)
         assert jnp.allclose(G, sentinel)
+
+
+# ---------------------------------------------------------------------------
+# Manifold parameter trees (#41 parity with empirical/synthetic)
+# ---------------------------------------------------------------------------
+
+_N_SIDE = 3
+_K_RANK = 2
+_M_MANIFOLD = _N_SIDE * (_N_SIDE + 1) // 2 + 1  # triu(Y Y') ++ phi = 7
+_K_AMBIENT = _N_SIDE * _K_RANK + 1  # vec Y + phi = 7
+
+
+@jdc.pytree_dataclass
+class _ManifoldParams:
+    """``PSDFixedRank(3, 2)`` ``Y`` leaf + ``Euclidean(1)`` ``phi`` leaf."""
+
+    Y: ManifoldLeaf
+    phi: ManifoldLeaf
+
+
+def _make_manifold_theta() -> _ManifoldParams:
+    Y = jnp.arange(1.0, 1.0 + _N_SIDE * _K_RANK).reshape(_N_SIDE, _K_RANK) / 10.0
+    return _ManifoldParams(
+        Y=ManifoldLeaf(Y, PSDFixedRank(_N_SIDE, _K_RANK)),
+        phi=ManifoldLeaf(jnp.array([0.7]), Euclidean(1)),
+    )
+
+
+def _manifold_expectation(model, theta):
+    """E[psi] = (triu(Y Y') ++ phi): the #41 gauge-fixture moment map."""
+    del model
+    Y = theta.Y.array
+    phi = theta.phi.array[0]
+    g = (Y @ Y.T)[jnp.triu_indices(_N_SIDE)]
+    return jnp.concatenate([g, jnp.reshape(phi, (1,))])
+
+
+class TestJacobianManifoldTree:
+    """The AD fallback handles manifold trees via ``flatten_params_for_ad``.
+
+    Pre-fix, :meth:`AnalyticalMeasure.jacobian` routed through the v1
+    scalar-only ``flatten_params`` and died with "all parameter leaves
+    must be 0-d scalars" on any :class:`ManifoldLeaf` tree.
+    ``EmpiricalMeasure`` and ``SyntheticMeasure`` were migrated to
+    ``flatten_params_for_ad`` in #41; analytical was missed.
+    """
+
+    def test_manifold_tree_jacobian_computes(self):
+        """A manifold tree yields a finite ambient (M, K) Jacobian."""
+        meas = AnalyticalMeasure(expectation_fn=_manifold_expectation)
+        theta = _make_manifold_theta()
+        G = meas.jacobian(_dummy_psi, theta)
+        assert G.shape == (_M_MANIFOLD, _K_AMBIENT)
+        assert bool(jnp.all(jnp.isfinite(G)))
+
+    def test_manifold_tree_jacobian_phi_block(self):
+        """The phi moment depends on exactly one ambient coordinate.
+
+        Without pinning the flatten ordering: the last moment (phi) has
+        derivative 1 w.r.t. exactly one flat coordinate and 0 elsewhere,
+        and no Y-moment depends on that coordinate.
+        """
+        meas = AnalyticalMeasure(expectation_fn=_manifold_expectation)
+        theta = _make_manifold_theta()
+        G = meas.jacobian(_dummy_psi, theta)
+        phi_row = G[-1]
+        assert float(jnp.sum(jnp.abs(phi_row))) == pytest.approx(1.0)
+        j = int(jnp.argmax(jnp.abs(phi_row)))
+        assert float(phi_row[j]) == pytest.approx(1.0)
+        assert jnp.allclose(G[:-1, j], 0.0)
+
+    def test_scalar_tree_behavior_unchanged(self):
+        """All-scalar trees keep the v1 flatten verbatim (K = n_leaves)."""
+        meas = AnalyticalMeasure(expectation_fn=_theta_dependent_expectation)
+        theta = _LinearParams(a=0.5, b=2.0)
+        G = meas.jacobian(_dummy_psi, theta)
+        assert G.shape == (2, 2)
+        assert jnp.allclose(G, jnp.array([[1.0, 0.0], [0.0, 4.0]]))
 
 
 # ---------------------------------------------------------------------------

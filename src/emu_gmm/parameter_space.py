@@ -52,11 +52,12 @@ not hand-roll flatten/unflatten.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from typing import Any, ClassVar, get_origin
 
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 
 from emu_gmm.manifolds.base import ManifoldParam
 from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
@@ -106,6 +107,99 @@ def on(manifold: ManifoldParam, default: Any = _NO_DEFAULT) -> Any:
             f"got {type(manifold).__name__}"
         )
     return _FieldSpec(manifold=manifold, default=default)
+
+
+def _is_classvar_annotation(annotation: Any) -> bool:
+    """True when ``annotation`` spells ``typing.ClassVar`` (evaluated or string).
+
+    Recognises the evaluated forms (bare ``ClassVar`` and ``ClassVar[...]``)
+    and --- because ``from __future__ import annotations`` leaves annotations
+    as strings in the user's module --- the lexical spellings ``"ClassVar"``,
+    ``"ClassVar[...]"``, ``"typing.ClassVar"``, ``"typing.ClassVar[...]"``.
+    Other aliases (e.g. ``import typing as t``) are not recognised as strings;
+    import ``ClassVar`` directly for the escape hatch to work under deferred
+    annotations.
+    """
+    if isinstance(annotation, str):
+        s = annotation.strip()
+        return s in ("ClassVar", "typing.ClassVar") or s.startswith(
+            ("ClassVar[", "typing.ClassVar[")
+        )
+    return annotation is ClassVar or get_origin(annotation) is ClassVar
+
+
+def _guard_undeclared_fields(
+    cls: type,
+    own_fields: dict[str, _FieldSpec],
+    inherited: dict[str, _FieldSpec],
+) -> None:
+    """Refuse class-body members that look like forgotten ``on(...)`` fields.
+
+    The natural forgot-the-descriptor mistake ``mu: Array = jnp.zeros(3)``
+    is NOT collected into ``__emu_fields__``; before this guard it survived
+    as a plain class attribute, so ``theta.mu`` still resolved and the model
+    ran --- but ``mu`` was never a pytree leaf and was **silently held fixed
+    during estimation** with no error. This guard runs *before* the
+    annotations rewrite and raises ``TypeError`` instead.
+
+    A class-body entry is suspicious when EITHER (a) its name appears in this
+    class's *own* ``__annotations__`` without an ``on(...)`` value, or (b) its
+    value is array-like (JAX/numpy array or scalar, Python ``int``/``float``
+    --- the plausible would-be-parameter defaults; ``bool`` flags are exempt).
+    Never flagged: dunder names, callables/methods, ``property`` /
+    ``classmethod`` / ``staticmethod`` descriptors, strings, and names
+    annotated ``typing.ClassVar[...]`` --- the documented escape hatch for
+    genuinely constant class attributes. Inherited attributes are not in
+    ``vars(cls)``, so parent classes are naturally exempt; but a child
+    *overriding* an inherited ``on(...)`` field with a plain value gets its
+    own, distinct error (a plain value can never override a manifold field).
+    """
+    own_annotations = cls.__dict__.get("__annotations__", {}) or {}
+    overriding: list[str] = []
+    suspicious: list[str] = []
+    for name, val in vars(cls).items():
+        if name in own_fields:
+            continue
+        if name.startswith("__") and name.endswith("__"):
+            continue
+        if isinstance(val, property | classmethod | staticmethod) or callable(val):
+            continue
+        if isinstance(val, str):
+            continue
+        if name in own_annotations and _is_classvar_annotation(own_annotations[name]):
+            continue
+        annotated = name in own_annotations
+        array_like = not isinstance(val, bool | np.bool_) and isinstance(
+            val, jax.Array | np.ndarray | np.generic | int | float
+        )
+        if not (annotated or array_like):
+            continue
+        if name in inherited:
+            overriding.append(name)
+        else:
+            suspicious.append(name)
+    if overriding:
+        names = ", ".join(repr(n) for n in overriding)
+        raise TypeError(
+            f"ParameterSpace subclass {cls.__name__!r} overrides inherited "
+            f"manifold field(s) {names} with a plain value. A plain class "
+            "attribute can never override a manifold field --- the value "
+            "would be silently ignored in favour of the parent's on(...) "
+            "spec. Re-declare the field with on(manifold, ...) to change its "
+            "manifold or default."
+        )
+    if suspicious:
+        names = ", ".join(repr(n) for n in suspicious)
+        raise TypeError(
+            f"ParameterSpace subclass {cls.__name__!r} has class-body "
+            f"member(s) {names} that look like parameter fields but are not "
+            "declared with on(...). Such a member is NOT part of the "
+            "parameter space: it would remain a plain class attribute and be "
+            "silently held constant during estimation. Declare it with "
+            "on(manifold, default=...) to make it an estimated parameter, or "
+            "annotate it with typing.ClassVar[...] if it is a genuinely "
+            "constant class attribute."
+        )
 
 
 class ParameterSpace:
@@ -173,12 +267,20 @@ class ParameterSpace:
         # re-declaring a parent field OVERRIDES the parent's spec but KEEPS the
         # parent's position (the field is not moved to the end) -- documented
         # dedupe choice: inherited position wins, child spec wins.
-        merged: dict[str, _FieldSpec] = {}
+        inherited: dict[str, _FieldSpec] = {}
         for base in reversed(cls.__mro__[1:]):  # parents first, child last
             base_fields = base.__dict__.get("__emu_fields__")
             if isinstance(base_fields, dict):
                 for name, fs in base_fields.items():
-                    merged[name] = fs  # parent position established here
+                    inherited[name] = fs  # parent position established here
+
+        # --- Guard: forgotten on(...) fields must raise, not silently drop.
+        # Must run BEFORE the annotations rewrite below, which would otherwise
+        # erase the evidence (the leftover attr survives as a plain class
+        # attribute and the field is silently held fixed during estimation).
+        _guard_undeclared_fields(cls, own_fields, inherited)
+
+        merged: dict[str, _FieldSpec] = dict(inherited)
         for name, fs in own_fields.items():
             merged[name] = fs  # child overrides spec; keeps inherited position
 

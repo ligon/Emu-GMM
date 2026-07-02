@@ -85,6 +85,23 @@ def ridge_inverse(
         - ``'binding'`` (bool): ``True`` if ``tau`` exceeds the
           binding-threshold (currently 1e-2); a signal that the
           ridge had to do non-trivial work.
+        - ``'saturated'`` (bool): ``True`` if the realised
+          :math:`M_\\star` is still **not** positive-definite — tested
+          on the *signed* spectrum
+          (``eigvalsh(sym(M_star)).min() <= 0``, NaN-safe: NaN
+          eigenvalues count as saturated). The diagonal-Tikhonov ridge
+          cannot repair e.g. an exact zero diagonal entry (the ridge
+          adds ``tau * M[i, i] == 0`` there), so the Cholesky NaNs and
+          the returned "inverse" is all-NaN. **A saturated result
+          means the returned inverse is NaN/meaningless** — check this
+          flag before consuming the inverse.
+
+        ``'kappa_before'`` / ``'kappa_after'`` are SVD condition
+        numbers (:func:`jnp.linalg.cond`, a ratio of *absolute*
+        singular values) and are therefore blind to a small negative
+        (or exactly zero) eigenvalue — see CLAUDE.md architectural
+        commitment 3. Treat them as diagnostics only; ``'saturated'``
+        is the positive-definiteness verdict.
 
     Notes
     -----
@@ -127,12 +144,25 @@ def ridge_inverse(
     M_inv = 0.5 * (M_inv + M_inv.T)
 
     kappa_after = jnp.linalg.cond(M_star)
+
+    # Saturation check on the SIGNED spectrum of the realised M_star:
+    # jnp.linalg.cond is an SVD ratio of absolute singular values and is
+    # blind to a zero/negative eigenvalue (CLAUDE.md commitment 3), so
+    # it cannot detect that the delegated ridge failed to achieve PD
+    # (e.g. an exact zero diagonal entry, which tau * diag(M) cannot
+    # lift). In that case the Cholesky above NaNs and M_inv is all-NaN;
+    # flag it rather than returning a silent NaN inverse. NaN-safe:
+    # ``NaN > 0`` is False, so NaN eigenvalues count as saturated.
+    min_eig = jnp.min(jnp.linalg.eigvalsh(0.5 * (M_star + M_star.T)))
+    saturated = not bool(min_eig > 0.0)
+
     tau_f = float(tau)
     info: dict[str, Any] = {
         "tau": tau_f,
         "kappa_before": float(kappa_before),
         "kappa_after": float(kappa_after),
         "binding": tau_f > _BINDING_TAU_THRESHOLD,
+        "saturated": saturated,
     }
 
     if axes_in is None:
