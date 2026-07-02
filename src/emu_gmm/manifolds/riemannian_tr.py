@@ -72,6 +72,7 @@ import numpy as np
 
 from emu_gmm._internal import params as params_mod
 from emu_gmm._internal.fn_cache import FunctionKeyedCache
+from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.positive import Positive
 from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
 
@@ -129,6 +130,10 @@ def _is_positive(manifold: Any) -> bool:
     return isinstance(manifold, Positive)
 
 
+def _is_euclidean(manifold: Any) -> bool:
+    return isinstance(manifold, Euclidean)
+
+
 def _is_manifold(obj: Any) -> bool:
     """Duck-type a ManifoldParam (it has projection + inner_product)."""
     return hasattr(obj, "projection") and hasattr(obj, "inner_product")
@@ -163,7 +168,10 @@ def _project_flat(plan: list, x: jnp.ndarray, v_flat: jnp.ndarray) -> jnp.ndarra
         pt = x[offset : offset + size]
         vv = v_flat[offset : offset + size]
         if shape == ():
-            parts.append(vv)  # scalar leaf: projection identity
+            # Scalar leaf: the tangent space of a 1-D manifold is all of R,
+            # so the projection is the identity for EVERY scalar leaf
+            # (Euclidean, Positive, Interval, future scalars).
+            parts.append(vv)
             continue
         proj_m = manifold.projection(jnp.reshape(pt, shape), jnp.reshape(vv, shape))
         parts.append(jnp.reshape(proj_m, (size,)))
@@ -173,10 +181,13 @@ def _project_flat(plan: list, x: jnp.ndarray, v_flat: jnp.ndarray) -> jnp.ndarra
 def _raise_index_flat(plan: list, x: jnp.ndarray, v_flat: jnp.ndarray) -> jnp.ndarray:
     r"""Raise the index of an ambient cotangent flat vector by ``G^{-1}``.
 
-    For a Positive leaf the inverse affine metric is ``x^2``; for Frobenius
-    leaves (PSDFixedRank / Euclidean) it is the identity. This is what turns
-    the Euclidean pullback Hessian ``\nabla^2\hat h`` into the Riemannian
-    Hessian operator whose metric form is the geodesic second derivative.
+    For a Positive leaf the inverse affine metric is ``x^2``; for any other
+    non-Euclidean scalar leaf (e.g. Interval, ``1/phi'(x)^2``) it is the
+    leaf's own inverse metric via ``euclidean_to_riemannian_gradient``; for
+    Frobenius leaves (PSDFixedRank / Euclidean) it is the identity. This is
+    what turns the Euclidean pullback Hessian ``\nabla^2\hat h`` into the
+    Riemannian Hessian operator whose metric form is the geodesic second
+    derivative.
     """
     parts = []
     for offset, size, shape, manifold in plan:
@@ -184,18 +195,34 @@ def _raise_index_flat(plan: list, x: jnp.ndarray, v_flat: jnp.ndarray) -> jnp.nd
         if shape == () and _is_positive(manifold):
             pt = x[offset : offset + size]
             parts.append(vv * (pt[0] ** 2))
+        elif shape == () and not _is_euclidean(manifold):
+            pt = x[offset : offset + size]
+            parts.append(
+                jnp.reshape(
+                    manifold.euclidean_to_riemannian_gradient(pt[0], vv[0]), (1,)
+                )
+            )
         else:
             parts.append(vv)
     return jnp.concatenate(parts)
 
 
 def _metric_diag(plan: list, x: jnp.ndarray) -> jnp.ndarray:
-    """Diagonal metric tensor ``G`` as a flat (K,) weight (1/x^2 for Positive)."""
+    """Diagonal metric tensor ``G`` as a flat (K,) weight.
+
+    ``1/x^2`` for Positive; the leaf's own scalar weight ``g_x(1, 1)`` for
+    any other non-Euclidean scalar leaf (``phi'(x)^2`` for Interval);
+    identity otherwise (Frobenius leaves).
+    """
     parts = []
     for offset, size, shape, manifold in plan:
         if shape == () and _is_positive(manifold):
             pt = x[offset : offset + size]
             parts.append(jnp.reshape(1.0 / (pt[0] ** 2), (1,)))
+        elif shape == () and not _is_euclidean(manifold):
+            pt = x[offset : offset + size]
+            one = jnp.ones((), dtype=x.dtype)
+            parts.append(jnp.reshape(manifold.inner_product(pt[0], one, one), (1,)))
         else:
             parts.append(jnp.ones((size,), dtype=x.dtype))
     return jnp.concatenate(parts)
@@ -208,14 +235,27 @@ def _inner(plan: list, x: jnp.ndarray, u: jnp.ndarray, v: jnp.ndarray) -> jnp.nd
 
 
 def _retract_flat(plan: list, x: jnp.ndarray, d: jnp.ndarray) -> jnp.ndarray:
-    """Per-leaf retraction of a flat step (additive / exponential / additive)."""
+    """Per-leaf retraction of a flat step.
+
+    Scalar leaves: Positive keeps the inline exponential ``x*exp(d/x)`` and
+    Euclidean the inline additive ``x+d`` (both bitwise-pinned); any OTHER
+    scalar manifold (Interval today, future scalar geometries tomorrow)
+    supplies its OWN ``retraction`` -- an additive fallback would defeat
+    e.g. Interval's bound preservation. Non-scalar leaves always dispatch
+    to their manifold's ``retraction``.
+    """
     parts = []
     for offset, size, shape, manifold in plan:
         pt = x[offset : offset + size]
         dd = d[offset : offset + size]
         if shape == ():
             p0, d0 = pt[0], dd[0]
-            new = p0 * jnp.exp(d0 / p0) if _is_positive(manifold) else p0 + d0
+            if _is_positive(manifold):
+                new = p0 * jnp.exp(d0 / p0)
+            elif _is_euclidean(manifold):
+                new = p0 + d0
+            else:
+                new = manifold.retraction(p0, d0)
             parts.append(jnp.reshape(new, (1,)))
             continue
         new_m = manifold.retraction(jnp.reshape(pt, shape), jnp.reshape(dd, shape))
@@ -929,9 +969,12 @@ class _RiemannianTR:
                 # AMBIENT horizontal pullback Hessian (project only, no raise):
                 # consistent with the ambient step + the ``ambient_metric`` tCG
                 # below. For PSD/Euclidean this is identical to the raised
-                # operator (Frobenius metric); only Positive leaves differ, and
-                # there the ambient choice is what matches riemannian_lm at the
-                # sigma -> 0 boundary.
+                # operator (Frobenius metric); only non-Frobenius scalar
+                # leaves (Positive / Interval) differ, and there the ambient
+                # choice is what matches riemannian_lm at the sigma -> 0
+                # boundary. The RETRACTION inside ``Q_hat`` is still the
+                # leaf's own (bound-preserving for Interval); only the metric
+                # bookkeeping of the tCG subproblem is ambient.
                 eta_h = _project_flat(plan, x, eta_flat)
                 _, hv = jax.jvp(jax.grad(Q_hat), (jnp.zeros_like(x),), (eta_h,))
                 return _project_flat(plan, x, hv)
