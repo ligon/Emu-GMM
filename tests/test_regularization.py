@@ -404,3 +404,57 @@ class TestDefinitenessFloor:
         Vs_j, tau_j = compute(reg, V)
         assert jnp.allclose(Vs_e, Vs_j, atol=1e-10)
         assert float(tau_e) == pytest.approx(float(tau_j), rel=1e-6)
+
+
+class TestZeroDiagonalSaturation:
+    """Honest-contract pin: a ``V`` the diagonal-ridge family CANNOT repair.
+
+    An exactly-zero diagonal entry (the empirical ``V`` of an all-zero
+    mask column, i.e. a zero-support moment) is invariant under the
+    canonical ridge: ``V + tau * diag(V)`` leaves ``(1 + tau) * 0 == 0``
+    at every ``tau``. No feasible ridge exists, so ``apply()`` saturates
+    the bisection at ``_TAU_MAX`` and returns a still-singular ``V_star``
+    --- BY (documented) DESIGN, since the routine must stay
+    trace-compatible and cannot raise. The estimator surfaces the event
+    loudly via the ``v_star_indefinite`` diagnostic (see
+    ``tests/test_diagnostics.py::TestVStarIndefiniteDiagnostic``); this
+    class pins the regulariser's honest contract rather than a repair it
+    cannot deliver.
+    """
+
+    @staticmethod
+    def _zero_diag_V() -> jnp.ndarray:
+        # Moment 2 has zero support: exact-zero row/column, hence an
+        # exact-zero diagonal entry. The (0, 1) off-diagonal is nonzero
+        # so the diagonal-branch dispatch (additive identity shift, which
+        # COULD repair this) does not trigger -- the canonical
+        # multiplicative branch is exercised.
+        return jnp.array(
+            [
+                [1.0, 0.3, 0.0],
+                [0.3, 2.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ]
+        )
+
+    def test_tau_saturates_and_v_star_not_pd(self):
+        from emu_gmm.regularization import _TAU_MAX
+
+        V = self._zero_diag_V()
+        V_star, tau = DiagonalTikhonov().apply(V)
+        # The bisection saturated at the cap: no feasible tau exists.
+        assert float(tau) == pytest.approx(_TAU_MAX)
+        # And the returned V_star is NOT positive-definite.
+        lam_min = float(np.linalg.eigvalsh(np.asarray(V_star))[0])
+        assert lam_min <= 0.0
+
+    def test_downstream_cholesky_nans(self):
+        # The concrete downstream hazard this contract implies: the
+        # Cholesky of the returned V_star is NaN (jax.scipy returns NaN
+        # rather than raising on non-PD input), which silently NaNs the
+        # criterion / J / SEs absent the estimator's v_star_indefinite
+        # diagnostic.
+        V = self._zero_diag_V()
+        V_star, _tau = DiagonalTikhonov().apply(V)
+        L = jnp.linalg.cholesky(V_star)
+        assert bool(jnp.isnan(L).any())

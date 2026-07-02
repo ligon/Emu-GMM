@@ -11,10 +11,12 @@ wrappers over ``jax.scipy.linalg`` that:
 4. provide a chained convenience ``whiten(V, m) -> y = L^{-1} m`` that
    the residual function in :mod:`emu_gmm.estimator` consumes directly.
 
-All routines are jit-compatible. ``cholesky(V)`` raises a clear error
-on a non-positive-definite ``V``; the regularisation layer
-(:mod:`emu_gmm.regularization`) is responsible for ensuring this
-doesn't happen at runtime.
+All routines are jit-compatible. ``cholesky(V)`` returns NaNs on a
+non-positive-definite ``V`` --- it does NOT raise (a runtime check
+would break tracing; see the function's Notes). Callers own the PD
+guarantee: the regularisation layer (:mod:`emu_gmm.regularization`) is
+responsible for ensuring ``V`` is PD at runtime, and the estimator's
+``v_star_indefinite`` diagnostic flags the case where it could not.
 """
 
 from __future__ import annotations

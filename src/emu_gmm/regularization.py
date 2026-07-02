@@ -53,9 +53,13 @@ addition to* meeting the condition-number target, expressing the joint
 constraint as ``lambda_max <= kappa_target * lambda_min`` (well-defined and
 false at ``lambda_min <= 0``). Cholesky's contract --- "the regularisation
 layer is responsible for ensuring ``V`` is PD" (see
-:mod:`emu_gmm._internal.cholesky`) --- is therefore actually upheld, not
-merely hoped for. This is the concrete realisation of the "minimum-tau
-knob" anticipated in #8.
+:mod:`emu_gmm._internal.cholesky`) --- is therefore upheld whenever the
+diagonal-ridge family can deliver it. It cannot always: a ``V`` with an
+exactly-zero diagonal entry (a zero-support moment) is invariant under
+the multiplicative ridge, so the bisection saturates at ``_TAU_MAX`` and
+``V*`` is returned still-non-PD; the estimator surfaces that event via
+the ``v_star_indefinite`` diagnostic. This is the concrete realisation
+of the "minimum-tau knob" anticipated in #8.
 
 The :math:`\\tau` search is implemented via bisection over a fixed
 number of iterations so the routine remains jit-compatible. The
@@ -219,17 +223,29 @@ class DiagonalTikhonov:
         self,
         V: Float[Array, "M M"],
     ) -> tuple[Float[Array, "M M"], Float[Array, ""]]:
-        """Return :math:`(V^\\star, \\tau)` that is PD with :math:`\\kappa(V^\\star) \\leq \\kappa_{\\mathrm{target}}`.
+        """Return :math:`(V^\\star, \\tau)`, targeting PD with :math:`\\kappa(V^\\star) \\leq \\kappa_{\\mathrm{target}}`.
 
-        The realised :math:`V^\\star` is guaranteed positive-definite (with a
-        Cholesky-safe margin) **and** within the condition-number target ---
-        the two requirements are tested jointly on the *signed* spectrum, so a
+        The realised :math:`V^\\star` is positive-definite (with a
+        Cholesky-safe margin) **and** within the condition-number target
+        whenever the diagonal-ridge family can achieve it --- the two
+        requirements are tested jointly on the *signed* spectrum, so a
         barely-indefinite ``V`` (a tiny negative eigenvalue) whose SVD
         condition number happens to sit below ``kappa_target`` is repaired
         rather than passed through (#111). If ``V`` already satisfies both,
         returns ``(V, 0.0)``. Otherwise bisects :math:`\\tau \\in [0,
         \\tau_{\\max}]` for the smallest ridge meeting both, with a fixed
         iteration count so the routine traces under ``jit`` / ``vmap``.
+
+        When NO :math:`\\tau` in the family can repair ``V`` --- e.g. an
+        exactly-zero diagonal entry (a zero-support moment coordinate),
+        which the multiplicative ridge leaves at ``(1 + tau) * 0 == 0``
+        for every :math:`\\tau` --- the bisection saturates at
+        :math:`\\tau_{\\max}` (``_TAU_MAX``) and the returned
+        :math:`V^\\star` may remain singular or indefinite. The routine
+        does not raise (it must stay trace-compatible); the event is
+        detected downstream by the estimator's ``v_star_indefinite``
+        diagnostic (:class:`emu_gmm.types.Diagnostics`), which warns
+        eagerly that the downstream Cholesky will NaN the fit.
 
         The ridge formula is dispatched based on ``V``'s structure:
         diagonal ``V`` uses :math:`V + \\tau (\\operatorname{tr}(V)/M) I`,

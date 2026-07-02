@@ -424,6 +424,17 @@ class Diagnostics:
     #: ``FitRecord.sigma_meat_indefinite`` (#143), so the event is
     #: auditable in committed MC records.
     sigma_meat_indefinite: Any = False
+    #: Diagnose-loudly policy: True when the FINAL regularised covariance
+    #: ``V*`` at ``theta_hat`` is not strictly positive-definite --- i.e.
+    #: the diagonal-ridge family could not repair ``V`` and the tau
+    #: bisection saturated at its upper bound (e.g. an exactly-zero
+    #: diagonal entry from a zero-support moment: ``(1 + tau) * 0 == 0``
+    #: at every tau). Downstream ``cholesky(V*)`` returns NaN BY DESIGN,
+    #: so the criterion, ``J_stat``, and the standard errors are expected
+    #: NaN. Inspect ``Diagnostics.N_j`` (an all-zero-support moment is
+    #: the common cause) and ``tau_realised``. NaN eigenvalues of ``V*``
+    #: count as flagged. Traced 0-d bool under jit, Python bool eagerly.
+    v_star_indefinite: Any = False
 
 
 def _is_non_scalar_spec(manifold_spec: Any) -> bool:
