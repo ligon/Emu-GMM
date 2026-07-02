@@ -22,6 +22,8 @@ sample mean (in ``mu``) and the sample covariance (in ``Gamma = A @ A.T``).
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
@@ -507,3 +509,97 @@ def test_run_callable_first_arg_is_polymorphic():
         assert bool(jnp.allclose(A_hat @ A_hat.T, cov_hat, atol=1e-6))
     # theta / theta_hat warm starts match each other bitwise on J.
     assert float(r_theta.J_stat) == float(r_theta_hat.J_stat)
+
+
+# ---------------------------------------------------------------------------
+# FIX 5 -- a field declared WITHOUT on(...) must raise, not silently drop.
+#
+# Before the guard, ``mu: Array = jnp.zeros(3)`` (the natural forgot-the-
+# descriptor mistake) survived as a plain class attribute: ``theta.mu`` still
+# resolved, the model ran -- but ``mu`` was never a pytree leaf and was
+# SILENTLY HELD FIXED during estimation with no error.
+# ---------------------------------------------------------------------------
+def test_annotated_field_without_on_raises_naming_field():
+    K = 3
+    with pytest.raises(TypeError, match=r"(?s)'mu'.*on\("):
+
+        class Normal(ParameterSpace):
+            A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K))
+            mu: jax.Array = jnp.zeros(K)  # forgot on(...) -> must raise
+
+
+def test_bare_scalar_class_attribute_raises_naming_field():
+    K = 2
+    with pytest.raises(TypeError, match=r"(?s)'sigma'.*on\("):
+
+        class Normal(ParameterSpace):
+            A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K))
+            sigma = 1.0  # bare would-be-parameter default -> must raise
+
+
+def test_classvar_constant_is_accepted_and_usable():
+    # The documented escape hatch: a genuinely constant class attribute is
+    # declared ClassVar and neither raises nor becomes a parameter field.
+    K = 2
+
+    class Normal(ParameterSpace):
+        scale: ClassVar[float] = 2.5
+        label = "normal-family"  # plain strings are never flagged either
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K))
+        mu: jax.Array = on(Euclidean(K), default=jnp.zeros(K))
+
+    # Not a parameter field...
+    assert tuple(Normal.__emu_fields__) == ("A", "mu")
+    # ...but still usable on the class and on bound instances.
+    assert Normal.scale == 2.5
+    assert Normal.label == "normal-family"
+    p = Normal.point()
+    assert p.scale == 2.5
+    assert isinstance(p.A, ManifoldLeaf) and isinstance(p.mu, ManifoldLeaf)
+
+
+def test_methods_properties_docstrings_do_not_trip_guard():
+    K = 2
+
+    class Normal(ParameterSpace):
+        """A docstring must not trip the guard."""
+
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K))
+        mu: jax.Array = on(Euclidean(K), default=jnp.zeros(K))
+
+        def gamma(self):
+            return self.A.array @ self.A.array.T
+
+        @property
+        def dim(self):
+            return self.mu.array.shape[0]
+
+        @staticmethod
+        def family():
+            return "normal"
+
+        @classmethod
+        def space_name(cls):
+            return cls.__name__
+
+    p = Normal.point()
+    assert bool(jnp.allclose(p.gamma(), jnp.eye(K)))
+    assert p.dim == K
+    assert Normal.family() == "normal"
+    assert Normal.space_name() == "Normal"
+
+
+def test_plain_value_cannot_override_inherited_manifold_field():
+    # A child "overriding" a parent's on(...) field with a plain constant can
+    # never work (the value would be silently discarded in favour of the
+    # parent's spec): distinct error message from the forgot-on(...) case.
+    K = 2
+
+    class Base(ParameterSpace):
+        A: jax.Array = on(PSDFixedRank(K, K), default=jnp.eye(K))
+        mu: jax.Array = on(Euclidean(K), default=jnp.zeros(K))
+
+    with pytest.raises(TypeError, match=r"(?s)overrides inherited.*'mu'"):
+
+        class Frozen(Base):
+            mu = jnp.ones(K)  # plain value can never override a manifold field
