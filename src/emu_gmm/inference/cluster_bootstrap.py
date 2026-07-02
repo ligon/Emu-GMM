@@ -447,6 +447,18 @@ def cluster_bootstrap(
     convergence = np.empty(n_boot, dtype=bool)
 
     for b in range(n_boot):
+        # Bare estimate() builds fresh closures per call, so JAX's
+        # global caches accumulate write-only traces (~14 MB/call
+        # measured; the unmitigated leak OOM-killed a 300-rep study at
+        # 9.4 GB -- the #139 merge-verification thread). But clearing
+        # ALSO drops XLA's re-hit kernel compilations: per-replicate
+        # clearing measured ~3-5x wall-clock (#139 thread). Clear every
+        # 25 replicates, mirroring studies/driver.py: ~350 MB swing,
+        # recompilation amortized to a few percent. Placed at the top
+        # of the loop (not after the fit) so the divergence pathways'
+        # ``continue`` below cannot skip it.
+        if b > 0 and b % 25 == 0:
+            jax.clear_caches()
         boot_measure, boot_cov = _resample_one(measure, rows_by_cluster, drawn_all[b])
         # NB: do *not* wrap this call in a broad ``except Exception``.
         # The framework's optimisers (``optimistix_lm`` with

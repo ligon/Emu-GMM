@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
-from emu_gmm._internal.params import flatten_params, unflatten_params
+from emu_gmm._internal.params import flatten_params_for_ad, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
 
 
@@ -89,17 +89,20 @@ class AnalyticalMeasure:
         If a ``jacobian_fn`` was supplied at construction, it is called
         directly; otherwise the Jacobian is computed via
         :func:`jax.jacfwd` of a flattened-``theta`` closure of
-        :meth:`expectation`, mirroring the :class:`SyntheticMeasure`
-        pattern. The result has the canonical ``(M, K)`` shape, with
-        ``K`` equal to the number of leaves in ``theta``.
+        :meth:`expectation`, routing ``theta`` through
+        :func:`~emu_gmm._internal.params.flatten_params_for_ad` and
+        mirroring the :class:`SyntheticMeasure` pattern. The result has
+        the canonical ``(M, K)`` shape, with ``K`` equal to the number
+        of leaves for all-scalar trees and the total ambient dimension
+        for manifold trees (#41).
         """
         if self.jacobian_fn is not None:
             return _to_plain(self.jacobian_fn(psi, theta))
 
-        flat_theta, treedef = flatten_params(theta)
+        flat_theta, treedef, mspec = flatten_params_for_ad(theta)
 
         def fn(flat):
-            params = unflatten_params(flat, treedef)
+            params = unflatten_params(flat, treedef, manifold_spec=mspec)
             return self.expectation(psi, params)
 
         return jax.jacfwd(fn)(flat_theta)
