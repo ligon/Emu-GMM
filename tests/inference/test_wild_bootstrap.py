@@ -698,3 +698,169 @@ class TestNamedArrayVAcceptance:
         assert isinstance(result, WildBootstrapResult)
         assert result.J_boot.shape == (15,)
         assert 0.0 <= float(result.p_value) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Non-PD V: NaN surfacing + default regularisation (#111 family)
+# ---------------------------------------------------------------------------
+#
+# ``cho.cholesky`` returns NaN on non-PD input (documented, no runtime
+# check --- the regularisation layer owns PD restoration; commitment 3).
+# The original ``V=None`` path passed the RAW covariance straight to the
+# Cholesky, so a barely-indefinite V gave ``J_observed = nan`` --- and
+# because every elementwise ``J_boot >= nan`` comparison is False,
+# ``p_value = mean(...) = 0.0``: a silently fabricated hard rejection.
+# Two independent fixes are tested here:
+#
+#   1. the internally computed V now goes through a ``regularization``
+#      strategy (default ``DiagonalTikhonov``, mirroring ``j_test`` /
+#      ``k_statistic``) before factorisation, and
+#   2. a non-finite ``J_observed`` surfaces ``p_value = nan`` rather
+#      than 0.0 (the #140 "NaN is an event" convention) --- this guard
+#      also covers the caller-supplied-V path, which is deliberately
+#      used verbatim (presumed already regularised, e.g. result.V_X).
+
+
+def _build_indefinite_V_setup() -> tuple[EmpiricalMeasure, ClusteredCovariance, _P]:
+    """Deterministic 3-obs / 2-moment / 3-cluster fixture whose RAW
+    dof-corrected clustered covariance is indefinite.
+
+    Moment 2 is unobserved in cluster 2, so the per-pair finite-cluster
+    factors are ``G_11 = 3 -> 3/2``, ``G_22 = G_12 = 2 -> 2``. The
+    Hadamard multiply by that unequal factor matrix is not a congruence
+    and flips the (perfectly cross-correlated) cluster totals
+    ``(1, 1), (-1, -1), (0.5, -)`` into an indefinite V --- exactly the
+    finite-sample non-PD risk the ClusteredCovariance docstring warns
+    about under ``dof_correction=True`` with unequal support (#120).
+    """
+    x = jnp.array([[1.0, 1.0], [-1.0, -1.0], [0.5, 0.0]])
+    mask = jnp.array([[1.0, 1.0], [1.0, 1.0], [1.0, 0.0]])
+    measure = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(3))
+    covariance = ClusteredCovariance(
+        cluster_ids=jnp.array([0.0, 1.0, 2.0]),
+        n_clusters=3,
+        dof_correction=True,
+    )
+    return measure, covariance, _P(a=0.0)
+
+
+class _NoOpRegularization:
+    """Identity regulariser: forces the raw (possibly non-PD) V through."""
+
+    def apply(self, V):
+        return V, jnp.asarray(0.0)
+
+
+class TestNonPDVarianceNaNSurfacing:
+    """A non-PD V must yield p_value = nan, never a fabricated 0.0."""
+
+    def test_fixture_raw_V_is_indefinite(self):
+        """Premise check: the fixture's raw covariance has a negative
+        eigenvalue (otherwise the tests below test nothing)."""
+        measure, covariance, theta_0 = _build_indefinite_V_setup()
+        V_raw = covariance.covariance(_identity_psi, theta_0, measure)
+        eigs = jnp.linalg.eigvalsh(V_raw)
+        assert float(eigs[0]) < 0.0
+
+    def test_supplied_indefinite_V_yields_nan_p_value(self):
+        """Caller-supplied V is used verbatim (the documented contract:
+        it is presumed regularised), so an indefinite V NaNs the
+        Cholesky --- and the p-value must surface that NaN. The old
+        code returned p_value == 0.0 here."""
+        measure, covariance, theta_0 = _build_indefinite_V_setup()
+        V_raw = covariance.covariance(_identity_psi, theta_0, measure)
+        result = moment_wild_bootstrap(
+            _identity_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=50,
+            key=jax.random.PRNGKey(50),
+            V=V_raw,
+        )
+        assert bool(jnp.isnan(result.J_observed))
+        assert bool(jnp.isnan(result.p_value))
+
+    def test_forced_unregularised_internal_V_yields_nan_p_value(self):
+        """Forcing a no-op regulariser on the V=None path reproduces the
+        old failure mode --- now surfaced as nan instead of the
+        fabricated hard rejection p_value == 0.0."""
+        measure, covariance, theta_0 = _build_indefinite_V_setup()
+        result = moment_wild_bootstrap(
+            _identity_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=50,
+            key=jax.random.PRNGKey(51),
+            regularization=_NoOpRegularization(),
+        )
+        assert bool(jnp.isnan(result.J_observed))
+        assert bool(jnp.isnan(result.p_value))
+        # The failure must be loud, not a plausible-looking probability.
+        assert float(result.p_value) != 0.0
+
+    def test_default_regularization_repairs_internal_V(self):
+        """Same non-PD scenario, default regularisation (V=None): the
+        DiagonalTikhonov repair delivers a PD V, so every statistic is
+        finite and the p-value is a genuine probability."""
+        measure, covariance, theta_0 = _build_indefinite_V_setup()
+        result = moment_wild_bootstrap(
+            _identity_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=50,
+            key=jax.random.PRNGKey(52),
+        )
+        assert bool(jnp.isfinite(result.J_observed))
+        assert bool(jnp.all(jnp.isfinite(result.J_boot)))
+        assert 0.0 <= float(result.p_value) <= 1.0
+
+    def test_nan_surfacing_traces_under_jit(self):
+        """The isfinite guard is jnp.where-based, so the helper still
+        traces under jit and the NaN rides through as a traced 0-d
+        array (jit/vmap commitment preserved)."""
+        measure, covariance, theta_0 = _build_indefinite_V_setup()
+
+        def run(key):
+            return moment_wild_bootstrap(
+                _identity_psi,
+                theta_0,
+                measure,
+                covariance,
+                n_boot=20,
+                key=key,
+                regularization=_NoOpRegularization(),
+            ).p_value
+
+        p_jit = jax.jit(run)(jax.random.PRNGKey(53))
+        assert p_jit.ndim == 0
+        assert bool(jnp.isnan(p_jit))
+
+    def test_well_conditioned_V_p_value_unchanged_by_guard(self):
+        """On a healthy problem the isfinite guard is a no-op: default-
+        regularised and explicitly-unregularised runs agree bit-for-bit
+        (DiagonalTikhonov returns tau=0 on an already-PD V)."""
+        measure, covariance, theta_0 = _build_h0_setup(seed=60, N=40, n_clusters=4)
+        result_default = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=30,
+            key=jax.random.PRNGKey(54),
+        )
+        result_noop = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=30,
+            key=jax.random.PRNGKey(54),
+            regularization=_NoOpRegularization(),
+        )
+        assert jnp.allclose(result_default.J_boot, result_noop.J_boot)
+        assert jnp.allclose(result_default.p_value, result_noop.p_value)
+        assert jnp.allclose(result_default.J_observed, result_noop.J_observed)
+        assert 0.0 <= float(result_default.p_value) <= 1.0

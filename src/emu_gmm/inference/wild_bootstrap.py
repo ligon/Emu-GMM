@@ -83,7 +83,8 @@ from jaxtyping import Array, Float
 from emu_gmm._internal import cholesky as cho
 from emu_gmm.covariance.clustered import ClusteredCovariance
 from emu_gmm.measures.empirical import EmpiricalMeasure
-from emu_gmm.types import ParamsLike, StructuralModel
+from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.types import ParamsLike, RegularizationStrategy, StructuralModel
 
 # Mammen two-point distribution: Pr(eta = a) = (sqrt5 + 1) / (2 sqrt5);
 # Pr(eta = b) = (sqrt5 - 1) / (2 sqrt5); a = -(sqrt5 - 1)/2, b = (sqrt5 + 1)/2.
@@ -113,7 +114,11 @@ class WildBootstrapResult:
         Empirical right-tail probability
         ``mean(J_boot >= J_observed)``. 0-d so it traces under ``jit`` /
         ``vmap``; cast with ``float(result.p_value)`` at the eager
-        boundary if you want a Python scalar.
+        boundary if you want a Python scalar. ``nan`` when
+        ``J_observed`` is non-finite (e.g. a non-PD ``V`` whose
+        Cholesky factor is NaN) --- the failure is surfaced as NaN
+        rather than fabricated into a hard rejection (``0.0``), per the
+        package's "NaN is an event" convention (#140).
     J_observed : 0-d jax array
         The analytic J-statistic at ``theta_hat`` evaluated against the
         same ``V`` used for whitening; included so callers can
@@ -217,6 +222,7 @@ def moment_wild_bootstrap(
     key: jax.Array,
     sign: Literal["rademacher", "mammen"] = "rademacher",
     V: Float[Array, "M M"] | ha.NamedArray | None = None,
+    regularization: RegularizationStrategy | None = None,
 ) -> WildBootstrapResult:
     """Cluster-wild bootstrap of the J-statistic (refit-free).
 
@@ -249,13 +255,25 @@ def moment_wild_bootstrap(
     V : (M, M) jax array or :class:`haliax.NamedArray`, optional, keyword-only
         The (regularised) variance matrix at ``theta_hat`` to whiten
         the bootstrap moments. When omitted the function recomputes it
-        by calling ``covariance.covariance(model, theta_hat, measure)``;
-        callers who already have ``EstimationResult.V_X`` should pass
-        it directly (either the NamedArray or its ``.array``) to avoid
-        the extra evaluation and to guarantee the Cholesky factor
-        matches the one used by the analytic J-test. The helper
-        auto-unwraps a :class:`haliax.NamedArray` to its underlying
-        array.
+        by calling ``covariance.covariance(model, theta_hat, measure)``
+        and applies ``regularization`` to the result before
+        factorising; callers who already have ``EstimationResult.V_X``
+        should pass it directly (either the NamedArray or its
+        ``.array``) to avoid the extra evaluation and to guarantee the
+        Cholesky factor matches the one used by the analytic J-test.
+        A caller-supplied ``V`` is used **verbatim** --- it is presumed
+        already regularised (``result.V_X`` is), so ``regularization``
+        is not applied to it. The helper auto-unwraps a
+        :class:`haliax.NamedArray` to its underlying array.
+    regularization : :class:`emu_gmm.types.RegularizationStrategy`, optional
+        Adaptive PD-restoration applied to :math:`V` before
+        factorisation when ``V`` is computed internally (``V=None``).
+        Defaults to :class:`emu_gmm.regularization.DiagonalTikhonov`
+        with framework defaults. Ignored when ``V`` is supplied. Without
+        this repair, a barely-indefinite raw covariance (the
+        finite-sample non-PD risk of the pairwise-overlap /
+        ``dof_correction`` forms; #111) NaNs the Cholesky factor and
+        every downstream statistic.
 
     Returns
     -------
@@ -284,7 +302,17 @@ def moment_wild_bootstrap(
     the helper traces under ``jax.jit`` and composes under
     ``jax.vmap``. Cast with ``float(...)`` at the eager boundary if a
     Python scalar is needed.
+
+    NaN is an event (#140): if the whitening fails --- a non-PD ``V``
+    NaNs the Cholesky factor, so ``J_observed`` is non-finite --- the
+    returned ``p_value`` is ``nan``, not the ``0.0`` that a naive
+    ``mean(J_boot >= nan)`` would silently fabricate (every elementwise
+    comparison against NaN is False). A NaN p-value tells the caller
+    the inference failed; a fabricated ``0.0`` tells them the null was
+    decisively rejected.
     """
+    if regularization is None:
+        regularization = DiagonalTikhonov()
     if sign not in ("rademacher", "mammen"):
         raise ValueError(
             f"moment_wild_bootstrap: sign must be 'rademacher' or 'mammen', "
@@ -328,11 +356,18 @@ def moment_wild_bootstrap(
     weight_mask = measure.mask * measure.weights[:, None]  # (N, M)
 
     # Variance at theta_hat. Caller-supplied V wins to guarantee a match
-    # with the regularised analytic V the EstimationResult exposes.
-    # Auto-unwrap a haliax NamedArray (the natural ``result.V_X`` hand-off)
-    # rather than letting jnp.asarray choke on the wrapper object.
+    # with the regularised analytic V the EstimationResult exposes; it is
+    # used verbatim (presumed already regularised). An internally
+    # recomputed V, by contrast, is RAW --- and the pairwise-overlap /
+    # dof-corrected clustered forms carry a finite-sample non-PD risk
+    # (commitment 3, #111) --- so it goes through the regularisation
+    # strategy before factorisation, exactly as in ``j_test`` /
+    # ``k_statistic``. Auto-unwrap a haliax NamedArray (the natural
+    # ``result.V_X`` hand-off) rather than letting jnp.asarray choke on
+    # the wrapper object.
     if V is None:
-        V_arr = _to_plain(covariance.covariance(model, theta_hat, measure))
+        V_raw = _to_plain(covariance.covariance(model, theta_hat, measure))
+        V_arr, _tau = regularization.apply(V_raw)
     else:
         V_arr = _to_plain(V)
     L = cho.cholesky(V_arr)  # (M, M) lower-triangular
@@ -364,7 +399,13 @@ def moment_wild_bootstrap(
     # Keep p_value and J_observed as 0-d traced arrays so the helper
     # traces cleanly under jit / vmap. Eager callers cast via float()
     # at the boundary.
-    p_value_arr = jnp.mean((J_boot >= J_observed_arr).astype(J_boot.dtype))
+    #
+    # NaN is an event (#140): ``J_boot >= nan`` is elementwise False, so
+    # a non-finite J_observed (non-PD V -> NaN Cholesky) would otherwise
+    # collapse to p = 0.0 --- a silently fabricated hard rejection.
+    # Surface the failure as a NaN p-value instead.
+    p_raw = jnp.mean((J_boot >= J_observed_arr).astype(J_boot.dtype))
+    p_value_arr = jnp.where(jnp.isfinite(J_observed_arr), p_raw, jnp.nan)
 
     return WildBootstrapResult(
         J_boot=J_boot,
