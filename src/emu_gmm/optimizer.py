@@ -595,28 +595,55 @@ class _LinearSolver:
         # rebuilt with a uniform static structure (``lax.cond`` requires both
         # branches to agree on it): ``backend`` is reported "linear" and
         # ``steps`` distinguishes the path (1 = linear; >1 = fallback ran).
-        def _linear_branch(_: Any) -> tuple[Any, Any, Any]:
-            return theta_hat, jnp.asarray(1, jnp.int32), final_objective
+        # A traced ``done`` flag (#78) is threaded through the cond so a
+        # fallback that hit max_steps is NOT reported converged under jit.
+        def _linear_branch(_: Any) -> tuple[Any, Any, Any, Any]:
+            # The cond takes this branch only when ``accept`` is True: the
+            # affine certificate held, so the one-step solution is converged.
+            return (
+                theta_hat,
+                jnp.asarray(1, jnp.int32),
+                final_objective,
+                jnp.asarray(True),
+            )
 
-        def _fallback_branch(_: Any) -> tuple[Any, Any, Any]:
+        def _fallback_branch(_: Any) -> tuple[Any, Any, Any, Any]:
             if args is not None and _supports_args(self.fallback):
                 tf, finfo = self.fallback(residual_fn, theta_init, args=args)
             else:
                 tf, finfo = self.fallback(rf, theta_init)
+            # Propagate the fallback's REAL traced convergence flag when it
+            # supplies one. Whether ``finfo.done is None`` is static --
+            # decided in Python while tracing this branch -- as is
+            # ``finfo.status`` (a static field), so the done-less case
+            # preserves the v1 status-string semantics trace-safely.
+            if finfo.done is not None:
+                fallback_done = jnp.asarray(finfo.done, dtype=bool)
+            else:
+                fallback_done = jnp.asarray(finfo.status in ("converged", "traced"))
             return (
                 tf,
                 jnp.asarray(finfo.steps, jnp.int32),
                 jnp.asarray(finfo.final_objective, theta_hat.dtype),
+                fallback_done,
             )
 
-        theta_opt, steps, fobj = jax.lax.cond(
+        theta_opt, steps, fobj, done = jax.lax.cond(
             accept, _linear_branch, _fallback_branch, None
         )
+        # ``status`` / ``backend`` are static fields and must be identical
+        # across both cond branches, so they stay "converged" / "linear" for
+        # structural uniformity ONLY. The traced ``done`` is the
+        # authoritative convergence channel on this path: the estimator
+        # prefers it over the status string (#78), so a fallback run that
+        # failed to converge surfaces as ``converged=False`` despite the
+        # static "converged" label.
         return theta_opt, OptimizerInfo(
             steps=steps,
             final_objective=fobj,
             status="converged",
             backend="linear",
+            done=done,
         )
 
 
