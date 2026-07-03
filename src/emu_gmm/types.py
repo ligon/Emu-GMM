@@ -624,8 +624,31 @@ class EstimationResult:
     # covariance is no longer an intrinsic property of the fit. Additive during
     # the transition (default ``None``); becomes part of the stripped
     # optimization surface.
+    #
+    # ``moment_covariance`` is the RAW (unregularised) moment covariance V at
+    # theta_hat -- the sandwich *meat*. Storing it (rather than recomputing it
+    # from the model) keeps the result self-contained and DIRECTLY CONSTRUCTIBLE:
+    # an artificial OptimizationResult(moment_jacobian=G, weighting_matrix=Lambda,
+    # moment_covariance=V) builds a fully testable AsymptoticLaw with no fit.
     moment_jacobian: Any = None
     weighting_matrix: Any = None
+    moment_covariance: Any = None
+
+    def asymptotic(self) -> Any:
+        """The asymptotic :class:`~emu_gmm.law.EstimatorLaw` for this fit.
+
+        Adds the asymptotic *assumption* (a CLT / exact limiting behaviour) to
+        this optimization result and returns an
+        :class:`~emu_gmm.law.AsymptoticLaw` that assembles the ridge-correct
+        sandwich from the result's ingredients. Convenience for
+        ``AsymptoticLaw(result)``; the statistical surface (``se`` / ``cov`` /
+        ``coef_table`` / functional SEs / ``j_test``) lives on the returned law,
+        not on the result --- an :class:`OptimizationResult` foregoes any
+        statistical interpretation (docs/optimization-result-law-split.org).
+        """
+        from emu_gmm.law import AsymptoticLaw
+
+        return AsymptoticLaw(self)
 
     @property
     def theta(self) -> ManifoldPoint:

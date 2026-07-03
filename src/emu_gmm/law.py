@@ -1164,16 +1164,54 @@ class AsymptoticLaw(EstimatorLaw):
             else self._backing.components  # type: ignore[union-attr]
         )
 
+    def _sigma(self) -> np.ndarray:
+        r"""The ambient ``(D, D)`` covariance :math:`\Sigma_\theta` the law asserts.
+
+        This is where the asymptotic *assumption* is applied: for a live
+        (result-backed) law it is ASSEMBLED from the
+        :class:`~emu_gmm.types.OptimizationResult`'s optimization ingredients
+        (moment Jacobian ``G``, weighting matrix ``Lambda``, raw moment
+        covariance ``V``) via the shared #133 sandwich
+        (:func:`emu_gmm._internal.asymptotic.asymptotic_covariance`) --- the
+        covariance is a property of the *law*, not of the fit. A moments-backed
+        (reloaded) law returns its persisted ``Sigma``. Cached.
+        """
+        cached = getattr(self, "_sigma_cache", None)
+        if cached is not None:
+            return cached
+        if self._backing is not None:
+            sig = np.asarray(self._backing.sigma)
+        else:
+            r = self._result
+            assert r is not None
+            if getattr(r, "moment_jacobian", None) is not None:
+                from emu_gmm._internal.asymptotic import asymptotic_covariance
+
+                gd = (
+                    0
+                    if r.manifold_spec is None
+                    else int(r.manifold_spec.total_gauge_dim)
+                )
+                sig = np.asarray(
+                    asymptotic_covariance(
+                        jnp.asarray(r.moment_jacobian),
+                        jnp.asarray(r.weighting_matrix),
+                        jnp.asarray(r.moment_covariance),
+                        gauge_dim=gd,
+                    )
+                )
+            else:
+                # Transitional fallback for a result built without ingredients.
+                sig = np.asarray(r.Sigma_theta.array)
+        self._sigma_cache = sig
+        return sig
+
     def _functional_cov(self, f: Functional) -> np.ndarray:
         # ``f`` is non-None here (cov() routes f=None to the plain covariance).
         assert f is not None
-        if self._result is not None:
-            _se, cov = self._result.functional_se(f)
-            return np.atleast_2d(np.asarray(cov))
         from emu_gmm.inference.functional_se import functional_se as _fse
 
-        assert self._backing is not None
-        _se, cov = _fse(f, self._backing.components, jnp.asarray(self._backing.sigma))
+        _se, cov = _fse(f, self._components(), jnp.asarray(self._sigma()))
         return np.atleast_2d(np.asarray(cov))
 
     def mean(self, f: Functional = None) -> np.ndarray:
@@ -1184,9 +1222,7 @@ class AsymptoticLaw(EstimatorLaw):
 
     def cov(self, f: Functional = None) -> np.ndarray:
         if f is None:
-            if self._result is not None:
-                return np.asarray(self._result.Sigma_theta.array)
-            return np.asarray(self._backing.sigma)  # type: ignore[union-attr]
+            return self._sigma()
         return self._functional_cov(f)
 
     def quantile(self, q: float, f: Functional = None) -> np.ndarray:

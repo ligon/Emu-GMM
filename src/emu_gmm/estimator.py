@@ -1288,6 +1288,7 @@ def build_estimator(
             manifold_spec=unflatten_spec,
             moment_jacobian=moment_jacobian,
             weighting_matrix=weighting_matrix_arr,
+            moment_covariance=V_hat,
         )
 
     # #142: expose the construction kwargs on the returned callable so
