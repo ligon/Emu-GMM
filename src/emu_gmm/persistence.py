@@ -269,9 +269,13 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
         )
 
     # Live-result-backed: extract the durable projection from the result.
+    # Persist the covariance the LAW asserts (its assembled sandwich), not the
+    # fit's raw matrix -- they agree to ~1e-16, and once OptimizationResult drops
+    # Sigma_theta the assembled one is the only source. This keeps a reloaded
+    # (moments-backed) law bit-for-bit equal to the live law it was saved from.
     result = law._result
     comps = tuple(np.asarray(c) for c in result.components())
-    sigma = np.asarray(result.Sigma_theta.array)
+    sigma = np.asarray(law._sigma())
     spec = result.manifold_spec
     if spec is not None:
         leaf_manifolds = [ls.manifold for ls in spec.leaf_specs]

@@ -248,7 +248,9 @@ class TestFromMomentsAndCodec:
         result, _spec, _M, _ = ph4._run_estimate(2, seed=301)
         live = AsymptoticLaw(result)
         comps = result.components()
-        sigma = np.asarray(result.Sigma_theta.array)
+        # The law asserts its assembled covariance (not the fit's raw matrix);
+        # from_moments over that reconstructs the same law bit-for-bit.
+        sigma = np.asarray(live.cov())
         leaf_specs = tuple(ls.manifold for ls in result.manifold_spec.leaf_specs)
         moments = AsymptoticLaw.from_moments(
             comps, sigma, leaf_specs=leaf_specs, names=live.param_names
