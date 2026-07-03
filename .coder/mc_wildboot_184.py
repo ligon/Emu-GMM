@@ -27,7 +27,6 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
-
 from emu_gmm import ClusteredCovariance, EmpiricalMeasure, build_estimator
 from emu_gmm.inference import moment_wild_bootstrap
 
@@ -51,9 +50,7 @@ CLUSTER_IDS = jnp.repeat(jnp.arange(G), N // G)
 
 def draw_measure(key):
     x = THETA0 + jax.random.normal(key, (N, M), dtype=jnp.float64)
-    return EmpiricalMeasure(
-        x=x, mask=jnp.ones((N, M)), weights=jnp.ones(N)
-    )
+    return EmpiricalMeasure(x=x, mask=jnp.ones((N, M)), weights=jnp.ones(N))
 
 
 def main() -> None:
@@ -80,12 +77,22 @@ def main() -> None:
             psi, res.theta_hat, meas, cov, n_boot=B, key=jax.random.fold_in(kr, 2)
         )  # projected (post-#184 default)
         wb_hat_raw = moment_wild_bootstrap(
-            psi, res.theta_hat, meas, cov, n_boot=B,
-            key=jax.random.fold_in(kr, 2), project_estimation_effect=False,
+            psi,
+            res.theta_hat,
+            meas,
+            cov,
+            n_boot=B,
+            key=jax.random.fold_in(kr, 2),
+            project_estimation_effect=False,
         )  # unprojected (pre-#184 behaviour)
         wb_0 = moment_wild_bootstrap(
-            psi, Mu(mu=jnp.asarray(THETA0)), meas, cov, n_boot=B,
-            key=jax.random.fold_in(kr, 3), project_estimation_effect=False,
+            psi,
+            Mu(mu=jnp.asarray(THETA0)),
+            meas,
+            cov,
+            n_boot=B,
+            key=jax.random.fold_in(kr, 3),
+            project_estimation_effect=False,
         )  # hypothesised theta_0: no estimation effect, projection off
         rows.append(
             (
@@ -105,9 +112,13 @@ def main() -> None:
     p_hat, p_raw, p_0, j_hat, j_0, jboot, jboot_raw = a.T
     print(f"\n=== issue #184 MC: R={R}, B={B}, N={N}, M={M}, K=1, G={G} ===")
     print(f"converged: {conv.sum()}/{R}")
-    print(f"mean J_observed(theta_hat) = {j_hat.mean():.3f}   (chi2_{{M-K}} mean = {M - 1})")
+    print(
+        f"mean J_observed(theta_hat) = {j_hat.mean():.3f}   (chi2_{{M-K}} mean = {M - 1})"
+    )
     print(f"mean J_observed(theta_0)   = {j_0.mean():.3f}   (chi2_M mean     = {M})")
-    print(f"mean J_boot projected   = {jboot.mean():.3f}  (target chi2_{{M-K}} mean = {M - 1})")
+    print(
+        f"mean J_boot projected   = {jboot.mean():.3f}  (target chi2_{{M-K}} mean = {M - 1})"
+    )
     print(f"mean J_boot unprojected = {jboot_raw.mean():.3f}  (chi2_M mean = {M})")
     for alpha in (0.01, 0.05, 0.10):
         print(
