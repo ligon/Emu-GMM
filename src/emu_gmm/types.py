@@ -616,6 +616,17 @@ class EstimationResult:
     # result unchanged.
     manifold_spec: Any = None
 
+    # Optimization ingredients for the OptimizationResult/EstimatorLaw split
+    # (docs/optimization-result-law-split.org): the realised horizontal moment
+    # Jacobian ``G_riem`` (M, D) and the realised weighting matrix ``Lambda``
+    # (M, M) the objective used. From these + the (recomputable) raw meat V the
+    # AsymptoticLaw reassembles the ridge-correct sandwich itself, so the
+    # covariance is no longer an intrinsic property of the fit. Additive during
+    # the transition (default ``None``); becomes part of the stripped
+    # optimization surface.
+    moment_jacobian: Any = None
+    weighting_matrix: Any = None
+
     @property
     def theta(self) -> ManifoldPoint:
         """Inspectable view of ``theta_hat`` exposing :meth:`components`.

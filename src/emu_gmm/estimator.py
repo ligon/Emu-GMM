@@ -717,6 +717,8 @@ def build_estimator(
         Float[Array, ""],  # J_pvalue_adjusted
         Float[Array, ""],  # sigma_meat_indefinite (0/1; #138)
         Float[Array, ""],  # v_star_indefinite (0/1; regulariser saturated)
+        Float[Array, "M D"],  # moment_jacobian (G_riem, horizontal-projected)
+        Float[Array, "M M"],  # weighting_matrix (realised Lambda)
     ]:
         theta_local = params_mod.unflatten_params(
             theta_flat, treedef, manifold_spec=unflatten_spec
@@ -861,6 +863,18 @@ def build_estimator(
         )
         Sigma_local = bread_pinv @ meat_local @ bread_pinv
         Sigma_local = 0.5 * (Sigma_local + Sigma_local.T)
+        # Materialise the realised weighting matrix Lambda = L_w^{-T} L_w^{-1}
+        # (the actual metric in m' Lambda m, whatever the weighting strategy):
+        # whitening the identity gives Wi = L_w^{-1}, so Lambda = Wi' Wi and
+        # G' Lambda G == info_local, G' Lambda V Lambda G == meat_local by the
+        # SAME arithmetic (exact reproduction, not just allclose). This is the
+        # ingredient the OptimizationResult/EstimatorLaw split hands to the Law
+        # so it can (re)assemble the ridge-correct sandwich itself.
+        Wi_local = _whiten_cols(jnp.eye(G_riem.shape[0], dtype=G_riem.dtype))
+        weighting_matrix_local = Wi_local.T @ Wi_local
+        weighting_matrix_local = 0.5 * (
+            weighting_matrix_local + weighting_matrix_local.T
+        )
         # #138 diagnose-loudly policy: an indefinite meat (raw V
         # indefinite in the binding-ridge regime) can push diag(Sigma)
         # negative; standard_errors maps that to NaN BY DESIGN. Surface
@@ -919,6 +933,8 @@ def build_estimator(
             J_pv_adj,
             sigma_meat_indefinite_local,
             v_star_indefinite_local,
+            G_riem,
+            weighting_matrix_local,
         )
 
     # The traced-argument inference kernel (#124): jitted ONCE at factory
@@ -1086,6 +1102,8 @@ def build_estimator(
             J_pvalue_adjusted,
             sigma_meat_indefinite,
             v_star_indefinite,
+            moment_jacobian,
+            weighting_matrix_arr,
         ) = (
             # The outer-loop args branch (#124 PR B) uses the SAME
             # traced inference kernel as the single-solve path: the
@@ -1268,6 +1286,8 @@ def build_estimator(
             # it is ``None`` so every result-path method takes the v1 branch
             # bitwise (R5/R10/R28).
             manifold_spec=unflatten_spec,
+            moment_jacobian=moment_jacobian,
+            weighting_matrix=weighting_matrix_arr,
         )
 
     # #142: expose the construction kwargs on the returned callable so
