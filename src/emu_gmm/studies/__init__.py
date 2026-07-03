@@ -1,11 +1,11 @@
 """``emu_gmm.studies`` --- the Monte Carlo / repeated-sampling driver (#114).
 
 Industrializes the canonical batching gesture the api-sketch names ---
-``tree_map(jnp.stack, *[result.record() for ...])`` --- in three strictly
+``tree_map(jnp.stack, *[fit_record(result) for ...])`` --- in three strictly
 separated layers (the #114 critical-read shape):
 
 1. **Replication engine** --- :func:`replicate`: an eager Python loop
-   ``key -> dgp(fold_in(key, r)) -> run(...) -> result.record()``,
+   ``key -> dgp(fold_in(key, r)) -> run(...) -> fit_record(result)``,
    stacked into :class:`MCRecords`. The #124 traced-measure kernel makes
    each rep a zero-retrace cache hit, so the loop is not the bottleneck;
    a batched ``lax.map`` execution model is a follow-up on #114.
@@ -49,7 +49,12 @@ from emu_gmm.studies.conditioning import (
     event_share,
     given,
 )
-from emu_gmm.studies.driver import MCRecords, replicate, replicate_coupled
+from emu_gmm.studies.driver import (
+    MCRecords,
+    fit_record,
+    replicate,
+    replicate_coupled,
+)
 from emu_gmm.studies.study import StudyResult, monte_carlo_study
 from emu_gmm.studies.summaries import (
     BiasSD,
@@ -66,6 +71,7 @@ from emu_gmm.studies.summaries import (
 
 __all__ = [
     "MCRecords",
+    "fit_record",
     "replicate",
     "replicate_coupled",
     "BiasSD",

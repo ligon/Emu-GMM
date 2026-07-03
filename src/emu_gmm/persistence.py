@@ -293,10 +293,11 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
     component_shapes = tuple(tuple(int(s) for s in np.shape(c)) for c in comps)
 
     diag = result.diagnostics
+    assert diag is not None
     diagnostics: dict[str, Any] = {
-        "J_stat": float(np.asarray(result.J_stat)),
-        "J_dof": int(result.J_dof),
-        "J_pvalue": float(np.asarray(result.J_pvalue)),
+        "J_stat": float(np.asarray(result.objective_value)),
+        "J_dof": int(result.n_overid),
+        "J_pvalue": float(law.J_pvalue),
         "gauge_nullspace_dim": int(diag.gauge_nullspace_dim),
         "tau_realised": float(np.asarray(diag.tau_realised)),
         "kappa_V": float(np.asarray(diag.kappa_V)),

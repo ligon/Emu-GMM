@@ -122,6 +122,7 @@ from emu_gmm.types import (
     FitRecord,
     LabelContext,
     Measure,
+    OptimizationResult,
     Optimizer,
     OptimizerInfo,
     RegularizationStrategy,
@@ -194,6 +195,7 @@ __all__ = [
     "IdentificationStrength",
     "BlockStrength",
     # Result / diagnostics types
+    "OptimizationResult",
     "EstimationResult",
     "FitRecord",
     "Diagnostics",

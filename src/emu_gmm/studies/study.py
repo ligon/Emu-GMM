@@ -28,7 +28,7 @@ from emu_gmm.studies.summaries import (
     size_power,
     tau_binding,
 )
-from emu_gmm.types import EstimationResult, Measure
+from emu_gmm.types import Measure, OptimizationResult
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,7 +63,7 @@ class StudyResult:
 
 
 def monte_carlo_study(
-    run: Callable[[Any, Measure], EstimationResult],
+    run: Callable[[Any, Measure], OptimizationResult],
     dgp: Callable[[jax.Array], Measure],
     *,
     n_reps: int,
@@ -74,7 +74,9 @@ def monte_carlo_study(
     alpha: tuple[float, ...] = (0.01, 0.05, 0.10),
     anchor_per_rep: bool = False,
     coupling_id: Any = None,
-    statistics: Mapping[str, Callable[[EstimationResult, Measure], Any]] | None = None,
+    statistics: (
+        Mapping[str, Callable[[OptimizationResult, Measure], Any]] | None
+    ) = None,
 ) -> StudyResult:
     """Run a study and compute the standard summary battery.
 

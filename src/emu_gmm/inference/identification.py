@@ -40,9 +40,10 @@ block — the direction that drives the weak-identification-robust / Wald
 divergence (#41's K-statistic): where it is small, a Wald CI understates
 uncertainty while the K-statistic stays valid.
 
-The curvature is built off :math:`V^\star = ` ``result.V_X`` — the *frozen-ridge*
-:math:`V^\star` the fit used at :math:`\hat\theta`, so :math:`\mathcal I` is the
-**same matrix** :func:`emu_gmm.diagnostics.compute_cond_info` conditions
+The curvature is read off ``result.gn_hessian`` — the fit's own
+Gauss--Newton :math:`\mathcal I = G'\Lambda G` (with the anchored-tau
+:math:`V^\star`), so it is the **same matrix**
+:func:`emu_gmm.diagnostics.compute_cond_info` conditions
 (``data_only`` / ``exclude_gauge``), bit-for-bit, including when the ridge binds.
 
 The clean **block-inverse identity** — :math:`\mathcal I_{b\cdot c}^{-1}` equals
@@ -384,11 +385,13 @@ def identification_strength(
         decomposition the K-Aggregators consumer wants. A gauge-bearing leaf
         (e.g. a :class:`PSDFixedRank` factor) must lie wholly within one block.
     V_star
-        Optional regularised variance override. Defaults to ``result.V_X`` —
-        the frozen-ridge :math:`V^\star` the fit actually used at
-        ``theta_hat`` (the same matrix ``cond_info`` conditions and the
-        ``Sigma_theta`` bread uses). Pass this only to supply a custom
-        :math:`V^\star`; the default is correct and bit-consistent with the
+        Optional regularised variance override. By default the curvature is
+        read straight off ``result.gn_hessian`` — the fit's own
+        :math:`\mathcal I = G'\Lambda G` at the anchored-tau :math:`V^\star`
+        (the same matrix ``cond_info`` conditions and the asymptotic-covariance
+        bread inverts). Pass a matrix here to recompute the curvature under a
+        custom :math:`V^\star = ` this argument from the ambient moment
+        Jacobian instead; the default is correct and bit-consistent with the
         result's own inference even when the ridge binds.
 
     Returns
@@ -399,11 +402,11 @@ def identification_strength(
 
     Notes
     -----
-    The metric is the *efficient* :math:`\Lambda = (V^\star)^{-1}` with
-    :math:`V^\star = ` ``result.V_X`` (the frozen-ridge variance the fit used),
-    independent of the weighting actually used to estimate. So the diagnostic
-    measures identification of the moment system itself and is bit-consistent
-    with ``cond_info`` even when the ridge binds. The exact reciprocal tie to
+    The metric is the realised :math:`\Lambda = (V^\star)^{-1}` the fit used,
+    read off ``result.gn_hessian`` (the anchored-tau curvature). So the
+    diagnostic measures identification of the moment system itself and is
+    bit-consistent with ``cond_info`` even when the ridge binds. The exact
+    reciprocal tie to
     :math:`\Sigma_\theta` holds only under efficient weighting at a non-binding
     ridge (see the module docstring). Eager-only.
     """
@@ -416,28 +419,28 @@ def identification_strength(
     leaf_ranges = _leaf_index_ranges(manifold_spec)
     total_dim = int(manifold_spec.total_dimension)
 
-    # Ambient moment-Jacobian at theta_hat (the (M, total_dimension) layout
-    # Sigma_theta is sized by). For a gauge-invariant model the ambient G
-    # annihilates the vertical directions, so the information matrix carries
-    # the exact gauge zeros — same precondition compute_cond_info relies on.
-    G = _to_plain(measure.jacobian(model, theta_hat))
-
-    # Default V* = result.V_X, the *frozen-ridge* regularised variance the fit
-    # actually used at theta_hat (estimator.py: V_X == V_star_hat, the
-    # anchored-tau V*). Reading it rather than recomputing
-    # ``regularization.apply(V(theta_hat))`` is both the correctness contract
-    # (the diagnostic's curvature is then the SAME matrix cond_info conditions
-    # and the Sigma_theta bread uses, including when the ridge binds) and the
-    # right reuse of a package-owned quantity: DiagonalTikhonov.apply is
-    # stateless, so a recompute would re-anchor a DIFFERENT tau at theta_hat
-    # (a silent divergence under a binding ridge; PR #178 review). The
-    # ``V_star=`` override stays for callers supplying a custom V*.
+    # The information (curvature) matrix I = G' Lambda G. By default this is
+    # the fit's OWN Gauss--Newton curvature, ``result.gn_hessian`` --- the
+    # SAME B = G' Lambda G the #133 sandwich bread inverts and ``cond_info``
+    # conditions (built off the anchored-tau V*, including when the ridge
+    # binds; the OptimizationResult/EstimatorLaw split moved the M-by-M V*
+    # itself onto the law, but the curvature it produced stays result-side).
+    # Reading it rather than recomputing ``information_matrix(G,
+    # regularization.apply(V(theta_hat)))`` avoids re-anchoring a DIFFERENT
+    # tau at theta_hat (a silent divergence under a binding ridge; PR #178
+    # review). The ``V_star=`` override recomputes the curvature under a
+    # caller-supplied V* from the ambient moment Jacobian.
     if V_star is None:
-        V_star_arr = _to_plain(result.V_X)
+        info = _to_plain(result.gn_hessian)
     else:
-        V_star_arr = jnp.asarray(V_star)
+        # Ambient moment-Jacobian at theta_hat (the (M, total_dimension)
+        # layout Sigma_theta is sized by). For a gauge-invariant model the
+        # ambient G annihilates the vertical directions, so the information
+        # matrix carries the exact gauge zeros compute_cond_info relies on.
+        assert measure is not None
+        G = _to_plain(measure.jacobian(model, theta_hat))
+        info = information_matrix(G, jnp.asarray(V_star))
 
-    info = information_matrix(G, V_star_arr)
     D = int(info.shape[-1])
     if D != total_dim:
         raise ValueError(
