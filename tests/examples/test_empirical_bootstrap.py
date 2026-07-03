@@ -66,12 +66,39 @@ def test_run_recovers_truth_and_matches_analytic_inference():
     assert abs(sigma2_hat - empirical_bootstrap.SIGMA2_TRUE) < 4.0 * analytic_se[1]
 
     # ---- Analytic J <-> wild-bootstrap J_observed ----
-    # The refit-free wild bootstrap whitens by the same V_X the analytic
-    # J-test uses, so J_observed should equal J_stat up to floating-point
-    # rounding.
-    assert float(wild.J_observed) == pytest.approx(
+    # The refit-free wild bootstrap whitens by the same regularised V* the
+    # analytic J-test uses (V* = inv(weighting_matrix) under the estimation/
+    # inference split), so the UNPROJECTED J_observed equals objective_value up
+    # to floating-point rounding. The example's headline `wild` result uses the
+    # post-#184 default (project_estimation_effect=True, correct at theta_hat),
+    # whose J_observed differs from objective_value by the estimation-effect
+    # component the projection removes -- so the exact identity is pinned on an
+    # explicit unprojected call instead. The dataset is rebuilt
+    # deterministically from the example's own seed; n_boot=1 because only the
+    # (draw-free) J_observed is compared.
+    import jax
+
+    from emu_gmm import moment_wild_bootstrap
+
+    measure, covariance, _ = empirical_bootstrap.make_dataset(
+        seed=empirical_bootstrap.DATA_SEED
+    )
+    wild_unproj = moment_wild_bootstrap(
+        empirical_bootstrap.mean_var_residual,
+        result.theta_hat,
+        measure,
+        covariance,
+        n_boot=1,
+        key=jax.random.PRNGKey(0),
+        V=np.linalg.inv(np.asarray(result.weighting_matrix)),
+        project_estimation_effect=False,
+    )
+    assert float(wild_unproj.J_observed) == pytest.approx(
         float(result.objective_value), rel=1e-6
     )
+    # The projected J_observed is an orthogonal projection of the same
+    # whitened vector: it can only shrink the norm (#184).
+    assert float(wild.J_observed) <= float(wild_unproj.J_observed) * (1 + 1e-12)
     assert wild.J_boot.shape == (80,)
     assert 0.0 <= float(wild.p_value) <= 1.0
 
