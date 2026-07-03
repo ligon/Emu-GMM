@@ -340,13 +340,15 @@ class TestPositiveReductionMatchesLM:
         r_lm = _run_scale(riemannian_lm(max_steps=200))
         assert bool(r_tr.converged) and bool(r_lm.converged)
 
-        # J_dof is static (M - dim_info); must be exactly equal.
-        assert r_tr.J_dof == r_lm.J_dof == 1
-        # J_stat is a scalar functional of the optimum.
-        assert float(r_tr.J_stat) == pytest.approx(float(r_lm.J_stat), rel=1e-6)
+        # n_overid is static (M - dim_info); must be exactly equal.
+        assert r_tr.n_overid == r_lm.n_overid == 1
+        # objective_value is a scalar functional of the optimum.
+        assert float(r_tr.objective_value) == pytest.approx(
+            float(r_lm.objective_value), rel=1e-6
+        )
         # Sigma_theta is the 1x1 ambient natural-scale variance (Convention B).
-        sig_tr = float(r_tr.Sigma_theta.array[0, 0])
-        sig_lm = float(r_lm.Sigma_theta.array[0, 0])
+        sig_tr = float(np.asarray(r_tr.asymptotic().cov())[0, 0])
+        sig_lm = float(np.asarray(r_lm.asymptotic().cov())[0, 0])
         assert sig_tr > 0.0
         assert sig_tr == pytest.approx(sig_lm, rel=1e-6)
 

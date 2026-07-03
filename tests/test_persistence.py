@@ -1,7 +1,7 @@
 r"""Tests for typed, versioned law persistence (#181).
 
 Persisting a fitted law to an inert, versioned ``.npz`` artifact and reloading
-it into a queryable law --- with NO live :class:`EstimationResult` on the
+it into a queryable law --- with NO live :class:`OptimizationResult` on the
 reload path.
 
 Asymptotic grade:

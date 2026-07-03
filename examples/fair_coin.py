@@ -31,7 +31,7 @@ Emu-GMM surface this showcases
   smallest API surface.
 - The ``estimate(...)`` entry point with the default optimiser
   (``optimistix_lm``).
-- ``EstimationResult.coef_table`` for a pandas-formatted summary
+- ``OptimizationResult.asymptotic().coef_table`` for a pandas-formatted summary
   (estimate, std_error, t_stat, p_value).
 
 This is the pedagogical "what is the minimum amount of code?" example.
@@ -49,15 +49,14 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
-from jaxtyping import Array, Float
-
 from emu_gmm import (
     EmpiricalMeasure,
-    EstimationResult,
-    IIDCovariance,
     Identity,
+    IIDCovariance,
+    OptimizationResult,
     estimate,
 )
+from jaxtyping import Array, Float
 
 # ---- Ground truth and defaults ----
 P_TRUE: float = 0.5
@@ -98,7 +97,7 @@ def run_fair_coin(
     n: int = N_DATA,
     seed: int = DATA_SEED,
     p_init: float = 0.3,
-) -> EstimationResult:
+) -> OptimizationResult:
     """Estimate ``p`` for a fair coin via Emu-GMM. Returns the full result.
 
     Parameters
@@ -135,13 +134,13 @@ def main() -> None:
     p_hat = float(result.theta_hat.p)
     print()
     print("Coefficient table:")
-    print(result.coef_table.to_string())
+    print(result.asymptotic().coef_table.to_string())
     print()
     print(
         f"  p_hat  = {p_hat:.6f}   "
         f"(truth {P_TRUE:.2f}, |err| = {abs(p_hat - P_TRUE):.2e})"
     )
-    print(f"  J-stat = {float(result.J_stat):.4e}   (dof = {result.J_dof})")
+    print(f"  J-stat = {float(result.objective_value):.4e}   (dof = {result.n_overid})")
     print(f"  converged = {result.converged}   " f"({result.iterations} iterations)")
 
 

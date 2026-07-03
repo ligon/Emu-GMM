@@ -62,7 +62,7 @@ What Emu-GMM API surface this exercises
   refreshes the weight matrix at each updated ``c`` and stops when
   ``c`` stabilises within ``weighting_tol``.
 - :func:`emu_gmm.estimate` --- the entry point that ties them all
-  together and produces an :class:`EstimationResult` with cluster-robust
+  together and produces an :class:`OptimizationResult` with cluster-robust
   standard errors on ``c_hat`` and the J-statistic of the
   over-identifying restriction.
 
@@ -76,8 +76,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
-from jaxtyping import Array, Float
-
 from emu_gmm import (
     ClusteredCovariance,
     EmpiricalMeasure,
@@ -85,7 +83,8 @@ from emu_gmm import (
     estimate,
     optimistix_lm,
 )
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
+from jaxtyping import Array, Float
 
 # ---------------------------------------------------------------------------
 # Panel dimensions and true structural parameter.
@@ -207,7 +206,7 @@ def run_twfe(
     weighting_tol: float = 1e-6,
     optimizer_rtol: float = 1e-8,
     optimizer_atol: float = 1e-8,
-) -> EstimationResult:
+) -> OptimizationResult:
     """Run the TWFE estimation pipeline once and return the result.
 
     Exposed as a module-level entry point so the recovery smoke test can
@@ -246,17 +245,17 @@ def main() -> None:
 
     result = run_twfe(seed=0)
 
-    print(result.coef_table.to_string())
+    print(result.asymptotic().coef_table.to_string())
     c_hat = float(result.theta_hat.c)
-    se = float(result.coef_table["std_error"].iloc[0])
+    se = float(result.asymptotic().coef_table["std_error"].iloc[0])
     print(
         f"\n  c_hat = {c_hat:.6f}   (truth {C_TRUE:.2f}, "
         f"|err| = {abs(c_hat - C_TRUE):.2e}, cluster-robust SE = {se:.4f})"
     )
     print(
-        f"  J-stat = {float(result.J_stat):.4e}   "
-        f"(dof = {result.J_dof}, p = {float(result.J_pvalue):.3f}, "
-        f"p_adj = {float(result.J_pvalue_adjusted):.3f})"
+        f"  J-stat = {float(result.objective_value):.4e}   "
+        f"(dof = {result.n_overid}, p = {float(result.asymptotic().J_pvalue):.3f}, "
+        f"p_adj = {float(result.asymptotic().J_pvalue_adjusted):.3f})"
     )
     print(
         f"  converged = {bool(result.converged)}   "

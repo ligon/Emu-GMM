@@ -511,8 +511,12 @@ class TestFlattenRoundTripAndInferenceParity:
 
         # Sigma_theta spectrum (gauge-invariant eigenvalue SET) must match: a
         # garbage round-trip into Sigma_theta perturbs this.
-        sa = 0.5 * (res_tr.Sigma_theta.array + res_tr.Sigma_theta.array.T)
-        sb = 0.5 * (res_lm.Sigma_theta.array + res_lm.Sigma_theta.array.T)
+        law_tr = res_tr.asymptotic()
+        law_lm = res_lm.asymptotic()
+        cov_tr = np.asarray(law_tr.cov())
+        cov_lm = np.asarray(law_lm.cov())
+        sa = 0.5 * (cov_tr + cov_tr.T)
+        sb = 0.5 * (cov_lm + cov_lm.T)
         np.testing.assert_allclose(
             np.sort(np.asarray(jnp.linalg.eigvalsh(sa))),
             np.sort(np.asarray(jnp.linalg.eigvalsh(sb))),
@@ -522,8 +526,8 @@ class TestFlattenRoundTripAndInferenceParity:
         # gamma_se: the gauge-invariant SE functional on Gamma. Sorted compare
         # because the ambient ordering is parameterisation-arbitrary but the
         # multiset of SEs on the gauge-invariant functional is not.
-        se_tr = np.asarray(res_tr.gamma_se())
-        se_lm = np.asarray(res_lm.gamma_se())
+        se_tr = np.asarray(law_tr.gamma_se())
+        se_lm = np.asarray(law_lm.gamma_se())
         assert se_tr.shape == se_lm.shape
         np.testing.assert_allclose(np.sort(se_tr), np.sort(se_lm), atol=1e-6)
 

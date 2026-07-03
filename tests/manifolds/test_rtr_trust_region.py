@@ -546,18 +546,18 @@ class TestSigmaToZeroBoundary:
         # (b) strictly positive (the exp retraction guarantee held).
         assert sigma_tr > 0.0
         # (c) finite objective.
-        assert jnp.isfinite(jnp.asarray(r_tr.J_stat))
+        assert jnp.isfinite(jnp.asarray(r_tr.objective_value))
         assert jnp.isfinite(
             jnp.asarray(_info_get(r_tr.diagnostics, "final_objective_data"))
             if _info_get(r_tr.diagnostics, "final_objective_data") is not None
-            else r_tr.J_stat
+            else r_tr.objective_value
         )
         # (d) matches LM at the boundary.  Both collapse toward 0+; compare on a
         # log scale (the affine-natural coordinate) with an absolute floor so two
         # tiny-but-different positives near machine zero still agree.
         assert sigma_tr == pytest.approx(sigma_lm, abs=1e-3, rel=1e-2)
-        assert float(jnp.asarray(r_tr.J_stat)) == pytest.approx(
-            float(jnp.asarray(r_lm.J_stat)), abs=1e-3
+        assert float(jnp.asarray(r_tr.objective_value)) == pytest.approx(
+            float(jnp.asarray(r_lm.objective_value)), abs=1e-3
         )
         # Drove toward the boundary (well below the O(1) start), not stalled.
         assert sigma_tr < 0.2

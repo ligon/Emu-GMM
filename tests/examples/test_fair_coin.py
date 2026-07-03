@@ -30,7 +30,7 @@ import fair_coin  # noqa: E402  (sys.path manipulation above is intentional)
 
 @pytest.fixture(scope="module")
 def result():
-    """Run the example once per module and share the EstimationResult."""
+    """Run the example once per module and share the OptimizationResult."""
     return fair_coin.run_fair_coin()
 
 
@@ -50,13 +50,13 @@ def test_converged(result):
 
 def test_just_identified_J_dof_is_zero(result):
     """``M = K = 1`` makes the J-test degenerate; ``J_dof`` must be 0."""
-    assert result.J_dof == 0
-    assert jnp.isfinite(result.J_stat)
+    assert result.n_overid == 0
+    assert jnp.isfinite(result.objective_value)
 
 
 def test_coef_table_has_expected_shape(result):
     """The coefficient table is a 1-row DataFrame indexed by ``"p"``."""
-    table = result.coef_table
+    table = result.asymptotic().coef_table
     assert list(table.index) == ["p"]
     assert set(table.columns) == {"estimate", "std_error", "t_stat", "p_value"}
     assert math.isfinite(float(table.loc["p", "std_error"]))

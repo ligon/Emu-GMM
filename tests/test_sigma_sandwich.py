@@ -30,6 +30,7 @@ from emu_gmm import (
 )
 from emu_gmm.examples.euler import EulerParams, euler_data, euler_residual
 from emu_gmm.measures import EmpiricalMeasure
+from emu_gmm.studies import fit_record
 
 N = 600
 
@@ -60,7 +61,7 @@ class TestParityAndSandwich:
         G, V = _G_and_V(res, m)
         classical = np.linalg.inv(G.T @ np.linalg.inv(V) @ G)
         np.testing.assert_allclose(
-            np.asarray(res.Sigma_theta.array), classical, rtol=1e-8
+            np.asarray(res.asymptotic().cov()), classical, rtol=1e-8
         )
 
     def test_identity_weighting_is_the_robust_sandwich(self):
@@ -76,7 +77,7 @@ class TestParityAndSandwich:
         bread_inv = np.linalg.inv(G.T @ G)
         sandwich = bread_inv @ (G.T @ V @ G) @ bread_inv
         np.testing.assert_allclose(
-            np.asarray(res.Sigma_theta.array), sandwich, rtol=1e-8
+            np.asarray(res.asymptotic().cov()), sandwich, rtol=1e-8
         )
         # (On the Euler DGP Identity weighting happens to be ~99.996%
         # efficient -- the common-SDF moments make V nearly proportional
@@ -101,7 +102,7 @@ class TestParityAndSandwich:
         bread_inv = np.linalg.inv(G.T @ Lam0 @ G)
         sandwich = bread_inv @ (G.T @ Lam0 @ V @ Lam0 @ G) @ bread_inv
         np.testing.assert_allclose(
-            np.asarray(res.Sigma_theta.array), sandwich, rtol=1e-8
+            np.asarray(res.asymptotic().cov()), sandwich, rtol=1e-8
         )
 
 
@@ -171,7 +172,7 @@ class TestCoverage:
             if not bool(res.converged):
                 continue
             used += 1
-            rec = res.record()
+            rec = fit_record(res)
             th = np.asarray(rec.theta_flat)
             se = np.asarray(rec.se)
             hits_sandwich += (np.abs(th - self.THETA_TRUE) <= 1.96 * se).astype(float)
@@ -197,8 +198,8 @@ class TestCoverage:
 
 @pytest.mark.parametrize("seed", [0, 1])
 def test_fitrecord_se_carries_the_sandwich(seed):
-    """FitRecord.se / standard_errors / coef_table all flow from
-    Sigma_theta, so the fix propagates everywhere (spot-check one)."""
+    """FitRecord.se / law.se() / law.coef_table all flow from the law's
+    assembled Sigma_theta, so the fix propagates everywhere (spot-check one)."""
     m = _measure(seed=seed)
     res = estimate(
         euler_residual,
@@ -208,8 +209,8 @@ def test_fitrecord_se_carries_the_sandwich(seed):
         parameters=_theta0(),
     )
     np.testing.assert_array_equal(
-        np.asarray(res.record().se),
-        np.sqrt(np.diag(np.asarray(res.Sigma_theta.array))),
+        np.asarray(fit_record(res).se),
+        np.sqrt(np.diag(np.asarray(res.asymptotic().cov()))),
     )
 
 
@@ -261,7 +262,7 @@ class TestIndefiniteMeatDiagnosis:
         assert float(res.diagnostics.tau_realised) > 0.0
         # The diagnose-loudly contract: flag + NaN SE + UserWarning.
         assert bool(res.diagnostics.sigma_meat_indefinite)
-        assert np.isnan(np.asarray(res.standard_errors.array)).any()
+        assert np.isnan(np.asarray(res.asymptotic().se())).any()
         assert any(
             "indefinite" in str(w.message) for w in caught
         ), "no loud warning emitted"
@@ -269,7 +270,7 @@ class TestIndefiniteMeatDiagnosis:
         # n_valid_se accounting (#140) -- the chain is consistent --
         # plus the 0/1 event flag itself, so committed MC records stay
         # auditable (#143).
-        rec = res.record()
+        rec = fit_record(res)
         assert np.isnan(np.asarray(rec.se)).any()
         assert float(rec.sigma_meat_indefinite) == 1.0
 
@@ -286,6 +287,6 @@ class TestIndefiniteMeatDiagnosis:
                 parameters=_theta0(),
             )
         assert not bool(res.diagnostics.sigma_meat_indefinite)
-        assert not np.isnan(np.asarray(res.standard_errors.array)).any()
+        assert not np.isnan(np.asarray(res.asymptotic().se())).any()
         assert not any("indefinite" in str(w.message) for w in caught)
-        assert float(res.record().sigma_meat_indefinite) == 0.0  # #143
+        assert float(fit_record(res).sigma_meat_indefinite) == 0.0  # #143

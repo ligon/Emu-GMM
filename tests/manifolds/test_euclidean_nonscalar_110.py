@@ -113,12 +113,12 @@ class TestNonScalarEuclideanHandBuilt:
 
     def test_J_dof_and_stat(self):
         r = _run_handbuilt([0.0, 0.0])
-        assert r.J_dof == M - K  # 3 - 2 == 1
-        assert jnp.isfinite(r.J_stat)
+        assert r.n_overid == M - K  # 3 - 2 == 1
+        assert jnp.isfinite(r.objective_value)
 
     def test_sigma_theta_finite_full_rank(self):
         r = _run_handbuilt([0.0, 0.0])
-        arr = np.asarray(r.Sigma_theta.array)
+        arr = np.asarray(r.asymptotic().cov())
         assert arr.shape == (K, K)  # ambient == identified (no gauge)
         assert bool(jnp.all(jnp.isfinite(jnp.asarray(arr))))
         # Full rank: a Euclidean leaf has no gauge nullspace.
@@ -148,7 +148,7 @@ class TestNonScalarEuclideanParameterSpace:
         mu_hat = np.asarray(r.theta_hat.mu.array)
         assert mu_hat == pytest.approx(np.asarray(mu_true), abs=0.1)
         assert r.converged
-        assert r.J_dof == M - K
+        assert r.n_overid == M - K
 
     def test_run_callable_reuses_and_recovers(self):
         # build_estimator-style reuse: the returned run() also flattens via the

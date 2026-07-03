@@ -113,7 +113,9 @@ class TestParity:
             rtol=1e-8,
         )
         np.testing.assert_allclose(
-            float(res_args.J_stat), float(res_legacy.J_stat), rtol=1e-8
+            float(res_args.objective_value),
+            float(res_legacy.objective_value),
+            rtol=1e-8,
         )
         np.testing.assert_allclose(
             float(res_args.diagnostics.optimizer_info.final_objective),
@@ -121,8 +123,8 @@ class TestParity:
             rtol=1e-8,
         )
         np.testing.assert_allclose(
-            np.asarray(res_args.Sigma_theta.array),
-            np.asarray(res_legacy.Sigma_theta.array),
+            np.asarray(res_args.asymptotic().cov()),
+            np.asarray(res_legacy.asymptotic().cov()),
             rtol=1e-6,
         )
 

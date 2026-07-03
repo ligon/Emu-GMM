@@ -28,7 +28,7 @@ from emu_gmm.manifolds import Euclidean, PSDFixedRank
 from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.measures import SyntheticMeasure
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from emu_gmm.weighting import ContinuouslyUpdated
 
 jax.config.update("jax_enable_x64", True)
@@ -96,8 +96,8 @@ def test_estimation_result_pickle_round_trip(tmp_path):
         warnings.simplefilter("error")
         result.to_pickle(path)
     # ... and from_pickle must not raise "ManifoldLeaf is immutable".
-    loaded = EstimationResult.from_pickle(path)
-    assert isinstance(loaded, EstimationResult)
+    loaded = OptimizationResult.from_pickle(path)
+    assert isinstance(loaded, OptimizationResult)
     assert isinstance(loaded.theta_hat, ProductParams)
     assert isinstance(loaded.theta_hat.Y, ManifoldLeaf)
     np.testing.assert_array_equal(
@@ -105,7 +105,7 @@ def test_estimation_result_pickle_round_trip(tmp_path):
         np.asarray(result.theta_hat.Y.array),
     )
     assert loaded.theta_hat.Y.manifold == result.theta_hat.Y.manifold
-    assert float(loaded.J_stat) == float(result.J_stat)
+    assert float(loaded.objective_value) == float(result.objective_value)
     # The reconstructed leaf is still immutable.
     with pytest.raises(AttributeError):
         loaded.theta_hat.Y.array = jnp.zeros((N, K))

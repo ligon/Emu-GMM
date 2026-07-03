@@ -377,7 +377,7 @@ class TestNonConvexMetaGate:
         out = optimizer.run(problem, initial_point=[np.asarray(Y0), np.array([0.4])])
         Y_pym = np.asarray(out.point[0], dtype=np.float64)
         Gamma_pym = jnp.asarray(Y_pym @ Y_pym.T)
-        J_tr = float(jnp.asarray(res_tr.J_stat))
+        J_tr = float(jnp.asarray(res_tr.objective_value))
         J_pym = 2.0 * float(out.cost)  # J = r'r = 2 * 0.5 r'r
 
         # Oracle parity on the gauge invariants that ARE identified: the
@@ -436,10 +436,11 @@ class TestGaugeInvariantComparisonOnly:
         assert bool(res.converged)
         A_tr, _ = res.components()
         Gamma_tr = A_tr @ A_tr.T
-        J_tr = float(jnp.asarray(res.J_stat))
+        J_tr = float(jnp.asarray(res.objective_value))
 
         # IDENTICAL whitening so the pymanopt objective coincides exactly.
-        W = jnp.linalg.inv(jnp.asarray(res.V_X.array))
+        # ``weighting_matrix`` is Lambda == (V*)^{-1} == the whitening W directly.
+        W = jnp.asarray(res.weighting_matrix)
         manifold = PymProduct([PymPSDFixedRank(N, k), PymEuclidean(1)])
 
         @pymanopt.function.jax(manifold)
@@ -722,7 +723,8 @@ class TestStepLevelTraceMatchesPymanopt:
         assert delta_emu.shape[0] >= self.N_STEPS
 
         # ---- pymanopt, instrumented per-outer-iteration via the subclass ----
-        W = jnp.linalg.inv(jnp.asarray(res_tr.V_X.array))
+        # ``weighting_matrix`` is Lambda == (V*)^{-1} == the whitening W directly.
+        W = jnp.asarray(res_tr.weighting_matrix)
         manifold = PymProduct([PymPSDFixedRank(N, k), PymEuclidean(1)])
 
         def model_m(Y, phi):

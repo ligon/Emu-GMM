@@ -468,10 +468,10 @@ class TestAsymptoticGrade:
     def test_mean_cov_se_identity(self, clean_scalar_result):
         law = AsymptoticLaw(clean_scalar_result)
         np.testing.assert_allclose(
-            law.cov(), np.asarray(clean_scalar_result.Sigma_theta.array)
+            law.cov(), np.asarray(clean_scalar_result.asymptotic().cov())
         )
         np.testing.assert_allclose(
-            law.se(), np.asarray(clean_scalar_result.standard_errors.array)
+            law.se(), np.asarray(clean_scalar_result.asymptotic().se())
         )
 
     def test_quantile_is_gaussian_marginal(self, clean_scalar_result):
@@ -492,7 +492,7 @@ class TestAsymptoticGrade:
         assert draws.shape == (50, len(law.param_names))
 
     def test_wraps_only_estimation_result(self):
-        with pytest.raises(TypeError, match="EstimationResult"):
+        with pytest.raises(TypeError, match="OptimizationResult"):
             AsymptoticLaw(object())
 
 
@@ -593,7 +593,9 @@ class TestGaugeAwareCodomain:
         ev = law.eigenvalue_se()
         assert ev.shape == (_K,)
         assert np.all(np.isfinite(ev)) and np.all(ev > 0.0)
-        np.testing.assert_allclose(ev, np.asarray(psd_result.eigenvalue_se()))
+        np.testing.assert_allclose(
+            ev, np.asarray(psd_result.asymptotic().eigenvalue_se())
+        )
 
     def test_asymptotic_gamma_se_shape(self, psd_result):
         law = AsymptoticLaw(psd_result)
@@ -669,7 +671,9 @@ class TestLeafView:
         law = AsymptoticLaw(psd_result)
         ev = law.leaf("Y").se("eigenvalues")
         assert ev.shape == (_K,)
-        np.testing.assert_allclose(ev, np.asarray(psd_result.eigenvalue_se()))
+        np.testing.assert_allclose(
+            ev, np.asarray(psd_result.asymptotic().eigenvalue_se())
+        )
         np.testing.assert_allclose(ev, law.se(eigenvalue_functional(_K)))
 
     def test_leaf_gamma_se_matches_functional(self, psd_result):

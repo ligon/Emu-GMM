@@ -17,7 +17,7 @@ jit / vmap compatibility of the helper.
     chi^2_p. The vmapped kernel approximates the asymptotic limit law to
     within Monte Carlo error.
 
-(d) Convenience overload: passing an EstimationResult evaluates at theta_hat.
+(d) Convenience overload: passing an OptimizationResult evaluates at theta_hat.
 
 (e) Kleibergen D-tilde correctness: the K stat is invariant under
     invertible linear reparameterisations of the moment vector
@@ -314,12 +314,12 @@ class TestChi2DistributionalSanity:
 
 
 # ---------------------------------------------------------------------------
-# (d) Accepts an EstimationResult as the first argument.
+# (d) Accepts an OptimizationResult as the first argument.
 # ---------------------------------------------------------------------------
 
 
-class TestAcceptsEstimationResult:
-    """Verifies the convenience overload: first arg can be an EstimationResult."""
+class TestAcceptsOptimizationResult:
+    """Verifies the convenience overload: first arg can be an OptimizationResult."""
 
     def test_uses_theta_hat_when_passed_result(self):
         from emu_gmm.estimator import estimate

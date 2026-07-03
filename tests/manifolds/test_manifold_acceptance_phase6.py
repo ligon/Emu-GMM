@@ -287,15 +287,17 @@ class TestGaugeInvariance:
             )
         )
         # Same J-statistic.
-        assert float(jnp.asarray(res_a.J_stat)) == pytest.approx(
-            float(jnp.asarray(res_b.J_stat)), abs=self.J_ATOL
+        assert float(jnp.asarray(res_a.objective_value)) == pytest.approx(
+            float(jnp.asarray(res_b.objective_value)), abs=self.J_ATOL
         )
-        # Same J_dof (static; gauge dim does not depend on the start).
-        assert res_a.J_dof == res_b.J_dof
+        # Same n_overid (static; gauge dim does not depend on the start).
+        assert res_a.n_overid == res_b.n_overid
         # Same Sigma_theta spectrum (gauge-invariant set of eigenvalues): the
         # ambient SEs are gauge-arbitrary, but the eigenvalue SET is not.
-        sa = 0.5 * (res_a.Sigma_theta.array + res_a.Sigma_theta.array.T)
-        sb = 0.5 * (res_b.Sigma_theta.array + res_b.Sigma_theta.array.T)
+        cov_a = np.asarray(res_a.asymptotic().cov())
+        cov_b = np.asarray(res_b.asymptotic().cov())
+        sa = 0.5 * (cov_a + cov_a.T)
+        sb = 0.5 * (cov_b + cov_b.T)
         assert bool(
             jnp.allclose(
                 jnp.sort(jnp.linalg.eigvalsh(sa)),
@@ -364,10 +366,11 @@ class TestPymanoptCrossCheck:
         assert bool(res.converged)
         A_emu, _ = res.components()
         Gamma_emu = A_emu @ A_emu.T
-        J_emu = float(jnp.asarray(res.J_stat))
+        J_emu = float(jnp.asarray(res.objective_value))
 
         # Whitening used by emu-gmm (so the pymanopt objective is identical).
-        W = jnp.linalg.inv(jnp.asarray(res.V_X.array))
+        # ``weighting_matrix`` is Lambda == (V*)^{-1} == the whitening W directly.
+        W = jnp.asarray(res.weighting_matrix)
 
         manifold = PymProduct([PymPSDFixedRank(N, k), PymEuclidean(1)])
 
@@ -450,8 +453,8 @@ class TestJDofChiSquareCalibration:
             )
             res = _estimate(_gauge_invariant_model, measure, theta_init)
             assert bool(res.converged)
-            observed_dofs.add(res.J_dof)
-            js.append(float(jnp.asarray(res.J_stat)))
+            observed_dofs.add(res.n_overid)
+            js.append(float(jnp.asarray(res.objective_value)))
         js = np.asarray(js)
 
         # The package reports the gauge-corrected dof (NOT hard-coded 0).

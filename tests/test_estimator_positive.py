@@ -13,7 +13,6 @@ the exponential retraction staying positive; a separate near-zero start
 
 from __future__ import annotations
 
-import haliax as ha
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
@@ -24,7 +23,7 @@ from emu_gmm.manifolds import Positive
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.regularization import DiagonalTikhonov
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from emu_gmm.weighting import ContinuouslyUpdated
 
 SIGMA_TRUE = 1.5
@@ -68,7 +67,7 @@ def _make_measure(seed: int = 0) -> EmpiricalMeasure:
 class TestPositiveAcceptance:
     """sigma>0 recovery, mirroring the empirical-path acceptance test."""
 
-    def _run(self) -> EstimationResult:
+    def _run(self) -> OptimizationResult:
         return estimate(
             model=scale_residual,
             measure=_make_measure(seed=0),
@@ -93,16 +92,16 @@ class TestPositiveAcceptance:
 
     def test_J_dof_is_one(self):
         r = self._run()
-        assert r.J_dof == 1  # M=2, dim_info = total_dimension - gauge = 1
+        assert r.n_overid == 1  # M=2, dim_info = total_dimension - gauge = 1
 
     def test_J_stat_finite_and_modest(self):
         r = self._run()
-        assert jnp.isfinite(r.J_stat)
-        assert float(r.J_stat) < 30.0
+        assert jnp.isfinite(r.objective_value)
+        assert float(r.objective_value) < 30.0
 
     def test_Sigma_theta_finite_and_rank_one(self):
         r = self._run()
-        arr = r.Sigma_theta.array
+        arr = r.asymptotic().cov()
         assert arr.shape == (1, 1)
         assert bool(jnp.all(jnp.isfinite(arr)))
         assert float(arr[0, 0]) > 0.0
@@ -124,7 +123,7 @@ class TestPositiveAcceptance:
         """
         r = self._run()
         sigma_hat = float(r.theta_hat.sigma)
-        sigma_riem = float(r.Sigma_theta.array[0, 0])
+        sigma_riem = float(r.asymptotic().cov()[0, 0])
 
         # Euclidean twin: identical residual, sigma as a plain Euclidean
         # leaf, evaluated at the same sigma_hat. Its Sigma is the ambient
@@ -144,7 +143,7 @@ class TestPositiveAcceptance:
             covariance=IIDCovariance(),
             theta_init=EucScaleParams(sigma=jnp.asarray(sigma_hat)),
         )
-        sigma_eucl = float(r_euc.Sigma_theta.array[0, 0])
+        sigma_eucl = float(r_euc.asymptotic().cov()[0, 0])
 
         # The manifold path reports the ambient variance: the two agree.
         assert sigma_riem == pytest.approx(sigma_eucl, rel=1e-6)
@@ -156,11 +155,9 @@ class TestPositiveAcceptance:
         # names the single tangent coordinate "sigma" (unchanged in shape
         # from the v1 Euclidean scalar leaf).
         assert r.labels.param_names == ("sigma",)
-        assert isinstance(r.Sigma_theta, ha.NamedArray)
-        # Sigma_theta is a 1x1 matrix on the generic Params/ParamsDual
-        # axes (v1 labelling); the readable per-coordinate name is in
-        # labels.param_names.
-        assert r.Sigma_theta.array.shape == (1, 1)
+        # Sigma_theta moved to the inference law as a plain numpy 1x1 array;
+        # the readable per-coordinate name is in labels.param_names.
+        assert r.asymptotic().cov().shape == (1, 1)
 
 
 class TestPositivePositivityGuarantee:
@@ -186,5 +183,5 @@ class TestPositiveDefaults:
             covariance=IIDCovariance(),
             theta_init=ScaleParams(sigma=jnp.asarray(0.8)),
         )
-        assert isinstance(r, EstimationResult)
+        assert isinstance(r, OptimizationResult)
         assert float(r.theta_hat.sigma) > 0.0

@@ -14,7 +14,6 @@ GAMMA_TRUE) it evaluates to zero exactly.
 
 from __future__ import annotations
 
-import haliax as ha
 import jax.numpy as jnp
 import pytest
 from emu_gmm.covariance import AnalyticalCovariance
@@ -30,7 +29,7 @@ from emu_gmm.examples.euler import (
 from emu_gmm.measures import AnalyticalMeasure
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from emu_gmm.weighting import ContinuouslyUpdated
 
 
@@ -56,7 +55,7 @@ FP_TOL = 1e-5
 class TestEulerAnalyticalRoundTripAcceptance:
     """Phase 6 milestone: closed-form Euler identification recovers truth."""
 
-    def _run(self) -> EstimationResult:
+    def _run(self) -> OptimizationResult:
         measure = AnalyticalMeasure(expectation_fn=euler_analytical_expectation)
         covariance = AnalyticalCovariance(covariance_fn=identity_covariance)
         return estimate(
@@ -89,8 +88,8 @@ class TestEulerAnalyticalRoundTripAcceptance:
 
     def test_J_dof_is_one(self):
         r = self._run()
-        # M = N_ASSETS = 3, K = 2 -> J_dof = 1.
-        assert r.J_dof == 1
+        # M = N_ASSETS = 3, K = 2 -> n_overid = 1.
+        assert r.n_overid == 1
 
 
 class TestLabelledOutputs:
@@ -98,22 +97,20 @@ class TestLabelledOutputs:
 
     def test_sigma_theta_labelled(self):
         r = TestEulerAnalyticalRoundTripAcceptance()._run()
-        assert isinstance(r.Sigma_theta, ha.NamedArray)
-        assert {a.name for a in r.Sigma_theta.axes} == {
-            "parameters",
-            "parameters_dual",
-        }
+        # cov() is a plain numpy (K, K) array (K = 2 params).
+        assert r.asymptotic().cov().shape == (2, 2)
 
     def test_v_x_labelled(self):
         r = TestEulerAnalyticalRoundTripAcceptance()._run()
-        assert isinstance(r.V_X, ha.NamedArray)
-        assert {a.name for a in r.V_X.axes} == {"moments", "moments_dual"}
+        # V* = inv(Lambda) is a plain numpy (M, M) array (M = 3 moments).
+        V_star = jnp.linalg.inv(jnp.asarray(r.weighting_matrix))
+        assert V_star.shape == (3, 3)
 
     def test_to_pandas_param_names(self):
         r = TestEulerAnalyticalRoundTripAcceptance()._run()
-        d = r.to_pandas()
-        assert list(d["Sigma_theta"].index) == ["beta", "gamma"]
-        assert list(d["Sigma_theta"].columns) == ["beta", "gamma"]
+        # Coefficient labelling now lives on the inference law's coef_table.
+        coef = r.asymptotic().coef_table
+        assert list(coef.index) == ["beta", "gamma"]
 
 
 class TestProvenance:

@@ -67,7 +67,7 @@ from emu_gmm import (
     estimate,
 )
 from emu_gmm.manifolds import Positive, riemannian_lm
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from jax.ops import segment_sum
 
 # Real-data acceptance test: marked slow so the every-push quick gate
@@ -271,7 +271,7 @@ def bundle(extract):
 
 def _estimate(
     bundle, covariance, *, optimizer=None, init_sigma=1.0
-) -> EstimationResult:
+) -> OptimizationResult:
     # optimizer=None auto-dispatches to RiemannianLM (sigma > 0, the actual
     # optimise). Passing riemannian_lm(max_steps=0) instead *evaluates* the
     # criterion at the fixed ``init_sigma`` without moving the iterate -- used
@@ -288,7 +288,7 @@ def _estimate(
 
 
 @pytest.fixture(scope="module")
-def fit_published(bundle) -> EstimationResult:
+def fit_published(bundle) -> OptimizationResult:
     """Published preferred spec: (stratum x arm)-clustered CUE."""
     covariance = ClusteredCovariance(
         cluster_ids=jnp.asarray(bundle["cell_codes"], dtype=jnp.float64),
@@ -311,13 +311,13 @@ def _design_covariance(bundle) -> StratifiedCovariance:
 
 
 @pytest.fixture(scope="module")
-def fit_design(bundle) -> EstimationResult:
+def fit_design(bundle) -> OptimizationResult:
     """Design-based spec: the actual CUE optimise (collapses to sigma -> 0)."""
     return _estimate(bundle, _design_covariance(bundle))
 
 
 @pytest.fixture(scope="module")
-def fit_design_boundary_limit(bundle) -> EstimationResult:
+def fit_design_boundary_limit(bundle) -> OptimizationResult:
     """Design J evaluated at a FIXED in-zone sigma (#159 robustness).
 
     ``riemannian_lm(max_steps=0)`` evaluates the criterion at
@@ -396,13 +396,15 @@ class TestPublishedTreatmentSpec:
         assert sigma == pytest.approx(SIGMA_HAT_PUBLISHED, rel=1e-3)
 
     def test_sigma_se(self, fit_published):
-        se = float(np.asarray(fit_published.standard_errors.array)[0])
+        se = float(np.asarray(fit_published.asymptotic().se())[0])
         assert se == pytest.approx(SIGMA_SE_PUBLISHED, rel=1e-3)
 
     def test_J(self, fit_published):
-        assert float(fit_published.J_stat) == pytest.approx(J_STAT_PUBLISHED, rel=1e-3)
-        assert fit_published.J_dof == 11  # M=12, K=1
-        assert float(fit_published.J_pvalue) == pytest.approx(
+        assert float(fit_published.objective_value) == pytest.approx(
+            J_STAT_PUBLISHED, rel=1e-3
+        )
+        assert fit_published.n_overid == 11  # M=12, K=1
+        assert float(fit_published.asymptotic().J_pvalue) == pytest.approx(
             J_PVALUE_PUBLISHED, abs=2e-3
         )
 
@@ -447,18 +449,18 @@ class TestDesignSpec:
         # platform-stable, so tightened from rel=1e-2 to rel=1e-4. The old pin
         # read J off the optimiser's flat-region, catastrophic-cancellation-
         # prone stopping point (J=5.44 on one OpenBLAS box vs ~7.08 on CI).
-        assert float(fit_design_boundary_limit.J_stat) == pytest.approx(
+        assert float(fit_design_boundary_limit.objective_value) == pytest.approx(
             J_STAT_DESIGN, rel=1e-4
         )
-        assert fit_design_boundary_limit.J_dof == 11
+        assert fit_design_boundary_limit.n_overid == 11
 
     def test_adjusted_pvalue(self, fit_design_boundary_limit):
         # The consumer's 'design' spec reads this p_adjusted off the result;
         # now pinned at the stable boundary limit (#159). The old 0.9081 was a
         # stale pre-migration orphan (#151).
-        assert float(fit_design_boundary_limit.J_pvalue_adjusted) == pytest.approx(
-            J_PVALUE_ADJ_DESIGN, abs=2e-4
-        )
+        assert float(
+            fit_design_boundary_limit.asymptotic().J_pvalue_adjusted
+        ) == pytest.approx(J_PVALUE_ADJ_DESIGN, abs=2e-4)
 
     def test_eval_sigma_is_in_the_stable_zone(self, bundle, fit_design_boundary_limit):
         # Guard the #159 fix: SIGMA_BOUNDARY_EVAL must sit in the cancellation-
@@ -471,8 +473,8 @@ class TestDesignSpec:
                 _design_covariance(bundle),
                 optimizer=riemannian_lm(max_steps=0),
                 init_sigma=SIGMA_BOUNDARY_EVAL / 10.0,
-            ).J_stat
+            ).objective_value
         )
-        assert float(fit_design_boundary_limit.J_stat) == pytest.approx(
+        assert float(fit_design_boundary_limit.objective_value) == pytest.approx(
             j_neighbor, rel=1e-3
         )

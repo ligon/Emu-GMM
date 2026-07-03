@@ -34,7 +34,7 @@ from emu_gmm.manifolds import Euclidean, PSDFixedRank
 from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.measures import SyntheticMeasure
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from emu_gmm.weighting import ContinuouslyUpdated
 
 jax.config.update("jax_enable_x64", True)
@@ -93,7 +93,7 @@ def _leaves(Y0):
     )
 
 
-def _fit(theta_init, measure) -> EstimationResult:
+def _fit(theta_init, measure) -> OptimizationResult:
     return estimate(
         _model,
         measure,
@@ -115,20 +115,22 @@ class TestFieldOrderAgreement:
         res_y_first = _fit(ParamsYFirst(Y=Y_leaf, phi=phi_leaf), measure)
         res_phi_first = _fit(ParamsPhiFirst(phi=phi_leaf, Y=Y_leaf), measure)
         assert bool(res_y_first.converged) and bool(res_phi_first.converged)
+        law_y = res_y_first.asymptotic()
+        law_p = res_phi_first.asymptotic()
 
         # The default rank is read off the SAME leaf the readouts use.
-        ev_a = res_y_first.eigenvalue_se()
-        ev_b = res_phi_first.eigenvalue_se()
+        ev_a = law_y.eigenvalue_se()
+        ev_b = law_p.eigenvalue_se()
         assert ev_a.shape == (K,) and ev_b.shape == (K,)
         np.testing.assert_allclose(np.asarray(ev_a), np.asarray(ev_b), rtol=1e-5)
 
-        g_a = res_y_first.gamma_se()
-        g_b = res_phi_first.gamma_se()
+        g_a = law_y.gamma_se()
+        g_b = law_p.gamma_se()
         assert g_a.shape == (N * (N + 1) // 2,)
         np.testing.assert_allclose(np.asarray(g_a), np.asarray(g_b), rtol=1e-5)
 
-        c_a = res_y_first.gamma_covariance()
-        c_b = res_phi_first.gamma_covariance()
+        c_a = law_y.gamma_covariance()
+        c_b = law_p.gamma_covariance()
         np.testing.assert_allclose(
             np.asarray(c_a), np.asarray(c_b), rtol=1e-4, atol=1e-12
         )
@@ -137,9 +139,15 @@ class TestFieldOrderAgreement:
         measure, Y0 = _make_measure(data_seed=1171)
         Y_leaf, phi_leaf = _leaves(Y0)
         res = _fit(ParamsPhiFirst(phi=phi_leaf, Y=Y_leaf), measure)
-        idx, ls = res._gamma_leaf()
-        assert idx == 1  # Y is the SECOND component under (phi, Y)
-        assert isinstance(ls.manifold, PSDFixedRank)
+        # The gamma readouts locate the PSDFixedRank leaf by manifold TYPE (the
+        # #117 rule), now via the law's per-leaf geometry, not by field order.
+        specs = res.asymptotic().leaf_specs
+        psd_indices = [
+            i for i, ls in enumerate(specs) if isinstance(ls.manifold, PSDFixedRank)
+        ]
+        assert psd_indices == [1]  # Y is the SECOND component under (phi, Y)
+        idx = psd_indices[0]
+        assert isinstance(specs[idx].manifold, PSDFixedRank)
         # And the component at that index really is the (N, K) factor.
         comps = res.components()
         assert tuple(int(s) for s in jnp.asarray(comps[idx]).shape) == (N, K)
@@ -148,32 +156,16 @@ class TestFieldOrderAgreement:
 # ---------------------------------------------------------------------------
 # Gate 2 -- locator typed errors (unit-level; dummy results suffice).
 # ---------------------------------------------------------------------------
-def _dummy_result(theta_hat) -> EstimationResult:
-    """An EstimationResult with only the fields _gamma_leaf touches."""
-    from typing import Any, cast
+def _dummy_result(theta_hat) -> OptimizationResult:
+    """An OptimizationResult carrying only the fields the leaf locator touches.
 
+    Every field but ``theta_hat`` defaults, so only ``theta_hat`` and its
+    ``manifold_spec`` (which the law's leaf locator reads) need be supplied.
+    """
     from emu_gmm._internal.params import manifold_spec_from_params
 
-    # Fields _gamma_leaf never reads are stubbed with None; cast keeps the
-    # plain-dataclass constructor honest for mypy without inventing values.
-    none = cast(Any, None)
-    return EstimationResult(
+    return OptimizationResult(
         theta_hat=theta_hat,
-        Sigma_theta=None,
-        V_X=None,
-        J_stat=none,
-        J_dof=0,
-        J_pvalue=none,
-        J_pvalue_adjusted=none,
-        converged=True,
-        iterations=0,
-        theta_init=theta_hat,
-        measure=none,
-        covariance=none,
-        weighting=none,
-        regularization=None,
-        diagnostics=none,
-        labels=none,
         manifold_spec=manifold_spec_from_params(theta_hat),
     )
 
@@ -193,8 +185,8 @@ class TestLocatorTypedErrors:
     def test_no_psd_leaf_raises(self):
         theta = _NoPSDParams(phi=ManifoldLeaf(jnp.asarray([0.5]), Euclidean(1)))
         res = _dummy_result(theta)
-        with pytest.raises(TypeError, match="no PSDFixedRank leaf"):
-            res._gamma_leaf()
+        with pytest.raises(TypeError, match="no unique PSDFixedRank leaf"):
+            res.asymptotic().gamma_se()
 
     def test_multiple_psd_leaves_raises(self):
         theta = _TwoPSDParams(
@@ -203,7 +195,7 @@ class TestLocatorTypedErrors:
         )
         res = _dummy_result(theta)
         with pytest.raises(TypeError, match="no canonical Gamma"):
-            res._gamma_leaf()
+            res.asymptotic().gamma_se()
 
 
 # ---------------------------------------------------------------------------

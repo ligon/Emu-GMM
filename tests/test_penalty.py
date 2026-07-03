@@ -213,8 +213,8 @@ class TestPenaltyNoneIsV1:
         new = _run(penalty=None)
         assert float(new.theta_hat.beta) == float(ref.theta_hat.beta)
         assert float(new.theta_hat.gamma) == float(ref.theta_hat.gamma)
-        assert new.J_stat == ref.J_stat
-        assert new.J_dof == ref.J_dof
+        assert new.objective_value == ref.objective_value
+        assert new.n_overid == ref.n_overid
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +382,7 @@ class TestFinalObjectiveSplit:
             float(d.final_objective_data), rel=0, abs=0
         )
         assert float(d.final_objective_data) == pytest.approx(
-            float(result.J_stat), rel=0, abs=0
+            float(result.objective_value), rel=0, abs=0
         )
 
     def test_penalised_full_strictly_above_data(self):
@@ -396,7 +396,7 @@ class TestFinalObjectiveSplit:
         # (~0.96, ~2.0) so p(theta_hat) is well above any noise floor.
         assert full > data + 1e-3
         # Data-only value still equals J_stat.
-        assert data == pytest.approx(float(result.J_stat), rel=0, abs=0)
+        assert data == pytest.approx(float(result.objective_value), rel=0, abs=0)
 
     def test_penalised_full_matches_data_plus_penalty(self):
         # Concrete identity: full == data + p(theta_hat).

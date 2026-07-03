@@ -73,16 +73,15 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
-from jaxtyping import Array, Float
-
 from emu_gmm import (
     ClusteredCovariance,
     EmpiricalMeasure,
-    EstimationResult,
+    OptimizationResult,
     cluster_bootstrap,
     estimate,
     optimistix_lm,
 )
+from jaxtyping import Array, Float
 
 # ---------------------------------------------------------------------------
 # Ground truth + sampling defaults.
@@ -214,13 +213,13 @@ def run(
     seed: int = SEED_DEFAULT,
     n_boot: int = 0,
     boot_seed: int = 2024,
-) -> tuple[EstimationResult, object | None]:
+) -> tuple[OptimizationResult, object | None]:
     """Build the DGP, estimate, optionally bootstrap.
 
     Returns
     -------
     result
-        The :class:`~emu_gmm.EstimationResult` from a single GMM solve.
+        The :class:`~emu_gmm.OptimizationResult` from a single GMM solve.
     boot
         A :class:`~emu_gmm.ClusterBootstrapResult` when ``n_boot > 0``,
         else ``None``.
@@ -268,11 +267,11 @@ def main() -> None:
     result, boot = run(n_boot=200)
 
     print("Point estimates:")
-    print(result.coef_table.to_string())
+    print(result.asymptotic().coef_table.to_string())
     print()
-    print(f"  J-stat            = {float(result.J_stat):.4e}")
-    print(f"  J degrees-of-fdm  = {result.J_dof}")
-    print(f"  J p-value (adj.)  = {float(result.J_pvalue_adjusted):.3f}")
+    print(f"  J-stat            = {float(result.objective_value):.4e}")
+    print(f"  J degrees-of-fdm  = {result.n_overid}")
+    print(f"  J p-value (adj.)  = {float(result.asymptotic().J_pvalue_adjusted):.3f}")
     print(
         f"  converged         = {result.converged} " f"({result.iterations} iterations)"
     )

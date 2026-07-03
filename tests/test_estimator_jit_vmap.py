@@ -57,7 +57,7 @@ class TestEstimateJitCompatible:
 
         def run(theta):
             r = estimate(**inputs, theta_init=theta)
-            return r.J_stat
+            return r.objective_value
 
         theta = EulerParams(beta=0.9, gamma=1.0)
         eager = float(run(theta))
@@ -67,16 +67,23 @@ class TestEstimateJitCompatible:
         # the answer, only the route.
         assert jitted == pytest.approx(eager, rel=1e-6, abs=1e-10)
 
-    def test_jit_returns_traced_pvalue(self):
-        """``J_pvalue`` is computed via ``jax.scipy.stats.chi2.sf``, so
-        it traces; the result is a 0-d JAX array in [0, 1]."""
+    def test_pvalue_from_eager_law_in_unit_interval(self):
+        """``estimate`` still traces end-to-end under jit on the
+        optimization surface; the J-test p-value moved to the eager
+        inference law (``result.asymptotic().J_pvalue``), where it is a
+        Python float in [0, 1] computed off the jit path."""
         inputs = _build_inputs()
 
         def run(theta):
-            return estimate(**inputs, theta_init=theta).J_pvalue
+            return estimate(**inputs, theta_init=theta).objective_value
 
-        p = jax.jit(run)(EulerParams(beta=0.9, gamma=1.0))
-        p_val = float(p)
+        # The optimization surface still traces cleanly under jit.
+        obj = float(jax.jit(run)(EulerParams(beta=0.9, gamma=1.0)))
+        assert jnp.isfinite(obj)
+
+        # The p-value is an eager inference readout, off the jit path.
+        r = estimate(**inputs, theta_init=EulerParams(beta=0.9, gamma=1.0))
+        p_val = r.asymptotic().J_pvalue
         assert 0.0 <= p_val <= 1.0
 
     def test_jit_compatible_diagnostics(self):
@@ -107,7 +114,7 @@ class TestEstimateVmapCompatible:
         inputs = _build_inputs()
 
         def run(theta):
-            return estimate(**inputs, theta_init=theta).J_stat
+            return estimate(**inputs, theta_init=theta).objective_value
 
         batch = EulerParams(
             beta=jnp.array([0.9, 0.95, 1.0]),
@@ -139,7 +146,7 @@ class TestEstimateVmapCompatible:
         inputs = _build_inputs()
 
         def run(theta):
-            return estimate(**inputs, theta_init=theta).J_stat
+            return estimate(**inputs, theta_init=theta).objective_value
 
         batch = EulerParams(
             beta=jnp.array([0.9, 0.95, 1.0]),

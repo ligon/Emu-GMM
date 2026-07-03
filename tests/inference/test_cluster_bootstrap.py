@@ -353,7 +353,7 @@ class TestUnderH0Normality:
             optimizer=optimistix_lm(rtol=1e-8, atol=1e-8),
             theta_init=EulerParams(beta=0.9, gamma=1.0),
         )
-        sigma_theta = np.asarray(result.Sigma_theta.array)
+        sigma_theta = np.asarray(result.asymptotic().cov())
         theta_hat_flat = np.array(
             [float(result.theta_hat.beta), float(result.theta_hat.gamma)]
         )
@@ -447,7 +447,7 @@ class TestParamNamesPreserved:
     def test_coords_parameters_matches_input_param_names(self):
         """``result.coords['parameters']`` echoes the dataclass field
         names in PyTree-flatten order (the same order that
-        ``EstimationResult.coef_table`` indexes by).
+        ``OptimizationResult.asymptotic().coef_table`` indexes by).
         """
         from emu_gmm._internal import params as params_mod
 
@@ -473,7 +473,7 @@ class TestParamNamesPreserved:
         # ... and exposes them via the ``coords`` mapping under the
         # canonical ``parameters`` axis key, so downstream tabular
         # gestures (``pd.Series(boot_se, index=result.coords['parameters'])``)
-        # match ``EstimationResult.coef_table.index``.
+        # match ``OptimizationResult.asymptotic().coef_table.index``.
         assert result.coords["parameters"] == expected_names
         # The bootstrap axis carries positional replicate indices.
         assert result.coords["bootstrap"] == (0, 1, 2)

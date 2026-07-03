@@ -12,7 +12,6 @@ recovery is expected within Monte Carlo error ~ sigma / sqrt(N).
 
 from __future__ import annotations
 
-import haliax as ha
 import jax.numpy as jnp
 import pytest
 from emu_gmm.covariance import IIDCovariance
@@ -27,7 +26,7 @@ from emu_gmm.examples.euler import (
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from emu_gmm.weighting import ContinuouslyUpdated
 
 N_DATA = 5000
@@ -45,7 +44,7 @@ def _make_measure(seed: int = 0) -> EmpiricalMeasure:
 class TestEulerEmpiricalAcceptance:
     """Phase 7 milestone: empirical-path recovery on pre-generated data."""
 
-    def _run(self) -> EstimationResult:
+    def _run(self) -> OptimizationResult:
         return estimate(
             model=euler_residual,
             measure=_make_measure(seed=0),
@@ -72,19 +71,21 @@ class TestEulerEmpiricalAcceptance:
 
     def test_J_dof_is_one(self):
         r = self._run()
-        assert r.J_dof == 1  # M=3, K=2
+        assert r.n_overid == 1  # M=3, K=2
 
     def test_J_stat_finite_and_modest(self):
         r = self._run()
-        assert jnp.isfinite(r.J_stat)
+        assert jnp.isfinite(r.objective_value)
         # Correct specification; J ~ chi^2_1 ~ 1 on average; allow up to
         # ~30 for sampling noise.
-        assert r.J_stat < 30.0
+        assert r.objective_value < 30.0
 
     def test_labelled_outputs(self):
         r = self._run()
-        assert isinstance(r.Sigma_theta, ha.NamedArray)
-        assert isinstance(r.V_X, ha.NamedArray)
+        # Sigma_theta / V_X moved to the inference law as plain numpy arrays.
+        assert r.asymptotic().cov().shape == (2, 2)
+        V_star = jnp.linalg.inv(jnp.asarray(r.weighting_matrix))
+        assert V_star.shape == (3, 3)
 
     def test_label_context(self):
         r = self._run()
@@ -114,5 +115,5 @@ class TestEmpiricalDefaults:
             covariance=IIDCovariance(),
             theta_init=EulerParams(beta=0.9, gamma=1.0),
         )
-        assert isinstance(r, EstimationResult)
+        assert isinstance(r, OptimizationResult)
         assert r.converged

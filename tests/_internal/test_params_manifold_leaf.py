@@ -124,7 +124,7 @@ class TestManifoldLeafPyTree:
     )
     def test_pickle_round_trip(self, array, manifold):
         # #147: the frozen __setattr__ rejected pickle's default slot-state
-        # reconstruction, so pickle.loads (and EstimationResult.from_pickle
+        # reconstruction, so pickle.loads (and OptimizationResult.from_pickle
         # on a manifold theta_hat) raised "ManifoldLeaf is immutable". The
         # __getstate__/__setstate__ hooks restore the slots via
         # object.__setattr__. A round-trip must preserve type, value, and
