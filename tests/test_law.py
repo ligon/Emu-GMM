@@ -49,6 +49,7 @@ from emu_gmm.inference.adaptive import (
     BootstrapSE,
 )
 from emu_gmm.law import eigenvalue_functional, gamma_functional
+from emu_gmm.manifolds import PSDFixedRank
 from emu_gmm.manifolds.manifold_leaf import ManifoldLeaf
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.studies import (
@@ -585,6 +586,7 @@ def psd_result():
 
 
 @pytest.mark.slow
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # exercises deprecated shims
 class TestGaugeAwareCodomain:
     def test_asymptotic_eigenvalue_se_reuses_result(self, psd_result):
         law = AsymptoticLaw(psd_result)
@@ -643,6 +645,89 @@ class TestGaugeAwareCodomain:
 
 
 @pytest.mark.slow
+class TestLeafView:
+    """Geometry-driven per-leaf queries: law.leaf(name).se(invariant).
+
+    The manifold supplies the invariants (PSDFixedRank -> eigenvalues / gamma;
+    flat -> value); the law routes them through its grade-correct algebra. This
+    replaces the model-specific gamma_se / eigenvalue_se methods with a surface
+    that keys on the leaf's geometry.
+    """
+
+    def test_leaves_expose_names_and_manifolds(self, psd_result):
+        law = AsymptoticLaw(psd_result)
+        names = dict(law.leaves)
+        assert set(names) == {"Y", "phi"}
+        assert isinstance(names["Y"], PSDFixedRank)
+
+    def test_psd_leaf_invariants(self, psd_result):
+        law = AsymptoticLaw(psd_result)
+        assert law.leaf("Y").invariants == ("eigenvalues", "gamma")
+        assert law.leaf("phi").invariants == ("value",)
+
+    def test_leaf_eigenvalue_se_matches_result_and_convenience(self, psd_result):
+        law = AsymptoticLaw(psd_result)
+        ev = law.leaf("Y").se("eigenvalues")
+        assert ev.shape == (_K,)
+        np.testing.assert_allclose(ev, np.asarray(psd_result.eigenvalue_se()))
+        np.testing.assert_allclose(ev, law.se(eigenvalue_functional(_K)))
+
+    def test_leaf_gamma_se_matches_functional(self, psd_result):
+        law = AsymptoticLaw(psd_result)
+        g = law.leaf("Y").se("gamma")
+        assert g.shape == (_N * (_N + 1) // 2,)
+        np.testing.assert_allclose(g, law.se(gamma_functional()))
+
+    def test_flat_leaf_value(self, psd_result):
+        law = AsymptoticLaw(psd_result)
+        v = law.leaf("phi").se("value")  # default invariant is "value"
+        assert v.shape == (1,)
+        np.testing.assert_allclose(v, law.leaf("phi").se())
+
+    def test_bad_invariant_and_bad_leaf_raise(self, psd_result):
+        law = AsymptoticLaw(psd_result)
+        with pytest.raises(KeyError, match="eigenvalues"):
+            law.leaf("Y").se("nope")
+        with pytest.raises(KeyError, match="Available leaves"):
+            law.leaf("nope")
+
+    def test_empirical_leaf_view_matches_asymptotic(self, psd_result):
+        """The empirical grade applies the leaf invariant PER DRAW and recovers
+        the delta-method eigenvalue SE (cross-grade coherence)."""
+        law = AsymptoticLaw(psd_result)
+        draws = law.sample(jax.random.PRNGKey(3), 8000)
+        emp = EmpiricalLaw.from_draws(
+            draws, names=law.param_names, leaf_specs=law.leaf_specs
+        )
+        np.testing.assert_allclose(
+            emp.leaf("Y").se("eigenvalues"),
+            law.leaf("Y").se("eigenvalues"),
+            rtol=0.15,
+        )
+
+    def test_no_geometry_law_refuses_leaf(self):
+        law = EmpiricalLaw.from_draws(np.random.default_rng(0).normal(size=50))
+        assert law.leaves == ()
+        with pytest.raises(TypeError, match="no manifold geometry"):
+            law.leaf("anything")
+
+    def test_deprecated_gamma_methods_warn_and_delegate(self, psd_result):
+        """The old model-specific methods still work but warn, delegating to the
+        same numbers the leaf view returns."""
+        law = AsymptoticLaw(psd_result)
+        with pytest.warns(DeprecationWarning, match="eigenvalue_se"):
+            ev = law.eigenvalue_se()
+        np.testing.assert_allclose(ev, law.leaf("Y").se("eigenvalues"))
+        with pytest.warns(DeprecationWarning, match="gamma_se"):
+            g = law.gamma_se()
+        np.testing.assert_allclose(g, law.leaf("Y").se("gamma"))
+        with pytest.warns(DeprecationWarning, match="gamma_covariance"):
+            gc = law.gamma_covariance()
+        np.testing.assert_allclose(gc, law.leaf("Y").cov("gamma"))
+
+
+@pytest.mark.slow
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # exercises deprecated shims
 class TestAcceptance2_6a:
     """§2.6a: ONE interface routes a K-Agg-style het result across grades.
 

@@ -21,6 +21,7 @@ factors at construction.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import jax
@@ -160,6 +161,17 @@ class Product:
             sub = f.tangent_basis_names(f"{field_name}_f{i}")
             labels.extend(sub)
         return labels
+
+    def invariants(self) -> dict[str, Callable[[Any], Any]]:
+        """No composite invariants --- a Product's queryable invariants live on
+        its factors, which are addressed as separate leaves (``law.leaf(name)``).
+
+        Returned empty (rather than stitched) because a factor invariant is a
+        function of *one* factor's array, not the whole structured point; the
+        leaf-view already exposes each factor's own :meth:`invariants`. Present
+        for :class:`ManifoldParam` protocol completeness.
+        """
+        return {}
 
 
 __all__ = ["Product"]

@@ -143,6 +143,11 @@ class MomentsBacking:
     # The typed FactorySpec (emu_gmm.persistence) rides opaquely here so this
     # _internal carrier stays decoupled from the public persistence type.
     factory_spec: Any = None
+    # Per-leaf field names (aligned with ``components``), so a reloaded law can
+    # address leaves by name (``law.leaf("Gamma")``). ``None`` for older
+    # artifacts that did not persist them (leaves stay unaddressable by name; the
+    # type-located gamma conveniences still work).
+    field_names: tuple[str | None, ...] | None = None
 
     @classmethod
     def build(
@@ -156,6 +161,7 @@ class MomentsBacking:
         psd_rank: int | None,
         diagnostics: dict[str, Any] | None = None,
         factory_spec: dict[str, Any] | None = None,
+        field_names: tuple[str | None, ...] | None = None,
     ) -> MomentsBacking:
         """Validate + normalise the moments state (shapes, names length, D)."""
         comps = tuple(np.asarray(c, dtype=float) for c in components)
@@ -177,6 +183,16 @@ class MomentsBacking:
                     f"MomentsBacking: names length {len(nm)} != ambient "
                     f"dimension D={flat_dim}."
                 )
+        fns: tuple[str | None, ...] | None
+        if field_names is None:
+            fns = None
+        else:
+            fns = tuple(field_names)
+            if len(fns) != len(comps):
+                raise ValueError(
+                    f"MomentsBacking: field_names length {len(fns)} != number of "
+                    f"components {len(comps)}."
+                )
         return cls(
             components=comps,
             sigma=sig,
@@ -187,6 +203,7 @@ class MomentsBacking:
             psd_rank=psd_rank,
             diagnostics=dict(diagnostics or {}),
             factory_spec=factory_spec,
+            field_names=fns,
         )
 
 

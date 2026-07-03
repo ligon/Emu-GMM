@@ -13,6 +13,7 @@ the manifold's responsibility, surfaced via ``gauge_dim``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -85,6 +86,19 @@ class ManifoldParam(Protocol):
         ``ambient_shape`` (scalar v1 leaf) this is ``[field_name]``;
         otherwise the names embed the leaf field name plus a
         ``_t_<i><j>...`` suffix per ambient index.
+    invariants() -> dict[str, Callable[[ambient_array], array]]
+        The manifold's canonical **gauge-invariant** functionals of a leaf
+        living on it, as ``{name: functional}``. Each functional maps the
+        leaf's ambient-shape array to a 1-D array and depends on the point
+        only through gauge invariants, so it is meaningful both per draw
+        (empirical grade) and under the delta method (asymptotic grade).
+        The flat manifolds (:class:`Euclidean` / ``Positive`` / ``Interval``)
+        expose ``{"value": ravel}`` (the coordinate itself); a quotient
+        manifold exposes its invariants (``PSDFixedRank`` ->
+        ``{"eigenvalues", "gamma"}`` of :math:`\Gamma = A A^\top`, never the
+        gauge-arbitrary raw factor). This is what lets an
+        :class:`~emu_gmm.law.EstimatorLaw` offer a sensible per-leaf query
+        set from geometry alone (``law.leaf(name).se("eigenvalues")``).
     """
 
     dimension: int
@@ -112,6 +126,8 @@ class ManifoldParam(Protocol):
     def random_point(self, key: Any) -> Any: ...
 
     def tangent_basis_names(self, field_name: str) -> list[str]: ...
+
+    def invariants(self) -> dict[str, Callable[[Any], Any]]: ...
 
 
 __all__ = ["ManifoldParam"]
