@@ -22,7 +22,7 @@ else
 PYTEST_CMD = $(POETRY) run python -m pytest $(PYTEST_FLAGS)
 endif
 
-.PHONY: setup lint black mypy test test-parallel check quick-check slow-tests clean build publish release
+.PHONY: setup lint black mypy test test-parallel check quick-check par-check par-quick-check slow-tests clean build publish release
 
 setup: .venv/pyvenv.cfg
 
@@ -42,14 +42,34 @@ mypy:
 test:
 	$(PYTEST_CMD)
 
+# Parallel pytest: one single-threaded worker per AVAILABLE core.
+# - NPROC via `nproc`, which respects sched_getaffinity: under a Slurm
+#   cgroup or a sandboxed session it sees the allocation, not the node.
+#   (`pytest -n auto` uses os.cpu_count() -- the whole node -- and
+#   oversubscribes by N x inside any cgroup; never use it here.)
+# - The env caps stop each JAX/XLA worker sizing its own thread pool to
+#   the visible CPU count (N workers x N threads segfaults; see
+#   CLAUDE.md "Running on this box").
+NPROC ?= $(shell nproc)
+PAR_ENV = OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+	XLA_FLAGS=--xla_force_host_platform_device_count=1
 test-parallel:
-	$(POETRY) run python -m pytest -n auto $(PYTEST_FLAGS) $(PYTEST_TARGET)
+	$(PAR_ENV) $(POETRY) run python -m pytest -n $(NPROC) $(PYTEST_FLAGS) $(PYTEST_TARGET)
 
 quick-check: lint black mypy
 	$(POETRY) run python -m pytest -m "not slow" $(PYTEST_TARGET)
 
 check: lint black mypy
 	$(POETRY) run python -m pytest $(PYTEST_TARGET)
+
+# The same two gates with the pytest stage parallelized (identical test
+# set; xdist worker-randomized order). `make check` stays the canonical
+# serial green gate; par-check is the fast pre-PR iteration form.
+par-quick-check: lint black mypy
+	$(PAR_ENV) $(POETRY) run python -m pytest -n $(NPROC) -m "not slow" $(PYTEST_TARGET)
+
+par-check: lint black mypy
+	$(PAR_ENV) $(POETRY) run python -m pytest -n $(NPROC) $(PYTEST_TARGET)
 
 slow-tests:
 	$(POETRY) run pytest -m slow $(PYTEST_TARGET)

@@ -365,6 +365,13 @@ single-thread caps only as a last resort.
 
 - For a **single** run, `taskset -c 0-31` is still worth it: a 32-core run is
   fast and leaves 32 cores free for other work.
+- **`make par-check` / `make par-quick-check`** run the same gates with the
+  pytest stage under pytest-xdist: one *single-threaded* worker per
+  affinity-visible core (`nproc`, which respects cgroups/sandboxes — never
+  `pytest -n auto`, whose `os.cpu_count()` sees the whole node) with
+  OMP/XLA thread caps baked in. The suite is compile-dominated
+  (~1500 mostly-small tests), so it scales near-linearly; `make check`
+  stays the canonical serial green gate.
 - **Multi-agent workflows / delegated agents:** give each agent a distinct
   core range (`0-31` vs `32-63`) rather than telling them to serialise.
 - **Pitfall:** do **not** gate on `pgrep -f "pytest"` in a wait loop — the
