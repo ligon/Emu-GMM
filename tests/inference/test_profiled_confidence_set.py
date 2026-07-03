@@ -17,12 +17,18 @@ Coverage (the issue's acceptance criteria):
 
 (d) The ``k_confidence_set(..., profile=[...])`` hook delegates identically;
     validation of the profile spec and the misuse guards.
+
+(f) Validity guards: a non-converged inner nuisance fit is excluded from the
+    set, counted, and flagged (#186); a non-CU ``nuisance_weighting`` emits a
+    once-per-call ``UserWarning`` (#187).
 """
 
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +38,7 @@ import pytest
 from emu_gmm import (
     ContinuouslyUpdated,
     EmpiricalMeasure,
+    Fixed,
     IIDCovariance,
     build_estimator,
     estimate,
@@ -539,3 +546,216 @@ class TestSubvectorCalibrationMC:
         assert 0.02 <= ar <= 0.10
         # The custom statistic also materializes in to_pandas (the #179 channel).
         assert "p_K_sub" in study.records.to_pandas().columns
+
+
+# ---------------------------------------------------------------------------
+# (f) Validity guards: #186 (inner non-convergence is an event, not a value)
+#     and #187 (the chi^2_{d_I} reference assumes CU nuisance concentration).
+# ---------------------------------------------------------------------------
+
+
+def _guard_measure(seed: int = 11, n: int = 400) -> EmpiricalMeasure:
+    """Small strong-IV measure for the guard tests; truth (theta_s, theta_w) = (1.5, -0.7)."""
+    rng = np.random.default_rng(seed)
+    Z = rng.normal(size=(n, 3))
+    a = Z @ np.array([1.4, 1.2, 1.1]) + rng.normal(size=n) * 0.4
+    b = Z @ np.array([1.0, 0.9, 1.1]) + rng.normal(size=n) * 0.4
+    y = 1.5 * a - 0.7 * b + rng.normal(size=n) * 0.3
+    X = np.column_stack([y, a, b, Z])
+    return EmpiricalMeasure.from_arrays(jnp.asarray(X), M=3)
+
+
+def _stub_estimate(nonconverged_calls: frozenset[int]):
+    """A deterministic stand-in for the inner ``estimate`` (#186 test route).
+
+    Returns the warm start (``theta_init``) as ``theta_hat`` — no
+    optimisation — with ``converged=False`` on the call indices named in
+    ``nonconverged_calls`` (the profiled loop makes exactly one inner
+    ``estimate`` call per grid point, in grid order). This keeps the guard
+    tests fast and makes the non-converged grid point exactly reproducible.
+    """
+    calls = {"n": -1}
+
+    def fake(model, measure, **kwargs):
+        calls["n"] += 1
+        return SimpleNamespace(
+            theta_hat=kwargs["theta_init"],
+            converged=calls["n"] not in nonconverged_calls,
+        )
+
+    return fake
+
+
+def _cu_warnings(record) -> list:
+    """The #187 CU-validity warnings among a recorded-warnings list."""
+    return [
+        w
+        for w in record
+        if issubclass(w.category, UserWarning) and "under-cover" in str(w.message)
+    ]
+
+
+class TestInnerConvergenceGuard:
+    """#186: a non-converged inner fit is excluded, counted, and flagged."""
+
+    def test_nonconverged_point_excluded_counted_and_flagged(self, monkeypatch):
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        # Grid through the truth theta_s = 1.5; the middle point IS the truth,
+        # so its (finite) p-value clears alpha — without the guard it would be
+        # accepted into the set, indistinguishable from a good point.
+        grid = np.linspace(1.46, 1.54, 5)
+        target = 2  # the truth: the point that "fails" to converge
+        monkeypatch.setattr(
+            estimator_mod, "estimate", _stub_estimate(frozenset({target}))
+        )
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            measure,
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+        )
+        # Finite p-value above alpha: the point WOULD have been accepted...
+        assert np.isfinite(cs.p_grid[target])
+        assert cs.p_grid[target] > cs.alpha
+        # ...but the guard excludes it from the set,
+        assert not cs.in_set[target]
+        # counts it through its own channel (NOT the NaN-invalid channel),
+        assert cs.n_nonconverged == 1
+        assert cs.nonconverged_indices == (target,)
+        assert cs.n_invalid == 0
+        assert cs.invalid_indices == ()
+        # and folds it into the boundary-reliability warning machinery.
+        summary = cs.summary()
+        assert "WARNING" in summary
+        assert "non-converged" in summary
+        assert "unreliable" in summary
+
+    def test_all_converged_counts_nothing(self, monkeypatch):
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(estimator_mod, "estimate", _stub_estimate(frozenset()))
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            measure,
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+        )
+        assert cs.n_nonconverged == 0
+        assert cs.nonconverged_indices == ()
+        assert "non-converged" not in cs.summary()
+
+    @pytest.mark.slow
+    def test_real_max_steps_one_inner_fits_all_flagged(self):
+        # Real-path leg (no stubs): a max_steps=1 inner optimiser cannot
+        # certify convergence from a far warm start, so EVERY grid point's
+        # inner fit reports converged=False through the estimator's threaded
+        # done flag — and every point is excluded and counted.
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=5.0),  # nuisance start far off
+            grid,
+            measure,
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+            nuisance_optimizer=optimistix_lm(max_steps=1),
+        )
+        assert cs.n_nonconverged == len(grid)
+        assert cs.nonconverged_indices == tuple(range(len(grid)))
+        assert not cs.in_set.any()
+        assert cs.topology == "empty"
+        assert "non-converged" in cs.summary()
+
+
+class TestCUOnlyWeightingGuard:
+    """#187: non-CU nuisance weighting warns (once per call); CU is silent."""
+
+    def test_fixed_weighting_warns_once_per_call(self, monkeypatch):
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(estimator_mod, "estimate", _stub_estimate(frozenset()))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            profiled_k_confidence_set(
+                lambda g: IVParams(theta_s=g, theta_w=-0.7),
+                grid,
+                measure,
+                IIDCovariance(),
+                _iv_model,
+                profile=["theta_s"],
+                nuisance_weighting=Fixed(V0=jnp.eye(3)),
+            )
+        ours = _cu_warnings(rec)
+        # Once per call — NOT once per grid point (3 grid points here).
+        assert len(ours) == 1
+        msg = str(ours[0].message)
+        assert "ContinuouslyUpdated" in msg
+        assert "chi^2_{d_I}" in msg
+
+    def test_hook_delegation_also_warns(self, monkeypatch):
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(estimator_mod, "estimate", _stub_estimate(frozenset()))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            k_confidence_set(
+                lambda g: IVParams(theta_s=g, theta_w=-0.7),
+                grid,
+                measure,
+                IIDCovariance(),
+                _iv_model,
+                profile=["theta_s"],
+                nuisance_weighting=Fixed(V0=jnp.eye(3)),
+            )
+        assert len(_cu_warnings(rec)) == 1
+
+    def test_default_cu_path_is_silent(self, monkeypatch):
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(estimator_mod, "estimate", _stub_estimate(frozenset()))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            cs = profiled_k_confidence_set(
+                lambda g: IVParams(theta_s=g, theta_w=-0.7),
+                grid,
+                measure,
+                IIDCovariance(),
+                _iv_model,
+                profile=["theta_s"],
+            )
+        assert _cu_warnings(rec) == []
+        assert cs.n_nonconverged == 0
+
+    def test_explicit_cu_is_silent(self, monkeypatch):
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(estimator_mod, "estimate", _stub_estimate(frozenset()))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            profiled_k_confidence_set(
+                lambda g: IVParams(theta_s=g, theta_w=-0.7),
+                grid,
+                measure,
+                IIDCovariance(),
+                _iv_model,
+                profile=["theta_s"],
+                nuisance_weighting=ContinuouslyUpdated(),
+            )
+        assert _cu_warnings(rec) == []
