@@ -2,9 +2,16 @@
 #+AUTHOR: emu-gmm
 #+OPTIONS: toc:2
 
-/Status: DESIGN, approved 2026-07-03 (owner discussion). Implementation on
-=claude/optimization-result-split=, stacked on the leaf-view branch. Supersedes
-the =EstimationResult=-carries-everything surface./
+/Status: IMPLEMENTED 2026-07-03 on =claude/optimization-result-split= (stacked
+on the leaf-view branch). =estimate()= returns the leaner =OptimizationResult=;
+the statistical surface (=se= / =cov= / =coef_table= / functional SEs / the
+J-test p-values) lives on =AsymptoticLaw(result)= (=result.asymptotic()=), which
+assembles the ridge-correct #133 sandwich from the result's ingredients via the
+shared =emu_gmm._internal.asymptotic.asymptotic_covariance=. =record()= moved to
+=emu_gmm.studies.fit_record=. =EstimationResult= is retained as a deprecated
+back-compat alias. Golden-fidelity gate: =tests/test_result_law_fidelity.py=
+(bit-for-bit vs the pre-refactor outputs). Supersedes the
+=EstimationResult=-carries-everything surface./
 
 * The principle
 

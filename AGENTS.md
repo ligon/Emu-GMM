@@ -14,9 +14,11 @@ inference through a single pipeline.
 v1 is implemented and operational. v2 adds the #79/#80 stratified/design-aware
 covariance module and the **Riemannian-manifold epic (#12)**: a
 `Product(PSDFixedRank(n, K), Euclidean(...))` parameter is estimable end-to-end
-via `RiemannianLM`, with gauge-aware `Sigma_theta` and gauge-invariant standard
-errors on functionals of `Gamma = A @ A.T` (`result.eigenvalue_se()`,
-`result.gamma_se()`, `result.functional_se(f)`). The manifold types
+via `RiemannianLM`, with a gauge-aware asymptotic covariance and
+gauge-invariant standard errors on functionals of `Gamma = A @ A.T`
+(`result.asymptotic().eigenvalue_se()` / `.gamma_se()` / `.functional_se(f)` —
+these moved to `AsymptoticLaw` in the estimation/inference split, see below).
+The manifold types
 (`PSDFixedRank`, `Euclidean`, `Product`, `Positive`, `ManifoldLeaf`) are
 re-exported at the top level alongside the Measure/Covariance menus. The green
 gate is `make check` (ruff + black + mypy + the full pytest suite) — restored
@@ -289,10 +291,23 @@ been through four reviewer iterations; the abstractions are deliberate.
 division of labour is deliberate (`design.org` §2): the consumer supplies
 a per-observation residual `psi(x_i, theta) -> R^M` and expresses
 per-moment observability through the `(N, M)` `mask`; everything
-statistical — moment expectation, design-aware `V_X`, the criterion,
-`J_stat`, `Sigma_theta`, standard errors, p-values, the K-statistic and
-bootstrap helpers — is **owned by the package** and read off
-`EstimationResult` / the inference helpers.
+statistical — moment expectation, design-aware covariance, the criterion,
+the J-statistic, the asymptotic covariance, standard errors, p-values, the
+K-statistic and bootstrap helpers — is **owned by the package**.
+
+**The estimation/inference split (`docs/optimization-result-law-split.org`).**
+`estimate()` returns an `OptimizationResult` — the *optimization* surface:
+`theta_hat`, `objective_value` (the J-statistic), `gradient`, `moment_jacobian`
+(G), `gn_hessian` (G'ΛG), `weighting_matrix` (Λ), `moment_covariance` (raw meat
+V), `n_overid`, and the optimization `diagnostics`. It carries **no statistical
+interpretation**. The *inference* surface lives on `result.asymptotic()` (an
+`AsymptoticLaw`), which assembles the ridge-correct #133 sandwich from those
+ingredients: `.cov()`, `.se()`, `.coef_table`, `.functional_se(f)` / per-leaf
+`.leaf(name).se(...)`, and `.j_test()` / `.J_pvalue` / `.J_pvalue_adjusted`.
+Read SEs and p-values off `result.asymptotic()`, **not** the result. Per-rep MC
+records come from `emu_gmm.studies.fit_record(result)` (was `result.record()`).
+`EstimationResult` remains as a deprecated back-compat alias for
+`OptimizationResult`.
 
 - **Don't reinvent package internals downstream.** A consumer must not
   recompute the criterion, `J`, or SEs inline. This is not stylistic: the
