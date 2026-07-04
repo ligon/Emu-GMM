@@ -38,7 +38,11 @@ Design notes (upstreamed from the Seasonality consumer's prototype,
   *excluded* from the set, counted in ``n_invalid``, and surfaced in
   ``invalid_indices`` and the summary — it never silently becomes
   either acceptance or rejection. If invalid points border a component,
-  treat that boundary as unreliable.
+  treat that boundary as unreliable. On the profiled path a
+  **non-converged inner nuisance fit is the same event class** (#186):
+  its p-value is finite but its reference distribution is invalid, so
+  the point is likewise excluded, counted (``n_nonconverged`` /
+  ``nonconverged_indices``), and flagged in the summary.
 
 The grid evaluation reuses one jit-compiled kernel across grid points
 (``theta_builder`` must therefore return PyTrees of identical structure
@@ -48,14 +52,17 @@ injects the scalar into a fixed dataclass).
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -66,6 +73,42 @@ from emu_gmm.types import (
 )
 
 _STATISTICS = ("K", "S", "J")
+
+#: Default dimensionless tolerance on the squared Newton decrement below which
+#: the concentrated nuisance FOC is treated as satisfied (see
+#: :func:`_foc_decrement` and :func:`profiled_k_confidence_set`). Genuine optima
+#: land at the float noise floor (~1e-16); a real stall is O(1)+, so any value
+#: well inside that gap works. The bar is set by what the asymptotic subvector
+#: reference needs (score ``o_p(1)``), not by machine precision.
+_FOC_TOL_DEFAULT = 1e-3
+
+
+def _foc_decrement(inner: Any, gauge_dim: int) -> float | None:
+    r"""Squared Newton decrement :math:`\lambda^2 = g' H^{+} g` of the inner fit.
+
+    The scale-free, parameterisation-invariant first-order-optimality measure:
+    (twice) the criterion decrease a Newton step from the inner solution would
+    still achieve, with :math:`g` the concentrated nuisance score
+    (``inner.gradient``) and :math:`H` the Gauss--Newton curvature
+    (``inner.gn_hessian``). It sits at the float noise floor (~1e-16) at a
+    genuine stationary point of the concentrated criterion and is O(1)+ at a
+    stall --- independent of the moment scale, sample size, or leaf
+    parameterisation --- so a single dimensionless tolerance separates "reached
+    the optimum" from "did not", without trusting the optimiser's own
+    (conservative, platform-sensitive) convergence certification. ``gauge_dim``
+    near-zero Hessian directions (a ``PSDFixedRank`` nuisance's gauge orbit) are
+    dropped BY COUNT via the same :func:`pinv_eigvalrule` rule the sandwich
+    bread uses. Returns ``None`` when the result lacks the gradient / GN-Hessian
+    ingredients (e.g. a hand-built result), so the caller falls back to the
+    optimiser's ``converged`` flag.
+    """
+    g = getattr(inner, "gradient", None)
+    H = getattr(inner, "gn_hessian", None)
+    if g is None or H is None:
+        return None
+    g_arr = jnp.asarray(g)
+    H_pinv = pinv_eigvalrule(jnp.asarray(H), drop_smallest=int(gauge_dim))
+    return float(jnp.dot(g_arr, H_pinv @ g_arr))
 
 
 @dataclass(frozen=True)
@@ -105,6 +148,16 @@ class KConfidenceSet:
         and listed in ``invalid_indices``).
     invalid_indices : tuple of int
         Grid indices whose p-value was NaN.
+    n_nonconverged : int
+        Number of grid points whose inner nuisance re-optimisation did
+        not converge (#186; profiled path only — always 0 for the
+        fixed-curve :func:`k_confidence_set`). Such points carry a
+        finite but *unreliable* p-value (the :math:`\\chi^2_{d_I}`
+        reference requires the concentrated nuisance score to vanish),
+        so they are excluded from the set exactly like the NaN-p
+        invalid points and listed in ``nonconverged_indices``.
+    nonconverged_indices : tuple of int
+        Grid indices whose inner nuisance fit did not converge.
     results : tuple of KStatisticResult, or None
         The full per-grid-point decompositions, retained only when
         ``keep_results=True`` was passed.
@@ -121,6 +174,8 @@ class KConfidenceSet:
     statistic: str
     n_invalid: int = 0
     invalid_indices: tuple[int, ...] = ()
+    n_nonconverged: int = 0
+    nonconverged_indices: tuple[int, ...] = ()
     results: tuple[KStatisticResult, ...] | None = field(default=None, repr=False)
 
     def summary(self) -> str:
@@ -150,6 +205,14 @@ class KConfidenceSet:
                 f"p-values (indices {list(self.invalid_indices)}); they "
                 f"were excluded from the set — boundaries adjacent to "
                 f"them are unreliable."
+            )
+        if self.n_nonconverged:
+            lines.append(
+                f"  WARNING: {self.n_nonconverged} grid point(s) had a "
+                f"non-converged inner nuisance fit (indices "
+                f"{list(self.nonconverged_indices)}); their p-values are "
+                f"unreliable and they were excluded from the set — "
+                f"boundaries adjacent to them are unreliable."
             )
         return "\n".join(lines)
 
@@ -248,6 +311,7 @@ def k_confidence_set(
     profile: Sequence[str] | None = None,
     nuisance_optimizer: Any = None,
     nuisance_weighting: Any = None,
+    foc_tol: float = _FOC_TOL_DEFAULT,
 ) -> KConfidenceSet:
     """Invert the K-statistic over a 1-D grid of nulls (#41 PR (b)).
 
@@ -364,6 +428,7 @@ def k_confidence_set(
                 keep_results=keep_results,
                 nuisance_optimizer=nuisance_optimizer,
                 nuisance_weighting=nuisance_weighting,
+                foc_tol=foc_tol,
             ),
         )
     if nuisance_optimizer is not None or nuisance_weighting is not None:
@@ -410,6 +475,7 @@ def _assemble_set(
     statistic: str,
     alpha: float,
     keep_results: bool,
+    nonconverged: np.ndarray | None = None,
 ) -> KConfidenceSet:
     """Classify a grid of :class:`KStatisticResult` into a :class:`KConfidenceSet`.
 
@@ -421,6 +487,13 @@ def _assemble_set(
     grid point — whether by evaluating the K-statistic along a fixed curve
     (``k_confidence_set``) or at a re-optimised profiled point
     (``profiled_k_confidence_set``) — so the classification is identical.
+
+    ``nonconverged`` (profiled path only, #186) is an optional boolean mask
+    over the grid marking points whose inner nuisance fit did not converge.
+    They are the same event class as NaN p-values — the p-value is finite
+    but its reference distribution is invalid — so they are treated exactly
+    like invalid points (excluded, never interpolated against, surfaced),
+    while being counted through their own ``n_nonconverged`` channel.
     """
     attr = f"p_{statistic}"
     p_grid = np.array(
@@ -428,9 +501,17 @@ def _assemble_set(
     )
 
     invalid = ~np.isfinite(p_grid)
+    noncon = (
+        np.zeros(p_grid.shape[0], dtype=bool)
+        if nonconverged is None
+        else np.asarray(nonconverged, dtype=bool)
+    )
     # NaN is an event, not a value (#140): an invalid p-value is never
-    # silently 'in' or 'out' — it is excluded AND surfaced.
-    in_set = np.where(invalid, False, p_grid > alpha)
+    # silently 'in' or 'out' — it is excluded AND surfaced. A non-converged
+    # inner fit (#186) is the same event: exclude it from the set and mask
+    # its (finite-but-wrong) p-value out of the edge interpolation below.
+    in_set = np.where(invalid | noncon, False, p_grid > alpha)
+    p_edge = np.where(noncon, np.nan, p_grid)
 
     runs = _connected_runs(in_set)
     intervals: list[tuple[float, float]] = []
@@ -440,13 +521,13 @@ def _assemble_set(
             lo = float(grid_arr[0])  # open edge: no outer point to interpolate
         else:
             lo = _interp_edge(
-                grid_arr[i0 - 1], grid_arr[i0], p_grid[i0 - 1], p_grid[i0], alpha
+                grid_arr[i0 - 1], grid_arr[i0], p_edge[i0 - 1], p_edge[i0], alpha
             )
         if i1 == n - 1:
             hi = float(grid_arr[-1])
         else:
             hi = _interp_edge(
-                grid_arr[i1], grid_arr[i1 + 1], p_grid[i1], p_grid[i1 + 1], alpha
+                grid_arr[i1], grid_arr[i1 + 1], p_edge[i1], p_edge[i1 + 1], alpha
             )
         intervals.append((lo, hi))
 
@@ -464,6 +545,8 @@ def _assemble_set(
         statistic=statistic,
         n_invalid=int(invalid.sum()),
         invalid_indices=tuple(int(i) for i in np.nonzero(invalid)[0]),
+        n_nonconverged=int(noncon.sum()),
+        nonconverged_indices=tuple(int(i) for i in np.nonzero(noncon)[0]),
         results=tuple(results) if keep_results else None,
     )
 
@@ -564,6 +647,7 @@ def profiled_k_confidence_set(
     strong_id_fallback: bool = False,
     keep_results: bool = False,
     return_profiled_points: bool = False,
+    foc_tol: float = _FOC_TOL_DEFAULT,
 ) -> KConfidenceSet | tuple[KConfidenceSet, tuple[ParamsLike, ...]]:
     r"""Profiled identification-robust set: concentrate out the nuisance (#176).
 
@@ -607,6 +691,16 @@ def profiled_k_confidence_set(
     nuisance_weighting : optional
         Weighting for the inner re-optimise; defaults to
         :class:`~emu_gmm.weighting.ContinuouslyUpdated` (the estimator default).
+        **The** :math:`\chi^2_{d_I}` **subvector reference assumes CU nuisance
+        concentration** (#187): the collapse of the full-vector :math:`K` onto
+        the interest block (see Notes) requires the nuisance score of the
+        *CUE* criterion to vanish at the concentrated point. Under a
+        ``Fixed`` / two-step weighting the CUE nuisance score at the inner
+        optimum is :math:`O_p(1)`, not :math:`o_p(1)`, so the reference is
+        anti-conservative and the resulting set may **under-cover**. Passing
+        a non-CU weighting therefore emits a ``UserWarning`` (once per call);
+        it is deliberately not rejected — the profiled *point* is still a
+        valid restricted estimate, only the subvector calibration degrades.
     regularization, score_cov_fn, V, L, gauge_nullspace_dim, strong_id_fallback
         Forwarded to the inner :func:`emu_gmm.estimate` (``regularization``
         only) and to the per-point :func:`emu_gmm.inference.k_statistic` (all),
@@ -616,6 +710,16 @@ def profiled_k_confidence_set(
     return_profiled_points : bool, default False
         Also return the tuple of profiled full-``theta`` PyTrees (one per grid
         value) alongside the set, for inspecting the concentrated nuisance path.
+    foc_tol : float, default 1e-3
+        Dimensionless tolerance on the inner squared Newton decrement
+        :math:`\lambda^2 = g' H^{+} g` below which the concentrated nuisance FOC
+        is treated as satisfied even if the optimiser did not certify
+        convergence (see the *Inner convergence guard* note). Genuine optima
+        land at the float noise floor (~1e-16) and a real stall is O(1)+, so the
+        default sits well inside that gap; the bar is what the asymptotic
+        subvector reference needs (score ``o_p(1)``), not solver precision.
+        Raise it to be more permissive about near-stationary inner fits, lower
+        it to demand a tighter FOC.
 
     Returns
     -------
@@ -644,6 +748,34 @@ def profiled_k_confidence_set(
     systematically **conservative** — badly so when the nuisance is
     high-dimensional (e.g. a ``PSDFixedRank`` factor).
 
+    **Inner convergence guard (#186).** The collapse onto the interest block
+    holds only when the inner solve actually reaches the concentrated FOC —
+    a non-stationary inner fit leaves the nuisance score non-zero and yields
+    a finite-but-*wrong* :math:`K`, indistinguishable from a good point by
+    value alone. The guard tests that FOC *directly* rather than trusting the
+    optimiser's self-certification: a Gauss--Newton / Riemannian-LM inner solve
+    can reach a genuine stationary point (score at the float noise floor) yet
+    report ``converged=False`` — hitting ``max_steps`` or the #156 ftol
+    cost-stagnation stop — and that certification is platform-sensitive, so
+    keying on the boolean alone excluded good optima and punched holes in the
+    set. A grid point is therefore kept when EITHER the optimiser certified
+    convergence OR the scale-free squared Newton decrement
+    :math:`\lambda^2 = g' H^{+} g` (:func:`_foc_decrement`, from the inner
+    ``gradient`` and ``gn_hessian``) is ``<= foc_tol`` — i.e. the concentrated
+    score genuinely vanishes. Only when BOTH fail (a real stall) is the point
+    treated like a NaN-p invalid one: excluded, counted in
+    :attr:`KConfidenceSet.n_nonconverged` /
+    :attr:`~KConfidenceSet.nonconverged_indices`, never interpolated against,
+    and flagged by :meth:`KConfidenceSet.summary` (boundaries adjacent to such
+    points are unreliable). The decrement is dimensionless, so the asymptotic
+    reference's ``score = o_p(1)`` requirement — far looser than machine-
+    precision certification — sets the tolerance, not the solver.
+
+    **CU-only validity (#187).** The same FOC argument requires the nuisance
+    to be concentrated under the *CUE* criterion; a non-CU
+    ``nuisance_weighting`` triggers a once-per-call ``UserWarning`` (see the
+    parameter entry above).
+
     **Precondition: the nuisance must be strongly identified.** The plug-in
     concentration above is the subvector statistic *evaluated at the restricted
     CUE*, which is identification-robust **in the interest direction** but
@@ -671,6 +803,21 @@ def profiled_k_confidence_set(
     grid_arr = _validate_grid_args(grid, statistic, alpha)
     if nuisance_weighting is None:
         nuisance_weighting = ContinuouslyUpdated()
+    elif not isinstance(nuisance_weighting, ContinuouslyUpdated):
+        # #187: the chi^2_{d_I} subvector reference needs the nuisance
+        # concentrated under the CUE criterion; a Fixed / two-step weighting
+        # leaves the CUE nuisance score O_p(1) and the reference is
+        # anti-conservative. Warn once per call (not per grid point); do not
+        # reject — see the nuisance_weighting docstring entry.
+        warnings.warn(
+            "profiled_k_confidence_set: the chi^2_{d_I} subvector reference "
+            "assumes the nuisance is concentrated under the CUE criterion "
+            "(ContinuouslyUpdated); with nuisance_weighting="
+            f"{type(nuisance_weighting).__name__} the concentrated nuisance "
+            "score does not vanish and the resulting set may under-cover.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # Build the reduced (nuisance-only) parameter dataclass once from the first
     # grid point; its structure is identical across the grid.
@@ -679,6 +826,7 @@ def profiled_k_confidence_set(
 
     results: list[KStatisticResult] = []
     profiled_points: list[ParamsLike] = []
+    nonconverged: list[bool] = []
     for g in grid_arr:
         theta_full_init = theta_builder(float(g))
         free_init = reducer.free_init(theta_full_init)
@@ -695,6 +843,33 @@ def profiled_k_confidence_set(
             optimizer=nuisance_optimizer,
             theta_init=free_init,
         )
+        # #186: the chi^2_{d_I} reference requires the concentrated nuisance
+        # FOC to hold -- the nuisance score must vanish at the inner solution,
+        # or K is finite-but-wrong. The RIGHT signal is the score itself, not
+        # the optimiser's boolean ``converged``: a Gauss--Newton / Riemannian-LM
+        # inner solve can reach a genuine stationary point (score at the float
+        # noise floor) yet fail to CERTIFY convergence -- riemannian_lm hitting
+        # ``max_steps`` or the #156 ftol cost-stagnation stop -- and that
+        # certification is platform-sensitive, which previously excluded good
+        # optima and punched holes in the set. So keep a point when EITHER the
+        # optimiser certified OR the scale-free Newton decrement
+        # lambda^2 = g' H^+ g is negligible (``foc_tol``); exclude (count as
+        # non-converged) only when BOTH fail -- a real stall. The asymptotic
+        # reference only needs the score ``o_p(1)``, a far looser bar than
+        # machine-precision certification, so ``foc_tol`` is a statistical
+        # tolerance, not a solver one. The grid loop is host-eager so the flags
+        # are concrete; guard the bool(...) coercion like the estimator does in
+        # case a traced flag ever leaks through -- an undecidable flag counts as
+        # NOT certified (then the FOC decrement decides).
+        try:
+            certified = bool(inner.converged)
+        except (jax.errors.TracerBoolConversionError, TypeError):
+            certified = False
+        spec_nuisance = getattr(inner, "manifold_spec", None)
+        gd_nuisance = 0 if spec_nuisance is None else int(spec_nuisance.total_gauge_dim)
+        lam2 = _foc_decrement(inner, gd_nuisance)
+        foc_ok = lam2 is not None and np.isfinite(lam2) and lam2 <= foc_tol
+        nonconverged.append(not (certified or foc_ok))
         theta_prof = reducer.recombine(theta_full_init, inner.theta_hat)
         # The nuisance is concentrated, so reference K/J to the SUBVECTOR null
         # distribution via k_statistic's own `interest=` surface (#176/#179):
@@ -721,7 +896,14 @@ def profiled_k_confidence_set(
         # global JAX caches would otherwise grow ~per call (CLAUDE.md).
         jax.clear_caches()
 
-    cs = _assemble_set(grid_arr, results, statistic, alpha, keep_results)
+    cs = _assemble_set(
+        grid_arr,
+        results,
+        statistic,
+        alpha,
+        keep_results,
+        nonconverged=np.asarray(nonconverged, dtype=bool),
+    )
     if return_profiled_points:
         return cs, tuple(profiled_points)
     return cs

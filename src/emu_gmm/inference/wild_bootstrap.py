@@ -22,12 +22,23 @@ The bootstrap J-statistic is then
 .. math::
    J^{*,(b)}
    \\;=\\;
-   \\big\\| L^{-1}\\, m^{*,(b)}(\\hat\\theta) \\big\\|^2,
+   \\big\\| P\\, L^{-1}\\, m^{*,(b)}(\\hat\\theta) \\big\\|^2,
 
 where :math:`L` is the lower-triangular Cholesky factor of the
 analytic variance :math:`V_X(\\hat\\theta)` evaluated at the original
-sample (the "refit-free" form). The bootstrap p-value is the empirical
-right-tail probability:
+sample (the "refit-free" form) and :math:`P` projects out the
+estimation effect (#184): :math:`P = I_M - Z_w Z_w^+` with
+:math:`Z_w = L^{-1} G(\\hat\\theta)` the whitened moment Jacobian. At
+an estimated :math:`\\hat\\theta` the CU first-order conditions
+annihilate :math:`K` directions of the whitened moment vector, so the
+observed J targets :math:`\\chi^2_{M-K}` while the raw sign-flipped
+draws carry full-rank-:math:`M` conditional variance
+(:math:`\\chi^2_M`); the projection puts both on the same
+rank-:math:`(M-K)` space. Pass
+``project_estimation_effect=False`` to recover the unprojected form
+(:math:`P = I`), which is the correct calibration when evaluating at a
+*hypothesised* :math:`\\theta_0`. The bootstrap p-value is the
+empirical right-tail probability:
 
 .. math::
    p^\\star
@@ -51,10 +62,13 @@ fixed-:math:`L` whitening avoids the recompile / refit overhead and
 keeps the bootstrap loop vmappable across replicates.
 
 The same V used for the analytic J-test must be passed into the
-bootstrap to keep the calibration consistent --- typically obtained
-from ``EstimationResult.V_X``. Passing the labelled
-:class:`haliax.NamedArray` directly is supported; the helper
-auto-unwraps to the underlying array.
+bootstrap to keep the calibration consistent --- the regularised V* the
+fit whitened by, obtained as ``inv(result.weighting_matrix)`` on the
+:class:`~emu_gmm.types.OptimizationResult` (the estimation/inference
+split removed the old ``result.V_X`` attribute; ``weighting_matrix`` is
+``Lambda = (V*)^{-1}``). A labelled :class:`haliax.NamedArray` --- e.g.
+:attr:`emu_gmm.inference.JTestResult.V_X` --- is also accepted; the
+helper auto-unwraps it to the underlying array.
 
 JIT / vmap compatibility
 ------------------------
@@ -145,11 +159,11 @@ class WildBootstrapResult:
 def _to_plain(value: Any) -> Float[Array, "..."]:
     """Strip a :class:`haliax.NamedArray` wrapper if present.
 
-    Mirrors the same helper in the covariance subpackage. The wild-
-    bootstrap docstring guides callers to pass
-    ``EstimationResult.V_X`` directly; ``V_X`` is a NamedArray, so
-    without this unwrap ``jnp.asarray(V_X)`` would raise. Plain JAX
-    arrays pass through unchanged.
+    Mirrors the same helper in the covariance subpackage. A caller may
+    pass a labelled V --- e.g. :attr:`emu_gmm.inference.JTestResult.V_X`,
+    a :class:`haliax.NamedArray` --- so without this unwrap
+    ``jnp.asarray(V)`` would raise on the wrapper. Plain JAX arrays (such
+    as ``inv(result.weighting_matrix)``) pass through unchanged.
     """
     if isinstance(value, ha.NamedArray):
         return jnp.asarray(value.array)
@@ -223,6 +237,7 @@ def moment_wild_bootstrap(
     sign: Literal["rademacher", "mammen"] = "rademacher",
     V: Float[Array, "M M"] | ha.NamedArray | None = None,
     regularization: RegularizationStrategy | None = None,
+    project_estimation_effect: bool = True,
 ) -> WildBootstrapResult:
     """Cluster-wild bootstrap of the J-statistic (refit-free).
 
@@ -257,14 +272,16 @@ def moment_wild_bootstrap(
         the bootstrap moments. When omitted the function recomputes it
         by calling ``covariance.covariance(model, theta_hat, measure)``
         and applies ``regularization`` to the result before
-        factorising; callers who already have ``EstimationResult.V_X``
-        should pass it directly (either the NamedArray or its
-        ``.array``) to avoid the extra evaluation and to guarantee the
-        Cholesky factor matches the one used by the analytic J-test.
+        factorising; callers who already have the regularised V* ---
+        ``inv(result.weighting_matrix)`` on the
+        :class:`~emu_gmm.types.OptimizationResult`, or a
+        :attr:`~emu_gmm.inference.JTestResult.V_X` NamedArray --- should
+        pass it directly to avoid the extra evaluation and to guarantee
+        the Cholesky factor matches the one used by the analytic J-test.
         A caller-supplied ``V`` is used **verbatim** --- it is presumed
-        already regularised (``result.V_X`` is), so ``regularization``
-        is not applied to it. The helper auto-unwraps a
-        :class:`haliax.NamedArray` to its underlying array.
+        already regularised (the fit's ``inv(weighting_matrix)`` is), so
+        ``regularization`` is not applied to it. The helper auto-unwraps
+        a :class:`haliax.NamedArray` to its underlying array.
     regularization : :class:`emu_gmm.types.RegularizationStrategy`, optional
         Adaptive PD-restoration applied to :math:`V` before
         factorisation when ``V`` is computed internally (``V=None``).
@@ -274,6 +291,28 @@ def moment_wild_bootstrap(
         finite-sample non-PD risk of the pairwise-overlap /
         ``dof_correction`` forms; #111) NaNs the Cholesky factor and
         every downstream statistic.
+    project_estimation_effect : bool, default ``True``
+        Project the whitened moments (observed *and* bootstrap) onto
+        the orthocomplement of the whitened Jacobian column space at
+        ``theta_hat`` (#184). The default ``True`` is correct for the
+        documented evaluate-at-``theta_hat`` usage: at a same-data CU
+        optimum the first-order conditions annihilate ``K`` directions
+        of the whitened moment vector, so ``J_observed`` targets
+        :math:`\\chi^2_{M-K}` while the raw sign-flipped draws have
+        full-rank-``M`` conditional variance and target
+        :math:`\\chi^2_M` --- MC-confirmed miscalibration (#184: in an
+        ``M=5, K=1`` design the unprojected bootstrap's effective size
+        at nominal 5% was 0.026, with mean ``J_boot`` about 5.0 against
+        mean ``J_observed`` about 4.0). With the projection ``J_boot``
+        targets :math:`\\chi^2_{M-K}`, matching the observed statistic.
+        Pass ``False`` when evaluating at a *hypothesised*
+        ``theta_0`` (no estimation effect --- the projection would
+        over-shrink the draws; evaluation at ``theta_0`` is correctly
+        calibrated without it). ``False`` is byte-identical to the
+        pre-#184 code path and skips the Jacobian evaluation entirely.
+        Plain Python bool, static at trace time: changing it triggers a
+        re-trace, and all projection arithmetic is ``jnp``-native, so
+        both settings trace under ``jax.jit`` / ``jax.vmap``.
 
     Returns
     -------
@@ -363,7 +402,7 @@ def moment_wild_bootstrap(
     # (commitment 3, #111) --- so it goes through the regularisation
     # strategy before factorisation, exactly as in ``j_test`` /
     # ``k_statistic``. Auto-unwrap a haliax NamedArray (the natural
-    # ``result.V_X`` hand-off) rather than letting jnp.asarray choke on
+    # ``JTestResult.V_X`` hand-off) rather than letting jnp.asarray choke on
     # the wrapper object.
     if V is None:
         V_raw = _to_plain(covariance.covariance(model, theta_hat, measure))
@@ -372,9 +411,34 @@ def moment_wild_bootstrap(
         V_arr = _to_plain(V)
     L = cho.cholesky(V_arr)  # (M, M) lower-triangular
 
-    # Analytic J at theta_hat against the same V.
+    # Estimation-effect projector (#184). At an estimated theta_hat the
+    # CU first-order conditions annihilate K directions of the whitened
+    # moment vector (J_observed ~ chi2_{M-K}), while the sign-flipped
+    # draws have full-rank-M conditional variance (J_boot ~ chi2_M).
+    # Project both onto the orthocomplement of the whitened Jacobian
+    # column space so observed and bootstrap statistics live on the
+    # same rank-(M-K) space. The Jacobian is whitened with the SAME
+    # Cholesky factor as the moments. Using pinv (not an explicit Gram
+    # inverse (Zw'Zw)^{-1}) is deliberate: for gauge-bearing manifold
+    # parameter trees the ambient Jacobian is rank-deficient along the
+    # gauge directions, and the pinv-based projector removes exactly
+    # the identified column space --- the gauge nullspace contributes
+    # nothing. The flag is a plain Python bool (static at trace time),
+    # so the False path pays no Jacobian evaluation at all.
+    P: Float[Array, "M M"] | None = None
+    if project_estimation_effect:
+        G = _to_plain(measure.jacobian(model, theta_hat))  # (M, K)
+        Zw = cho.forward_solve(L, G)  # whitened Jacobian (M, K)
+        P = jnp.eye(Zw.shape[0], dtype=Zw.dtype) - Zw @ jnp.linalg.pinv(Zw)
+
+    # Analytic J at theta_hat against the same V. At a genuine CU
+    # optimum the projection changes y_hat only at higher order;
+    # applying it to BOTH the observed and the bootstrap moments keeps
+    # the two statistics on the same space.
     m_hat = measure.expectation(model, theta_hat)
     y_hat = cho.forward_solve(L, _to_plain(m_hat))
+    if P is not None:
+        y_hat = P @ y_hat
     J_observed_arr = jnp.sum(y_hat * y_hat)
 
     cluster_ids = covariance.cluster_ids
@@ -392,6 +456,8 @@ def moment_wild_bootstrap(
         eta_i = _per_obs_signs(eta_c, cluster_ids)  # (N,)
         m_boot = _bootstrap_moment(contributions, weight_mask, eta_i)  # (M,)
         y_boot = cho.forward_solve(L, m_boot)
+        if P is not None:
+            y_boot = P @ y_boot  # estimation-effect projection (#184)
         return jnp.sum(y_boot * y_boot)
 
     J_boot = jax.vmap(one_replicate)(keys)  # (n_boot,)

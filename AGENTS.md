@@ -136,9 +136,14 @@ been through four reviewer iterations; the abstractions are deliberate.
    stable in finite samples.
 6. **Labelled outputs via the LabelContext**. The estimator probes the
    model's return value to detect a `haliax.NamedArray` with a `Moments`
-   axis and uses its labels; else `moment_names` kwarg; else positional
-   `m_0, m_1, ...`. Don't mutate label state from inside the residual
-   closure — it rides as a static closure variable.
+   axis and uses its **per-coordinate labels when the axis carries any —
+   a plain haliax `Axis` never does, so today that branch only validates
+   the axis size**; else `moment_names` kwarg; else positional
+   `m_0, m_1, ...`. (#190 flipped this: the NamedArray branch previously
+   outranked an explicit kwarg with positional names — an inversion,
+   since the axis carries zero label information.) Don't mutate label
+   state from inside the residual closure — it rides as a static
+   closure variable.
 7. **JAX float64 enabled at package import.** `src/emu_gmm/__init__.py`
    calls `jax.config.update("jax_enable_x64", True)` before any
    sub-module import. JAX defaults to float32 (a deep-learning
@@ -360,6 +365,13 @@ single-thread caps only as a last resort.
 
 - For a **single** run, `taskset -c 0-31` is still worth it: a 32-core run is
   fast and leaves 32 cores free for other work.
+- **`make par-check` / `make par-quick-check`** run the same gates with the
+  pytest stage under pytest-xdist: one *single-threaded* worker per
+  affinity-visible core (`nproc`, which respects cgroups/sandboxes — never
+  `pytest -n auto`, whose `os.cpu_count()` sees the whole node) with
+  OMP/XLA thread caps baked in. The suite is compile-dominated
+  (~1500 mostly-small tests), so it scales near-linearly; `make check`
+  stays the canonical serial green gate.
 - **Multi-agent workflows / delegated agents:** give each agent a distinct
   core range (`0-31` vs `32-63`) rather than telling them to serialise.
 - **Pitfall:** do **not** gate on `pgrep -f "pytest"` in a wait loop — the

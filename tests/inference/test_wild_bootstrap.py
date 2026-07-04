@@ -18,6 +18,16 @@ Three contracts:
     ID receive the same sign in every replicate; the bootstrap that
     ignores cluster IDs (treats every observation as its own cluster)
     produces a /different/ distribution of bootstrap moments.
+
+(d) Estimation-effect projection (#184). The default
+    ``project_estimation_effect=True`` projects the whitened moments
+    onto the orthocomplement of the whitened Jacobian column space so
+    ``J_boot`` targets chi2_{M-K} (matching ``J_observed`` at a CU
+    ``theta_hat``); ``False`` is byte-identical to the pre-#184 code
+    path and is the correct calibration for evaluation at a
+    hypothesised ``theta_0``. Tests in this file that evaluate at a
+    fixed TRUE ``theta_0`` (no estimation effect) pass ``False``
+    explicitly.
 """
 
 from __future__ import annotations
@@ -167,6 +177,11 @@ class TestUnderH0PValueUniformity:
             n_boot=500,
             key=key,
             sign="rademacher",
+            # #184: this test evaluates at the fixed TRUE theta_0, where
+            # there is no estimation effect and the unprojected chi2_M
+            # calibration is the correct target. The default projection
+            # is for the evaluate-at-theta_hat use case.
+            project_estimation_effect=False,
         )
         # p_value must be a valid probability.
         assert 0.0 <= result.p_value <= 1.0
@@ -204,6 +219,10 @@ class TestUnderH0PValueUniformity:
                 n_boot=200,
                 key=key,
                 sign="rademacher",
+                # #184: theta_0 evaluation (fixed TRUE value, no
+                # estimation effect) --- the unprojected form is the
+                # correctly calibrated one here.
+                project_estimation_effect=False,
             )
             p_values.append(result.p_value)
         p_arr = jnp.asarray(p_values)
@@ -444,6 +463,12 @@ class TestArgumentValidation:
             n_boot=20,
             key=jax.random.PRNGKey(21),
             V=big_V,
+            # #184: on this M=1, K=1 fixture the estimation-effect
+            # projector annihilates the single whitened direction
+            # regardless of V (J = 0 for ANY V), which would make the
+            # verbatim-V contract under test unobservable. theta_0
+            # evaluation -> unprojected form.
+            project_estimation_effect=False,
         )
         # J = m' V^{-1} m -> 0 as V -> infty.
         assert float(jnp.max(result.J_boot)) < 1e-5
@@ -526,6 +551,10 @@ class TestJitVmapCompatibility:
 
         # `n_boot` and `sign` are static (shape / dispatch parameters);
         # `key` is the only traced PRNG input we vmap over below.
+        # #184: unprojected form --- theta_0 evaluation on an M=1, K=1
+        # fixture, where the projector degenerates the statistics to ~0
+        # and the eager-vs-jit value comparison would be vacuous. The
+        # True-path jit coverage lives in TestEstimationEffectProjection.
         def run(key):
             return moment_wild_bootstrap(
                 _residual_psi,
@@ -535,6 +564,7 @@ class TestJitVmapCompatibility:
                 n_boot=20,
                 key=key,
                 sign="rademacher",
+                project_estimation_effect=False,
             )
 
         eager = run(jax.random.PRNGKey(31))
@@ -580,6 +610,9 @@ class TestJitVmapCompatibility:
         """`jit(vmap(...))` traces end-to-end and matches eager."""
         measure, covariance, theta_0 = _build_h0_setup(seed=34, N=40, n_clusters=4)
 
+        # #184: unprojected form for the same reason as
+        # test_jit_returns_traced_scalars --- the M=1, K=1 projector
+        # degenerates the p-values this test compares.
         def run(key):
             return moment_wild_bootstrap(
                 _residual_psi,
@@ -589,6 +622,7 @@ class TestJitVmapCompatibility:
                 n_boot=10,
                 key=key,
                 sign="rademacher",
+                project_estimation_effect=False,
             ).p_value
 
         keys = jax.random.split(jax.random.PRNGKey(35), 3)
@@ -646,6 +680,10 @@ class TestNamedArrayVAcceptance:
         V_plain = jnp.array([[2.5]])
         V_named = ha.named(V_plain, (Moments, MomentsDual))
 
+        # #184: pass project_estimation_effect=False --- on this M=1,
+        # K=1 fixture the projector collapses every statistic to ~0
+        # regardless of V, which would make the plain-vs-NamedArray
+        # comparison vacuous (0 == 0 no matter what the unwrap does).
         result_plain = moment_wild_bootstrap(
             _residual_psi,
             theta_0,
@@ -654,6 +692,7 @@ class TestNamedArrayVAcceptance:
             n_boot=30,
             key=jax.random.PRNGKey(41),
             V=V_plain,
+            project_estimation_effect=False,
         )
         result_named = moment_wild_bootstrap(
             _residual_psi,
@@ -663,6 +702,7 @@ class TestNamedArrayVAcceptance:
             n_boot=30,
             key=jax.random.PRNGKey(41),
             V=V_named,
+            project_estimation_effect=False,
         )
 
         # The two paths must produce identical bootstrap draws and
@@ -864,3 +904,179 @@ class TestNonPDVarianceNaNSurfacing:
         assert jnp.allclose(result_default.p_value, result_noop.p_value)
         assert jnp.allclose(result_default.J_observed, result_noop.J_observed)
         assert 0.0 <= float(result_default.p_value) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Estimation-effect projection (#184)
+# ---------------------------------------------------------------------------
+#
+# At an estimated theta_hat the CU first-order conditions annihilate K
+# directions of the whitened moment vector, so J_observed targets
+# chi2_{M-K}; the raw sign-flipped draws have full-rank-M conditional
+# variance and target chi2_M. MC evidence on issue #184 (M=5, K=1,
+# G=20 clusters, R=500 x B=999): effective size at nominal 5% halved
+# to 0.026, mean J_boot 4.997 against mean J_observed 3.993. The
+# default ``project_estimation_effect=True`` projects the whitened
+# moments (observed AND bootstrap) onto the orthocomplement of the
+# whitened Jacobian column space, restoring the chi2_{M-K} target;
+# ``False`` is byte-identical to the pre-#184 code path --- the correct
+# calibration when evaluating at a hypothesised theta_0.
+
+
+def _build_overid_setup(
+    *, seed: int, N: int, M: int, n_clusters: int
+) -> tuple[EmpiricalMeasure, ClusteredCovariance, _P]:
+    """Over-identified common-mean fixture: the M moment coordinates
+    ``x_j - a`` share the single scalar parameter ``a`` (K=1, so
+    ``J_dof = M - 1``). ``N`` must be a multiple of ``n_clusters``
+    (contiguous balanced clusters)."""
+    key = jax.random.PRNGKey(seed)
+    x = jax.random.normal(key, (N, M))
+    measure = EmpiricalMeasure(x=x, mask=jnp.ones((N, M)), weights=jnp.ones(N))
+    cluster_ids = jnp.repeat(jnp.arange(n_clusters, dtype=jnp.float64), N // n_clusters)
+    covariance = ClusteredCovariance(cluster_ids=cluster_ids, n_clusters=n_clusters)
+    return measure, covariance, _P(a=0.0)
+
+
+class TestEstimationEffectProjection:
+    """#184: default-on projection, False-path bit-identity, NaN, jit."""
+
+    def test_false_path_bit_identical_to_pre_change(self):
+        """``project_estimation_effect=False`` reproduces the pre-#184
+        output bit-for-bit.
+
+        The pinned expectations below were captured by executing the
+        pre-change implementation (branch state before the #184 fix,
+        HEAD 495686d) on this exact fixture: seed=77, N=60, M=3,
+        n_clusters=6, theta=_P(a=0.0), n_boot=64, key=PRNGKey(123),
+        sign="rademacher", V=None (default DiagonalTikhonov). The False
+        path must not pay the Jacobian evaluation nor perturb a single
+        bit of the original computation.
+        """
+        measure, covariance, theta_0 = _build_overid_setup(
+            seed=77, N=60, M=3, n_clusters=6
+        )
+        result = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=64,
+            key=jax.random.PRNGKey(123),
+            sign="rademacher",
+            project_estimation_effect=False,
+        )
+        assert float(result.J_observed) == 4.347590543339194
+        assert float(result.p_value) == 0.21875
+        expected_head = np.array(
+            [
+                1.1150200488505575,
+                2.179227467974644,
+                3.8665904206793247,
+                3.1580941678315284,
+                3.1140965995187666,
+                3.8845413986738255,
+            ]
+        )
+        np.testing.assert_array_equal(np.asarray(result.J_boot[:6]), expected_head)
+        assert float(jnp.sum(result.J_boot)) == 179.50999135901674
+
+    def test_projected_boot_targets_chi2_m_minus_k_at_cu_theta_hat(self):
+        """At the CU theta_hat on an over-identified fixture (M=3, K=1)
+        the default projection puts mean(J_boot) near M-K = 2 --- not
+        near M = 3, where the unprojected draws sit (#184) --- and the
+        bootstrap p-value is a non-degenerate probability."""
+        from emu_gmm import DiagonalTikhonov, estimate
+
+        measure, covariance, _theta = _build_overid_setup(
+            seed=77, N=60, M=3, n_clusters=6
+        )
+        fit = estimate(
+            model=_residual_psi,
+            measure=measure,
+            covariance=covariance,
+            regularization=DiagonalTikhonov(),
+            theta_init=_P(a=0.1),
+        )
+        assert bool(fit.converged)
+        theta_hat = fit.theta_hat
+
+        result = moment_wild_bootstrap(
+            _residual_psi,
+            theta_hat,
+            measure,
+            covariance,
+            n_boot=2000,
+            key=jax.random.PRNGKey(202),
+            sign="rademacher",
+        )  # default project_estimation_effect=True
+        boot_mean = float(jnp.mean(result.J_boot))
+        # chi2_{M-K} mean is 2; loose band per the finite-cluster (G=6)
+        # variance of a B=2000 mean. The unprojected target (M=3) sits
+        # well outside this band.
+        assert abs(boot_mean - 2.0) < 0.5
+        assert 0.0 < float(result.p_value) < 1.0
+
+        result_unprojected = moment_wild_bootstrap(
+            _residual_psi,
+            theta_hat,
+            measure,
+            covariance,
+            n_boot=2000,
+            key=jax.random.PRNGKey(202),
+            sign="rademacher",
+            project_estimation_effect=False,
+        )
+        # Same draws, no projection: the mean reverts to the full-rank
+        # chi2_M target --- the #184 miscalibration this fix removes.
+        boot_mean_unprojected = float(jnp.mean(result_unprojected.J_boot))
+        assert abs(boot_mean_unprojected - 3.0) < 0.5
+
+    def test_true_plus_nonpd_v_still_yields_nan_p_value(self):
+        """Projection composes with the #140 NaN-surfacing contract: a
+        verbatim non-PD V NaNs the Cholesky factor, the whitened
+        Jacobian, and the projector alike --- the p-value must still
+        surface NaN, never a fabricated probability."""
+        measure, covariance, theta_0 = _build_indefinite_V_setup()
+        V_raw = covariance.covariance(_identity_psi, theta_0, measure)
+        result = moment_wild_bootstrap(
+            _identity_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=50,
+            key=jax.random.PRNGKey(50),
+            V=V_raw,
+            project_estimation_effect=True,
+        )
+        assert bool(jnp.isnan(result.J_observed))
+        assert bool(jnp.isnan(result.p_value))
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_traces_under_jit_with_both_flags(self, flag):
+        """The helper traces under ``jax.jit`` with either flag value
+        (the flag is a plain Python bool, static at trace time; the
+        projection arithmetic is jnp-native) and matches eager on an
+        over-identified fixture where the projector is non-trivial."""
+        measure, covariance, theta = _build_overid_setup(
+            seed=88, N=60, M=3, n_clusters=6
+        )
+
+        def run(key):
+            return moment_wild_bootstrap(
+                _residual_psi,
+                theta,
+                measure,
+                covariance,
+                n_boot=25,
+                key=key,
+                project_estimation_effect=flag,
+            )
+
+        eager = run(jax.random.PRNGKey(90))
+        jitted = jax.jit(run)(jax.random.PRNGKey(90))
+        assert jnp.allclose(jitted.J_boot, eager.J_boot)
+        assert jnp.allclose(jitted.p_value, eager.p_value)
+        assert jnp.allclose(jitted.J_observed, eager.J_observed)
+        assert bool(jnp.all(jnp.isfinite(jitted.J_boot)))
+        assert 0.0 <= float(jitted.p_value) <= 1.0

@@ -218,7 +218,11 @@ def run(
     boot_key = jax.random.PRNGKey(boot_seed)
     wild_key, cluster_key = jax.random.split(boot_key)
 
-    # Refit-free: cluster-wild Rademacher on the moments.
+    # Refit-free: cluster-wild Rademacher on the moments. Evaluated at
+    # the ESTIMATED theta_hat, so the post-#184 default projection is
+    # active: J_boot targets chi2_{M-K}, matching the estimated-theta
+    # J_observed (pass project_estimation_effect=False only when
+    # evaluating at a hypothesised theta_0).
     wild = moment_wild_bootstrap(
         mean_var_residual,
         result.theta_hat,

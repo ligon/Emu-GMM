@@ -22,7 +22,14 @@ stopping rule cannot be ``vmap``-ed). It wraps any *batched* draw callable:
 
 returning ``size`` scalar replicate values of the statistic of interest
 (e.g. ``cluster_bootstrap(..., n_boot=size, key=key).theta_boot.array[:, k]``
-for a single coordinate, or ``.J_boot`` for the J-statistic). Non-converged
+for a single coordinate). Do **not** feed ``.J_boot`` into
+:class:`BootstrapPValue` as an over-identification test: the pairs cluster
+bootstrap does not recentre :math:`\\psi` at the sample moment, so in each
+bootstrap world :math:`E^*[\\psi] = \\hat m(\\hat\\theta) \\neq 0` and
+``J_boot`` carries a noncentral shift --- the resulting p-value is
+miscalibrated (conservative) however precise the MCSE machinery makes it
+look (Hall-Horowitz 1996; issue #185 tracks a recentred variant).
+Theta-coordinate functionals are unaffected. Non-converged
 replicates may be returned as ``NaN``; they are excluded from the functional
 but counted in the denominator (``n_invalid``), so a degenerate resampling
 world cannot masquerade as precision.
