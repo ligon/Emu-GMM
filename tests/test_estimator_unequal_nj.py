@@ -205,12 +205,12 @@ class TestUnequalNjEndToEnd:
 
     def test_J_dof_and_modest(self):
         r = self._run()
-        assert r.J_dof == 1  # M=3, K=2, unchanged by masking
-        assert jnp.isfinite(r.J_stat)
+        assert r.n_overid == 1  # M=3, K=2, unchanged by masking
+        assert jnp.isfinite(r.objective_value)
         # Correctly specified + correctly weighted => J ~ chi^2_1; a single
         # draw should be modest. A common-N misweighting would systematically
         # distort this once N_j are as unequal as here.
-        assert r.J_stat < 30.0
+        assert r.objective_value < 30.0
 
 
 class TestUnequalNjJCalibration:
@@ -237,7 +237,7 @@ class TestUnequalNjJCalibration:
                 theta_init=EulerParams(beta=0.9, gamma=1.0),
             )
             if bool(r.converged):
-                js.append(float(r.J_stat))
+                js.append(float(r.objective_value))
         js_arr = np.asarray(js)
         assert js_arr.size >= n_reps - 2  # near-universal convergence
         # E[chi^2_1] = 1, Var = 2; mean over ~40 reps has SD ~ sqrt(2/40)

@@ -116,6 +116,10 @@ class Identity:
 
     #: Standard residual-path strategy --- no outer driver needed.
     requires_outer_loop: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
+    #: NOT efficient: ``Lambda = I`` is not ``(V*)^{-1}``, so the criterion has
+    #: no ``chi^2_{M-K}`` limit -- the J p-values are undefined (#188). The Law
+    #: emits ``nan`` for J_pvalue / J_pvalue_adjusted under this weighting.
+    efficient_weighting: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     def whitening_residual(
         self,
@@ -196,6 +200,12 @@ class Fixed:
     L0: Float[Array, "M M"]
     #: Standard residual-path strategy --- no outer driver needed.
     requires_outer_loop: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
+    #: Efficient by the two-step contract: ``Fixed(V0)`` is meant to carry a
+    #: consistent estimate of the moment covariance, so ``Lambda = V0^{-1}``
+    #: approximates the efficient weight and the J ``chi^2_{M-K}`` limit holds. A
+    #: *mis-scaled* ``V0`` breaks that, but the strategy cannot detect it (#188);
+    #: the guard trusts the contract.
+    efficient_weighting: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
 
     def __init__(
         self,
@@ -203,6 +213,7 @@ class Fixed:
         L0: Float[Array, "M M"] | None = None,
         V0: Float[Array, "M M"] | None = None,
         requires_outer_loop: bool = False,
+        efficient_weighting: bool = True,
     ) -> None:
         if args:
             raise TypeError(
@@ -237,6 +248,11 @@ class Fixed:
         # the jax_dataclasses pytree-unflatten path can round-trip the
         # static field after a ``jit`` boundary.
         object.__setattr__(self, "requires_outer_loop", requires_outer_loop)
+        # ``efficient_weighting`` is likewise a static (treedef) field; the kwarg
+        # exists so the jax_dataclasses unflatten path can round-trip it after a
+        # ``jit`` boundary. ``Fixed`` is efficient by the two-step contract, so
+        # the default is ``True`` (see the class attribute note).
+        object.__setattr__(self, "efficient_weighting", efficient_weighting)
 
     @classmethod
     def from_V0(cls, V0: Float[Array, "M M"]) -> Fixed:
@@ -295,6 +311,9 @@ class ContinuouslyUpdated:
 
     #: Standard residual-path strategy --- no outer driver needed.
     requires_outer_loop: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
+    #: Efficient: at convergence ``Lambda = (V*)^{-1}``, so the J statistic has
+    #: the ``chi^2_{M-K}`` limit and the J p-values are well-defined (#188).
+    efficient_weighting: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
 
     def whitening_residual(
         self,
@@ -390,6 +409,9 @@ class IteratedWeighting:
     #: Iterated GMM needs the estimator to drive an outer Python loop;
     #: see :meth:`outer_loop_driver`.
     requires_outer_loop: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
+    #: Efficient: iterated GMM converges to the ``(V*)^{-1}`` weight, so the J
+    #: statistic has the ``chi^2_{M-K}`` limit and its p-values are valid (#188).
+    efficient_weighting: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
 
     def __post_init__(self) -> None:
         if int(self.weighting_iterations) < 1:

@@ -61,7 +61,7 @@ def test_run_recovers_truth_and_matches_analytic_inference():
     # band; in practice the t-stats are well above 10.
     mu_hat = float(result.theta_hat.mu)
     sigma2_hat = float(result.theta_hat.sigma2)
-    analytic_se = np.asarray(result.standard_errors.array)
+    analytic_se = np.asarray(result.asymptotic().se())
     assert abs(mu_hat - empirical_bootstrap.MU_TRUE) < 4.0 * analytic_se[0]
     assert abs(sigma2_hat - empirical_bootstrap.SIGMA2_TRUE) < 4.0 * analytic_se[1]
 
@@ -69,7 +69,9 @@ def test_run_recovers_truth_and_matches_analytic_inference():
     # The refit-free wild bootstrap whitens by the same V_X the analytic
     # J-test uses, so J_observed should equal J_stat up to floating-point
     # rounding.
-    assert float(wild.J_observed) == pytest.approx(float(result.J_stat), rel=1e-6)
+    assert float(wild.J_observed) == pytest.approx(
+        float(result.objective_value), rel=1e-6
+    )
     assert wild.J_boot.shape == (80,)
     assert 0.0 <= float(wild.p_value) <= 1.0
 
@@ -98,7 +100,7 @@ def test_run_recovers_truth_and_matches_analytic_inference():
     ), f"NaN in SE ratios: {ratios} (likely all bootstrap replicates failed)"
     assert np.all((ratios > 0.6) & (ratios < 1.5)), (
         f"Bootstrap-vs-analytic SE ratios outside the 0.6-1.5 band: "
-        f"{dict(zip(se_table.index, ratios))}"
+        f"{dict(zip(se_table.index, ratios, strict=False))}"
     )
 
 

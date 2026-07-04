@@ -818,6 +818,6 @@ class TestEstimatorPathGaugeInvariance:
         Ga, Gb = Aa @ Aa.T, Ab @ Ab.T
         assert bool(jnp.allclose(Ga, Gb, atol=1e-7))
         assert bool(jnp.allclose(Ga, Gamma_true, atol=4e-3))
-        assert float(jnp.asarray(res_a.J_stat)) == pytest.approx(
-            float(jnp.asarray(res_b.J_stat)), abs=1e-7
+        assert float(jnp.asarray(res_a.objective_value)) == pytest.approx(
+            float(jnp.asarray(res_b.objective_value)), abs=1e-7
         )

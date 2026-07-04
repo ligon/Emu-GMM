@@ -21,13 +21,6 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
-
-from emu_gmm import estimate
-from emu_gmm.covariance import AnalyticalCovariance, IIDCovariance
-from emu_gmm.measures import EmpiricalMeasure
-from emu_gmm.regularization import DiagonalTikhonov
-from emu_gmm.weighting import Fixed, IteratedWeighting
-
 from blp_data import load_data, load_estimates, load_updated_W, load_W
 from blp_model import (
     BLPParams,
@@ -37,6 +30,11 @@ from blp_model import (
     make_psi,
     product_index_x,
 )
+from emu_gmm import estimate
+from emu_gmm.covariance import AnalyticalCovariance, IIDCovariance
+from emu_gmm.measures import EmpiricalMeasure
+from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.weighting import Fixed, IteratedWeighting
 
 REF = Path(__file__).parent / "reference"
 
@@ -151,7 +149,7 @@ def run_spec(spec, *, mode="fixed_W", cold=False):
     # In fixed_W mode V_X = W^-1/N, so emu's objective m'V_X^-1 m = N*gbar'W gbar
     # already matches pyblp's reported objective directly.
     emu_obj = float(result.diagnostics.final_objective)
-    se = np.asarray(result.standard_errors.array).reshape(-1)
+    se = np.asarray(result.asymptotic().se()).reshape(-1)
     return {
         "spec": spec,
         "mode": mode,
@@ -159,9 +157,9 @@ def run_spec(spec, *, mode="fixed_W", cold=False):
         "theta_hat": flat_theta(result.theta_hat),
         "se": se,
         "emu_objective": emu_obj,
-        "J_stat": float(result.J_stat),
-        "J_dof": int(result.J_dof),
-        "J_pvalue": float(result.J_pvalue),
+        "J_stat": float(result.objective_value),
+        "J_dof": int(result.n_overid),
+        "J_pvalue": float(result.asymptotic().J_pvalue),
         "converged": bool(result.converged),
         "iterations": int(result.iterations),
         "pyblp_objective": est["objective"],

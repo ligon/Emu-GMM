@@ -2,7 +2,7 @@
 
 The only genuinely new machinery in the #114 cluster: the replication
 engine ``key -> dataset -> estimate -> record``. Per-rep statistics are
-owned by :class:`~emu_gmm.types.EstimationResult` (via ``.record()``,
+owned by :class:`~emu_gmm.types.OptimizationResult` (via ``.record()``,
 #125) and aggregation by the layer-2 summarizers in
 :mod:`emu_gmm.studies.summaries`; this module only runs the loop and
 stacks the records.
@@ -14,7 +14,7 @@ makes each rep a cache-hit call (~5 ms/rep, zero retraces for fresh
 same-structure measures), so the Python loop is not the bottleneck. The
 batched ``lax.map``-over-stacked-datasets path is a follow-up tracked on
 #114: it needs a slim *in-trace* kernel record (today ``FitRecord`` is
-assembled host-side from ``EstimationResult``, which is deliberately a
+assembled host-side from ``OptimizationResult``, which is deliberately a
 host-side leaf), and on CPU at study scale it measured comparable to the
 traced-arg loop anyway (#124 spike).
 
@@ -40,7 +40,77 @@ import jax_dataclasses as jdc
 import numpy as np
 import pandas as pd
 
-from emu_gmm.types import EstimationResult, FitRecord, Measure
+from emu_gmm.types import (
+    FitRecord,
+    Measure,
+    OptimizationResult,
+    _flat_theta,
+    _result_param_names,
+)
+
+
+def fit_record(result: OptimizationResult) -> FitRecord:
+    """The slim, stackable per-fit summary pytree for one fit (#125).
+
+    The empirical-law bridge: it extracts exactly the fields
+    repeated-estimation consumers need --- ``theta_flat`` (manifold-aware
+    ambient flatten, the ``Sigma_theta`` axis), ``se``, the J triple,
+    ``converged``, ``tau_realised``, ``binding_ridge``,
+    ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143) --- as a
+    :class:`~emu_gmm.types.FitRecord` ready for ``tree_map(jnp.stack,
+    *records)``.
+
+    This lives in the studies layer, not on the
+    :class:`~emu_gmm.types.OptimizationResult`, because it is inherently
+    *statistical*: the per-rep ``se`` and the J p-values are inference
+    quantities, so they are computed through the fit's
+    :class:`~emu_gmm.law.AsymptoticLaw` (the same shared #133 sandwich the
+    live law asserts), not off the bare optimization result
+    (docs/optimization-result-law-split.org).
+    """
+    import warnings
+
+    from emu_gmm.law import AsymptoticLaw
+
+    law = AsymptoticLaw(result)
+    theta_arr = _flat_theta(result.theta_hat, result.manifold_spec)
+    param_names = _result_param_names(result)
+    se_arr = jnp.asarray(law.se())
+    if int(se_arr.shape[0]) != int(theta_arr.shape[0]):
+        raise ValueError(
+            "fit_record(): flattened estimate length "
+            f"{int(theta_arr.shape[0])} does not match the SE axis "
+            f"{int(se_arr.shape[0])}; this indicates a manifold-spec routing "
+            "bug (mirrors the coef_table guard)."
+        )
+    diag = result.diagnostics
+    assert diag is not None
+    # Under a non-efficient weighting the law reports the J p-values as NaN
+    # (the #188 guard) --- the correct, honest value to RECORD (a J-calibration
+    # study then surfaces NaN rather than a falsely-precise miscalibrated curve).
+    # The accompanying interactive warning belongs on a live-law read, not this
+    # per-rep batch builder, so silence just that one message here.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=".*non-efficient weighting.*", category=UserWarning
+        )
+        j_pvalue = jnp.asarray(law.J_pvalue)
+        j_pvalue_adjusted = jnp.asarray(law.J_pvalue_adjusted)
+    return FitRecord(
+        theta_flat=theta_arr,
+        se=se_arr,
+        J_stat=jnp.asarray(result.objective_value),
+        J_pvalue=j_pvalue,
+        J_pvalue_adjusted=j_pvalue_adjusted,
+        converged=jnp.asarray(result.converged, dtype=jnp.float64),
+        tau_realised=jnp.asarray(diag.tau_realised),
+        binding_ridge=jnp.asarray(diag.binding_ridge, dtype=jnp.float64),
+        sigma_meat_indefinite=jnp.asarray(
+            diag.sigma_meat_indefinite, dtype=jnp.float64
+        ),
+        J_dof=int(result.n_overid),
+        param_names=param_names,
+    )
 
 
 @jdc.pytree_dataclass
@@ -86,7 +156,7 @@ class MCRecords:
     #: "let the harness collect a statistic the FitRecord schema doesn't carry"
     #: channel --- e.g. an identification-robust K p-value at a null, an
     #: identification-strength scalar --- each computed by package code from the
-    #: harness's own ``(EstimationResult, Measure)`` draw. A traced pytree child
+    #: harness's own ``(OptimizationResult, Measure)`` draw. A traced pytree child
     #: (not static): it rides jit/vmap and stacks like ``records``.
     extra: dict[str, jax.Array] | None = None
 
@@ -142,7 +212,7 @@ class MCRecords:
 
 
 def replicate(
-    run: Callable[[Any, Measure], EstimationResult],
+    run: Callable[[Any, Measure], OptimizationResult],
     dgp: Callable[[jax.Array], Measure],
     *,
     n_reps: int,
@@ -150,7 +220,9 @@ def replicate(
     theta_init: Any,
     anchor_per_rep: bool = False,
     coupling_id: Any = None,
-    statistics: Mapping[str, Callable[[EstimationResult, Measure], Any]] | None = None,
+    statistics: (
+        Mapping[str, Callable[[OptimizationResult, Measure], Any]] | None
+    ) = None,
 ) -> MCRecords:
     """Run ``n_reps`` independent draw-and-estimate replicates.
 
@@ -158,7 +230,7 @@ def replicate(
     ----------
     run
         A fitted-estimator callable ``run(theta_init, measure) ->
-        EstimationResult`` --- i.e. the return value of
+        OptimizationResult`` --- i.e. the return value of
         :func:`emu_gmm.build_estimator`. Taking the callable (rather
         than rebuilding internally from ``(model, covariance, ...)``)
         keeps the driver from duplicating ``build_estimator``'s kwarg
@@ -235,7 +307,7 @@ def replicate(
         statistics** the harness should collect alongside the
         :class:`~emu_gmm.types.FitRecord` (#179). Each
         ``extractor(result, measure) -> scalar`` is called once per
-        replicate with that rep's fitted :class:`EstimationResult` and the
+        replicate with that rep's fitted :class:`OptimizationResult` and the
         :class:`Measure` the harness drew (so there is no measure
         re-generation and no hand loop), and its outputs are stacked into
         :attr:`MCRecords.extra` under ``name`` with the same leading
@@ -259,7 +331,7 @@ def replicate(
     """
     if n_reps < 1:
         raise ValueError(f"replicate(): n_reps must be >= 1, got {n_reps}")
-    fit_per_rep: Callable[[Measure], EstimationResult] | None = None
+    fit_per_rep: Callable[[Measure], OptimizationResult] | None = None
     if anchor_per_rep:
         spec = getattr(run, "_emu_gmm_factory_spec", None)
         if spec is None:
@@ -277,7 +349,7 @@ def replicate(
         # be load-order sensitive (the _resolve_parameters precedent).
         from emu_gmm.estimator import estimate
 
-        def _fit_fresh_anchor(measure: Measure) -> EstimationResult:
+        def _fit_fresh_anchor(measure: Measure) -> OptimizationResult:
             return estimate(
                 spec["model"],
                 measure,
@@ -299,7 +371,7 @@ def replicate(
         measure = dgp(rep_key)
         if fit_per_rep is not None:
             result = fit_per_rep(measure)
-            records.append(result.record())
+            records.append(fit_record(result))
             _collect_statistics(statistics, extra_cols, result, measure)
             # Bare estimate() builds fresh closures per call, so JAX's
             # global caches accumulate write-only traces (~14 MB/call
@@ -313,7 +385,7 @@ def replicate(
                 jax.clear_caches()
         else:
             result = run(theta_init, measure)
-            records.append(result.record())
+            records.append(fit_record(result))
             _collect_statistics(statistics, extra_cols, result, measure)
     stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *records)
     extra = (
@@ -331,9 +403,9 @@ def replicate(
 
 
 def _collect_statistics(
-    statistics: Mapping[str, Callable[[EstimationResult, Measure], Any]] | None,
+    statistics: Mapping[str, Callable[[OptimizationResult, Measure], Any]] | None,
     extra_cols: dict[str, list[Any]],
-    result: EstimationResult,
+    result: OptimizationResult,
     measure: Measure,
 ) -> None:
     """Evaluate each custom per-draw extractor and append its scalar (#179)."""
@@ -344,7 +416,7 @@ def _collect_statistics(
 
 
 def replicate_coupled(
-    runs: Mapping[str, Callable[[Any, Measure], EstimationResult]],
+    runs: Mapping[str, Callable[[Any, Measure], OptimizationResult]],
     dgp: Callable[[jax.Array], Measure],
     *,
     n_reps: int,

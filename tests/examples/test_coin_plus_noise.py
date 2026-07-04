@@ -60,7 +60,7 @@ class TestCoinPlusNoiseSynthetic:
     def test_just_identified_J_dof_zero(self, coin_module):
         result = coin_module.run_synthetic(n_sim=2000, seed=0)
         # Just-identified: M = K = 2.
-        assert result.J_dof == 0
+        assert result.n_overid == 0
 
 
 @pytest.mark.slow

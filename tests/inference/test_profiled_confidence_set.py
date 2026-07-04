@@ -124,7 +124,7 @@ class TestMatchesHandRolled:
         result = _fit_weak_iv()
         ts = float(result.theta_hat.theta_s)
         tw = float(result.theta_hat.theta_w)
-        se = np.asarray(result.standard_errors.array)
+        se = np.asarray(result.asymptotic().se())
         measure = result.measure
         grid = np.linspace(tw - 8 * se[1], tw + 8 * se[1], 9)
 
@@ -168,7 +168,7 @@ class TestMatchesHandRolled:
         result = _fit_weak_iv()
         ts = float(result.theta_hat.theta_s)
         tw = float(result.theta_hat.theta_w)
-        se = np.asarray(result.standard_errors.array)
+        se = np.asarray(result.asymptotic().se())
         grid = np.linspace(tw - 6 * se[1], tw + 6 * se[1], 5)
 
         def builder(g):
@@ -209,7 +209,7 @@ class TestWeakVsStrong:
         result = _fit_weak_iv()
         ts = float(result.theta_hat.theta_s)
         tw = float(result.theta_hat.theta_w)
-        se = np.asarray(result.standard_errors.array)
+        se = np.asarray(result.asymptotic().se())
         gw = np.linspace(tw - 10 * se[1], tw + 10 * se[1], 13)
         weak = profiled_k_confidence_set(
             lambda g: IVParams(theta_s=ts, theta_w=g),
@@ -231,7 +231,7 @@ class TestWeakVsStrong:
         result = _fit_strong_iv()
         ts = float(result.theta_hat.theta_s)
         tw = float(result.theta_hat.theta_w)
-        se = np.asarray(result.standard_errors.array)
+        se = np.asarray(result.asymptotic().se())
         gs = np.linspace(ts - 8 * se[0], ts + 8 * se[0], 13)
         strong = profiled_k_confidence_set(
             lambda g: IVParams(theta_s=g, theta_w=tw),

@@ -39,7 +39,7 @@ def test_twfe_recovers_c_within_2_cluster_robust_se():
     """
     result = twfe.run_twfe(seed=0)
     c_hat = float(result.theta_hat.c)
-    se = float(result.coef_table["std_error"].iloc[0])
+    se = float(result.asymptotic().coef_table["std_error"].iloc[0])
     assert se > 0.0 and jnp.isfinite(jnp.asarray(se))
     assert abs(c_hat - twfe.C_TRUE) < 2.0 * se, (
         f"c_hat={c_hat:.4f} is {abs(c_hat - twfe.C_TRUE):.4f} from truth "
@@ -51,11 +51,11 @@ def test_twfe_recovers_c_within_2_cluster_robust_se():
 def test_twfe_J_stat_finite_and_modest():
     """The over-identifying J-stat should be finite and chi^2_1-ish."""
     result = twfe.run_twfe(seed=0)
-    assert result.J_dof == 1  # M=2, K=1
-    assert jnp.isfinite(result.J_stat)
+    assert result.n_overid == 1  # M=2, K=1
+    assert jnp.isfinite(result.objective_value)
     # Correctly specified DGP; J ~ chi^2_1 in the limit. Allow generous
     # finite-sample slack so the test is not flaky on a single seed.
-    assert float(result.J_stat) < 30.0
+    assert float(result.objective_value) < 30.0
 
 
 @pytest.mark.slow
@@ -63,7 +63,7 @@ def test_twfe_converged():
     """The estimator should report a converged outer-loop status.
 
     A non-converged status would surface in
-    :attr:`EstimationResult.converged` as ``False`` and would mean the
+    :attr:`OptimizationResult.converged` as ``False`` and would mean the
     iterated weighting loop hit its iteration budget without stabilising
     ``c``.
     """

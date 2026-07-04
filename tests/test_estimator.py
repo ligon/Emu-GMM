@@ -12,7 +12,6 @@ the derivation.
 
 from __future__ import annotations
 
-import haliax as ha
 import jax
 import jax.numpy as jnp
 import pytest
@@ -28,7 +27,7 @@ from emu_gmm.examples.euler import (
 from emu_gmm.measures import SyntheticMeasure
 from emu_gmm.optimizer import optimistix_lm
 from emu_gmm.regularization import DiagonalTikhonov
-from emu_gmm.types import EstimationResult
+from emu_gmm.types import OptimizationResult
 from emu_gmm.weighting import ContinuouslyUpdated
 
 N_SIM = 5000
@@ -42,7 +41,7 @@ N_SIM = 5000
 class TestEulerSyntheticAcceptance:
     """The Phase 5 milestone: end-to-end multi-asset Euler estimation."""
 
-    def _run(self) -> EstimationResult:
+    def _run(self) -> OptimizationResult:
         sampler = euler_sampler_factory(N_SIM)
         measure = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
@@ -74,30 +73,30 @@ class TestEulerSyntheticAcceptance:
 
     def test_J_dof_is_one(self):
         r = self._run()
-        assert r.J_dof == 1  # M=3 assets - K=2 params = 1
+        assert r.n_overid == 1  # M=3 assets - K=2 params = 1
 
     def test_J_stat_finite_and_modest(self):
         r = self._run()
-        assert jnp.isfinite(r.J_stat)
+        assert jnp.isfinite(r.objective_value)
         # The DGP is correctly specified so J should be small. With
         # N_SIM=5000, expected value of J under the null is ~1 (chi-sq
         # with 1 dof). Allow up to ~10 for sampling noise.
-        assert r.J_stat < 30.0
+        assert r.objective_value < 30.0
 
     def test_J_pvalue_finite(self):
         r = self._run()
-        assert jnp.isfinite(r.J_pvalue)
-        assert 0.0 <= r.J_pvalue <= 1.0
+        p = r.asymptotic().J_pvalue
+        assert jnp.isfinite(p)
+        assert 0.0 <= p <= 1.0
 
     def test_labelled_outputs(self):
         r = self._run()
-        assert isinstance(r.Sigma_theta, ha.NamedArray)
-        assert {a.name for a in r.Sigma_theta.axes} == {
-            "parameters",
-            "parameters_dual",
-        }
-        assert isinstance(r.V_X, ha.NamedArray)
-        assert {a.name for a in r.V_X.axes} == {"moments", "moments_dual"}
+        # Sigma_theta / V_X moved off the result onto the inference law and
+        # are now plain numpy arrays (no haliax axes).
+        cov = r.asymptotic().cov()
+        assert cov.shape == (2, 2)  # K = 2 params (beta, gamma)
+        V_star = jnp.linalg.inv(jnp.asarray(r.weighting_matrix))
+        assert V_star.shape == (3, 3)  # M = 3 moments
 
     def test_label_context_populated(self):
         r = self._run()
@@ -109,14 +108,16 @@ class TestEulerSyntheticAcceptance:
     def test_to_pandas_works(self):
         r = self._run()
         d = r.to_pandas()
-        assert "Sigma_theta" in d
-        assert list(d["Sigma_theta"].index) == ["beta", "gamma"]
-        assert list(d["Sigma_theta"].columns) == ["beta", "gamma"]
-        assert list(d["V_X"].index) == ["m_0", "m_1", "m_2"]
+        # to_pandas now carries only the optimization readouts; the
+        # coefficient labelling moved to the inference law's coef_table.
+        assert set(d) == {"N_j", "moment_residual", "summary"}
+        coef = r.asymptotic().coef_table
+        assert list(coef.index) == ["beta", "gamma"]
+        assert list(d["moment_residual"].index) == ["m_0", "m_1", "m_2"]
 
     def test_sigma_theta_finite(self):
         r = self._run()
-        assert jnp.all(jnp.isfinite(r.Sigma_theta.array))
+        assert jnp.all(jnp.isfinite(r.asymptotic().cov()))
 
     def test_diagnostics_populated(self):
         r = self._run()
@@ -159,7 +160,7 @@ class TestEstimateDefaults:
             covariance=SyntheticCovariance(),
             theta_init=EulerParams(beta=0.9, gamma=1.0),
         )
-        assert isinstance(r, EstimationResult)
+        assert isinstance(r, OptimizationResult)
         assert r.converged
 
 
@@ -182,4 +183,8 @@ class TestMomentNamesOverride:
         )
         assert r.labels.moment_names == ("asset_low", "asset_mid", "asset_high")
         d = r.to_pandas()
-        assert list(d["V_X"].index) == ["asset_low", "asset_mid", "asset_high"]
+        assert list(d["moment_residual"].index) == [
+            "asset_low",
+            "asset_mid",
+            "asset_high",
+        ]

@@ -121,7 +121,7 @@ def test_point_estimate_matches_within_ols():
     res = _emu_fit(y_t, X_t, unit, IIDCovariance())
     beta_emu = np.array([float(res.theta_hat.b_x), float(res.theta_hat.b_z)])
     assert np.max(np.abs(beta_emu - beta_ref)) < 1e-9
-    assert float(res.J_stat) < 1e-18  # just-identified -> J identically 0
+    assert float(res.objective_value) < 1e-18  # just-identified -> J identically 0
 
 
 def test_iid_covariance_equals_hc0_sandwich():
@@ -129,7 +129,7 @@ def test_iid_covariance_equals_hc0_sandwich():
     _, u_ref, XtX = _within_ols(y_t, X_t)
     se_ref = _hc0_se(X_t, u_ref, XtX)
     res = _emu_fit(y_t, X_t, unit, IIDCovariance())
-    se_emu = np.asarray(res.standard_errors.array, dtype=float)
+    se_emu = np.asarray(res.asymptotic().se(), dtype=float)
     assert np.allclose(se_emu, se_ref, rtol=1e-8, atol=1e-12)
 
 
@@ -146,14 +146,14 @@ def test_clustered_covariance_equals_crve_sandwich():
             n_clusters=int(codes.max()) + 1,
         ),
     )
-    se_emu = np.asarray(res.standard_errors.array, dtype=float)
+    se_emu = np.asarray(res.asymptotic().se(), dtype=float)
     assert np.allclose(se_emu, se_ref, rtol=1e-8, atol=1e-12)
 
 
 def test_clustering_inflates_standard_errors():
     y_t, X_t, unit, codes = _fixture()
     se_iid = np.asarray(
-        _emu_fit(y_t, X_t, unit, IIDCovariance()).standard_errors.array, dtype=float
+        _emu_fit(y_t, X_t, unit, IIDCovariance()).asymptotic().se(), dtype=float
     )
     se_cl = np.asarray(
         _emu_fit(
@@ -164,7 +164,9 @@ def test_clustering_inflates_standard_errors():
                 cluster_ids=jnp.asarray(codes, dtype=jnp.float64),
                 n_clusters=int(codes.max()) + 1,
             ),
-        ).standard_errors.array,
+        )
+        .asymptotic()
+        .se(),
         dtype=float,
     )
     # AR(1) within-unit errors -> the panel-robust SE strictly exceeds HC0.

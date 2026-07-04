@@ -146,7 +146,7 @@ class TestResultPathNoRaise:
     def test_coef_table_no_raise_positional_labels(self, k):
         result, M, _, _, _ = _run_estimate(k, seed=30 + k)
         D = N * k + 1
-        tab = result.coef_table  # must NOT raise
+        tab = result.asymptotic().coef_table  # must NOT raise
         assert len(tab) == D
         assert list(tab.columns) == ["estimate", "std_error", "t_stat", "p_value"]
         # Positional tangent labels, NOT scalar field-names.
@@ -163,21 +163,27 @@ class TestResultPathNoRaise:
     def test_standard_errors_no_raise_and_sized_total_dimension(self, k):
         result, M, _, _, _ = _run_estimate(k, seed=40 + k)
         D = N * k + 1
-        se = result.standard_errors  # must NOT raise
-        assert int(se.array.shape[0]) == D
-        assert int(se.array.shape[0]) == result.Sigma_theta.array.shape[0]
+        law = result.asymptotic()
+        se = law.se()  # must NOT raise
+        assert int(se.shape[0]) == D
+        assert int(se.shape[0]) == law.cov().shape[0]
 
     def test_to_pandas_sigma_positional_labels(self, k):
         result, M, _, _, _ = _run_estimate(k, seed=50 + k)
         D = N * k + 1
-        out = result.to_pandas()  # must NOT raise
-        sigma = out["Sigma_theta"]
+        # The statistical surface moved to the law: Sigma_theta -> cov(), and
+        # the positional tangent labels ride on the law's coef_table index.
+        law = result.asymptotic()
+        sigma = law.cov()  # numpy (D, D); must NOT raise
         assert sigma.shape == (D, D)
-        assert list(sigma.index) == list(sigma.columns)
-        assert "Y[0,0]" in list(sigma.index)
-        coeffs = out["coefficients"]
-        assert len(coeffs) == D
-        assert not coeffs.index.isnull().any()
+        tab = law.coef_table
+        assert len(tab) == D
+        assert "Y[0,0]" in list(tab.index)
+        assert not tab.index.isnull().any()
+        # to_pandas still works and no longer exposes the moved statistical keys.
+        out = result.to_pandas()
+        assert "Sigma_theta" not in out
+        assert "coefficients" not in out
 
 
 class TestWarmStart:

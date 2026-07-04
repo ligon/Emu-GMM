@@ -190,8 +190,8 @@ def main():
     # emu-gmm.
     res_iid, res_cl = emu_panel_fit(y_t, X_t, unit)
     beta_emu = np.array([float(res_iid.theta_hat.b_x), float(res_iid.theta_hat.b_z)])
-    se_emu_iid = np.asarray(res_iid.standard_errors.array, dtype=float)
-    se_emu_cl = np.asarray(res_cl.standard_errors.array, dtype=float)
+    se_emu_iid = np.asarray(res_iid.asymptotic().se(), dtype=float)
+    se_emu_cl = np.asarray(res_cl.asymptotic().se(), dtype=float)
 
     names = ["b_x", "b_z"]
     print("Linear panel (within / fixed-effects) regression via emu-gmm")
@@ -202,7 +202,7 @@ def main():
             f"{nm:>6} {beta_ref[j]:>12.6f} {beta_emu[j]:>12.6f} "
             f"{abs(beta_ref[j] - beta_emu[j]):>10.2e}"
         )
-    print(f"\nJ stat (just-identified, should be ~0): {float(res_iid.J_stat):.2e}")
+    print(f"\nJ stat (just-identified, should be ~0): {float(res_iid.objective_value):.2e}")
     print(f"converged: {res_iid.converged}; iterations: {res_iid.iterations}")
 
     print("\nStandard errors")

@@ -1,0 +1,170 @@
+#+TITLE: OptimizationResult ⟂ EstimatorLaw — the estimation/inference split
+#+AUTHOR: emu-gmm
+#+OPTIONS: toc:2
+
+/Status: IMPLEMENTED 2026-07-03 on =claude/optimization-result-split= (stacked
+on the leaf-view branch). =estimate()= returns the leaner =OptimizationResult=;
+the statistical surface (=se= / =cov= / =coef_table= / functional SEs / the
+J-test p-values) lives on =AsymptoticLaw(result)= (=result.asymptotic()=), which
+assembles the ridge-correct #133 sandwich from the result's ingredients via the
+shared =emu_gmm._internal.asymptotic.asymptotic_covariance=. =record()= moved to
+=emu_gmm.studies.fit_record=. =EstimationResult= is retained as a deprecated
+back-compat alias. Golden-fidelity gate: =tests/test_result_law_fidelity.py=
+(bit-for-bit vs the pre-refactor outputs). Supersedes the
+=EstimationResult=-carries-everything surface./
+
+* The principle
+
+An estimator is two things wearing one coat: an *optimization* (find the
+argmin of a criterion, and characterise the objective near it) and an
+*inference* (turn that local characterisation into a statement about the
+sampling distribution of the estimator). The second step is not free — it
+requires *assumptions* (a CLT and that one is in the limit; or a resampling
+DGP; ...). The current =EstimationResult= conflates them: it reports
+=standard_errors=, =coef_table= (t / p), =J_pvalue=, and delta-method SEs —
+all of which are *interpretations under an assumption* — right next to the
+argmin.
+
+The split:
+
+- =OptimizationResult= — the solution to an optimization problem, and *only*
+  objects intrinsic to it: the argmin, the objective value there, the
+  gradient and the (Gauss--Newton) Hessian / Jacobian, the optimiser's trace,
+  and the numerical conditioning. *No statistical interpretation.* It does not
+  know the word "distribution".
+- =EstimatorLaw= — consumes an =OptimizationResult= and is *explicit about the
+  assumption it adds* to license a distributional reading. =AsymptoticLaw(result)=
+  is the strong-assumption grade (a CLT, exact limiting behaviour); its very
+  strength is what makes its queries simple. Weaker, more explicit grades
+  (bootstrap / repeated-sampling =EmpiricalLaw=) carry more machinery.
+
+*Membership rule.* A member lives on =OptimizationResult= iff computing it
+needs only the data, the criterion, and its local geometry — no sampling
+assumption. Everything else is an =EstimatorLaw= method that names its
+assumption.
+
+* =OptimizationResult= — the optimization surface
+
+A plain, *directly constructible* =@dataclasses.dataclass= (host-side; not a
+traced pytree — that role is =FitRecord='s). Directly constructible is a
+first-class requirement (owner, 2026-07-03): a test must be able to hand-build
+an *artificial* result (a chosen =gn_hessian= / =weighting_matrix= /
+=moment_jacobian=) and feed it to =AsymptoticLaw= to unit-test the inference
+assembly in isolation. So: sensible field order, no required
+compute-coupled objects beyond the matrices, a =replace=-friendly shape.
+
+| field              | meaning                                             | was            |
+|--------------------+-----------------------------------------------------+----------------|
+| =theta_hat=        | the minimiser (user parameter pytree)               | keep           |
+| =objective_value=  | Q(θ̂) = m̄'Λm̄ at the optimum                       | =J_stat=       |
+| =gradient=         | ∇Q(θ̂) — FOC residual at convergence                | /new/          |
+| =moment_jacobian=  | G = ∂m̄/∂θ at θ̂ (manifold =G_riem=)                | internal only  |
+| =gn_hessian=       | G'ΛG — Gauss--Newton curvature of the criterion     | =info_matrix=  |
+| =weighting_matrix= | Λ — the realised, frozen, ridged metric in m̄'Λm̄   | =V_X= (see R4) |
+| =n_overid=         | M − p_id — # overidentifying restrictions           | =J_dof=        |
+| =optimizer_info=   | iterations / convergence / step                     | keep           |
+| =diagnostics=      | Hessian conditioning κ, ridge τ (optimization only) | keep, trimmed  |
+| =manifold_spec=    | leaf geometry                                       | keep           |
+| =measure=,=covariance= | the criterion's definition (Law reads them)     | keep           |
+
+*Removed from the result* (now =AsymptoticLaw= methods): =Sigma_theta=,
+=standard_errors=, =coef_table=, =J_pvalue=, =J_pvalue_adjusted=,
+=functional_se=, =eigenvalue_se=, =gamma_se=, =gamma_covariance=, =record()=.
+
+=record()= moves to the studies layer as a free function
+=emu_gmm.studies.fit_record(result)= (it is the empirical-law bridge and is
+inherently statistical — it extracts an SE per rep). =OptimizationResult= keeps
+*zero* statistical methods.
+
+* =AsymptoticLaw= — the inference surface, assembled from ingredients
+
+=AsymptoticLaw(result)= (the =EstimatorLaw= constructor the owner asked for).
+It assembles the *ridge-correct sandwich* from the result's ingredients, so the
+inference logic lives here, not in =estimate=:
+
+- bread  B = =gn_hessian= = G'ΛG                    (from =moment_jacobian=, =weighting_matrix=)
+- meat   M = G'Λ Ŝ ΛG,  Ŝ = raw =covariance.covariance(measure, θ̂)= (unridged; #138 meat)
+- =cov()= = B⁻¹ M B⁻¹  (gauge-aware =pinv_eigvalrule= bread; collapses to B⁻¹ at
+  efficient weighting + non-binding ridge)
+- =se()=, =coef_table=, =functional_se= / leaf SEs, =j_test()= / =J_pvalue= +
+  =J_pvalue_adjusted= (the χ² / Welch--Satterthwaite reading of =objective_value=),
+  and it owns the #138 indefinite-meat NaN-SE warning.
+
+** Why the Hessian alone is not enough (the ridge)
+
+With a binding ridge (or any inefficient weighting) Λ = (V+τD)⁻¹ ≠ Ŝ⁻¹, so
+M ≠ B and Σ is a genuine sandwich B⁻¹ M B⁻¹ — not B⁻¹ (#133). The Law therefore
+needs (i) the *realised, frozen* =weighting_matrix= Λ for the bread (anchor-once:
+a re-derived ridge could pick a different τ), and (ii) the raw meat Ŝ = V(θ̂),
+which it recomputes from =result.covariance= + =result.measure= + θ̂. Both are on
+the result, so no extra data threads through; the sandwich shortcut is only
+valid at efficient weighting with a non-binding ridge.
+
+* The shared routine
+
+The sandwich (whiten, =pinv_eigvalrule= bread, gauge-nullspace handling, #138
+meat detection) is extracted *byte-for-byte* into a pure low-level function
+=emu_gmm._internal.asymptotic.asymptotic_covariance(G, weighting, meat, manifold_spec)
+-> Σ= that =types.py= can import without a cycle. Both =AsymptoticLaw.cov()= and
+the studies =fit_record= call it — one implementation, no =types → law= import.
+
+* Construction & access
+
+- =estimate()= returns the leaner =OptimizationResult=.
+- =AsymptoticLaw(result)= is the inference constructor; =result.asymptotic()= is a
+  convenience alias.
+- Artificial results: =OptimizationResult(theta_hat=..., moment_jacobian=G,
+  weighting_matrix=Lambda, ...)= builds directly (defaults for optimizer_info /
+  diagnostics), so =AsymptoticLaw(OptimizationResult(...))= is unit-testable with
+  known linear algebra.
+
+* Migration
+
+Internal consumers repoint by the membership rule:
+- curvature users → the result (=identification_strength= builds G'ΛG Schur
+  complements: reads =gn_hessian= directly, needs no V*);
+- distribution users → the Law (=k_statistic= V-override, =cluster_bootstrap=,
+  =wild_bootstrap=, =j_test=, =functional_se=, =persistence=, =studies=).
+=EstimationResult= → =OptimizationResult= rename across src + tests. Docs:
+=design.org= §"downstream contract" + =CLAUDE.md= repointed — SEs / p-values come
+from =result.asymptotic()=, not =result=.
+
+* Red-team checklist (adversarial review must clear these)
+
+- R1 layering :: no =types → law= import; =fit_record= in studies; shared
+  =_internal.asymptotic=.
+- R2 MC hot path :: =replicate= per-rep SE still cached, no retrace/perf
+  regression.
+- R3 fidelity :: golden test — new =law.cov()= == pre-refactor =Sigma_theta= on
+  the scalar + manifold fixtures, bit-for-bit, *before* deleting the old path.
+- R4 =weighting_matrix= = Λ, not V* :: curvature consumers use =gn_hessian=;
+  inference consumers get V* = Λ⁻¹ from the Law. No consumer left reading a
+  stale =V_X=.
+- R5 =sigma_meat_indefinite= is a Law event :: the flag / warning emit where SE
+  is computed (Law / fit_record), not from the optimiser; =diagnostics= keeps
+  only optimization conditioning.
+- R6 persistence :: a materialised (assembled-Σ) =AsymptoticLaw= still persists;
+  reload path unchanged (=from_moments=).
+- R7 ridge correctness :: sandwich (not B⁻¹) under a binding ridge; a golden
+  ridge fixture proves it.
+- R8 gauge :: the gauge-aware pinv bread lives with the *inversion* in the Law.
+- R9 constructibility :: an artificial =OptimizationResult= + =AsymptoticLaw= gives
+  the hand-computed sandwich on a tiny known example.
+- R10 =objective_value= == old =J_stat= numerically (no explicit N; commitment 9).
+
+* Folded in: #188 — J p-values require efficient weighting
+
+The over-identification statistic $J = m'\Lambda m$ has its $\chi^2_{n_{overid}}$
+limit only under *efficient* weighting $\Lambda = (V^\star)^{-1}$ (the
+=ContinuouslyUpdated= / iterated default). Under a non-efficient weight
+(=Identity=, or a mis-scaled =Fixed=) $J$ is a weighted sum of chi-squares whose
+mean need not be $n_{overid}$, so neither the nominal nor the ridge-adjusted
+p-value is calibrated. Each =WeightingStrategy= now advertises an
+=efficient_weighting= flag (default =True=; =Identity= sets =False=), and
+=AsymptoticLaw.J_pvalue= / =.J_pvalue_adjusted= return =nan= (with a
+once-per-instance =UserWarning=) when it is =False=. Result-backed only; a
+moments-backed (reloaded) law inherits the already-guarded persisted value. This
+closes #188. Guard tests: =tests/test_law.py::TestInefficientWeightingJGuard=.
+The R7 golden ridge fixture landed as
+=tests/test_result_law_fidelity.py::TestBindingRidgeFidelity= (the reassembled
+adjusted p-value drift-locked at =0.8997= vs the nominal =0.9968=).

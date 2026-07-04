@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import haliax as ha
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 import pandas as pd
 import pytest
 from emu_gmm import types as t
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import labels as labels_mod
+from emu_gmm.studies import fit_record
 
 
 @jdc.pytree_dataclass
@@ -83,19 +84,31 @@ class TestProtocols:
 # ---------------------------------------------------------------------------
 
 
-def _make_result() -> t.EstimationResult:
-    """Build a synthetic EstimationResult for use across tests."""
-    Params = axes_mod.params_axis(2)
-    ParamsDual = axes_mod.params_dual_axis(2)
-    Moments = axes_mod.moments_axis(3)
-    MomentsDual = axes_mod.moments_dual_axis(3)
+def _make_result() -> t.OptimizationResult:
+    """Build a synthetic OptimizationResult for use across tests.
 
-    sigma = labels_mod.label_matrix(
-        jnp.array([[0.01, 0.001], [0.001, 0.02]]), Params, ParamsDual
-    )
-    v_x = labels_mod.label_matrix(jnp.eye(3) * 0.1, Moments, MomentsDual)
+    The statistical surface (``cov`` / ``se`` / ``coef_table`` / J p-values)
+    now lives on ``result.asymptotic()`` (an ``AsymptoticLaw``), which
+    ASSEMBLES ``Sigma_theta`` from the optimization ingredients ``(G, Lambda,
+    V)`` via the #133 sandwich ``B^+ M B^+`` (``B = G'LG``, ``M = G'LVLG``).
+    We engineer those three so the assembled 2x2 covariance is exactly the
+    target ``[[0.01, 0.001], [0.001, 0.02]]`` the tests assert on:
+
+    * ``G`` selects the first two of three moments, so the third moment drops
+      out of both bread and meat;
+    * ``Lambda = 10 * I`` (so ``V_X = V* = Lambda^{-1} = 0.1 * I``); the
+      Lambda scaling cancels in ``B^+ M B^+``, leaving ``Sigma`` equal to the
+      top-left 2x2 block of the raw meat ``V`` (``moment_covariance``).
+    """
+    Moments = axes_mod.moments_axis(3)
     n_j = labels_mod.label_vector(jnp.array([100.0, 100.0, 100.0]), Moments)
     m_res = labels_mod.label_vector(jnp.array([1e-4, -2e-4, 5e-5]), Moments)
+
+    moment_jacobian = jnp.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+    weighting_matrix = 10.0 * jnp.eye(3)
+    moment_covariance = jnp.array(
+        [[0.01, 0.001, 0.0], [0.001, 0.02, 0.0], [0.0, 0.0, 1.0]]
+    )
 
     opt_info = t.OptimizerInfo(
         steps=12, status="converged", final_objective=1.3, backend="stub"
@@ -119,14 +132,13 @@ def _make_result() -> t.EstimationResult:
         obs_name="hh",
     )
 
-    return t.EstimationResult(
+    return t.OptimizationResult(
         theta_hat=_EulerParams(beta=0.95, gamma=2.0),
-        Sigma_theta=sigma,
-        V_X=v_x,
-        J_stat=jnp.asarray(1.3),
-        J_dof=1,
-        J_pvalue=jnp.asarray(0.25),
-        J_pvalue_adjusted=jnp.asarray(0.25),
+        objective_value=jnp.asarray(1.3),
+        moment_jacobian=moment_jacobian,
+        weighting_matrix=weighting_matrix,
+        moment_covariance=moment_covariance,
+        n_overid=1,
         converged=True,
         iterations=12,
         theta_init=_EulerParams(beta=0.9, gamma=1.5),
@@ -170,11 +182,14 @@ class TestDataclassConstruction:
 
     def test_estimation_result(self):
         r = _make_result()
-        assert isinstance(r, t.EstimationResult)
+        assert isinstance(r, t.OptimizationResult)
         assert r.theta_hat.beta == pytest.approx(0.95)
         assert r.converged is True
-        assert isinstance(r.Sigma_theta, ha.NamedArray)
-        assert isinstance(r.V_X, ha.NamedArray)
+        # The statistical surface moved to result.asymptotic() (a plain-numpy
+        # AsymptoticLaw); the covariance is assembled there, not stored.
+        cov = r.asymptotic().cov()
+        assert isinstance(cov, np.ndarray)
+        assert cov.shape == (2, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -186,30 +201,32 @@ class TestToPandas:
     def test_returns_expected_keys(self):
         r = _make_result()
         d = r.to_pandas()
+        # The statistical keys (coefficients / Sigma_theta / V_X) moved off
+        # to_pandas onto result.asymptotic(); only the optimization readout
+        # remains here.
         assert set(d.keys()) == {
-            "coefficients",
-            "Sigma_theta",
-            "V_X",
             "N_j",
             "moment_residual",
             "summary",
         }
 
-    def test_sigma_theta_dataframe(self):
+    def test_sigma_theta_not_in_to_pandas_but_on_law(self):
         r = _make_result()
-        sigma = r.to_pandas()["Sigma_theta"]
-        assert isinstance(sigma, pd.DataFrame)
-        assert list(sigma.index) == ["beta", "gamma"]
-        assert list(sigma.columns) == ["beta", "gamma"]
-        assert sigma.loc["beta", "beta"] == pytest.approx(0.01)
-        assert sigma.loc["beta", "gamma"] == pytest.approx(0.001)
+        # Sigma_theta is gone from to_pandas; it lives on the law as plain
+        # numpy (no named axes), assembled from the #133 sandwich.
+        assert "Sigma_theta" not in r.to_pandas()
+        cov = np.asarray(r.asymptotic().cov())
+        assert cov.shape == (2, 2)
+        assert cov[0, 0] == pytest.approx(0.01)
+        assert cov[0, 1] == pytest.approx(0.001)
 
-    def test_v_x_dataframe(self):
+    def test_v_x_not_in_to_pandas_but_from_weighting(self):
         r = _make_result()
-        v = r.to_pandas()["V_X"]
-        assert isinstance(v, pd.DataFrame)
-        assert list(v.index) == ["euler_a", "euler_b", "euler_c"]
-        assert v.loc["euler_a", "euler_a"] == pytest.approx(0.1)
+        # V_X (the regularised moment covariance V*) is no longer materialised
+        # in to_pandas; recover it as inv(weighting_matrix).
+        assert "V_X" not in r.to_pandas()
+        v_x = np.linalg.inv(np.asarray(r.weighting_matrix))
+        assert v_x[0, 0] == pytest.approx(0.1)
 
     def test_n_j_series(self):
         r = _make_result()
@@ -229,11 +246,12 @@ class TestToPandas:
         r = _make_result()
         s = r.to_pandas()["summary"]
         assert isinstance(s, pd.Series)
-        assert "J_stat" in s.index
-        assert "J_dof" in s.index
+        # J_stat -> objective_value, J_dof -> n_overid in the new summary.
+        assert "objective_value" in s.index
+        assert "n_overid" in s.index
         assert "tau_realised" in s.index
         assert "kappa_V" in s.index
-        assert s["J_stat"] == pytest.approx(1.3)
+        assert s["objective_value"] == pytest.approx(1.3)
         assert s["converged"]
 
 
@@ -243,36 +261,35 @@ class TestToPandas:
 
 
 class TestStandardErrorsAndCoefTable:
-    def test_standard_errors_is_named_array(self):
+    def test_standard_errors_is_numpy_on_param_axis(self):
         r = _make_result()
-        se = r.standard_errors
-        assert isinstance(se, ha.NamedArray)
-        assert se.axes[0].name == "parameters"
-        assert se.axes[0].size == 2
+        se = r.asymptotic().se()
+        # The law returns plain numpy (no named axes) on the parameter axis.
+        assert isinstance(se, np.ndarray)
+        assert se.shape == (2,)
 
     def test_standard_errors_match_sqrt_diag(self):
-        """``standard_errors`` is exactly ``sqrt(diag(Sigma_theta))``.
+        """``asymptotic().se()`` is exactly ``sqrt(diag(cov()))``.
 
-        This is the property users currently hand-roll
-        (``jnp.sqrt(jnp.diag(Sigma_theta.values))``); the API exposes
-        it directly.
+        This is the property users hand-roll; the law exposes it directly.
         """
         r = _make_result()
-        sigma_arr = jnp.asarray(r.Sigma_theta.array)
+        law = r.asymptotic()
+        sigma_arr = jnp.asarray(law.cov())
         expected = jnp.sqrt(jnp.diag(sigma_arr))
-        actual = jnp.asarray(r.standard_errors.array)
+        actual = jnp.asarray(law.se())
         assert jnp.allclose(actual, expected)
 
-    def test_standard_errors_cached(self):
-        """Repeated access returns the same object (functools cache)."""
-        r = _make_result()
-        a = r.standard_errors
-        b = r.standard_errors
+    def test_cov_cached_within_a_law(self):
+        """Repeated ``cov()`` on one law returns the cached array (identity)."""
+        law = _make_result().asymptotic()
+        a = law.cov()
+        b = law.cov()
         assert a is b
 
     def test_coef_table_is_dataframe_with_four_columns(self):
         r = _make_result()
-        tbl = r.coef_table
+        tbl = r.asymptotic().coef_table
         assert isinstance(tbl, pd.DataFrame)
         assert list(tbl.columns) == ["estimate", "std_error", "t_stat", "p_value"]
         # Index is the param names.
@@ -284,13 +301,13 @@ class TestStandardErrorsAndCoefTable:
         should be finite (no NaN).
         """
         r = _make_result()
-        tbl = r.coef_table
+        tbl = r.asymptotic().coef_table
         assert tbl.notna().all().all()
 
     def test_coef_table_estimate_column_matches_theta_hat(self):
         """``estimate`` column equals the flattened ``theta_hat``."""
         r = _make_result()
-        tbl = r.coef_table
+        tbl = r.asymptotic().coef_table
         # _EulerParams has beta=0.95, gamma=2.0 in PyTree-traversal order
         # (alphabetical for jdc.pytree_dataclass-on-jax-tree-utils?). Use
         # the param-name index to read deterministically.
@@ -299,15 +316,16 @@ class TestStandardErrorsAndCoefTable:
 
     def test_coef_table_std_error_matches_sqrt_diag(self):
         r = _make_result()
-        tbl = r.coef_table
-        sigma_arr = jnp.asarray(r.Sigma_theta.array)
+        law = r.asymptotic()
+        tbl = law.coef_table
+        sigma_arr = jnp.asarray(law.cov())
         expected = jnp.sqrt(jnp.diag(sigma_arr))
         assert tbl["std_error"].to_numpy()[0] == pytest.approx(float(expected[0]))
         assert tbl["std_error"].to_numpy()[1] == pytest.approx(float(expected[1]))
 
     def test_coef_table_t_stat_is_estimate_over_std_error(self):
         r = _make_result()
-        tbl = r.coef_table
+        tbl = r.asymptotic().coef_table
         ratio = tbl["estimate"] / tbl["std_error"]
         assert tbl["t_stat"].to_numpy()[0] == pytest.approx(ratio.to_numpy()[0])
         assert tbl["t_stat"].to_numpy()[1] == pytest.approx(ratio.to_numpy()[1])
@@ -317,27 +335,22 @@ class TestStandardErrorsAndCoefTable:
         import scipy.stats
 
         r = _make_result()
-        tbl = r.coef_table
+        tbl = r.asymptotic().coef_table
         for name in ("beta", "gamma"):
             t_val = float(tbl.loc[name, "t_stat"])
             expected = 2.0 * scipy.stats.norm.sf(abs(t_val))
             assert float(tbl.loc[name, "p_value"]) == pytest.approx(expected)
 
-    def test_to_pandas_exposes_coef_table_as_coefficients(self):
-        """``to_pandas()['coefficients']`` returns the coefficient
-        table; this is the round-trip the acceptance criterion calls
-        out.
-        """
+    def test_coef_table_not_in_to_pandas_but_on_law(self):
+        """The coefficient table moved off ``to_pandas()`` onto the law."""
         r = _make_result()
         d = r.to_pandas()
-        assert "coefficients" in d
-        coeffs = d["coefficients"]
+        assert "coefficients" not in d
+        coeffs = r.asymptotic().coef_table
         assert isinstance(coeffs, pd.DataFrame)
         assert list(coeffs.columns) == ["estimate", "std_error", "t_stat", "p_value"]
         # All four columns populated (no NaN under the stub fixture).
         assert coeffs.notna().all().all()
-        # Same object as the cached_property (round-trip identity).
-        assert coeffs is r.coef_table
 
 
 # ---------------------------------------------------------------------------
@@ -418,16 +431,15 @@ class TestPickleConvenience:
         r = _make_result()
         path = tmp_path / "result.pkl"
         r.to_pickle(path)
-        r2 = t.EstimationResult.from_pickle(path)
-        assert isinstance(r2, t.EstimationResult)
+        r2 = t.OptimizationResult.from_pickle(path)
+        assert isinstance(r2, t.OptimizationResult)
         assert float(r2.theta_hat.beta) == float(r.theta_hat.beta)
         assert float(r2.theta_hat.gamma) == float(r.theta_hat.gamma)
-        assert float(r2.J_stat) == float(r.J_stat)
-        assert r2.J_dof == r.J_dof
-        import numpy as np
+        assert float(r2.objective_value) == float(r.objective_value)
+        assert r2.n_overid == r.n_overid
 
         np.testing.assert_array_equal(
-            np.asarray(r2.Sigma_theta.array), np.asarray(r.Sigma_theta.array)
+            np.asarray(r2.asymptotic().cov()), np.asarray(r.asymptotic().cov())
         )
         assert r2.labels.param_names == r.labels.param_names
 
@@ -439,8 +451,8 @@ class TestPickleConvenience:
         path = tmp_path / "notaresult.pkl"
         with open(path, "wb") as fh:
             pickle.dump({"theta": [1.0, 2.0]}, fh)
-        with pytest.raises(TypeError, match="not an EstimationResult"):
-            t.EstimationResult.from_pickle(path)
+        with pytest.raises(TypeError, match="not an OptimizationResult"):
+            t.OptimizationResult.from_pickle(path)
 
     def test_main_namespace_warns_at_save_time(self, tmp_path):
         """A __main__-namespaced parameter class triggers the portability
@@ -467,7 +479,7 @@ class TestPickleConvenience:
             with pytest.warns(UserWarning, match="__main__"):
                 r.to_pickle(path)
             # And it still loads in THIS process (shim present).
-            r2 = t.EstimationResult.from_pickle(path)
+            r2 = t.OptimizationResult.from_pickle(path)
             assert float(r2.theta_hat.a) == 1.0
         finally:
             _RelabelableParams.__module__ = orig_module
@@ -491,18 +503,16 @@ class TestPickleConvenience:
 
 class TestFitRecord:
     def test_record_matches_result_fields(self):
-        import numpy as np
-
         r = _make_result()
-        rec = r.record()
+        rec = fit_record(r)
         assert isinstance(rec, t.FitRecord)
         np.testing.assert_allclose(np.asarray(rec.theta_flat), np.array([0.95, 2.0]))
         np.testing.assert_array_equal(
-            np.asarray(rec.se), np.asarray(r.standard_errors.array)
+            np.asarray(rec.se), np.asarray(r.asymptotic().se())
         )
-        assert float(rec.J_stat) == float(r.J_stat)
-        assert float(rec.J_pvalue) == float(r.J_pvalue)
-        assert rec.J_dof == r.J_dof
+        assert float(rec.J_stat) == float(r.objective_value)
+        assert float(rec.J_pvalue) == float(r.asymptotic().J_pvalue)
+        assert rec.J_dof == r.n_overid
         assert float(rec.converged) == 1.0
         assert float(rec.binding_ridge) == 0.0
         assert float(rec.sigma_meat_indefinite) == 0.0
@@ -521,11 +531,13 @@ class TestFitRecord:
                 base.diagnostics, sigma_meat_indefinite=jnp.asarray(True)
             ),
         )
-        rec = r.record()
+        rec = fit_record(r)
         assert float(rec.sigma_meat_indefinite) == 1.0
         assert rec.sigma_meat_indefinite.dtype == jnp.float64
         # Stackable and mean()-able alongside an un-flagged fit.
-        stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), rec, base.record())
+        stacked = jax.tree_util.tree_map(
+            lambda *xs: jnp.stack(xs), rec, fit_record(base)
+        )
         assert stacked.sigma_meat_indefinite.shape == (2,)
         assert float(stacked.sigma_meat_indefinite.mean()) == 0.5
 
@@ -533,7 +545,7 @@ class TestFitRecord:
         """The canonical batching gesture: tree_map(jnp.stack, *records)
         gives every traced field a leading replication axis while the
         static fields (J_dof, param_names) ride the shared treedef."""
-        recs = [_make_result().record() for _ in range(3)]
+        recs = [fit_record(_make_result()) for _ in range(3)]
         stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *recs)
         assert stacked.theta_flat.shape == (3, 2)
         assert stacked.se.shape == (3, 2)
@@ -568,15 +580,20 @@ class TestFitRecord:
             phi=jnp.asarray(0.7),
         )
         D = 7  # 3*2 ambient + 1 scalar
-        Params = axes_mod.params_axis(D)
-        ParamsDual = axes_mod.params_dual_axis(D)
-        sigma = labels_mod_.label_matrix(jnp.eye(D) * 0.01, Params, ParamsDual)
+        # Optimization ingredients sized to the ambient tangent axis (M = D):
+        # G = I_D, Lambda = I_D, V = 0.01 I_D, so the law's sandwich yields a
+        # (D, D) covariance (gauge nullspace of PSDFixedRank(3, 2) pinned out).
+        G = jnp.eye(D)
+        weighting_matrix = jnp.eye(D)
+        moment_covariance = jnp.eye(D) * 0.01
         base = _make_result()
         r = dataclasses.replace(
             base,
             theta_hat=theta,
             theta_init=theta,
-            Sigma_theta=sigma,
+            moment_jacobian=G,
+            weighting_matrix=weighting_matrix,
+            moment_covariance=moment_covariance,
             labels=labels_mod_.LabelContext(
                 param_names=("Y", "phi"),
                 moment_names=base.labels.moment_names,
@@ -584,9 +601,7 @@ class TestFitRecord:
             ),
             manifold_spec=manifold_spec_from_params(theta),
         )
-        # Invalidate the cached property from the template result.
-        r.__dict__.pop("standard_errors", None)
-        rec = r.record()
+        rec = fit_record(r)
         assert rec.theta_flat.shape == (D,)
         assert rec.se.shape == (D,)
         assert len(rec.param_names) == D

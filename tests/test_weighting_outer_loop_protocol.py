@@ -252,5 +252,7 @@ class TestThirdPartyOuterLoopDriver:
         assert float(r_third.theta_hat.mu) == pytest.approx(
             float(r_builtin.theta_hat.mu), abs=1e-9
         )
-        # Same J-stat too.
-        assert float(r_third.J_stat) == pytest.approx(float(r_builtin.J_stat), abs=1e-9)
+        # Same objective value too.
+        assert float(r_third.objective_value) == pytest.approx(
+            float(r_builtin.objective_value), abs=1e-9
+        )

@@ -468,10 +468,10 @@ class TestAsymptoticGrade:
     def test_mean_cov_se_identity(self, clean_scalar_result):
         law = AsymptoticLaw(clean_scalar_result)
         np.testing.assert_allclose(
-            law.cov(), np.asarray(clean_scalar_result.Sigma_theta.array)
+            law.cov(), np.asarray(clean_scalar_result.asymptotic().cov())
         )
         np.testing.assert_allclose(
-            law.se(), np.asarray(clean_scalar_result.standard_errors.array)
+            law.se(), np.asarray(clean_scalar_result.asymptotic().se())
         )
 
     def test_quantile_is_gaussian_marginal(self, clean_scalar_result):
@@ -492,8 +492,70 @@ class TestAsymptoticGrade:
         assert draws.shape == (50, len(law.param_names))
 
     def test_wraps_only_estimation_result(self):
-        with pytest.raises(TypeError, match="EstimationResult"):
+        with pytest.raises(TypeError, match="OptimizationResult"):
             AsymptoticLaw(object())
+
+
+# ---------------------------------------------------------------------------
+# §2.4b --- the J-test precondition guard (#188): a non-efficient weighting
+# has no chi^2_{n_overid} limit, so the law must refuse the p-value (nan + warn)
+# rather than report a meaningless number.
+# ---------------------------------------------------------------------------
+class TestInefficientWeightingJGuard:
+    @pytest.fixture(scope="class")
+    def identity_result(self):
+        """The same clean M=2, K=1 fit but under a non-efficient Identity weight."""
+        from emu_gmm import Identity
+
+        measure = _poison_measure(jax.random.PRNGKey(1), 0.0)
+        return estimate(
+            _loc_model,
+            measure,
+            covariance=_CleanCov(),
+            parameters=_theta0(),
+            weighting=Identity(),
+        )
+
+    def test_identity_weighting_advertises_inefficient(self, identity_result):
+        assert identity_result.weighting.efficient_weighting is False
+
+    def test_J_pvalue_is_nan_and_warns(self, identity_result):
+        law = AsymptoticLaw(identity_result)
+        with pytest.warns(UserWarning, match="non-efficient weighting"):
+            p = law.J_pvalue
+        assert np.isnan(p)
+
+    def test_J_pvalue_adjusted_is_nan(self, identity_result):
+        law = AsymptoticLaw(identity_result)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert np.isnan(law.J_pvalue_adjusted)
+
+    def test_j_test_bundles_nan(self, identity_result):
+        law = AsymptoticLaw(identity_result)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            jt = law.j_test()
+        assert np.isnan(jt.J_pvalue) and np.isnan(jt.J_pvalue_adjusted)
+        # the statistic and dof are still reported; only the p-value refuses.
+        assert np.isfinite(jt.J_stat) and jt.n_overid == 1
+
+    def test_warning_is_once_per_instance(self, identity_result):
+        law = AsymptoticLaw(identity_result)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _ = law.J_pvalue
+            _ = law.J_pvalue  # second read: already warned, stays silent
+            _ = law.J_pvalue_adjusted
+        j_warnings = [w for w in caught if "non-efficient weighting" in str(w.message)]
+        assert len(j_warnings) == 1
+
+    def test_efficient_weighting_pvalue_is_finite(self, clean_scalar_result):
+        """The default (ContinuouslyUpdated) fit reports a finite p-value."""
+        assert clean_scalar_result.weighting.efficient_weighting is True
+        law = AsymptoticLaw(clean_scalar_result)
+        p = law.J_pvalue
+        assert np.isfinite(p) and 0.0 <= p <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +655,9 @@ class TestGaugeAwareCodomain:
         ev = law.eigenvalue_se()
         assert ev.shape == (_K,)
         assert np.all(np.isfinite(ev)) and np.all(ev > 0.0)
-        np.testing.assert_allclose(ev, np.asarray(psd_result.eigenvalue_se()))
+        np.testing.assert_allclose(
+            ev, np.asarray(psd_result.asymptotic().eigenvalue_se())
+        )
 
     def test_asymptotic_gamma_se_shape(self, psd_result):
         law = AsymptoticLaw(psd_result)
@@ -669,7 +733,9 @@ class TestLeafView:
         law = AsymptoticLaw(psd_result)
         ev = law.leaf("Y").se("eigenvalues")
         assert ev.shape == (_K,)
-        np.testing.assert_allclose(ev, np.asarray(psd_result.eigenvalue_se()))
+        np.testing.assert_allclose(
+            ev, np.asarray(psd_result.asymptotic().eigenvalue_se())
+        )
         np.testing.assert_allclose(ev, law.se(eigenvalue_functional(_K)))
 
     def test_leaf_gamma_se_matches_functional(self, psd_result):

@@ -20,7 +20,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 from emu_gmm import types as t
-from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal.labels import tangent_basis_names
 from emu_gmm._internal.params import manifold_spec_from_params
@@ -34,74 +33,29 @@ class _EulerParams:
     gamma: float
 
 
-class _StubMeasure:
-    def expectation(self, psi, theta):
-        return jnp.zeros(2)
-
-    def jacobian(self, psi, theta):
-        return jnp.zeros((2, 2))
-
-
-class _StubCovariance:
-    def covariance(self, psi, theta, measure):
-        return jnp.eye(2)
-
-
-class _StubWeighting:
-    def whitening_residual(self, m, V, theta):
-        return m
-
-
-class _StubRegularization:
-    def apply(self, V):
-        return V, 0.0
-
-
-def _make_scalar_result(manifold_spec=None) -> t.EstimationResult:
-    Params = axes_mod.params_axis(2)
-    ParamsDual = axes_mod.params_dual_axis(2)
-    Moments = axes_mod.moments_axis(3)
-    MomentsDual = axes_mod.moments_dual_axis(3)
-    sigma = labels_mod.label_matrix(
-        jnp.array([[0.01, 0.001], [0.001, 0.02]]), Params, ParamsDual
-    )
-    v_x = labels_mod.label_matrix(jnp.eye(3) * 0.1, Moments, MomentsDual)
-    n_j = labels_mod.label_vector(jnp.array([100.0, 100.0, 100.0]), Moments)
-    m_res = labels_mod.label_vector(jnp.array([1e-4, -2e-4, 5e-5]), Moments)
-    opt_info = t.OptimizerInfo(
-        steps=12, status="converged", final_objective=1.3, backend="stub"
-    )
-    diagnostics = t.Diagnostics(
-        tau_realised=jnp.asarray(0.001),
-        kappa_V=jnp.asarray(1e3),
-        binding_ridge=jnp.asarray(False),
-        cholesky_pivot_min=jnp.asarray(0.05),
-        final_objective=jnp.asarray(1.3),
-        final_gradient_norm=jnp.asarray(1e-9),
-        N_j=n_j,
-        moment_residual=m_res,
-        optimizer_info=opt_info,
-    )
+def _make_scalar_result(manifold_spec=None) -> t.OptimizationResult:
+    # Post-split, Sigma_theta is ASSEMBLED by the law from the optimization
+    # ingredients (moment Jacobian G, weighting Lambda, raw meat V). A minimal
+    # but consistent (M=3, D=2) set makes coef_table / se / cov assemble without
+    # error; these v1 non-regression checks are about the field-name LABELS, not
+    # the numeric Sigma values.
+    G = jnp.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])  # (3, 2), full column rank
+    Lam = jnp.eye(3)  # weighting matrix Lambda
+    V = jnp.eye(3)  # raw moment covariance (meat)
     lc = labels_mod.LabelContext(
         param_names=("beta", "gamma"),
         moment_names=("euler_a", "euler_b", "euler_c"),
     )
-    return t.EstimationResult(
+    return t.OptimizationResult(
         theta_hat=_EulerParams(beta=0.95, gamma=2.0),
-        Sigma_theta=sigma,
-        V_X=v_x,
-        J_stat=jnp.asarray(1.3),
-        J_dof=1,
-        J_pvalue=jnp.asarray(0.25),
-        J_pvalue_adjusted=jnp.asarray(0.25),
+        moment_jacobian=G,
+        weighting_matrix=Lam,
+        moment_covariance=V,
+        objective_value=jnp.asarray(1.3),
+        n_overid=1,
         converged=True,
         iterations=12,
         theta_init=_EulerParams(beta=0.9, gamma=1.5),
-        measure=_StubMeasure(),
-        covariance=_StubCovariance(),
-        weighting=_StubWeighting(),
-        regularization=_StubRegularization(),
-        diagnostics=diagnostics,
         labels=lc,
         manifold_spec=manifold_spec,
     )
@@ -110,15 +64,17 @@ def _make_scalar_result(manifold_spec=None) -> t.EstimationResult:
 class TestV1ManifoldSpecNone:
     def test_coef_table_index_is_field_names(self):
         r = _make_scalar_result(manifold_spec=None)
-        tab = r.coef_table
+        tab = r.asymptotic().coef_table
         assert list(tab.index) == ["beta", "gamma"]
         assert list(tab["estimate"].to_numpy()) == [0.95, 2.0]
 
     def test_to_pandas_sigma_index_field_names(self):
         r = _make_scalar_result(manifold_spec=None)
-        sigma = r.to_pandas()["Sigma_theta"]
-        assert list(sigma.index) == ["beta", "gamma"]
-        assert list(sigma.columns) == ["beta", "gamma"]
+        law = r.asymptotic()
+        # Sigma_theta moved to the law as a plain (D, D) numpy array; the v1
+        # field-name labels now ride on the law's coef_table index.
+        assert law.cov().shape == (2, 2)
+        assert list(law.coef_table.index) == ["beta", "gamma"]
 
     def test_components_returns_scalar_tuple_field_order(self):
         r = _make_scalar_result(manifold_spec=None)
@@ -132,8 +88,8 @@ class TestV1ManifoldSpecNone:
 
     def test_standard_errors_unchanged(self):
         r = _make_scalar_result(manifold_spec=None)
-        se = r.standard_errors
-        assert int(se.array.shape[0]) == 2
+        se = r.asymptotic().se()
+        assert int(se.shape[0]) == 2
 
 
 class TestV1AllScalarSpec:
@@ -155,7 +111,7 @@ class TestV1AllScalarSpec:
         assert all(ls.ambient_shape == () for ls in spec.leaf_specs)
         r = _make_scalar_result(manifold_spec=spec)
         # all-scalar spec -> _is_non_scalar_spec False -> field-name index
-        assert list(r.coef_table.index) == ["beta", "gamma"]
+        assert list(r.asymptotic().coef_table.index) == ["beta", "gamma"]
 
 
 class TestTangentBasisNames:

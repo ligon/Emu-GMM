@@ -93,8 +93,8 @@ from emu_gmm.runtime import maybe_warn_cpu_oversubscription
 from emu_gmm.types import (
     CovarianceStrategy,
     Emu_GMM_DimensionError,
-    EstimationResult,
     Measure,
+    OptimizationResult,
     Optimizer,
     ParamsLike,
     RegularizationStrategy,
@@ -277,7 +277,7 @@ def build_estimator(
     theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
-) -> Callable[[ParamsLike, Measure], EstimationResult]:
+) -> Callable[[ParamsLike, Measure], OptimizationResult]:
     """Build a re-usable estimator callable.
 
     Pays the one-time setup cost (label probing, anchored-ridge
@@ -507,12 +507,6 @@ def build_estimator(
     else:
         _, treedef = params_mod.flatten_params(theta_init)
         unflatten_spec = None
-    # ``total_dimension`` is the ambient tangent dimension that the
-    # inference / label / axes path keys on. For v1 / all-Euclidean /
-    # scalar-Positive trees it equals the field count ``K_probe``, so the
-    # 226 v1 tests are bitwise unchanged.
-    total_dimension = manifold_spec.total_dimension
-
     # Anchor-once-then-freeze tau policy (design.org §5; CLAUDE.md
     # commitment 3).
     V0 = covariance.covariance(model, theta_init, template_measure)
@@ -717,6 +711,9 @@ def build_estimator(
         Float[Array, ""],  # J_pvalue_adjusted
         Float[Array, ""],  # sigma_meat_indefinite (0/1; #138)
         Float[Array, ""],  # v_star_indefinite (0/1; regulariser saturated)
+        Float[Array, "M D"],  # moment_jacobian (G_riem, horizontal-projected)
+        Float[Array, "M M"],  # weighting_matrix (realised Lambda)
+        Float[Array, " D"],  # gradient (grad Q at theta_hat, ambient tangent)
     ]:
         theta_local = params_mod.unflatten_params(
             theta_flat, treedef, manifold_spec=unflatten_spec
@@ -861,6 +858,20 @@ def build_estimator(
         )
         Sigma_local = bread_pinv @ meat_local @ bread_pinv
         Sigma_local = 0.5 * (Sigma_local + Sigma_local.T)
+        # Materialise the realised weighting matrix Lambda = L_w^{-T} L_w^{-1}
+        # (the actual metric in m' Lambda m, whatever the weighting strategy):
+        # whitening the identity gives Wi = L_w^{-1}, so Lambda = Wi' Wi and
+        # G' Lambda G / G' Lambda V Lambda G are the SAME quantities as
+        # info_local / meat_local -- but re-associated (Lambda materialised
+        # first), so the Law reproduces Sigma to machine precision (~1e-16), NOT
+        # literally bit-for-bit. This is the ingredient the OptimizationResult/
+        # EstimatorLaw split hands to the Law so it can (re)assemble the
+        # ridge-correct sandwich itself.
+        Wi_local = _whiten_cols(jnp.eye(G_riem.shape[0], dtype=G_riem.dtype))
+        weighting_matrix_local = Wi_local.T @ Wi_local
+        weighting_matrix_local = 0.5 * (
+            weighting_matrix_local + weighting_matrix_local.T
+        )
         # #138 diagnose-loudly policy: an indefinite meat (raw V
         # indefinite in the binding-ridge regime) can push diag(Sigma)
         # negative; standard_errors maps that to NaN BY DESIGN. Surface
@@ -886,7 +897,8 @@ def build_estimator(
             r = _residual_core(tf, measure_arg, weighting)
             return 0.5 * jnp.sum(r * r)
 
-        grad_norm_local = jnp.linalg.norm(jax.grad(_half)(theta_flat))
+        grad_vec_local = jax.grad(_half)(theta_flat)
+        grad_norm_local = jnp.linalg.norm(grad_vec_local)
         if half_M_minus_K_overidentified:
             J_pv = jax.scipy.stats.chi2.sf(J_local, J_dof)
             J_pv_adj_binding = regularization_adjusted_pvalue(
@@ -919,6 +931,9 @@ def build_estimator(
             J_pv_adj,
             sigma_meat_indefinite_local,
             v_star_indefinite_local,
+            G_riem,
+            weighting_matrix_local,
+            grad_vec_local,
         )
 
     # The traced-argument inference kernel (#124): jitted ONCE at factory
@@ -943,7 +958,7 @@ def build_estimator(
     def _run(
         theta_init_call: ParamsLike,
         measure_call: Measure,
-    ) -> EstimationResult:
+    ) -> OptimizationResult:
         # FIX 4: the returned callable's first arg is polymorphic too, routed
         # through the SAME pure-Python resolver as estimate()/build_estimator()
         # (a ParameterSpace subclass -> .point(); a ManifoldPoint view ->
@@ -1069,7 +1084,7 @@ def build_estimator(
         )
 
         (
-            Sigma_theta_arr,
+            _sigma_theta_arr,
             V_star_hat,
             J_stat,
             kappa_V,
@@ -1082,10 +1097,13 @@ def build_estimator(
             V_hat,
             cholesky_pivot_min,
             final_gradient_norm,
-            J_pvalue,
-            J_pvalue_adjusted,
+            _j_pvalue,
+            _j_pvalue_adjusted,
             sigma_meat_indefinite,
             v_star_indefinite,
+            moment_jacobian,
+            weighting_matrix_arr,
+            gradient_vec,
         ) = (
             # The outer-loop args branch (#124 PR B) uses the SAME
             # traced inference kernel as the single-solve path: the
@@ -1100,18 +1118,11 @@ def build_estimator(
             else cast(Any, compute_inference_jit)(theta_hat_flat)
         )
 
-        # Param axes are sized by the ambient tangent dimension
-        # ``total_dimension`` (Phase 4 / BUG-D / R14/R17), matching the
-        # (total_dimension, total_dimension) Sigma_theta the inference
-        # block now returns. For v1 / all-scalar trees
-        # ``total_dimension == K``, so these are bitwise unchanged.
-        Params = axes_mod.params_axis(total_dimension)
-        ParamsDual = axes_mod.params_dual_axis(total_dimension)
+        # The moment axis sizes the labelled per-moment diagnostics
+        # (``N_j`` / ``moment_residual``). The parameter/covariance axes that
+        # used to label ``Sigma_theta`` / ``V_X`` moved to the AsymptoticLaw
+        # with the covariance itself (the OptimizationResult/EstimatorLaw split).
         Moments = axes_mod.moments_axis(M)
-        MomentsDual = axes_mod.moments_dual_axis(M)
-
-        Sigma_theta = labels_mod.label_matrix(Sigma_theta_arr, Params, ParamsDual)
-        V_X = labels_mod.label_matrix(V_star_hat, Moments, MomentsDual)
 
         binding_ridge = _binding_ridge(regularization, tau_hat)
 
@@ -1243,14 +1254,15 @@ def build_estimator(
         if iterated_status in ("max_iterations", "inner_non_convergence"):
             converged = False
 
-        return EstimationResult(
+        return OptimizationResult(
             theta_hat=theta_hat,
-            Sigma_theta=Sigma_theta,
-            V_X=V_X,
-            J_stat=J_stat,
-            J_dof=J_dof,
-            J_pvalue=J_pvalue,
-            J_pvalue_adjusted=J_pvalue_adjusted,
+            objective_value=J_stat,
+            gradient=gradient_vec,
+            moment_jacobian=moment_jacobian,
+            gn_hessian=info_matrix,
+            weighting_matrix=weighting_matrix_arr,
+            moment_covariance=V_hat,
+            n_overid=J_dof,
             converged=converged,
             iterations=iterations,
             theta_init=theta_init_call,
@@ -1263,10 +1275,9 @@ def build_estimator(
             # ``unflatten_spec`` is the manifold_spec for the manifold-aware
             # (v2) path and ``None`` for v1 / all-scalar trees (set above
             # alongside the treedef). Threading it onto the result drives the
-            # Phase-5 readout: ``components()``, the manifold-aware
+            # Phase-5 readout: ``components()``, the law's manifold-aware
             # ``coef_table`` flatten, and positional tangent labels. For v1
-            # it is ``None`` so every result-path method takes the v1 branch
-            # bitwise (R5/R10/R28).
+            # it is ``None`` so every result-path branch is bitwise (R5/R10/R28).
             manifold_spec=unflatten_spec,
         )
 
@@ -1303,7 +1314,7 @@ def estimate(
     theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
-) -> EstimationResult:
+) -> OptimizationResult:
     """Estimate :math:`\\hat\\theta` by minimising
     :math:`Q_\\mu(\\theta) = \\| L_\\mu(\\theta)^{-1}\\, \\mathbb{E}_\\mu[\\psi(\\cdot,\\theta)] \\|^2`.
 

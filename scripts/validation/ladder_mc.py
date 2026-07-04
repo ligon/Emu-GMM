@@ -93,6 +93,7 @@ from emu_gmm.studies import (
     coverage,
     crn_pair,
     event_share,
+    fit_record,
     given,
     j_calibration,
     monte_carlo_study,
@@ -489,7 +490,7 @@ def run_arm_per_rep_anchor(
             theta_init=theta_init,
             moment_names=moment_names,
         )
-        recs.append(res.record())
+        recs.append(fit_record(res))
         # Bare estimate() builds fresh closures per call, so JAX's global
         # caches accumulate write-only traces (~14 MB/call measured; the
         # un-mitigated leak OOM-killed this study's first full run at

@@ -114,4 +114,6 @@ def test_iterated_matches_continuously_updated():
         float(r_cu.theta_hat.phi.array[0]),
         atol=1e-6,
     )
-    assert jnp.allclose(float(r_it.J_stat), float(r_cu.J_stat), atol=1e-6)
+    assert jnp.allclose(
+        float(r_it.objective_value), float(r_cu.objective_value), atol=1e-6
+    )

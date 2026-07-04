@@ -129,11 +129,11 @@ class TestPhase4Inference:
         # Sigma_theta is the ambient (D, D) sandwich -> ALL ambient columns
         # flowed through G_riem (BUG-A). A range(K)=2-column drop would
         # give (2, 2).
-        assert result.Sigma_theta.array.shape == (D, D)
+        assert result.asymptotic().cov().shape == (D, D)
 
     def test_sigma_finite(self, k):
         result, _, _, _ = _run_estimate(k, seed=20 + k)
-        assert bool(jnp.all(jnp.isfinite(result.Sigma_theta.array)))
+        assert bool(jnp.all(jnp.isfinite(result.asymptotic().cov())))
 
     def test_exact_gauge_eigenvalue_drop_count(self, k):
         result, spec, M, _ = _run_estimate(k, seed=30 + k)
@@ -143,9 +143,8 @@ class TestPhase4Inference:
         # Sigma_theta rank == total_dimension - gauge_dim: exactly the
         # gauge_dim directions are pinned to zero (the dropped eigenpairs).
         D = spec.total_dimension
-        evals = jnp.linalg.eigvalsh(
-            0.5 * (result.Sigma_theta.array + result.Sigma_theta.array.T)
-        )
+        cov = np.asarray(result.asymptotic().cov())
+        evals = jnp.linalg.eigvalsh(0.5 * (cov + cov.T))
         n_zero = int(jnp.sum(jnp.abs(evals) < 1e-10 * jnp.max(jnp.abs(evals))))
         assert n_zero == gauge
         assert int(jnp.sum(jnp.abs(evals) >= 1e-10 * jnp.max(jnp.abs(evals)))) == (
@@ -157,11 +156,11 @@ class TestPhase4Inference:
         gauge = k * (k - 1) // 2
         D = spec.total_dimension
         expected = max(M - (D - gauge), 0)
-        assert result.J_dof == expected
+        assert result.n_overid == expected
         # And NOT the hard-coded-0-gauge value (M - D), which would be 1
         # smaller for k=2 and 3 smaller for k=3.
-        assert result.J_dof == M - (D - gauge)
-        assert result.J_dof != (M - D) or gauge == 0
+        assert result.n_overid == M - (D - gauge)
+        assert result.n_overid != (M - D) or gauge == 0
 
 
 class TestUnderIdentificationGuard:

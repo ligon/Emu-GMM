@@ -62,10 +62,11 @@ from __future__ import annotations
 import abc
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.stats
 import numpy as np
 import scipy.stats
 
@@ -108,7 +109,11 @@ from emu_gmm.studies.conditioning import (
     given,
 )
 from emu_gmm.studies.driver import MCRecords
-from emu_gmm.types import EstimationResult, FitRecord
+from emu_gmm.types import (
+    FitRecord,
+    OptimizationResult,
+    _result_param_names,
+)
 
 __all__ = [
     "EstimatorLaw",
@@ -124,6 +129,26 @@ __all__ = [
 #: what :meth:`EstimationResult.components` returns) to a scalar or 1-D array.
 #: ``None`` means the identity on the ambient flat parameter vector.
 Functional = Callable[[tuple[Any, ...]], Any] | None
+
+
+class JTest(NamedTuple):
+    """The asymptotic over-identification J-test read off an :class:`AsymptoticLaw`.
+
+    The chi-squared / Welch--Satterthwaite reading of the fit's
+    ``objective_value`` (the realised J-statistic) against its ``n_overid``
+    degrees of freedom --- an *inference* statement, so it lives on the law, not
+    on the :class:`~emu_gmm.types.OptimizationResult`.
+    """
+
+    #: ``Q(theta_hat)`` --- the realised J-statistic (the fit's objective value).
+    J_stat: float
+    #: ``M - p_id`` --- the number of over-identifying restrictions.
+    n_overid: int
+    #: Nominal ``chi^2_{n_overid}`` survival-function p-value.
+    J_pvalue: float
+    #: Regularisation-adjusted (weighted-chi^2 / Welch--Satterthwaite) p-value;
+    #: equals ``J_pvalue`` when the ridge is not binding.
+    J_pvalue_adjusted: float
 
 
 def eigenvalue_functional(
@@ -528,7 +553,7 @@ class EmpiricalLaw(EstimatorLaw):
     def from_records_with_template(
         cls,
         records: MCRecords | FitRecord,
-        template: EstimationResult,
+        template: OptimizationResult,
         *,
         label: str | None = None,
     ) -> EmpiricalLaw:
@@ -546,7 +571,7 @@ class EmpiricalLaw(EstimatorLaw):
         leaf_specs = (
             tuple(spec.leaf_specs)
             if spec is not None
-            else _scalar_leaf_specs(tuple(template.record().param_names))
+            else _scalar_leaf_specs(_result_param_names(template))
         )
         return cls.from_records(
             records, component_shapes=shapes, leaf_specs=leaf_specs, label=label
@@ -1008,12 +1033,12 @@ class AsymptoticLaw(EstimatorLaw):
 
     def __init__(
         self,
-        result: EstimationResult | None = None,
+        result: OptimizationResult | None = None,
         *,
         label: str | None = None,
         _backing: "_MomentsBacking | None" = None,
     ) -> None:
-        # Two backings (one query algebra): a LIVE EstimationResult, or a
+        # Two backings (one query algebra): a LIVE OptimizationResult, or a
         # moments-only record reconstructed from persisted arrays
         # (``from_moments`` / a reloaded LawState, #181). The query methods
         # route to the SAME delta-method machinery either way --- the moments
@@ -1025,16 +1050,16 @@ class AsymptoticLaw(EstimatorLaw):
             self._names = _backing.names
             self._label = label or "asymptotic(from_moments)"
             return
-        if not isinstance(result, EstimationResult):
+        if not isinstance(result, OptimizationResult):
             raise TypeError(
-                "AsymptoticLaw wraps an EstimationResult (the emu_gmm.estimate "
+                "AsymptoticLaw wraps an OptimizationResult (the emu_gmm.estimate "
                 f"output); got {type(result).__name__}. To reconstruct without "
                 "a live result use AsymptoticLaw.from_moments(...)."
             )
         self._result = result
         self._backing = None
         self._label = label or "asymptotic(N(theta_hat, Sigma_theta))"
-        self._names = tuple(result.record().param_names)
+        self._names = tuple(_result_param_names(result))
 
     # -- moments-only constructor (#181) ------------------------------------
     @classmethod
@@ -1141,7 +1166,7 @@ class AsymptoticLaw(EstimatorLaw):
         return tuple(specs)
 
     @property
-    def result(self) -> EstimationResult:
+    def result(self) -> OptimizationResult:
         """The wrapped :class:`~emu_gmm.types.EstimationResult` (live-backed only).
 
         Raises if this law was reconstructed via :meth:`from_moments` (a
@@ -1151,7 +1176,7 @@ class AsymptoticLaw(EstimatorLaw):
             raise AttributeError(
                 "AsymptoticLaw.result: this law was reconstructed from moments "
                 "(from_moments / a reloaded LawState) and has no live "
-                "EstimationResult. Query the law directly (se, functional_se, "
+                "OptimizationResult. Query the law directly (se, functional_se, "
                 "eigenvalue_se, gamma_se)."
             )
         return self._result
@@ -1164,16 +1189,46 @@ class AsymptoticLaw(EstimatorLaw):
             else self._backing.components  # type: ignore[union-attr]
         )
 
+    def _sigma(self) -> np.ndarray:
+        r"""The ambient ``(D, D)`` covariance :math:`\Sigma_\theta` the law asserts.
+
+        This is where the asymptotic *assumption* is applied: for a live
+        (result-backed) law it is ASSEMBLED from the
+        :class:`~emu_gmm.types.OptimizationResult`'s optimization ingredients
+        (moment Jacobian ``G``, weighting matrix ``Lambda``, raw moment
+        covariance ``V``) via the shared #133 sandwich
+        (:func:`emu_gmm._internal.asymptotic.asymptotic_covariance`) --- the
+        covariance is a property of the *law*, not of the fit. A moments-backed
+        (reloaded) law returns its persisted ``Sigma``. Cached.
+        """
+        cached = getattr(self, "_sigma_cache", None)
+        if cached is not None:
+            return cached
+        if self._backing is not None:
+            sig = np.asarray(self._backing.sigma)
+        else:
+            r = self._result
+            assert r is not None
+            from emu_gmm._internal.asymptotic import asymptotic_covariance
+
+            gd = 0 if r.manifold_spec is None else int(r.manifold_spec.total_gauge_dim)
+            sig = np.asarray(
+                asymptotic_covariance(
+                    jnp.asarray(r.moment_jacobian),
+                    jnp.asarray(r.weighting_matrix),
+                    jnp.asarray(r.moment_covariance),
+                    gauge_dim=gd,
+                )
+            )
+        self._sigma_cache = sig
+        return sig
+
     def _functional_cov(self, f: Functional) -> np.ndarray:
         # ``f`` is non-None here (cov() routes f=None to the plain covariance).
         assert f is not None
-        if self._result is not None:
-            _se, cov = self._result.functional_se(f)
-            return np.atleast_2d(np.asarray(cov))
         from emu_gmm.inference.functional_se import functional_se as _fse
 
-        assert self._backing is not None
-        _se, cov = _fse(f, self._backing.components, jnp.asarray(self._backing.sigma))
+        _se, cov = _fse(f, self._components(), jnp.asarray(self._sigma()))
         return np.atleast_2d(np.asarray(cov))
 
     def mean(self, f: Functional = None) -> np.ndarray:
@@ -1184,10 +1239,219 @@ class AsymptoticLaw(EstimatorLaw):
 
     def cov(self, f: Functional = None) -> np.ndarray:
         if f is None:
-            if self._result is not None:
-                return np.asarray(self._result.Sigma_theta.array)
-            return np.asarray(self._backing.sigma)  # type: ignore[union-attr]
+            return self._sigma()
         return self._functional_cov(f)
+
+    @property
+    def standard_errors(self) -> np.ndarray:
+        r"""Asymptotic standard errors of the ambient flat parameter.
+
+        ``sqrt(diag(Sigma_theta))``; negative diagonal entries (a non-PD
+        finite-sample sandwich, the #138 indefinite-meat event) propagate as
+        ``nan``. Returned as a plain numpy array on the ``param_names`` axis ---
+        the law returns numpy, not a :class:`haliax.NamedArray`. Alias for
+        ``se()`` with ``f=None``.
+        """
+        return self.se()
+
+    @property
+    def coef_table(self) -> Any:
+        """Coefficient table: estimate, std error, t-stat, p-value.
+
+        A :class:`pandas.DataFrame` indexed by the ambient tangent labels
+        (:attr:`param_names`) with columns ``estimate`` (the flattened
+        ``theta_hat``), ``std_error`` (:attr:`standard_errors`), ``t_stat``
+        (``estimate / std_error``; NaN where the SE is 0 / NaN) and ``p_value``
+        (two-sided ``N(0, 1)`` reference). This is an *inference* readout, so it
+        lives on the law, not the result. For a non-scalar manifold leaf the
+        rows carry positional tangent labels whose raw per-entry values are
+        gauge-arbitrary; use a gauge-invariant leaf view / functional for those.
+        """
+        import pandas as pd
+
+        estimate = np.asarray(_flatten_components(self._components()))
+        names = list(self.param_names)
+        if len(names) != int(estimate.shape[0]):
+            raise ValueError(
+                f"coef_table: parameter label count {len(names)} does not match "
+                f"the flattened estimate length {int(estimate.shape[0])}; this "
+                "indicates a manifold-spec / flatten routing mismatch"
+            )
+        se = np.asarray(self.se())
+        with np.errstate(invalid="ignore", divide="ignore"):
+            safe_se = np.where((se > 0.0) & np.isfinite(se), se, np.nan)
+            t_stat = estimate / safe_se
+        p_value = 2.0 * scipy.stats.norm.sf(np.abs(t_stat))
+        return pd.DataFrame(
+            {
+                "estimate": estimate,
+                "std_error": se,
+                "t_stat": t_stat,
+                "p_value": p_value,
+            },
+            index=names,
+        )
+
+    def _objective_and_dof(self) -> tuple[float, int]:
+        """``(J_stat, n_overid)`` from the live result or the persisted backing."""
+        if self._result is not None:
+            obj = self._result.objective_value
+            return (
+                float(np.asarray(obj)) if obj is not None else float("nan"),
+                int(self._result.n_overid),
+            )
+        diag = getattr(self._backing, "diagnostics", {}) or {}
+        return float(diag.get("J_stat", np.nan)), int(diag.get("J_dof", 0))
+
+    def _efficient_weighting(self) -> bool:
+        """Whether the fit used an *efficient* weighting --- the J-test precondition (#188).
+
+        The over-identification statistic :math:`J = m'\\Lambda m` has its
+        :math:`\\chi^2_{n_{overid}}` limit only under efficient weighting
+        :math:`\\Lambda = (V^\\star)^{-1}` (the ``ContinuouslyUpdated`` / iterated
+        default). Under a NON-efficient weight (``Identity``, or a ``Fixed``
+        metric not equal to the optimal one) :math:`J` is a quadratic form in an
+        asymptotically Gaussian moment vector with a non-idempotent kernel --- a
+        *weighted* sum of chi-squares whose mean need not be :math:`n_{overid}`
+        --- so neither the nominal nor the ridge-adjusted p-value is calibrated.
+        The weighting advertises this via its ``efficient_weighting`` flag
+        (default ``True``: absent the flag we assume the caller knows the limit
+        holds). A moments-backed (reloaded) law inherits the already-guarded
+        persisted value, so this only gates the live, result-backed path.
+        """
+        if self._result is None:
+            return True
+        return bool(getattr(self._result.weighting, "efficient_weighting", True))
+
+    def _warn_inefficient_j(self, what: str) -> None:
+        """Emit a once-per-instance J-not-calibrated warning (#188)."""
+        if getattr(self, "_warned_inefficient_j", False):
+            return
+        self._warned_inefficient_j = True
+        wname = type(self._result.weighting).__name__ if self._result else "?"
+        warnings.warn(
+            f"AsymptoticLaw.{what}: the fit used a non-efficient weighting "
+            f"({wname}), under which the over-identification J-statistic has no "
+            "chi^2_{n_overid} limit (it is a weighted sum of chi-squares whose "
+            "mean need not equal n_overid); the p-value is not calibrated and is "
+            "reported as nan. Use ContinuouslyUpdated / IteratedWeighting for a "
+            "calibrated over-identification test (#188).",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    @property
+    def J_pvalue(self) -> float:
+        r"""Nominal over-identification p-value, ``chi^2_{n_overid}.sf(J_stat)``.
+
+        The chi-squared reading of the fit's ``objective_value`` --- the
+        *inference* statement the estimator used to report on the result. ``nan``
+        for a just-identified fit (``n_overid == 0``), and ``nan`` (with a
+        warning) under a non-efficient weighting, where :math:`J` has no
+        ``chi^2_{n_overid}`` limit (see :meth:`_efficient_weighting`, #188). A
+        persisted (moments-backed) law returns its stored p-value.
+        """
+        if self._result is None:
+            diag = getattr(self._backing, "diagnostics", {}) or {}
+            return float(diag.get("J_pvalue", np.nan))
+        J, dof = self._objective_and_dof()
+        if dof <= 0:
+            return float("nan")
+        if not self._efficient_weighting():
+            self._warn_inefficient_j("J_pvalue")
+            return float("nan")
+        return float(jax.scipy.stats.chi2.sf(J, dof))
+
+    @property
+    def J_pvalue_adjusted(self) -> float:
+        r"""Regularisation-adjusted J p-value (weighted-chi^2 limit; #133/#137).
+
+        Equal to :attr:`J_pvalue` when the ridge is not binding; under a binding
+        ridge it is the Welch--Satterthwaite survival function of the generalised
+        chi-squared (mcar-asymptotics.org Theorem 6), reassembled here from the
+        result's raw meat ``V`` (:attr:`~emu_gmm.types.OptimizationResult.moment_covariance`),
+        the regularised ``V* = Lambda^{-1}``
+        (:attr:`~emu_gmm.types.OptimizationResult.weighting_matrix`) and the
+        moment Jacobian (:attr:`~emu_gmm.types.OptimizationResult.moment_jacobian`).
+
+        **Precondition --- efficient weighting.** The generalised-chi-squared
+        adjustment is derived for the *efficient* GMM criterion
+        ``J = m'(V*)^{-1} m`` (the ``ContinuouslyUpdated`` / iterated default),
+        where ``Lambda = (V*)^{-1}`` exactly and ``V* = Lambda^{-1}`` recovers the
+        frozen ridged covariance. Under a NON-efficient weighting
+        (``Identity`` / ``Fixed``) ``Lambda`` is the analyst's fixed metric, so
+        ``Lambda^{-1}`` is that metric's implied covariance --- not the ridged
+        ``V*`` --- and the weighted-chi-squared limit does not apply; treat the
+        adjusted value as meaningful only under (near-)efficient weighting. (This
+        is a property of asking for a ridge-adjustment under an inefficient
+        weight, not of the estimation/inference split.)
+        """
+        if self._result is None:
+            # A persisted (moments-backed) law returns the stored adjusted value
+            # (persisted alongside the nominal one); older artifacts that predate
+            # its persistence fall back to the nominal p-value.
+            diag = getattr(self._backing, "diagnostics", {}) or {}
+            return float(diag.get("J_pvalue_adjusted", self.J_pvalue))
+        r = self._result
+        J, dof = self._objective_and_dof()
+        if dof <= 0:
+            return float("nan")
+        if not self._efficient_weighting():
+            self._warn_inefficient_j("J_pvalue_adjusted")
+            return float("nan")
+        nominal = float(jax.scipy.stats.chi2.sf(J, dof))
+        diag = r.diagnostics
+        binding = (
+            bool(np.asarray(diag.binding_ridge) > 0.5) if diag is not None else False
+        )
+        if not binding:
+            return nominal
+        from emu_gmm.diagnostics import regularization_adjusted_pvalue
+
+        gd = 0 if r.manifold_spec is None else int(r.manifold_spec.total_gauge_dim)
+        V_star = jnp.linalg.inv(jnp.asarray(r.weighting_matrix))
+        return float(
+            regularization_adjusted_pvalue(
+                jnp.asarray(J),
+                jnp.asarray(r.moment_covariance),
+                V_star,
+                jnp.asarray(r.moment_jacobian),
+                gauge_nullspace_dim=gd,
+            )
+        )
+
+    def functional_se(
+        self, f: Callable[[tuple[Any, ...]], Any]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        r"""Gauge-invariant delta-method ``(se, cov)`` of ``f(components)``.
+
+        The general delta-method primitive (#42): for a gauge-invariant
+        functional ``f(components) -> R^p`` returns ``(se, cov)`` with
+        ``cov = J_f @ Sigma_theta @ J_f.T`` and ``se = sqrt(diag(cov))``
+        (negatives from round-off clip to ``nan``). Convenience bundling
+        :meth:`se` / :meth:`cov` on a component functional; this is the
+        inference reading that used to live on ``EstimationResult``.
+        """
+        cov = np.atleast_2d(self._functional_cov(f))
+        d = np.diag(cov)
+        with np.errstate(invalid="ignore"):
+            se = np.sqrt(np.where(d >= 0.0, d, np.nan))
+        return se, cov
+
+    def j_test(self) -> JTest:
+        """The over-identification :class:`JTest` (J-stat, dof, nominal + adjusted p).
+
+        Bundles :attr:`J_pvalue` / :attr:`J_pvalue_adjusted` with the underlying
+        statistic and degrees of freedom --- the inference reading of the fit's
+        ``objective_value`` that the estimator no longer performs itself.
+        """
+        J, dof = self._objective_and_dof()
+        return JTest(
+            J_stat=J,
+            n_overid=dof,
+            J_pvalue=self.J_pvalue,
+            J_pvalue_adjusted=self.J_pvalue_adjusted,
+        )
 
     def quantile(self, q: float, f: Functional = None) -> np.ndarray:
         """The Gaussian marginal ``q``-quantile, ``mean + z_q * se`` (closed form).

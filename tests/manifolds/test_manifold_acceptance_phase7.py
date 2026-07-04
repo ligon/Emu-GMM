@@ -149,22 +149,23 @@ class TestFunctionalSEShapes:
         )
         result = _estimate(_gauge_invariant_model, measure, theta_init)
         assert bool(result.converged)
+        law = result.asymptotic()
 
-        ev_se = result.eigenvalue_se()
+        ev_se = law.eigenvalue_se()
         assert ev_se.shape == (k,)  # K nonzero eigenvalues, NOT n
         assert bool(jnp.all(jnp.isfinite(ev_se)))
         assert bool(jnp.all(ev_se > 0.0))
 
         # explicit rank argument agrees with the inferred default.
-        assert bool(jnp.allclose(result.eigenvalue_se(rank=k), ev_se))
+        assert bool(jnp.allclose(law.eigenvalue_se(rank=k), ev_se))
 
-        g_se = result.gamma_se()
+        g_se = law.gamma_se()
         q = N * (N + 1) // 2
         assert g_se.shape == (q,)
         assert bool(jnp.all(jnp.isfinite(g_se)))
         assert bool(jnp.all(g_se > 0.0))
 
-        gcov = result.gamma_covariance()
+        gcov = law.gamma_covariance()
         assert gcov.shape == (q, q)
         # PSD up to round-off (R33).
         evc = jnp.linalg.eigvalsh(0.5 * (gcov + gcov.T))
@@ -176,7 +177,7 @@ class TestFunctionalSEShapes:
             G = A @ A.T
             return jnp.array([G[0, 0], G[1, 1], jnp.trace(G), phi[0]])
 
-        se, cov = result.functional_se(f)
+        se, cov = law.functional_se(f)
         assert se.shape == (4,)
         assert cov.shape == (4, 4)
         assert bool(jnp.all(jnp.isfinite(se)))
@@ -214,15 +215,17 @@ class TestGaugeInvarianceOfSEs:
             _gauge_invariant_model, measure, _make_params(Y0 @ Q, phi0, k)
         )
         assert bool(res_a.converged) and bool(res_b.converged)
+        law_a = res_a.asymptotic()
+        law_b = res_b.asymptotic()
 
         # eigenvalue SEs identical.
         assert bool(
             jnp.allclose(
-                res_a.eigenvalue_se(), res_b.eigenvalue_se(), atol=self.SE_ATOL
+                law_a.eigenvalue_se(), law_b.eigenvalue_se(), atol=self.SE_ATOL
             )
         )
         # vech(Gamma) SEs identical.
-        assert bool(jnp.allclose(res_a.gamma_se(), res_b.gamma_se(), atol=self.SE_ATOL))
+        assert bool(jnp.allclose(law_a.gamma_se(), law_b.gamma_se(), atol=self.SE_ATOL))
 
         # a general gauge-invariant functional: identical.
         def f(comps):
@@ -230,8 +233,8 @@ class TestGaugeInvarianceOfSEs:
             G = A @ A.T
             return jnp.array([G[0, 0], G[2, 1], jnp.trace(G @ G), phi[0]])
 
-        sa, _ = res_a.functional_se(f)
-        sb, _ = res_b.functional_se(f)
+        sa, _ = law_a.functional_se(f)
+        sb, _ = law_b.functional_se(f)
         assert bool(jnp.allclose(sa, sb, atol=self.SE_ATOL))
 
 
@@ -264,6 +267,8 @@ class TestNegativeControl:
             _gauge_invariant_model, measure, _make_params(Y0 @ Q, phi0, k)
         )
         assert bool(res_a.converged) and bool(res_b.converged)
+        law_a = res_a.asymptotic()
+        law_b = res_b.asymptotic()
 
         # f_bad leaks a raw Y entry (NOT a function of Gamma alone).
         def f_bad(comps):
@@ -275,10 +280,10 @@ class TestNegativeControl:
             A, _phi = comps
             return jnp.reshape((A @ A.T)[0, 0], (1,))
 
-        se_bad_a, _ = res_a.functional_se(f_bad)
-        se_bad_b, _ = res_b.functional_se(f_bad)
-        se_good_a, _ = res_a.functional_se(f_good)
-        se_good_b, _ = res_b.functional_se(f_good)
+        se_bad_a, _ = law_a.functional_se(f_bad)
+        se_bad_b, _ = law_b.functional_se(f_bad)
+        se_good_a, _ = law_a.functional_se(f_good)
+        se_good_b, _ = law_b.functional_se(f_good)
 
         # The gauge-violating SE is finite and strictly positive (it picks up
         # variance from the gauge fibre that Sigma_theta carries).
@@ -333,8 +338,9 @@ class TestCorrectnessVsReference:
         )
         result = _estimate(_gauge_invariant_model, measure, theta_init)
         assert bool(result.converged)
+        law = result.asymptotic()
         comps = result.components()
-        Sigma = jnp.asarray(result.Sigma_theta.array)
+        Sigma = jnp.asarray(law.cov())
         flat, shapes = self._flat_and_shapes(comps)
 
         def f_ev(components):
@@ -344,7 +350,7 @@ class TestCorrectnessVsReference:
             return ev[n - k :]
 
         # AD-based delta-method SE (the implementation under test).
-        se_ad = result.eigenvalue_se(rank=k)
+        se_ad = law.eigenvalue_se(rank=k)
 
         # Finite-difference Jacobian of f_ev w.r.t. the flat ambient vector.
         eps = 1e-6
@@ -395,7 +401,7 @@ class TestCorrectnessVsReference:
         # Delta-method SE from ONE reference fit.
         ref = _estimate(_gauge_invariant_model, make_measure(10_000), theta_init)
         assert bool(ref.converged)
-        se_delta = np.asarray(ref.eigenvalue_se(rank=k))
+        se_delta = np.asarray(ref.asymptotic().eigenvalue_se(rank=k))
 
         # Bootstrap: refit on fresh noise draws, collect the K eigenvalues.
         evs = []
@@ -462,22 +468,24 @@ class TestV1ScalarReduction:
 
     def test_identity_projector_matches_standard_errors(self):
         result = self._v1_result()
-        se_std = np.asarray(result.standard_errors.array)
+        law = result.asymptotic()
+        se_std = np.asarray(law.se())
         # f = identity (return both scalars).
-        se_id, _ = result.functional_se(lambda c: jnp.array([c[0], c[1]]))
+        se_id, _ = law.functional_se(lambda c: jnp.array([c[0], c[1]]))
         assert bool(jnp.allclose(jnp.asarray(se_id), jnp.asarray(se_std), atol=1e-10))
         # Per-coordinate projectors agree element-wise.
         for i in range(2):
-            se_i, _ = result.functional_se(lambda c, _i=i: jnp.reshape(c[_i], (1,)))
+            se_i, _ = law.functional_se(lambda c, _i=i: jnp.reshape(c[_i], (1,)))
             assert float(se_i[0]) == pytest.approx(float(se_std[i]), abs=1e-10)
 
     def test_scalar_transform_matches_manual_delta(self):
         result = self._v1_result()
-        Sigma = np.asarray(result.Sigma_theta.array)
+        law = result.asymptotic()
+        Sigma = np.asarray(law.cov())
         a_hat = float(jnp.asarray(result.components()[0]))
 
         # f = a**2: J_f = [2a, 0]; Var = 4 a^2 Sigma_aa.
-        se_f, cov_f = result.functional_se(lambda c: jnp.reshape(c[0] ** 2, (1,)))
+        se_f, cov_f = law.functional_se(lambda c: jnp.reshape(c[0] ** 2, (1,)))
         manual_var = 4.0 * a_hat**2 * Sigma[0, 0]
         assert float(cov_f[0, 0]) == pytest.approx(manual_var, rel=1e-9)
         assert float(se_f[0]) == pytest.approx(np.sqrt(manual_var), rel=1e-9)

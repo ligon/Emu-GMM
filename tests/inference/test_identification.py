@@ -220,7 +220,7 @@ class TestRobustVsWaldDivergence:
     def test_weak_block_in_weak_regime_and_se_inflation_localised(self):
         result = _fit_weak_iv()
         ident = identification_strength(result, _iv_model)
-        se = np.asarray(result.standard_errors.array)  # [theta_s, theta_w]
+        se = np.asarray(result.asymptotic().se())  # [theta_s, theta_w]
 
         weak_conc = float(ident["theta_w"].min_eigenvalue)
         strong_conc = float(ident["theta_s"].min_eigenvalue)
@@ -239,7 +239,7 @@ class TestRobustVsWaldDivergence:
         # the exact curvature/Wald-variance tie behind the divergence claim.
         result = _fit_weak_iv()
         ident = identification_strength(result, _iv_model)
-        Sigma = np.asarray(result.Sigma_theta.array)
+        Sigma = np.asarray(result.asymptotic().cov())
         for i, name in enumerate(("theta_s", "theta_w")):
             np.testing.assert_allclose(
                 float(ident[name].min_eigenvalue), 1.0 / Sigma[i, i], rtol=1e-6
@@ -256,9 +256,10 @@ class TestRobustVsWaldDivergence:
 
 # ---------------------------------------------------------------------------
 # (c') Binding-ridge regime (PR #178 review, Finding 1): the diagnostic must
-#      build its curvature off the FROZEN result.V_X, not a fresh ridge
-#      re-anchored at theta_hat. DiagonalTikhonov.apply is stateless, so a
-#      recompute would re-bisect a different tau; reading result.V_X keeps the
+#      build its curvature off the FROZEN V* (inv of result.weighting_matrix),
+#      not a fresh ridge re-anchored at theta_hat. DiagonalTikhonov.apply is
+#      stateless, so a recompute would re-bisect a different tau; reading the
+#      frozen V* keeps the
 #      info matrix bit-consistent with cond_info / Sigma_theta when tau binds.
 # ---------------------------------------------------------------------------
 
@@ -281,7 +282,7 @@ def _fit_binding_ridge(seed: int = 3, n: int = 2000):
 
     The start is deliberately FAR from theta_hat so the anchored ridge (frozen
     at theta_init) differs materially from one re-anchored at theta_hat — the
-    regime where reading result.V_X vs recomputing actually diverges.
+    regime where reading the frozen V* vs recomputing actually diverges.
     """
     rng = np.random.default_rng(seed)
     r = rng.normal(size=n)
@@ -314,12 +315,12 @@ class TestBindingRidgeUsesFrozenVX:
         assert bool(result.diagnostics.binding_ridge)
 
         # The re-anchored V* (the OLD default: regularization.apply at
-        # theta_hat) differs materially from the frozen result.V_X.
+        # theta_hat) differs materially from the frozen V* (result.weighting_matrix).
         V_th = IIDCovariance().covariance(_quad_model, result.theta_hat, result.measure)
         V_th = jnp.asarray(getattr(V_th, "array", V_th))
         V_reanchor, _tau = reg.apply(V_th)
         V_reanchor = np.asarray(V_reanchor)
-        V_X = np.asarray(result.V_X.array)
+        V_X = np.linalg.inv(np.asarray(result.weighting_matrix))
         assert not np.allclose(V_X, V_reanchor)
 
         default = identification_strength(result, _quad_model)

@@ -635,8 +635,8 @@ class TestVStarIndefiniteDiagnostic:
         assert float(res.diagnostics.tau_realised) == pytest.approx(_TAU_MAX)
         # And the downstream symptom the diagnostic explains: the
         # Cholesky-driven statistics are NaN.
-        assert np.isnan(float(res.J_stat))
-        assert np.isnan(np.asarray(res.standard_errors.array)).any()
+        assert np.isnan(float(res.objective_value))
+        assert np.isnan(np.asarray(res.asymptotic().se())).any()
 
     def test_healthy_fixture_flag_false_and_silent(self):
         measure = _empirical_measure()
@@ -646,5 +646,5 @@ class TestVStarIndefiniteDiagnostic:
         assert not bool(res.diagnostics.v_star_indefinite)
         assert not any("not positive-definite" in str(w.message) for w in caught)
         # Healthy fit: finite J and SEs (the flag is not a false alarm).
-        assert bool(jnp.isfinite(res.J_stat))
-        assert not np.isnan(np.asarray(res.standard_errors.array)).any()
+        assert bool(jnp.isfinite(res.objective_value))
+        assert not np.isnan(np.asarray(res.asymptotic().se())).any()

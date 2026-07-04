@@ -68,9 +68,9 @@ This example exercises:
 * :func:`emu_gmm.estimate` -- the GMM entry point.
 * :func:`emu_gmm.moment_wild_bootstrap` -- refit-free wild bootstrap.
 * :func:`emu_gmm.cluster_bootstrap` -- refit-based pairs bootstrap.
-* :attr:`emu_gmm.EstimationResult.standard_errors` --- analytic SE
+* :attr:`emu_gmm.OptimizationResult.asymptotic().se()` --- analytic SE
   the bootstrap SEs are benchmarked against.
-* :attr:`emu_gmm.EstimationResult.coef_table` -- the headline tabular
+* :attr:`emu_gmm.OptimizationResult.asymptotic().coef_table` -- the headline tabular
   output.
 
 Run directly::
@@ -85,7 +85,6 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
 import pandas as pd
-
 from emu_gmm import (
     ClusteredCovariance,
     EmpiricalMeasure,
@@ -204,7 +203,7 @@ def run(
 
     Returns
     -------
-    result : :class:`emu_gmm.EstimationResult`
+    result : :class:`emu_gmm.OptimizationResult`
         The point estimate + analytic-variance container.
     wild : :class:`emu_gmm.WildBootstrapResult`
         Refit-free cluster-wild bootstrap.
@@ -228,7 +227,7 @@ def run(
         n_boot=n_boot,
         key=wild_key,
         sign="rademacher",
-        V=result.V_X,
+        V=np.linalg.inv(np.asarray(result.weighting_matrix)),
     )
 
     # Refit-based: resample whole clusters, re-solve.
@@ -251,8 +250,8 @@ def run(
     else:
         boot_se = np.full(theta_boot_arr.shape[1], np.nan)
 
-    analytic_se = np.asarray(result.standard_errors.array)
-    point = np.asarray(result.coef_table["estimate"].to_numpy())  # estimate column
+    analytic_se = np.asarray(result.asymptotic().se())
+    point = np.asarray(result.asymptotic().coef_table["estimate"].to_numpy())  # estimate column
 
     se_table = pd.DataFrame(
         {
@@ -286,16 +285,16 @@ def main() -> None:
     print("=" * 60)
     print("Point estimates (coef_table)")
     print("=" * 60)
-    print(result.coef_table.to_string())
+    print(result.asymptotic().coef_table.to_string())
     print()
 
     print("=" * 60)
     print("Analytic J-test")
     print("=" * 60)
     print(
-        f"J_stat = {float(result.J_stat):.4f}   "
-        f"(dof = {result.J_dof}, nominal p = {float(result.J_pvalue):.3f}, "
-        f"adjusted p = {float(result.J_pvalue_adjusted):.3f})"
+        f"J_stat = {float(result.objective_value):.4f}   "
+        f"(dof = {result.n_overid}, nominal p = {float(result.asymptotic().J_pvalue):.3f}, "
+        f"adjusted p = {float(result.asymptotic().J_pvalue_adjusted):.3f})"
     )
     print()
 

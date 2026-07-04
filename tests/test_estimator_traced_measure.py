@@ -97,11 +97,13 @@ class TestParity:
             rtol=1e-12,
         )
         np.testing.assert_allclose(
-            float(res_traced.J_stat), float(res_legacy.J_stat), rtol=1e-10
+            float(res_traced.objective_value),
+            float(res_legacy.objective_value),
+            rtol=1e-10,
         )
         np.testing.assert_allclose(
-            np.asarray(res_traced.Sigma_theta.array),
-            np.asarray(res_legacy.Sigma_theta.array),
+            np.asarray(res_traced.asymptotic().cov()),
+            np.asarray(res_legacy.asymptotic().cov()),
             rtol=1e-9,
         )
 
@@ -126,7 +128,9 @@ class TestParity:
             rtol=1e-12,
         )
         np.testing.assert_allclose(
-            float(res_traced.J_stat), float(res_bare.J_stat), rtol=1e-10
+            float(res_traced.objective_value),
+            float(res_bare.objective_value),
+            rtol=1e-10,
         )
 
 
@@ -275,7 +279,7 @@ class TestKernelPathSemantics:
         assert spy.args_calls == 2  # identity case rides the kernel
         # Deterministic: same measure, same kernel, same trace.
         assert float(r1.theta_hat.beta) == float(r2.theta_hat.beta)
-        assert float(r1.J_stat) == float(r2.J_stat)
+        assert float(r1.objective_value) == float(r2.objective_value)
 
     def test_different_measure_class_routes_legacy(self):
         """A measure of a DIFFERENT CLASS than the template must not ride

@@ -83,13 +83,13 @@ class TestBuildEstimatorEquivalence:
         assert float(r_factory.theta_hat.b) == pytest.approx(
             float(r_oneshot.theta_hat.b), rel=1e-9, abs=1e-12
         )
-        # Same J-stat.
-        assert float(r_factory.J_stat) == pytest.approx(
-            float(r_oneshot.J_stat), rel=1e-9, abs=1e-12
+        # Same objective value.
+        assert float(r_factory.objective_value) == pytest.approx(
+            float(r_oneshot.objective_value), rel=1e-9, abs=1e-12
         )
-        # Same Sigma_theta diagonal.
-        s_f = jnp.diag(jnp.asarray(r_factory.Sigma_theta.array))
-        s_o = jnp.diag(jnp.asarray(r_oneshot.Sigma_theta.array))
+        # Same Sigma_theta diagonal (now on the inference law as numpy).
+        s_f = jnp.diag(jnp.asarray(r_factory.asymptotic().cov()))
+        s_o = jnp.diag(jnp.asarray(r_oneshot.asymptotic().cov()))
         assert jnp.allclose(s_f, s_o, atol=1e-9, rtol=1e-9)
 
     def test_multiple_theta_init_with_same_measure(self):
@@ -184,17 +184,19 @@ class TestBuildEstimatorCaching:
         # Warm: time the first invocation (compile + run).
         t0 = time.perf_counter()
         r1 = run(_Params(a=0.1, b=1.2), measure)
-        jax.block_until_ready(r1.J_stat)
+        jax.block_until_ready(r1.objective_value)
         first_time = time.perf_counter() - t0
 
         # Time the second invocation (run only).
         t0 = time.perf_counter()
         r2 = run(_Params(a=0.2, b=1.5), measure)
-        jax.block_until_ready(r2.J_stat)
+        jax.block_until_ready(r2.objective_value)
         second_time = time.perf_counter() - t0
 
         # Same factual answers (sanity).
-        assert float(r1.J_stat) == pytest.approx(float(r2.J_stat), abs=1e-6)
+        assert float(r1.objective_value) == pytest.approx(
+            float(r2.objective_value), abs=1e-6
+        )
         # Second call materially faster. We're conservative here
         # because GitHub CI / shared hosts vary; the practical speedup
         # is ~5-30x.

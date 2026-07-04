@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
 from emu_gmm import (
     AnalyticalCovariance,
     AnalyticalMeasure,
@@ -56,9 +55,10 @@ def _print_result(
     print(
         f"  gamma = {gamma:.6f}   (truth {GAMMA_TRUE:.2f}, |err| = {abs(gamma - GAMMA_TRUE):.2e})"
     )
+    law = result.asymptotic()
     print(
-        f"  J-stat = {result.J_stat:.4e}   "
-        f"(dof = {result.J_dof}, p = {result.J_pvalue:.3f})"
+        f"  J-stat = {result.objective_value:.4e}   "
+        f"(dof = {result.n_overid}, p = {law.J_pvalue:.3f})"
     )
     print(
         f"  converged = {result.converged}   "
@@ -130,8 +130,8 @@ def run_empirical() -> None:
         theta_init=THETA_INIT,
     )
     _print_result(result, recover_atol_beta=0.05, recover_atol_gamma=0.5)
-    print("\n  Sigma_theta (labelled, as DataFrame):")
-    print(result.to_pandas()["Sigma_theta"].to_string())
+    print("\n  asymptotic covariance (result.asymptotic().cov()):")
+    print(result.asymptotic().cov())
 
 
 def main() -> None:

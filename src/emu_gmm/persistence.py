@@ -269,9 +269,13 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
         )
 
     # Live-result-backed: extract the durable projection from the result.
+    # Persist the covariance the LAW asserts (its assembled sandwich), not the
+    # fit's raw matrix -- they agree to ~1e-16, and once OptimizationResult drops
+    # Sigma_theta the assembled one is the only source. This keeps a reloaded
+    # (moments-backed) law bit-for-bit equal to the live law it was saved from.
     result = law._result
     comps = tuple(np.asarray(c) for c in result.components())
-    sigma = np.asarray(result.Sigma_theta.array)
+    sigma = np.asarray(law._sigma())
     spec = result.manifold_spec
     if spec is not None:
         leaf_manifolds = [ls.manifold for ls in spec.leaf_specs]
@@ -289,10 +293,17 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
     component_shapes = tuple(tuple(int(s) for s in np.shape(c)) for c in comps)
 
     diag = result.diagnostics
+    assert diag is not None
     diagnostics: dict[str, Any] = {
-        "J_stat": float(np.asarray(result.J_stat)),
-        "J_dof": int(result.J_dof),
-        "J_pvalue": float(np.asarray(result.J_pvalue)),
+        "J_stat": float(np.asarray(result.objective_value)),
+        "J_dof": int(result.n_overid),
+        "J_pvalue": float(law.J_pvalue),
+        # Persist the ADJUSTED p-value too: it is not recomputable on reload
+        # (the moment-space V / V* / G ingredients are not persisted), and under
+        # a binding ridge it differs from the nominal. Without this a reloaded
+        # law would silently hand back the nominal value under the "adjusted"
+        # name (adversarial-review finding).
+        "J_pvalue_adjusted": float(law.J_pvalue_adjusted),
         "gauge_nullspace_dim": int(diag.gauge_nullspace_dim),
         "tau_realised": float(np.asarray(diag.tau_realised)),
         "kappa_V": float(np.asarray(diag.kappa_V)),

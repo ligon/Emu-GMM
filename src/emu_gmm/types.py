@@ -32,7 +32,6 @@ to anything inside a jit boundary).
 from __future__ import annotations
 
 import dataclasses
-import functools
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
@@ -41,12 +40,10 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import pandas as pd
-import scipy.stats
 from jaxtyping import Array, Float
 
-from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal.labels import LabelContext as LabelContext  # re-export
-from emu_gmm._internal.labels import label_vector, tangent_basis_names
+from emu_gmm._internal.labels import tangent_basis_names
 
 # ``flatten_params`` is the v1 scalar-only flatten; ``flatten_params_with_spec``
 # is the manifold-aware ambient flatten. ``coef_table`` routes through the
@@ -147,6 +144,19 @@ class WeightingStrategy(Protocol):
     ``requires_outer_loop = True`` and implement
     :meth:`outer_loop_driver` with the signature documented on
     :class:`~emu_gmm.weighting.IteratedWeighting.outer_loop_driver`.
+
+    Efficient-weighting flag
+    ------------------------
+    ``efficient_weighting: bool`` (optional; defaults to ``True`` when a
+    strategy omits it) declares whether the criterion ``m' Lambda m`` uses
+    the efficient weight ``Lambda = (V*)^{-1}`` at ``theta_hat`` --- the
+    condition under which the over-identification statistic has a
+    ``chi^2_{M-K}`` limit. :class:`~emu_gmm.law.AsymptoticLaw` reads it and
+    emits ``nan`` for ``J_pvalue`` / ``J_pvalue_adjusted`` when it is
+    ``False``, rather than a plausible-looking but meaningless p-value
+    (#188; the #133 sandwich already guards ``Sigma_theta`` for the same
+    inefficient-weighting case). ``ContinuouslyUpdated`` / ``IteratedWeighting``
+    / ``Fixed`` set it ``True``; ``Identity`` sets it ``False``.
     """
 
     def whitening_residual(
@@ -509,7 +519,7 @@ class FitRecord:
 
     .. code-block:: python
 
-       records = [run(theta0, dgp(jax.random.fold_in(key, r))).record()
+       records = [fit_record(run(theta0, dgp(jax.random.fold_in(key, r))))
                   for r in range(n_reps)]
        stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *records)
 
@@ -553,68 +563,148 @@ class FitRecord:
     param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
 
 
-@dataclasses.dataclass
-class EstimationResult:
-    """The output of :func:`emu_gmm.estimate`.
+def _result_param_names(result: "OptimizationResult") -> tuple[str, ...]:
+    """Ambient tangent labels of ``result.theta_hat`` (length ``D``).
 
-    Holds the estimate, inference quantities, provenance, and a label
-    context for materialising labelled outputs into pandas.
+    Manifold-aware and robust to a missing :class:`LabelContext` (a
+    hand-built artificial result): non-scalar spec -> positional tangent
+    labels; a label context -> its parameter names; otherwise positional
+    ``theta_i`` sized by the flattened estimate. The single source of truth
+    for the ambient axis labels shared by the law and :func:`fit_record`.
+    """
+    spec = result.manifold_spec
+    labels = result.labels
+    if _is_non_scalar_spec(spec):
+        fallback = tuple(labels.param_names) if labels is not None else ()
+        return tuple(tangent_basis_names(spec, fallback_param_names=fallback))
+    if labels is not None:
+        return tuple(labels.param_names)
+    flat, _treedef = flatten_params(result.theta_hat)
+    n = int(jnp.asarray(flat).shape[0])
+    return tuple(f"theta_{i}" for i in range(n))
+
+
+def _flat_theta(theta_hat: Any, manifold_spec: Any) -> Float[Array, " D"]:
+    """The ambient flat parameter vector of ``theta_hat`` (the ``Sigma`` axis).
+
+    Manifold-aware: the ambient (``flatten_params_with_spec``) flatten for a
+    non-scalar leaf, the v1 2-tuple ``flatten_params`` for an all-scalar tree
+    (bitwise the v1 axis). Shared by the law's ``coef_table`` / ``mean`` and
+    :func:`fit_record`.
+    """
+    if _is_non_scalar_spec(manifold_spec):
+        flat, _treedef, _spec = flatten_params_with_spec(theta_hat)
+    else:
+        flat, _treedef = flatten_params(theta_hat)
+    return jnp.asarray(flat)
+
+
+@dataclasses.dataclass
+class OptimizationResult:
+    """The output of :func:`emu_gmm.estimate` --- the *optimization* surface.
+
+    An estimator is two things wearing one coat: an *optimization* (find the
+    argmin of a criterion and characterise the objective near it) and an
+    *inference* (turn that local characterisation into a statement about the
+    sampling distribution of the estimator). :class:`OptimizationResult` is the
+    first: the argmin, the objective value there, the gradient and the
+    Gauss--Newton curvature / moment Jacobian, the optimiser's trace, and the
+    numerical conditioning --- objects intrinsic to the optimization, with **no
+    statistical interpretation** (docs/optimization-result-law-split.org).
+
+    The inference surface --- ``se`` / ``cov`` / ``coef_table`` / functional
+    SEs / the J-test p-values --- lives on an :class:`~emu_gmm.law.EstimatorLaw`
+    that *names the assumption it adds*. Get the strong-assumption (Gaussian /
+    CLT) grade via :meth:`asymptotic` (``AsymptoticLaw(result)``); it assembles
+    the ridge-correct #133 sandwich from the ingredients on this result
+    (:attr:`moment_jacobian`, :attr:`weighting_matrix`, :attr:`moment_covariance`).
+
+    Directly constructible: every field but :attr:`theta_hat` has a default, so
+    a test can hand-build an artificial result
+    (``OptimizationResult(theta_hat=..., moment_jacobian=G,
+    weighting_matrix=Lambda, moment_covariance=V, manifold_spec=...)``) and feed
+    it to :class:`~emu_gmm.law.AsymptoticLaw` to unit-test the inference
+    assembly in isolation.
+
+    ``EstimationResult`` is a deprecated back-compat alias for this class.
     """
 
     # Estimate (in the user's parameter dataclass type)
     theta_hat: Any
-    # Asymptotic covariance, axes [Params, ParamsDual]
-    Sigma_theta: ha.NamedArray
-    # Variance at theta_hat, axes [Moments, MomentsDual]
-    V_X: ha.NamedArray
 
-    # J-test. ``J_stat`` and ``J_pvalue`` are 0-d JAX arrays so
-    # ``estimate`` is jit / vmap compatible; ``float(result.J_stat)``
-    # outside trace recovers a Python scalar. ``J_dof`` is a static int.
-    #
-    # ``J_pvalue`` is the *nominal* chi^2_{M-K} survival function value.
-    # ``J_pvalue_adjusted`` is the regularisation-adjusted survival
-    # function under the weighted-chi^2 limit of
-    # mcar-asymptotics.org Theorem 6; it equals ``J_pvalue`` when the
-    # ridge is not binding (tau <= tau_threshold) and differs (via a
-    # Welch-Satterthwaite approximation to the generalised chi-squared)
-    # when it binds.
-    J_stat: Float[Array, ""]
-    J_dof: int
-    J_pvalue: Float[Array, ""]
-    J_pvalue_adjusted: Float[Array, ""]
+    # -- optimization scalars / vectors ----------------------------------
+    #: ``Q(theta_hat) = m_bar' Lambda m_bar`` at the optimum (was ``J_stat``).
+    #: A 0-d JAX array so ``estimate`` is jit / vmap compatible;
+    #: ``float(result.objective_value)`` outside trace recovers a Python scalar.
+    objective_value: Any = None
+    #: ``grad Q(theta_hat)`` --- the FOC residual vector at convergence, on the
+    #: ambient tangent axis (length ``D``). ``None`` on a hand-built result.
+    gradient: Any = None
+    #: ``G = d m_bar / d theta`` at theta_hat (the horizontal-projected moment
+    #: Jacobian ``G_riem`` for a manifold parameter), shape ``(M, D)``. The
+    #: sandwich's outer factor; the Law reads it for the bread and meat.
+    moment_jacobian: Any = None
+    #: ``B = G' Lambda G`` --- the Gauss--Newton curvature of the criterion
+    #: (the information matrix; was ``info_matrix``), shape ``(D, D)``. A
+    #: curvature object (result-side); ``identification_strength`` reads it.
+    gn_hessian: Any = None
+    #: ``Lambda`` --- the realised, frozen, ridged metric in ``m_bar' Lambda
+    #: m_bar`` the objective used, shape ``(M, M)``. ``V* = Lambda^{-1}`` is the
+    #: regularised moment covariance the fit whitened by.
+    weighting_matrix: Any = None
+    #: The RAW (unregularised) moment covariance ``V`` at theta_hat --- the
+    #: sandwich *meat*, shape ``(M, M)``. Storing it (rather than recomputing
+    #: from the model) keeps the result self-contained and directly
+    #: constructible.
+    moment_covariance: Any = None
+    #: ``M - p_id`` --- the number of overidentifying restrictions (was
+    #: ``J_dof``). A static Python int.
+    n_overid: int = 0
 
-    # Status. ``converged`` is a Python bool derived from the optimiser's
-    # discrete status enum (or the sentinel ``"traced"`` under jit/vmap).
-    # ``iterations`` is whatever the backend supplied: a Python int from
-    # SciPy, a 0-d JAX int array from optimistix (so it traces under jit).
-    converged: bool
-    iterations: Any
+    # -- optimiser status / provenance -----------------------------------
+    #: ``converged`` is a Python bool derived from the optimiser's discrete
+    #: status enum (or the sentinel ``"traced"`` under jit/vmap).
+    converged: Any = True
+    #: Whatever the backend supplied: a Python int from SciPy, a 0-d JAX int
+    #: array from optimistix (so it traces under jit).
+    iterations: Any = 0
 
     # Provenance (echoed from the call site)
-    theta_init: Any
-    measure: Measure
-    covariance: CovarianceStrategy
-    weighting: WeightingStrategy
-    regularization: RegularizationStrategy | None
+    theta_init: Any = None
+    measure: Measure | None = None
+    covariance: CovarianceStrategy | None = None
+    weighting: WeightingStrategy | None = None
+    regularization: RegularizationStrategy | None = None
 
-    # Diagnostics
-    diagnostics: Diagnostics
+    # Diagnostics (optimization conditioning only)
+    diagnostics: Diagnostics | None = None
 
-    # Labels collected during input normalisation; threads through to
-    # to_pandas() for DataFrame construction.
-    labels: LabelContext
+    # Labels collected during input normalisation.
+    labels: LabelContext | None = None
 
     # Manifold metadata describing ``theta_hat``'s leaf geometry (Phase 5,
     # manifold epic #12). ``None`` for a v1 / all-scalar estimate; a
     # :class:`emu_gmm.manifolds.spec.ManifoldSpec` (== the estimate's
     # ``unflatten_spec``) for the manifold-aware path. Drives the
-    # ``components()`` readout, the manifold-aware ``coef_table`` flatten,
-    # and the positional tangent labels (so a non-scalar leaf's ambient
-    # coordinates are NOT mislabelled as scalar field-names; INT-12/R5).
-    # Defaults to ``None`` so every existing v1 callsite constructs the
-    # result unchanged.
+    # ``components()`` readout, the law's manifold-aware ``coef_table`` flatten,
+    # and the positional tangent labels (INT-12/R5).
     manifold_spec: Any = None
+
+    def asymptotic(self) -> Any:
+        """The asymptotic :class:`~emu_gmm.law.EstimatorLaw` for this fit.
+
+        Adds the asymptotic *assumption* (a CLT / exact limiting behaviour) to
+        this optimization result and returns an
+        :class:`~emu_gmm.law.AsymptoticLaw` that assembles the ridge-correct
+        sandwich from the result's ingredients. Convenience for
+        ``AsymptoticLaw(result)``; the statistical surface (``se`` / ``cov`` /
+        ``coef_table`` / functional SEs / ``j_test``) lives on the returned law,
+        not on the result --- an :class:`OptimizationResult` foregoes any
+        statistical interpretation (docs/optimization-result-law-split.org).
+        """
+        from emu_gmm.law import AsymptoticLaw
+
+        return AsymptoticLaw(self)
 
     @property
     def theta(self) -> ManifoldPoint:
@@ -640,381 +730,26 @@ class EstimationResult:
         """
         return _walk_components(self.theta_hat)
 
-    @functools.cached_property
-    def standard_errors(self) -> ha.NamedArray:
-        """Asymptotic standard errors of ``theta_hat``.
-
-        Computed as ``sqrt(diag(Sigma_theta))``, returned as a
-        :class:`haliax.NamedArray` on the ``parameters`` axis so
-        downstream code can index by parameter name. Cached on first
-        access.
-
-        Negative diagonal entries (which can arise in pathological
-        finite-sample regimes when ``info_matrix`` was numerically
-        non-PD) propagate as :data:`numpy.nan` rather than complex
-        values, matching the convention in :func:`numpy.sqrt` with
-        ``where=arr>=0``.
-        """
-        diag = jnp.diag(jnp.asarray(self.Sigma_theta.array))
-        # Guard against tiny negatives from finite-precision round-off:
-        # clip exactly to 0 before sqrt.
-        se = jnp.sqrt(jnp.where(diag >= 0.0, diag, jnp.nan))
-        Params = axes_mod.params_axis(int(se.shape[0]))
-        return label_vector(se, Params)
-
-    def functional_se(
-        self, f: Callable[[tuple[Any, ...]], Any]
-    ) -> tuple[Float[Array, " p"], Float[Array, "p p"]]:
-        r"""Gauge-invariant delta-method SE / covariance of ``f(components)``.
-
-        The general Phase-7 (#42) primitive. For a functional
-        ``f(components) -> R^p`` that depends on ``theta_hat`` only through
-        gauge invariants, returns ``(se, cov)`` where
-        ``cov = J_f @ Sigma_theta @ J_f.T`` (the delta method) and
-        ``se = sqrt(diag(cov))``. ``J_f`` is the Jacobian of ``f`` w.r.t. the
-        ambient flat parameter, taken at the **fixed** ``theta_hat`` (never
-        through the solver; commitment 5).
-
-        Parameters
-        ----------
-        f
-            A JAX-AD-able callable mapping the components tuple
-            ``(A, phi, ...)`` -- exactly what :meth:`components` returns, same
-            order -- to a 1-D JAX array of length ``p`` (a scalar is treated
-            as ``p == 1``). ``f`` must be **gauge-invariant**: it must depend
-            on each gauge-bearing leaf (a ``PSDFixedRank`` factor ``A``) only
-            through that leaf's gauge invariants (e.g. ``Gamma = A @ A.T``).
-
-            Example::
-
-                def gamma00(comps):
-                    A, phi = comps
-                    return (A @ A.T)[0, 0]      # one Gamma entry, gauge-inv.
-
-                se, cov = result.functional_se(gamma00)
-
-        Returns
-        -------
-        se : ``(p,)`` ``jax`` array
-            ``sqrt(diag(cov))``; negative diagonal entries from round-off
-            clip to ``nan`` (matching :attr:`standard_errors`).
-        cov : ``(p, p)`` ``jax`` array
-            The symmetrised delta-method covariance.
-
-        Notes
-        -----
-        Gauge-invariance is automatic for a gauge-invariant ``f`` (its ``J_f``
-        annihilates the gauge nullspace already pinned out of
-        ``Sigma_theta``), so ``Y0`` and ``Y0 @ Q`` give identical SEs. A
-        gauge-VIOLATING ``f`` (one that leaks raw ``Y``) returns a valid but
-        gauge-dependent SE -- the routine cannot detect the violation; it is
-        the caller's responsibility. **v1 / scalar reduction:** for an
-        all-scalar tree ``components()`` is the tuple of scalar leaves and
-        ``Sigma_theta`` is the ordinary ``(K, K)`` covariance, so this reduces
-        to the ordinary delta-method SE; for ``f = lambda c: c[i]`` it agrees
-        with ``standard_errors[i]``.
-
-        Eager-only: call outside any ``jax.jit`` boundary.
-        """
-        from emu_gmm.inference.functional_se import functional_se as _fse
-
-        return _fse(f, self.components(), jnp.asarray(self.Sigma_theta.array))
-
-    def gamma_covariance(self) -> Float[Array, "q q"]:
-        r"""Delta-method covariance of ``vech(Gamma)``, ``Gamma = A @ A.T``.
-
-        ``A`` is the first (``PSDFixedRank``) component. The ``q = n(n+1)/2``
-        entries follow the row-major lower-triangular ``vech`` order
-        (``Gamma[0,0], Gamma[1,0], Gamma[1,1], ...``; see
-        :func:`emu_gmm.inference.functional_se.vech_indices`). Gauge-invariant:
-        ``Gamma`` is unchanged under ``A -> A @ Q`` for ``Q in O(K)``.
-        """
-        from emu_gmm.inference.functional_se import gamma_se as _gse
-
-        idx, _ls = self._gamma_leaf()
-        _se, cov = _gse(
-            self.components(), jnp.asarray(self.Sigma_theta.array), index=idx
-        )
-        return cov
-
-    def gamma_se(self) -> Float[Array, " q"]:
-        r"""Delta-method SE of each ``vech(Gamma)`` entry, ``Gamma = A @ A.T``.
-
-        Returns a ``(q,)`` vector of standard errors for the
-        ``q = n(n+1)/2`` unique entries of the symmetric ``Gamma`` in
-        row-major lower-triangular ``vech`` order (``Gamma[0,0]``,
-        ``Gamma[1,0]``, ``Gamma[1,1]``, ...; see
-        :func:`emu_gmm.inference.functional_se.vech_indices`). Thin wrapper
-        over :meth:`functional_se`; gauge-invariant.
-
-        Note this axis (``n(n+1)/2`` Gamma-functional entries) is **distinct**
-        from the ``coef_table`` / ``standard_errors`` axis (the
-        ``total_dimension`` ambient tangent coordinates, whose raw per-entry
-        ``Y`` SEs are gauge-arbitrary and not interpretable). They are
-        different spaces (R29).
-        """
-        from emu_gmm.inference.functional_se import gamma_se as _gse
-
-        idx, _ls = self._gamma_leaf()
-        se, _cov = _gse(
-            self.components(), jnp.asarray(self.Sigma_theta.array), index=idx
-        )
-        return se
-
-    def eigenvalue_se(self, rank: int | None = None) -> Float[Array, " k"]:
-        r"""Delta-method SE of the nonzero eigenvalues of ``Gamma = A @ A.T``.
-
-        The K-Aggregators primary: SEs of the eigenvalues of the cross-price
-        substitution matrix ``Gamma``. For a rank-``k`` ``Gamma in R^{n x n}``
-        (``A`` a ``PSDFixedRank(n, k)`` factor) this returns a length-``k``
-        vector of SEs for the ``k`` **nonzero** eigenvalues, ordered ascending
-        to match :func:`jax.numpy.linalg.eigvalsh`.
-
-        The ``n - k`` structural zeros are **not** returned: the zero block is
-        a repeated eigenvalue, so its eigenvalue Jacobian is degenerate /
-        undefined; the consumer cares only about the ``k`` nonzero eigenvalues.
-
-        Parameters
-        ----------
-        rank
-            The number ``k`` of nonzero eigenvalues. Defaults to the
-            ``PSDFixedRank`` rank read from the first leaf of
-            :attr:`manifold_spec` when present; otherwise the
-            numerically-nonzero eigenvalue count of ``Gamma_hat``
-            (``|lambda| > 1e-10 * max|lambda|``).
-
-        Returns
-        -------
-        ``(k,)`` ``jax`` array of standard errors.
-
-        Degenerate eigenvalues
-        ----------------------
-        If two of the ``k`` nonzero eigenvalues coincide the individual
-        eigenvalues are not smooth functions of ``Gamma`` (only symmetric
-        functions of the degenerate block are), so the per-eigenvalue SE is
-        not well-defined at exact degeneracy: ``eigvalsh`` returns a finite
-        but eigenbasis-dependent derivative there. This is non-generic (the
-        generic case is distinct eigenvalues, where the SEs are exact); a
-        near-degenerate spectrum yields large but finite SEs. With
-        (near-)repeated eigenvalues, prefer a symmetric functional of the
-        block (e.g. its sum) via :meth:`functional_se`. Gauge-invariant: the
-        eigenvalues of ``Gamma`` do not depend on the O(K) representative of
-        ``A``.
-        """
-        from emu_gmm.inference.functional_se import eigenvalue_se as _evse
-
-        comps = self.components()
-        idx, _ls = self._gamma_leaf()
-        if rank is None:
-            rank = self._gamma_rank(comps)
-        se, _cov = _evse(
-            comps, jnp.asarray(self.Sigma_theta.array), int(rank), index=idx
-        )
-        return se
-
-    def _gamma_leaf(self) -> tuple[int, Any | None]:
-        """Locate the ``PSDFixedRank`` factor: ``(component_index, leaf_spec)``.
-
-        The single source of truth for which component the Gamma readouts
-        (:meth:`gamma_se`, :meth:`gamma_covariance`, :meth:`eigenvalue_se`)
-        and the default-``rank`` inference operate on (#117). Previously the
-        readouts hard-coded ``components[0]`` while the rank default scanned
-        the spec for the first 2-D leaf; a dataclass declared ``(phi, A)``
-        got the right rank but the wrong ``Gamma``.
-
-        Rules:
-
-        * spec present: the **unique** leaf whose manifold is a
-          :class:`~emu_gmm.manifolds.psd_fixed_rank.PSDFixedRank` (a 2-D
-          *Euclidean* matrix leaf is not a Gamma factor and is skipped).
-          Zero such leaves, or more than one, is a typed error -- with
-          several factors there is no canonical ``Gamma``; use
-          :meth:`functional_se` with an explicit functional instead.
-        * no spec (a hand-rolled / v1 result): legacy ``components[0]``
-          contract; :func:`_gamma_from_components` validates that the
-          component is 2-D.
-
-        ``leaf_specs`` and :meth:`components` share leaf-walk (dataclass
-        field) order, so the spec index is the component index.
-        """
-        from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
-
-        spec = self.manifold_spec
-        if spec is None:
-            return 0, None
-        psd_indices = [
-            i
-            for i, ls in enumerate(spec.leaf_specs)
-            if isinstance(ls.manifold, PSDFixedRank)
-        ]
-        if not psd_indices:
-            raise TypeError(
-                "Gamma readout: the manifold spec has no PSDFixedRank leaf, "
-                "so Gamma = A @ A.T is undefined for this estimate. The "
-                "gamma_se / gamma_covariance / eigenvalue_se conveniences "
-                "apply only to PSDFixedRank factors; for other functionals "
-                "use result.functional_se(f)."
-            )
-        if len(psd_indices) > 1:
-            raise TypeError(
-                f"Gamma readout: the manifold spec has {len(psd_indices)} "
-                "PSDFixedRank leaves (component indices "
-                f"{psd_indices}); there is no canonical Gamma. Use "
-                "result.functional_se(f) with a functional that selects "
-                "the intended factor explicitly."
-            )
-        idx = psd_indices[0]
-        return idx, spec.leaf_specs[idx]
-
-    def _gamma_rank(self, components: tuple[Any, ...]) -> int:
-        """Infer the rank ``k`` of the ``PSDFixedRank`` factor ``A``.
-
-        Reads the rank off the *same* leaf :meth:`_gamma_leaf` locates for
-        the Gamma readouts (#117); falls back to the numerically-nonzero
-        eigenvalue count of ``Gamma_hat`` when no spec is present.
-        """
-        from emu_gmm.inference.functional_se import count_nonzero_eigenvalues
-
-        idx, ls = self._gamma_leaf()
-        if ls is not None:
-            rank_attr = getattr(ls.manifold, "rank", None)
-            if rank_attr is None:
-                rank_attr = getattr(ls.manifold, "k", None)
-            if rank_attr is not None:
-                return int(rank_attr)
-            amb = tuple(int(s) for s in ls.ambient_shape)
-            return int(amb[1])  # (n, k) ambient shape -> k columns
-        return count_nonzero_eigenvalues(components, index=idx)
-
-    @functools.cached_property
-    def coef_table(self) -> pd.DataFrame:
-        """Coefficient table: estimate, std error, t-stat, p-value.
-
-        A :class:`pandas.DataFrame` indexed by parameter name with four
-        columns:
-
-        - ``estimate``: ``theta_hat`` (flattened in PyTree-traversal
-          order to align with ``Sigma_theta``'s ``parameters`` axis).
-        - ``std_error``: ``sqrt(diag(Sigma_theta))`` (see
-          :attr:`standard_errors`).
-        - ``t_stat``: ``estimate / std_error`` (NaN where std_error is
-          0 or NaN).
-        - ``p_value``: two-sided large-sample p-value under standard
-          normal reference (``2 * (1 - Phi(|t_stat|))``), matching the
-          asymptotic-normality of the GMM estimator.
-
-        Cached on first access.
-
-        Flattening of ``theta_hat`` is manifold-aware. For a v1 / all-scalar
-        tree (no ``manifold_spec`` or a spec whose leaves are all scalar)
-        the estimate column uses :func:`flatten_params` and is indexed by
-        the dataclass field names --- bitwise unchanged from v1. For a
-        non-scalar manifold leaf (e.g. ``PSDFixedRank``) the estimate column
-        uses :func:`flatten_params_with_spec` (the ambient flatten the
-        ``Sigma_theta`` / ``standard_errors`` axis is sized by), and the
-        table rows carry **positional tangent labels** (``Y[0,0]``,
-        ``Y[0,1]`` ... ``phi[0]``) rather than scalar field names: the raw
-        per-entry ambient coordinates of a manifold leaf are gauge-arbitrary
-        and not individually interpretable (INT-12/R5). Gauge-invariant
-        functionals of ``Gamma = A @ A.T`` (issue #42) must be computed from
-        :meth:`components` and their SEs estimated via the delta method.
-        """
-        import numpy as _np
-
-        if _is_non_scalar_spec(self.manifold_spec):
-            estimate, _treedef, _spec = flatten_params_with_spec(self.theta_hat)
-            param_names = list(
-                tangent_basis_names(
-                    self.manifold_spec,
-                    fallback_param_names=tuple(self.labels.param_names),
-                )
-            )
-        else:
-            estimate, _treedef = flatten_params(self.theta_hat)
-            param_names = list(self.labels.param_names)
-        estimate_arr = jnp.asarray(estimate)
-        # The estimate column, the SE column, and the row index must all
-        # describe the same ambient tangent axis: size == total_dimension
-        # for a manifold leaf, == field count for v1. A mismatch is a
-        # routing bug, not a user error (R7).
-        if len(param_names) != int(estimate_arr.shape[0]):
-            raise ValueError(
-                "coef_table: parameter label count "
-                f"{len(param_names)} does not match the flattened estimate "
-                f"length {int(estimate_arr.shape[0])}; this indicates a "
-                "manifold-spec / flatten routing mismatch"
-            )
-        se_arr = jnp.asarray(self.standard_errors.array)
-        # Where se_arr is non-positive or NaN, t_stat and p_value go
-        # to NaN rather than dividing by zero. ``jnp.where`` evaluates
-        # both branches under jit, so the divide itself is harmless;
-        # we just mask the result.
-        safe_se = jnp.where((se_arr > 0.0) & jnp.isfinite(se_arr), se_arr, jnp.nan)
-        t_stat = estimate_arr / safe_se
-        # Two-sided p-value under N(0,1). scipy is already a dep (see
-        # estimator.py); evaluate on the host side via numpy.
-        t_host = _np.asarray(t_stat)
-        p_value = 2.0 * scipy.stats.norm.sf(_np.abs(t_host))
-        return pd.DataFrame(
-            {
-                "estimate": _np.asarray(estimate_arr),
-                "std_error": _np.asarray(se_arr),
-                "t_stat": t_host,
-                "p_value": p_value,
-            },
-            index=param_names,
-        )
-
     def to_pandas(self) -> dict[str, pd.DataFrame | pd.Series]:
-        """Materialise labelled fields as pandas objects.
+        """Materialise the optimization's labelled fields as pandas objects.
 
-        Returns a dict with keys:
+        The *statistical* surface (``coefficients`` / ``Sigma_theta`` / ``V_X``)
+        moved to the :class:`~emu_gmm.law.AsymptoticLaw`: use
+        ``result.asymptotic().coef_table`` and ``.cov()``. What remains here is
+        the optimization readout --- the labelled per-moment diagnostics and a
+        scalar summary of the fit:
 
-        - ``"coefficients"``: :class:`pandas.DataFrame` with columns
-          ``estimate, std_error, t_stat, p_value``, indexed by
-          parameter name. Same object as :attr:`coef_table`.
-        - ``"Sigma_theta"``: :class:`pandas.DataFrame` indexed by
-          parameter names on both axes.
-        - ``"V_X"``: :class:`pandas.DataFrame` indexed by moment names
-          on both axes.
         - ``"N_j"``: :class:`pandas.Series` indexed by moment names.
-        - ``"moment_residual"``: :class:`pandas.Series` indexed by
-          moment names.
-        - ``"summary"``: :class:`pandas.Series` of scalar fields
-          (J_stat, J_dof, J_pvalue, converged, iterations,
-          tau_realised, kappa_V, final_objective).
-
-        Useful for pandas-centric reporting workflows; the labelled
-        :class:`haliax.NamedArray` fields remain available on ``self``
-        for users who prefer to stay in the JAX/Haliax stack.
+        - ``"moment_residual"``: :class:`pandas.Series` indexed by moment names.
+        - ``"summary"``: :class:`pandas.Series` of scalar optimization fields
+          (``objective_value``, ``n_overid``, ``converged``, ``iterations``,
+          ``tau_realised``, ``kappa_V``, ``final_objective``).
         """
-        # ``Sigma_theta`` is sized by the ambient tangent dimension
-        # (== field count for v1; > field count for a non-scalar manifold
-        # leaf). Index it by the positional tangent labels so the rows /
-        # columns match the matrix shape and are not mislabelled as scalar
-        # field-names (INT-12/R5). For v1 these labels coincide with the
-        # field names, so the DataFrame is unchanged.
-        if _is_non_scalar_spec(self.manifold_spec):
-            param_names = list(
-                tangent_basis_names(
-                    self.manifold_spec,
-                    fallback_param_names=tuple(self.labels.param_names),
-                )
-            )
-        else:
-            param_names = list(self.labels.param_names)
-        moment_names = list(self.labels.moment_names)
+        labels = self.labels
+        assert labels is not None
+        assert self.diagnostics is not None
+        moment_names = list(labels.moment_names)
 
-        sigma_df = pd.DataFrame(
-            jnp.asarray(self.Sigma_theta.array),
-            index=param_names,
-            columns=param_names,
-        )
-        v_df = pd.DataFrame(
-            jnp.asarray(self.V_X.array),
-            index=moment_names,
-            columns=moment_names,
-        )
         n_j = pd.Series(
             jnp.asarray(self.diagnostics.N_j.array),
             index=moment_names,
@@ -1029,10 +764,8 @@ class EstimationResult:
         # arrays to Python floats so the resulting Series is ergonomic.
         summary = pd.Series(
             {
-                "J_stat": float(jnp.asarray(self.J_stat)),
-                "J_dof": int(self.J_dof),
-                "J_pvalue": float(jnp.asarray(self.J_pvalue)),
-                "J_pvalue_adjusted": float(jnp.asarray(self.J_pvalue_adjusted)),
+                "objective_value": float(jnp.asarray(self.objective_value)),
+                "n_overid": int(self.n_overid),
                 "converged": bool(self.converged),
                 "iterations": int(self.iterations),
                 "tau_realised": float(jnp.asarray(self.diagnostics.tau_realised)),
@@ -1048,66 +781,10 @@ class EstimationResult:
         )
 
         return {
-            "coefficients": self.coef_table,
-            "Sigma_theta": sigma_df,
-            "V_X": v_df,
             "N_j": n_j,
             "moment_residual": m_res,
             "summary": summary,
         }
-
-    def record(self) -> FitRecord:
-        """The slim, stackable per-fit summary pytree (#125).
-
-        Extracts exactly the fields repeated-estimation consumers need
-        --- ``theta_flat`` (manifold-aware ambient flatten, same axis as
-        ``Sigma_theta``), ``se``, the J triple, ``converged``,
-        ``tau_realised``, ``binding_ridge``, ``sigma_meat_indefinite``
-        (the #138 NaN-SE event; #143) --- as a
-        :class:`FitRecord` pytree ready for
-        ``tree_map(jnp.stack, *records)``. Replaces the hand-rolled
-        ``_internal.params.flatten_params`` extraction every MC harness
-        previously re-invented (which silently broke for manifold
-        parameters; the dispatch here is the same one ``coef_table``
-        uses).
-        """
-        if _is_non_scalar_spec(self.manifold_spec):
-            theta_flat, _treedef, _spec = flatten_params_with_spec(self.theta_hat)
-            param_names = tuple(
-                tangent_basis_names(
-                    self.manifold_spec,
-                    fallback_param_names=tuple(self.labels.param_names),
-                )
-            )
-        else:
-            theta_flat, _treedef = flatten_params(self.theta_hat)
-            param_names = tuple(self.labels.param_names)
-        theta_arr = jnp.asarray(theta_flat)
-        se_arr = jnp.asarray(self.standard_errors.array)
-        if int(se_arr.shape[0]) != int(theta_arr.shape[0]):
-            raise ValueError(
-                "record(): flattened estimate length "
-                f"{int(theta_arr.shape[0])} does not match the SE axis "
-                f"{int(se_arr.shape[0])}; this indicates a manifold-spec "
-                "routing bug (mirrors the coef_table guard)."
-            )
-        return FitRecord(
-            theta_flat=theta_arr,
-            se=se_arr,
-            J_stat=jnp.asarray(self.J_stat),
-            J_pvalue=jnp.asarray(self.J_pvalue),
-            J_pvalue_adjusted=jnp.asarray(self.J_pvalue_adjusted),
-            converged=jnp.asarray(self.converged, dtype=jnp.float64),
-            tau_realised=jnp.asarray(self.diagnostics.tau_realised),
-            binding_ridge=jnp.asarray(
-                self.diagnostics.binding_ridge, dtype=jnp.float64
-            ),
-            sigma_meat_indefinite=jnp.asarray(
-                self.diagnostics.sigma_meat_indefinite, dtype=jnp.float64
-            ),
-            J_dof=int(self.J_dof),
-            param_names=param_names,
-        )
 
     def _main_namespace_hazards(self) -> list[str]:
         """Names of provenance objects whose classes/callables live in
@@ -1175,7 +852,7 @@ class EstimationResult:
         hazards = self._main_namespace_hazards()
         if hazards:
             warnings.warn(
-                "EstimationResult.to_pickle: the following provenance "
+                "OptimizationResult.to_pickle: the following provenance "
                 f"objects resolve through __main__: {hazards}. Pickle "
                 "stores classes/functions by reference, so this file will "
                 "only load in a process whose __main__ defines the same "
@@ -1189,8 +866,8 @@ class EstimationResult:
             pickle.dump(self, fh)
 
     @classmethod
-    def from_pickle(cls, path: Any) -> "EstimationResult":
-        """Load an :class:`EstimationResult` pickled by :meth:`to_pickle`.
+    def from_pickle(cls, path: Any) -> "OptimizationResult":
+        """Load an :class:`OptimizationResult` pickled by :meth:`to_pickle`.
 
         Thin wrapper over :func:`pickle.load` with a type check, so a
         wrong-file mistake surfaces as a clear :class:`TypeError` rather
@@ -1208,13 +885,22 @@ class EstimationResult:
             obj = pickle.load(fh)
         if not isinstance(obj, cls):
             raise TypeError(
-                f"EstimationResult.from_pickle: {path!r} contains a "
-                f"{type(obj).__name__}, not an EstimationResult. If this "
+                f"OptimizationResult.from_pickle: {path!r} contains a "
+                f"{type(obj).__name__}, not an OptimizationResult. If this "
                 "is a ManifoldGMM GMMResult pickle, re-estimate with "
                 "emu_gmm (see docs/migration/manifoldgmm-to-emu-gmm.org); "
                 "pickles do not migrate across libraries."
             )
         return obj
+
+
+#: Deprecated back-compat alias for :class:`OptimizationResult`. The
+#: estimation/inference split (docs/optimization-result-law-split.org) renamed
+#: the class: ``estimate()`` returns the leaner optimization surface and the
+#: statistical surface lives on ``result.asymptotic()``. New code should use
+#: ``OptimizationResult``; this name is retained so existing imports keep
+#: working.
+EstimationResult = OptimizationResult
 
 
 __all__ = [
@@ -1227,6 +913,7 @@ __all__ = [
     "Optimizer",
     "OptimizerInfo",
     "Diagnostics",
+    "OptimizationResult",
     "EstimationResult",
     "FitRecord",
     "ManifoldPoint",

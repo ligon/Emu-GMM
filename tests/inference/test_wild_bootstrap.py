@@ -621,7 +621,7 @@ class TestJitVmapCompatibility:
 # ---------------------------------------------------------------------------
 #
 # Per the PR #32 review HIGH finding #2: the docstring instructs callers
-# to pass `EstimationResult.V_X` (a haliax NamedArray) directly into the
+# to pass the moment covariance V* (a haliax NamedArray) directly into the
 # `V=` kwarg. The original implementation called `jnp.asarray(V)` which
 # raises on a NamedArray. Fix: auto-unwrap NamedArray via `_to_plain`
 # at the input boundary.
@@ -630,8 +630,8 @@ class TestJitVmapCompatibility:
 class TestNamedArrayVAcceptance:
     """The `V=` kwarg accepts a labelled `haliax.NamedArray` directly.
 
-    The docstring of `moment_wild_bootstrap` points users at
-    `result.V_X` (a NamedArray, not the underlying `.array`); the
+    The docstring of `moment_wild_bootstrap` points users at a labelled
+    moment covariance V* (a NamedArray, not the underlying `.array`); the
     helper must therefore unwrap the wrapper rather than choking on it.
     """
 
@@ -640,7 +640,7 @@ class TestNamedArrayVAcceptance:
         measure, covariance, theta_0 = _build_h0_setup(seed=40, N=40, n_clusters=4)
 
         # One-moment problem (matching _build_h0_setup); fabricate the
-        # NamedArray exactly the way `EstimationResult.V_X` does.
+        # NamedArray exactly the way a labelled moment covariance V* does.
         Moments = ha.Axis("moments", 1)
         MomentsDual = ha.Axis("moments_dual", 1)
         V_plain = jnp.array([[2.5]])
@@ -673,10 +673,10 @@ class TestNamedArrayVAcceptance:
         assert jnp.allclose(result_plain.J_observed, result_named.J_observed)
 
     def test_namedarray_V_from_estimation_result_shape(self):
-        """The natural caller gesture --- pass `result.V_X` straight
-        through without an `.array` unwrap --- does not raise.
+        """The natural caller gesture --- pass a labelled moment covariance
+        V* straight through without an `.array` unwrap --- does not raise.
 
-        `EstimationResult.V_X` is shaped (M, M) with axes
+        The moment covariance V* is shaped (M, M) with axes
         (moments, moments_dual); this is the canonical hand-off
         documented in the helper's docstring.
         """
@@ -718,7 +718,7 @@ class TestNamedArrayVAcceptance:
 #   2. a non-finite ``J_observed`` surfaces ``p_value = nan`` rather
 #      than 0.0 (the #140 "NaN is an event" convention) --- this guard
 #      also covers the caller-supplied-V path, which is deliberately
-#      used verbatim (presumed already regularised, e.g. result.V_X).
+#      used verbatim (presumed already regularised, e.g. the frozen V*).
 
 
 def _build_indefinite_V_setup() -> tuple[EmpiricalMeasure, ClusteredCovariance, _P]:

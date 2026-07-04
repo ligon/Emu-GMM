@@ -101,8 +101,9 @@ class TestRegularizationAdjustedPvalue:
         adjusted p-value matches the nominal one to roundoff."""
         result = estimate(**self._common_kwargs(_well_conditioned_cov))
         assert bool(result.diagnostics.binding_ridge) is False
-        assert float(result.J_pvalue) == pytest.approx(
-            float(result.J_pvalue_adjusted), rel=1e-10, abs=1e-12
+        law = result.asymptotic()
+        assert float(law.J_pvalue) == pytest.approx(
+            float(law.J_pvalue_adjusted), rel=1e-10, abs=1e-12
         )
 
     def test_pvalue_adjusted_differs_from_nominal_when_binding(self):
@@ -124,8 +125,9 @@ class TestRegularizationAdjustedPvalue:
         )
         assert bool(result.diagnostics.binding_ridge) is True
         # Both are valid probabilities.
-        p_nom = float(result.J_pvalue)
-        p_adj = float(result.J_pvalue_adjusted)
+        law = result.asymptotic()
+        p_nom = float(law.J_pvalue)
+        p_adj = float(law.J_pvalue_adjusted)
         assert 0.0 <= p_nom <= 1.0
         assert 0.0 <= p_adj <= 1.0
         # The two must differ by a measurable amount: the adjustment

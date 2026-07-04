@@ -209,10 +209,10 @@ def _print_header(title: str) -> None:
 
 def _print_result(result, context: str) -> None:
     print(f"  ({context})")
-    print(result.coef_table.to_string())
+    print(result.asymptotic().coef_table.to_string())
     print(
-        f"  J-stat = {float(result.J_stat):.4e}  "
-        f"(dof = {result.J_dof}, p = {float(result.J_pvalue):.3f})"
+        f"  J-stat = {float(result.objective_value):.4e}  "
+        f"(dof = {result.n_overid}, p = {float(result.asymptotic().J_pvalue):.3f})"
     )
     print(
         f"  converged = {bool(result.converged)}  "

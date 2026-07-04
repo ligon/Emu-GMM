@@ -67,14 +67,15 @@ class TestNumericalEquivalence:
         # V_star, so ||y||^2 == m' V*^{-1} m. Cross-check via
         # ``V_X`` (which the post-optimum block exposes as the
         # *anchored* covariance).
-        V_star = result.V_X.array  # haliax NamedArray
+        # V* = inv(Lambda), the regularised (anchored) moment covariance.
+        V_star = jnp.linalg.inv(jnp.asarray(result.weighting_matrix))
         m = jnp.asarray(result.diagnostics.moment_residual.array)
         # m' V*^{-1} m
         Vinv_m = jnp.linalg.solve(V_star, m)
         quad = float(m @ Vinv_m)
         assert (
-            float(result.J_stat) == jax.numpy.float64(quad).item()
-            or abs(float(result.J_stat) - quad) < 1e-8
+            float(result.objective_value) == jax.numpy.float64(quad).item()
+            or abs(float(result.objective_value) - quad) < 1e-8
         )
 
     def test_sigma_theta_matches_inv_info_matrix(self):
@@ -82,7 +83,7 @@ class TestNumericalEquivalence:
         # ``Sigma_theta == inv(G' V*^{-1} G)``. We don't have G as a
         # public output, but we can reconstruct via the jacobian and
         # the anchored V*.
-        V_star = result.V_X.array
+        V_star = jnp.linalg.inv(jnp.asarray(result.weighting_matrix))
         # Compute G manually via jax.jacfwd of the (jit-free) residual
         # path.
         from emu_gmm._internal.params import flatten_params, unflatten_params
@@ -96,12 +97,12 @@ class TestNumericalEquivalence:
         G = jax.jacfwd(expectation_fn)(flat)
         info = G.T @ jnp.linalg.solve(V_star, G)
         Sigma_ref = jnp.linalg.inv(info)
-        Sigma_est = result.Sigma_theta.array
+        Sigma_est = result.asymptotic().cov()
         assert jnp.allclose(Sigma_est, Sigma_ref, atol=1e-7)
 
     def test_cholesky_pivot_min_matches_v_star(self):
         result = _make_estimate()
-        V_star = result.V_X.array
+        V_star = jnp.linalg.inv(jnp.asarray(result.weighting_matrix))
         L = jnp.linalg.cholesky(V_star)
         pivot_min = float(jnp.min(jnp.diag(L)))
         assert (
@@ -159,7 +160,7 @@ class TestSinglePassPostOptimum:
         # Just assert that estimate() succeeded and the result fields
         # are present; the actual count assertion below is the
         # invariant.
-        assert result.J_stat is not None
+        assert result.objective_value is not None
         # Each Python ``psi`` invocation corresponds to one trace under
         # jit (the eager-side counter increments at trace time). We
         # bound generously: the optimiser runs a small handful of

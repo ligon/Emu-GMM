@@ -288,7 +288,7 @@ def test_theta_init_alias_is_bitwise_identical_to_parameters():
     # Bitwise identical (same start, same path).
     assert bool(jnp.array_equal(A_old, A_new))
     assert bool(jnp.array_equal(mu_old, mu_new))
-    assert float(r_old.J_stat) == float(r_new.J_stat)
+    assert float(r_old.objective_value) == float(r_new.objective_value)
 
 
 def test_passing_both_parameters_and_theta_init_errors():
@@ -354,7 +354,9 @@ def test_all_scalar_parameter_space_reduces_to_v1():
     # The all-scalar (Euclidean) ParameterSpace matches the v1 scalar path.
     assert float(a_s) == pytest.approx(float(a_v), abs=1e-9)
     assert float(b_s) == pytest.approx(float(b_v), abs=1e-9)
-    assert float(r_space.J_stat) == pytest.approx(float(r_v1.J_stat), abs=1e-9)
+    assert float(r_space.objective_value) == pytest.approx(
+        float(r_v1.objective_value), abs=1e-9
+    )
     # An all-Euclidean ParameterSpace takes the v1 dispatch (no Riemannian
     # routing): like the bare scalar dataclass, manifold_spec is None.
     assert r_space.manifold_spec is None
@@ -508,7 +510,7 @@ def test_run_callable_first_arg_is_polymorphic():
         assert bool(jnp.allclose(mu_hat, mean_hat, atol=1e-6))
         assert bool(jnp.allclose(A_hat @ A_hat.T, cov_hat, atol=1e-6))
     # theta / theta_hat warm starts match each other bitwise on J.
-    assert float(r_theta.J_stat) == float(r_theta_hat.J_stat)
+    assert float(r_theta.objective_value) == float(r_theta_hat.objective_value)
 
 
 # ---------------------------------------------------------------------------

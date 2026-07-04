@@ -508,7 +508,7 @@ def cluster_bootstrap(
             continue
         theta_hat_flat, _, _ = params_mod.flatten_params_for_ad(result.theta_hat)
         theta_boot[b] = np.asarray(theta_hat_flat)
-        J_boot[b] = float(result.J_stat)
+        J_boot[b] = float(result.objective_value)
         convergence[b] = bool(result.converged)
 
     # Label the (n_boot, K) array along the canonical parameters axis;
