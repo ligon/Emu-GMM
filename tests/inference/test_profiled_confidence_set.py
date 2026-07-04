@@ -320,7 +320,18 @@ class TestManifoldNuisance:
         result, _spec, _M, _ = ph4._run_estimate(k, seed=301)
         phi_hat = float(result.theta_hat.phi.array[0])
         Y_hat = jnp.asarray(np.asarray(result.theta_hat.Y.array))
-        grid = np.linspace(phi_hat - 0.5, phi_hat + 0.5, 7)
+        # Size the grid to phi's identification scale, NOT an arbitrary wide
+        # window. phi is *so* strongly identified here that its 95% profiled-K
+        # CI half-width is ~0.013 (p ~ 0.14 at phi_hat +/- 0.01, ~0.003 at
+        # +/- 0.02); a wide window (e.g. +/- 0.5) therefore resolves the set to
+        # the single grid point that lands exactly on phi_hat and also drags in
+        # far-flung nulls whose inner nuisance re-fit fails to converge -- so the
+        # #186 convergence guard excludes them and the lone in-set point makes
+        # the topology flip between 'interval' and 'empty' across platforms
+        # (the pre-fix flake). A tight grid (step 0.005 over +/- 0.03) puts
+        # several points strictly inside the CI, all with converged inner fits,
+        # so the bounded-interval finding is robust.
+        grid = np.linspace(phi_hat - 0.03, phi_hat + 0.03, 13)
         cs = profiled_k_confidence_set(
             lambda g: ph4._make_params(Y_hat, g, k),
             grid,
@@ -329,9 +340,13 @@ class TestManifoldNuisance:
             ph4._model,
             profile=["phi"],
         )
-        # phi is strongly identified: a bounded interval inside the window.
+        # phi is strongly identified: a bounded interval strictly inside the
+        # window (converged out-of-set points on both sides -> not open at an
+        # edge), and no point was dropped by the inner-convergence guard.
         assert cs.topology == "interval"
         assert not cs.open_left and not cs.open_right
+        assert cs.n_nonconverged == 0
+        assert int(cs.in_set.sum()) >= 3
 
 
 # ---------------------------------------------------------------------------

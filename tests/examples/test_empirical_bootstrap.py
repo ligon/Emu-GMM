@@ -77,7 +77,6 @@ def test_run_recovers_truth_and_matches_analytic_inference():
     # deterministically from the example's own seed; n_boot=1 because only the
     # (draw-free) J_observed is compared.
     import jax
-
     from emu_gmm import moment_wild_bootstrap
 
     measure, covariance, _ = empirical_bootstrap.make_dataset(

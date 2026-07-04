@@ -702,7 +702,7 @@ def profiled_k_confidence_set(
     a non-converged inner fit leaves the nuisance score non-zero and yields
     a finite-but-*wrong* :math:`K`, indistinguishable from a good point by
     value alone. Each grid point therefore reads the inner
-    ``EstimationResult.converged`` flag (reliable on all optimiser paths
+    ``OptimizationResult.converged`` flag (reliable on all optimiser paths
     since the linear solver's ``done`` flag was threaded through); a
     non-converged point is treated exactly like a NaN-p invalid point:
     excluded from the set, counted in
