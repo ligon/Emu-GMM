@@ -18,11 +18,13 @@ Three claims, in decreasing tightness:
    the per-coordinate :math:`N_j` into :math:`V_X`, so its ``objective_value``
    is on the SAME scale as gmm's :math:`n\,\bar g' S^{-1}\bar g` -- an O(1)-few
    value referenced to :math:`\chi^2_2`, NOT off by a factor of ``n``.
-3. **The documented convention band** (``test_estimates_match_within_band``):
-   emu's uncentered PSD-by-construction :math:`V_X` vs gmm's centered-family
-   :math:`S` give CUE / iterated estimates that agree to ~1% (coef) / ~5% (SE).
-   A tighter match needs a matched weight (claim 1); a WIDER gap would flag a
-   real regression, not a convention difference.
+3. **The documented weighting band** (``test_estimates_match_within_band``):
+   the emu CUE / iterated estimates agree with gmm's to ~1% (coef) / ~5% (SE) ---
+   a small, systematic difference in how each package builds the CUE weight
+   :math:`V(\theta)` (NOT moment-covariance centering: an ``IIDCovariance(
+   centered=True)`` toggle leaves the emu CUE point byte-identical; see
+   ``docs/validation/r-reference-crosschecks.org``). A tighter match needs a
+   matched weight (claim 1); a WIDER gap would flag a real regression.
 """
 
 from __future__ import annotations

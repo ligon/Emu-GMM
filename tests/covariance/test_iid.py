@@ -262,3 +262,80 @@ class TestNaNSafety:
         assert float(V[0, 1]) == pytest.approx(
             (3.0 * 30.0 + 4.0 * 40.0) / (4.0 * 2.0), rel=1e-6
         )
+
+
+# ---------------------------------------------------------------------------
+# The centered= knob (docs/validation/r-reference-crosschecks.org): subtract the
+# per-coordinate mean moment before the pairwise-overlap outer products.
+# ---------------------------------------------------------------------------
+def _masked_centered_reference(X, mask):
+    """Independent numpy reference for the masked, centered V_X."""
+    N, M = X.shape
+    Nj = mask.sum(0)
+    m = (mask * X).sum(0) / Nj  # per-coordinate mean over OBSERVED rows
+    V = np.zeros((M, M))
+    for j in range(M):
+        for k in range(M):
+            num = np.sum(mask[:, j] * mask[:, k] * (X[:, j] - m[j]) * (X[:, k] - m[k]))
+            V[j, k] = num / (Nj[j] * Nj[k])
+    return V
+
+
+class TestCenteredKnob:
+    def _meas(self, seed=0, n=40, m=3, loc=1.0):
+        rng = np.random.default_rng(seed)
+        X = rng.normal(loc, 2.0, size=(n, m))  # nonzero mean so centering bites
+        meas = EmpiricalMeasure(
+            x=jnp.asarray(X), mask=jnp.ones((n, m)), weights=jnp.ones(n)
+        )
+        return X, meas
+
+    def test_static_field_default_false(self):
+        assert IIDCovariance().centered is False
+        assert IIDCovariance(centered=True).centered is True
+
+    def test_unmasked_matches_hand_computation(self):
+        X, meas = self._meas()
+        n = X.shape[0]
+        vu = np.asarray(IIDCovariance().covariance(_identity_psi, _P(0.0, 0.0), meas))
+        vc = np.asarray(
+            IIDCovariance(centered=True).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        )
+        # uncentered: sum_i x x' / N^2 == (X'X)/N^2; centered: biased cov / N.
+        np.testing.assert_allclose(vu, (X.T @ X) / n**2, rtol=1e-6)
+        np.testing.assert_allclose(
+            vc, np.cov(X, rowvar=False, bias=True) / n, rtol=1e-6
+        )
+
+    def test_both_forms_are_psd(self):
+        _, meas = self._meas()
+        for cov in (IIDCovariance(), IIDCovariance(centered=True)):
+            V = np.asarray(cov.covariance(_identity_psi, _P(0.0, 0.0), meas))
+            assert np.all(np.linalg.eigvalsh(V) >= -1e-12)
+
+    def test_equal_when_moments_already_have_zero_mean(self):
+        rng = np.random.default_rng(1)
+        X = rng.normal(0.0, 1.0, size=(60, 2))
+        X = X - X.mean(axis=0)  # exact zero column means -> centering is a no-op
+        meas = EmpiricalMeasure(
+            x=jnp.asarray(X), mask=jnp.ones((60, 2)), weights=jnp.ones(60)
+        )
+        vu = np.asarray(IIDCovariance().covariance(_identity_psi, _P(0.0, 0.0), meas))
+        vc = np.asarray(
+            IIDCovariance(centered=True).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        )
+        np.testing.assert_allclose(vu, vc, atol=1e-12)
+
+    def test_masked_centering_uses_per_coordinate_observed_mean(self):
+        # Partial observability: the centre is the mean over each coordinate's
+        # OWN observed rows, and each (j,k) sum is over rows observing both.
+        X = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]])
+        mask = np.array([[1, 1], [1, 0], [1, 1], [0, 1]], dtype=float)
+        meas = EmpiricalMeasure(
+            x=jnp.asarray(X), mask=jnp.asarray(mask), weights=jnp.ones(4)
+        )
+        vc = np.asarray(
+            IIDCovariance(centered=True).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        )
+        np.testing.assert_allclose(vc, _masked_centered_reference(X, mask), rtol=1e-6)
+        assert np.all(np.linalg.eigvalsh(vc) >= -1e-12)

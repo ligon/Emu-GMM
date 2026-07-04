@@ -70,8 +70,10 @@ reference <- list(
     model = "y ~ xe, instruments (1, z1, z2, z3); M=4, K=2, over_id=2",
     note = paste(
       "gmm uses vcov='iid'. The gmm CUE/iterative estimates differ from emu-gmm",
-      "at the ~0.1-3% level by moment-covariance-estimator convention; the 2SLS",
-      "point (fixed (Z'Z)^-1 weight) is the exact machine-precision anchor."
+      "at the ~0.1-3% level by CUE weight construction, NOT moment-covariance",
+      "centering (an IIDCovariance(centered=True) toggle does not close the gap);",
+      "the 2SLS point (fixed (Z'Z)^-1 weight) is the exact machine-precision",
+      "anchor. See docs/validation/r-reference-crosschecks.org."
     )
   ),
   twoStageLeastSquares = list(
