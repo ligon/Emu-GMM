@@ -24,7 +24,6 @@ from pathlib import Path
 
 import jax
 import numpy as np
-
 from emu_gmm.examples.euler import (
     BETA_TRUE,
     GAMMA_TRUE,

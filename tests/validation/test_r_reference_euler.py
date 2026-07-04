@@ -38,6 +38,10 @@ _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 _CSV = _DATA_DIR / "gmm_euler.csv"
 _REF = _DATA_DIR / "gmm_euler_reference.json"
 
+# Acceptance-level external cross-check (mirrors test_estimator_realdata.py): run
+# in the full-suite validation leg, not the fast per-push quick-check gate.
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture(scope="module")
 def data_and_ref():
