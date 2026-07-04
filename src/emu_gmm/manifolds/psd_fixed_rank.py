@@ -34,6 +34,7 @@ horizontal-basis storage (deferred to v2.1).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import jax
@@ -194,6 +195,37 @@ class PSDFixedRank:
                 else:
                     labels.append(f"{field_name}_t_{i}_{j}")
         return labels
+
+    def invariants(self) -> dict[str, Callable[[Any], Any]]:
+        r"""Canonical gauge-invariant functionals of an ambient ``(n, k)`` factor ``A``.
+
+        :math:`\Gamma = A A^\top` is *the* :math:`O(k)`-quotient invariant (the
+        rank-``k`` PSD matrix; unchanged under :math:`A \to A Q`, :math:`Q \in
+        O(k)`), so its spectrum and its ``vech`` are the natural queryable
+        summaries of a leaf on this manifold. Each functional maps the leaf's
+        ambient ``(n, k)`` array to a 1-D array and is gauge-invariant, hence
+        meaningful both per draw (empirical grade) and under the delta method
+        (asymptotic grade) --- the raw ``(n, k)`` entries themselves are
+        gauge-arbitrary and are deliberately NOT offered.
+
+        * ``"eigenvalues"`` --- the ``k`` nonzero eigenvalues of :math:`\Gamma`,
+          ascending (the ``n - k`` structural zeros, a degenerate repeated
+          eigenvalue, are excluded).
+        * ``"gamma"`` --- ``vech(Gamma)``, the ``n(n+1)/2`` unique
+          lower-triangular entries in row-major order.
+        """
+        n, k = self._n, self._k
+        ii, jj = jnp.tril_indices(n)
+
+        def eigenvalues(A: Any) -> Any:
+            arr = jnp.asarray(A)
+            return jnp.linalg.eigvalsh(arr @ arr.T)[n - k :]
+
+        def gamma(A: Any) -> Any:
+            arr = jnp.asarray(A)
+            return (arr @ arr.T)[ii, jj]
+
+        return {"eigenvalues": eigenvalues, "gamma": gamma}
 
 
 # ---------------------------------------------------------------------------

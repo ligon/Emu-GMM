@@ -10,6 +10,7 @@ ambient gradient. See plan §2.8 for the v1 back-compat path: a v1-style
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import jax
@@ -126,6 +127,15 @@ class Euclidean:
             suffix = "_".join(str(i) for i in idx)
             labels.append(f"{field_name}_t_{suffix}")
         return labels
+
+    def invariants(self) -> dict[str, Callable[[Any], Any]]:
+        """The coordinate value itself --- ``Euclidean`` has no gauge to quotient.
+
+        A flat leaf has no non-trivial invariant beyond its own coordinates, so
+        the single ``"value"`` functional returns the raveled ambient array (a
+        length-``dimension`` vector; a 0-d scalar leaf ravels to length 1).
+        """
+        return {"value": lambda x: jnp.ravel(jnp.asarray(x))}
 
 
 __all__ = ["Euclidean"]

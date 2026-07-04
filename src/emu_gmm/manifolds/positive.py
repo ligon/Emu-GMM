@@ -25,6 +25,7 @@ field through ``jit``. Float64 by package import.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any
 
 import jax
@@ -154,6 +155,16 @@ class Positive:
     def tangent_basis_names(self, field_name: str) -> list[str]:
         """Scalar leaf: ``[field_name]`` (matches ``Euclidean()`` / v1)."""
         return [field_name]
+
+    def invariants(self) -> dict[str, Callable[[Any], Any]]:
+        """The positive value itself --- no gauge to quotient (``gauge_dim == 0``).
+
+        The single ``"value"`` functional returns the raveled scalar (length 1).
+        The reported asymptotic scale is the natural / ambient one (``Var(x)``,
+        not the log-scale; see :meth:`retraction_differential`), so ``value`` is
+        the coordinate a caller wants an SE on.
+        """
+        return {"value": lambda x: jnp.ravel(jnp.asarray(x))}
 
 
 __all__ = ["Positive"]
