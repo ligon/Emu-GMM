@@ -11,7 +11,7 @@
       "sandwich": "3.1.0"
     },
     "model": "y ~ xe, instruments (1, z1, z2, z3); M=4, K=2, over_id=2",
-    "note": "gmm uses vcov='iid'. The gmm CUE/iterative estimates differ from emu-gmm at the ~0.1-3% level by CUE weight construction, NOT moment-covariance centering (an IIDCovariance(centered=True) toggle does not close the gap); the 2SLS point (fixed (Z'Z)^-1 weight) is the exact machine-precision anchor. See docs/validation/r-reference-crosschecks.org."
+    "note": "gmm uses vcov='iid' via the FUNCTION interface g(theta, x); on this the gmm CUE/iterated estimates match emu-gmm to ~5-6 significant figures, and an independent numpy CUE confirms both. gmm's FORMULA interface (gmm(y~xe, ~z)) instead gives ~0.1% different CUE for linear models (its iterated collapses to exact 2SLS) -- a gmm interface quirk, not an emu difference. The 2SLS point (fixed (Z'Z)^-1 weight) is the exact machine-precision anchor. See docs/validation/r-reference-crosschecks.org."
   },
   "twoStageLeastSquares": {
     "coef": {
@@ -24,28 +24,28 @@
   },
   "gmm_cue": {
     "coef": {
-      "b0": 0.9753402977374378,
-      "b1": 2.0182669567038656
+      "b0": 0.98236691475793414,
+      "b1": 2.020437406371399
     },
     "se": {
-      "b0": 0.06229767433202419,
-      "b1": 0.049347356844535575
+      "b0": 0.061995778699084167,
+      "b1": 0.048107982909265622
     },
-    "J": 3.7163132105921073,
-    "J_pvalue": 0.15595986112886209,
+    "J": 3.6212961889558555,
+    "J_pvalue": 0.16354810782246174,
     "J_df": 2
   },
   "gmm_iterative": {
     "coef": {
-      "b0": 0.97518049249357774,
-      "b1": 2.0241896364241847
+      "b0": 0.98092120427597795,
+      "b1": 2.0268835200164705
     },
     "se": {
-      "b0": 0.062057678615721,
-      "b1": 0.049157250963689156
+      "b0": 0.061736589226104734,
+      "b1": 0.0478968450937724
     },
-    "J": 3.7305965138874577,
-    "J_pvalue": 0.15485001790363359,
+    "J": 3.6394629755095496,
+    "J_pvalue": 0.16206926267350436,
     "J_df": 2
   }
 }

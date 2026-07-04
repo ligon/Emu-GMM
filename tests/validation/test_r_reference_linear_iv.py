@@ -8,23 +8,26 @@ this consumes *frozen* reference numbers, so CI needs no R toolchain; regenerate
 with ``gen_data.py`` then ``reference.R`` (R installs from the Ubuntu ``r-cran-*``
 debs -- CRAN is blocked by the agent egress policy; see the doc).
 
-Three claims, in decreasing tightness:
+The R reference uses gmm's FUNCTION interface ``g(theta, x)`` (the standard
+general GMM, and what emu-gmm implements) -- NOT the formula interface
+``gmm(y ~ x, ~ z)``, which for linear models runs a different internal path and
+gives a ~0.1% different CUE (its iterated collapses to exact 2SLS). See the doc.
 
-1. **Machine-precision correctness** (``test_matched_weight_reproduces_2sls``):
-   with the 2SLS weight :math:`(Z'Z/n)^{-1}` held identical, emu-gmm's linear
-   GMM solver reproduces ``AER::ivreg`` to ~1e-6. This isolates the estimator
-   math from any covariance-estimator convention.
-2. **Commitment 9 -- the J scale** (``test_J_is_on_the_chi2_scale``): emu folds
-   the per-coordinate :math:`N_j` into :math:`V_X`, so its ``objective_value``
-   is on the SAME scale as gmm's :math:`n\,\bar g' S^{-1}\bar g` -- an O(1)-few
-   value referenced to :math:`\chi^2_2`, NOT off by a factor of ``n``.
-3. **The documented weighting band** (``test_estimates_match_within_band``):
-   the emu CUE / iterated estimates agree with gmm's to ~1% (coef) / ~5% (SE) ---
-   a small, systematic difference in how each package builds the CUE weight
-   :math:`V(\theta)` (NOT moment-covariance centering: an ``IIDCovariance(
-   centered=True)`` toggle leaves the emu CUE point byte-identical; see
-   ``docs/validation/r-reference-crosschecks.org``). A tighter match needs a
-   matched weight (claim 1); a WIDER gap would flag a real regression.
+Claims:
+
+1. **Machine-precision solver correctness** (``test_matched_weight...``): with
+   the 2SLS weight :math:`(Z'Z/n)^{-1}` held identical, emu reproduces
+   ``AER::ivreg`` to ~1e-6.
+2. **Point estimates match** (``test_point_estimate...``): emu's CUE / iterated
+   point estimates reproduce R ``gmm`` (function interface) to ~5-6 sig figs;
+   independent of moment-covariance centering.
+3. **Commitment 9 -- the J scale** (``test_J_is_on_the_chi2_scale``): emu's
+   ``objective_value`` is chi^2_2-scaled, not off by a factor of ``n``.
+4. **The ``centered=True`` knob reconciles the vcov convention**
+   (``test_centered_knob...``): R ``gmm`` reports J / SE with the *centered*
+   moment covariance; ``IIDCovariance(centered=True)`` reproduces gmm's J and SE
+   to ~5 sig figs (the emu default is uncentered, so its J differs by the
+   :math:`O(\bar m^2)` centering term while the point estimate does not).
 """
 
 from __future__ import annotations
@@ -55,6 +58,11 @@ _REF = _DATA_DIR / "gmm_linear_iv_reference.json"
 # in the full-suite validation leg, not the fast per-push quick-check gate.
 pytestmark = pytest.mark.slow
 
+_WEIGHTINGS = [
+    (ContinuouslyUpdated(), "gmm_cue"),
+    (IteratedWeighting(), "gmm_iterative"),
+]
+
 
 @jdc.pytree_dataclass
 class _P:
@@ -75,12 +83,12 @@ def data_and_ref():
     return X, ref
 
 
-def _fit(X, weighting):
+def _fit(X, weighting, covariance=None):
     meas = EmpiricalMeasure.from_arrays(jnp.asarray(X), M=4)
     r = estimate(
         _iv_resid,
         meas,
-        covariance=IIDCovariance(),
+        covariance=covariance if covariance is not None else IIDCovariance(),
         weighting=weighting,
         optimizer=optimistix_lm(),
         theta_init=_P(b0=0.0, b1=0.0),
@@ -111,32 +119,44 @@ def test_matched_weight_reproduces_2sls_to_machine_precision(data_and_ref):
     np.testing.assert_allclose(float(r.theta_hat.b1), tsls["b1"], rtol=1e-5)
 
 
-def test_J_is_on_the_chi2_scale_no_explicit_N(data_and_ref):
-    """Claim 2 (commitment 9): J is chi^2_2-scaled, not off by a factor of n."""
-    X, ref = data_and_ref
-    r, law = _fit(X, IteratedWeighting())
-    g = ref["gmm_iterative"]
-    assert r.n_overid == g["J_df"] == 2
-    # A factor-of-n bug would put J near 0.007 or near 1900; it is neither.
-    assert 1.0 < float(r.objective_value) < 8.0
-    np.testing.assert_allclose(float(r.objective_value), g["J"], rtol=0.06)
-    np.testing.assert_allclose(float(law.J_pvalue), g["J_pvalue"], atol=0.02)
+@pytest.mark.parametrize("weighting,key", _WEIGHTINGS)
+def test_point_estimate_matches_gmm(data_and_ref, weighting, key):
+    """Claim 2: emu CUE / iterated point + SE reproduce R gmm to ~5-6 sig figs.
 
-
-@pytest.mark.parametrize(
-    "weighting,key",
-    [
-        (ContinuouslyUpdated(), "gmm_cue"),
-        (IteratedWeighting(), "gmm_iterative"),
-    ],
-)
-def test_estimates_match_within_convention_band(data_and_ref, weighting, key):
-    """Claim 3: emu vs gmm agree to the documented ~1% coef / ~5% SE band."""
+    Point estimate is independent of centering (the emu default, uncentered, is
+    used here); the SE is nearly so on this fit.
+    """
     X, ref = data_and_ref
     r, law = _fit(X, weighting)
     se = np.asarray(law.se())
     g = ref[key]
-    np.testing.assert_allclose(float(r.theta_hat.b0), g["coef"]["b0"], rtol=0.015)
-    np.testing.assert_allclose(float(r.theta_hat.b1), g["coef"]["b1"], rtol=0.015)
-    np.testing.assert_allclose(se[0], g["se"]["b0"], rtol=0.06)
-    np.testing.assert_allclose(se[1], g["se"]["b1"], rtol=0.06)
+    np.testing.assert_allclose(float(r.theta_hat.b0), g["coef"]["b0"], rtol=1e-3)
+    np.testing.assert_allclose(float(r.theta_hat.b1), g["coef"]["b1"], rtol=1e-3)
+    np.testing.assert_allclose(se[0], g["se"]["b0"], rtol=1e-2)
+    np.testing.assert_allclose(se[1], g["se"]["b1"], rtol=1e-2)
+
+
+def test_J_is_on_the_chi2_scale_no_explicit_N(data_and_ref):
+    """Claim 3 (commitment 9): J is chi^2_2-scaled, not off by a factor of n."""
+    X, ref = data_and_ref
+    r, _ = _fit(X, IteratedWeighting())
+    assert r.n_overid == ref["gmm_iterative"]["J_df"] == 2
+    # A factor-of-n bug would put J near 0.007 or near 1900; it is neither.
+    assert 1.0 < float(r.objective_value) < 8.0
+
+
+@pytest.mark.parametrize("weighting,key", _WEIGHTINGS)
+def test_centered_knob_reconciles_gmm_J_and_se(data_and_ref, weighting, key):
+    """Claim 4: IIDCovariance(centered=True) matches gmm's centered J / SE.
+
+    R gmm reports J and vcov with the centered moment covariance; the emu default
+    is uncentered. Toggling ``centered=True`` reproduces gmm's J and SE to ~5 sig
+    figs (the point estimate is unchanged -- centering does not move it).
+    """
+    X, ref = data_and_ref
+    r, law = _fit(X, weighting, covariance=IIDCovariance(centered=True))
+    se = np.asarray(law.se())
+    g = ref[key]
+    np.testing.assert_allclose(float(r.objective_value), g["J"], rtol=1e-2)
+    np.testing.assert_allclose(float(law.J_pvalue), g["J_pvalue"], atol=5e-3)
+    np.testing.assert_allclose(se[1], g["se"]["b1"], rtol=1e-2)

@@ -49,15 +49,15 @@ The identical CSV is read by both R (=scripts/gmm_reference/reference.R=) and
 emu-gmm (the test), with a =sha256= provenance guard so the two cannot silently
 drift.
 
-** Results (n=500, seed 20260704)
+** Results (n=500, seed 20260704; R via gmm's FUNCTION interface g(theta,x))
 
-| quantity      |   emu-gmm |    R gmm | note                         |
-|---------------+-----------+----------+------------------------------|
-| 2SLS b1 (matched weight) | 2.0241896 | 2.0241896 | =AER::ivreg=; exact to 1e-6  |
-| CUE b1        |    2.0204 |   2.0183 | gmm =type="cue"=             |
-| iterated b1   |    2.0269 |   2.0242 | gmm =type="iterative"=       |
-| iterated se(b1) |   0.0479 |   0.0492 | ~2.6% (convention)           |
-| iterated J    |     3.613 |    3.731 | both → chi^2_2, p≈0.155–0.164 |
+| quantity                 |   emu-gmm |    R gmm | note                              |
+|--------------------------+-----------+----------+-----------------------------------|
+| 2SLS b1 (matched weight) | 2.0241896 | 2.0241896 | =AER::ivreg=; exact to 1e-6       |
+| CUE b1                   | 2.0204063 | 2.0204374 | ~5-6 sig figs                     |
+| iterated b1              | 2.0268869 | 2.0268835 | ~6 sig figs                       |
+| CUE J (=centered=True=)  |   3.62130 | 3.621296 | gmm reports centered; ~5 sig figs |
+| CUE se(b1) (=centered=)  |  0.048109 | 0.048108 | ~5 sig figs                       |
 
 ** Findings
 
@@ -66,46 +66,48 @@ drift.
    (7+ digits). This isolates and confirms the estimator math, independent of
    any covariance-estimator convention.
 
-2. *Commitment 9 (the =N= scaling) is validated against an independent
-   implementation.* emu-gmm folds the per-coordinate =N_j= into =V_X= and
-   carries no explicit =N=, so =objective_value = mbar' V_X^{-1} mbar=. R's =gmm=
-   reports =J = n * gbar' S^{-1} gbar=. These land on the *same scale* (≈3.6 vs
-   ≈3.7, both referenced to =chi^2_2=, p≈0.16) — a factor-of-=n= (=500=) error in
-   our convention would put =J= near 0.007 or near 1900. It does neither. This is
-   exactly the class of bug the downstream-contract section of =CLAUDE.md= warns
-   about, now checked externally.
+2. *The point estimates match to ~5-6 significant figures.* emu-gmm's CUE and
+   iterated estimates reproduce R =gmm='s (=b1 ≈ 2.02041= CUE, =2.02689=
+   iterated). This holds regardless of moment-covariance centering.
 
-3. *The residual ~0.1–3% gap is a convention, not an error.* It is small
-   (~0.1% on the CUE point, ~2–3% on SE / J) and statistically negligible
-   (~0.04 SE), but systematic. Its source is *not* fully pinned down, and one
-   candidate has been *ruled out*: moment-covariance centering. emu-gmm's
-   =IIDCovariance= is uncentered by default and now offers a =centered=True=
-   knob (below) matching R =gmm='s =centeredVcov=TRUE= convention; but directly
-   toggling it shows centering changes =V_X= by only ~0.4% here, moves =J= by at
-   most ~a quarter of the gap, and leaves the emu CUE *point estimate*
-   byte-identical (still =b1 ≈ 2.0204= vs gmm =2.0183=). Symmetrically, gmm's own
-   =centeredVcov= toggle did not move its numbers on this fit. So the residual
-   emu-vs-gmm CUE difference stems from something else --- most plausibly a
-   difference in how the two packages construct / optimise the CUE weight
-   =V(theta)= (or a small-sample weight factor) --- and remains under
-   investigation. What is *decisive* is claim 1: under a matched weight the two
-   agree to machine precision, so the GMM solver is correct; the convention
-   differences live entirely in the weight construction.
+3. *Commitment 9 (the =N= scaling) is validated.* emu-gmm folds the
+   per-coordinate =N_j= into =V_X= and carries no explicit =N=, so
+   =objective_value = mbar' V_X^{-1} mbar= lands on the same =chi^2_2= scale as
+   gmm's =n * gbar' S^{-1} gbar= (≈3.6, not off by the factor of =n=500= a
+   scaling bug would introduce). This is exactly the class of error the
+   downstream-contract section of =CLAUDE.md= warns about, now checked
+   externally.
+
+4. *The J / SE convention is the =centered= axis, and the knob reconciles it.*
+   R =gmm= reports the J-statistic and vcov with the *centered* moment
+   covariance; emu-gmm's default is uncentered, so its default =J= (≈3.595)
+   differs from gmm's (≈3.621) by the =O(mbar^2)= centering term (the point
+   estimate does not). Setting =IIDCovariance(centered=True)= reproduces gmm's
+   =J= and =SE= to ~5 significant figures.
+
+*Resolved: the earlier "~0.1% CUE gap" was a gmm interface artifact, not an emu
+difference.* An initial version of this reference used gmm's *formula* interface
+=gmm(y ~ xe, ~ z)=, which for LINEAR models runs a different internal path (its
+=type="iterative"= collapses to *exact* 2SLS; its =type="cue"= gives a ~0.1%
+different point) than the general =gmm(g, x)= *function* interface. emu-gmm
+implements the standard general GMM and matches the function interface --- and an
+independent numpy/scipy CUE, which lands on emu's point to 6 digits and confirms
+emu's solution has the *lower* CUE objective. The reference was switched to the
+function interface (the same one the Euler cross-check uses).
 
 ** The =centered= knob on =IIDCovariance=
 
-Motivated by this cross-check, =IIDCovariance(centered=True)= subtracts the
-per-coordinate mean moment =m_j = (1/N_j) sum_i d_ij w_i psi_j= before forming
-the pairwise-overlap outer products, giving the numerator
-=sum_i d_ij d_ik w_i^2 (psi_j - m_j)(psi_k - m_k)= --- the centered
-moment-covariance convention (R =gmm='s =centeredVcov=TRUE=, most textbooks).
-Both forms are PSD by construction (a sum of masked outer products) and agree
-asymptotically at =theta_0= (where =E[psi]=0=); they differ by =O(mbar^2)= at an
-over-identified =theta_hat=. Default stays =False= (uncentered, marginally
-better finite-sample conditioning) --- no behaviour change. Note the honest
-caveat above: the knob supplies the centered *convention* (useful to match a
-reference's vcov / SE reporting), but on this well-fitting example it does *not*
-by itself reconcile the CUE point estimate with =gmm=.
+=IIDCovariance(centered=True)= subtracts the per-coordinate mean moment
+=m_j = (1/N_j) sum_i d_ij w_i psi_j= before forming the pairwise-overlap outer
+products, giving the numerator =sum_i d_ij d_ik w_i^2 (psi_j - m_j)(psi_k - m_k)=
+--- the centered moment-covariance convention (R =gmm='s =centeredVcov=TRUE=, and
+most textbooks). Both forms are PSD by construction (a sum of masked outer
+products) and agree asymptotically at =theta_0= (where =E[psi]=0=); they differ
+by =O(mbar^2)= at an over-identified =theta_hat=, which is exactly the J / SE gap
+in finding 4. It does *not* move the point estimate (the CUE argmin is the same
+for both, confirmed by the independent numpy CUE). Default stays =False=
+(uncentered, marginally better finite-sample conditioning) --- no behaviour
+change; pass =centered=True= to match a reference's centered J / SE reporting.
 
 ** Regenerate
 
@@ -183,7 +185,7 @@ Rscript scripts/gmm_reference/reference_euler.R   # -> tests/data/gmm_euler_refe
 For one fixed fitted model, compare emu-gmm's =IIDCovariance= /
 =ClusteredCovariance= SEs against =sandwich::vcovHC= (HC0–HC3) and =vcovCL= (with
 its =cadjust= / =G/(G-1)= knobs) to pin down *which named convention* emu-gmm
-implements. (The Tier-1 centered-vs-uncentered question is partly resolved: the
-=centered=True= knob has been added to =IIDCovariance= --- but the cross-check
-also showed centering is *not* the source of the emu-vs-gmm CUE gap, so the open
-follow-up is to identify what in the CUE weight construction *is*.)
+implements. (Tier 1 already resolved the iid case: emu-gmm's uncentered default
+and its =centered=True= knob bracket gmm's =centeredVcov= convention, and the
+knob reproduces gmm's J / SE to ~5 sig figs. Tier 3 extends this to the
+heteroskedasticity-robust and clustered families.)

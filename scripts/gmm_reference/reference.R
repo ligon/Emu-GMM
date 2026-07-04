@@ -37,8 +37,22 @@ data_sha256 <- digest::digest(file = data_path, algo = "sha256")
 # jsonlite serialises plain doubles.
 num <- function(x) as.numeric(x)
 
+# Use gmm's FUNCTION interface g(theta, x) -- the same general nonlinear entry
+# point as the Euler cross-check -- NOT the formula interface gmm(y ~ x, ~ z).
+# For LINEAR models the two disagree: the formula interface runs a different
+# internal path (its iterated even collapses to exact 2SLS), giving a ~0.1% CUE
+# difference, whereas the function interface is the standard general GMM that
+# emu-gmm implements and that an independent numpy CUE confirms. The moments are
+# identical: instruments (1, z1, z2, z3) times the residual (y - b0 - b1*xe).
+# See docs/validation/r-reference-crosschecks.org.
+g_lin <- function(theta, x) {
+  r <- x[, "y"] - theta[1] - theta[2] * x[, "xe"]
+  cbind(r, r * x[, "z1"], r * x[, "z2"], r * x[, "z3"])
+}
+xm <- as.matrix(d)
+
 fit_gmm <- function(type) {
-  res <- gmm(y ~ xe, ~ z1 + z2 + z3, data = d, type = type, vcov = "iid")
+  res <- gmm(g_lin, xm, t0 = c(b0 = 0.0, b1 = 0.0), type = type, vcov = "iid")
   st <- num(specTest(res)$test)  # c(J, p) ; df = M - K is implicit (= 2 here)
   cf <- num(coef(res))
   se <- num(sqrt(diag(vcov(res))))
@@ -69,11 +83,13 @@ reference <- list(
     ),
     model = "y ~ xe, instruments (1, z1, z2, z3); M=4, K=2, over_id=2",
     note = paste(
-      "gmm uses vcov='iid'. The gmm CUE/iterative estimates differ from emu-gmm",
-      "at the ~0.1-3% level by CUE weight construction, NOT moment-covariance",
-      "centering (an IIDCovariance(centered=True) toggle does not close the gap);",
-      "the 2SLS point (fixed (Z'Z)^-1 weight) is the exact machine-precision",
-      "anchor. See docs/validation/r-reference-crosschecks.org."
+      "gmm uses vcov='iid' via the FUNCTION interface g(theta, x); on this the",
+      "gmm CUE/iterated estimates match emu-gmm to ~5-6 significant figures, and",
+      "an independent numpy CUE confirms both. gmm's FORMULA interface",
+      "(gmm(y~xe, ~z)) instead gives ~0.1% different CUE for linear models (its",
+      "iterated collapses to exact 2SLS) -- a gmm interface quirk, not an emu",
+      "difference. The 2SLS point (fixed (Z'Z)^-1 weight) is the exact",
+      "machine-precision anchor. See docs/validation/r-reference-crosschecks.org."
     )
   ),
   twoStageLeastSquares = list(
