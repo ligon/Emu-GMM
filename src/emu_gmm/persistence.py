@@ -298,6 +298,12 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
         "J_stat": float(np.asarray(result.objective_value)),
         "J_dof": int(result.n_overid),
         "J_pvalue": float(law.J_pvalue),
+        # Persist the ADJUSTED p-value too: it is not recomputable on reload
+        # (the moment-space V / V* / G ingredients are not persisted), and under
+        # a binding ridge it differs from the nominal. Without this a reloaded
+        # law would silently hand back the nominal value under the "adjusted"
+        # name (adversarial-review finding).
+        "J_pvalue_adjusted": float(law.J_pvalue_adjusted),
         "gauge_nullspace_dim": int(diag.gauge_nullspace_dim),
         "tau_realised": float(np.asarray(diag.tau_realised)),
         "kappa_V": float(np.asarray(diag.kappa_V)),

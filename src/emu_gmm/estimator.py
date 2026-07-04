@@ -861,10 +861,12 @@ def build_estimator(
         # Materialise the realised weighting matrix Lambda = L_w^{-T} L_w^{-1}
         # (the actual metric in m' Lambda m, whatever the weighting strategy):
         # whitening the identity gives Wi = L_w^{-1}, so Lambda = Wi' Wi and
-        # G' Lambda G == info_local, G' Lambda V Lambda G == meat_local by the
-        # SAME arithmetic (exact reproduction, not just allclose). This is the
-        # ingredient the OptimizationResult/EstimatorLaw split hands to the Law
-        # so it can (re)assemble the ridge-correct sandwich itself.
+        # G' Lambda G / G' Lambda V Lambda G are the SAME quantities as
+        # info_local / meat_local -- but re-associated (Lambda materialised
+        # first), so the Law reproduces Sigma to machine precision (~1e-16), NOT
+        # literally bit-for-bit. This is the ingredient the OptimizationResult/
+        # EstimatorLaw split hands to the Law so it can (re)assemble the
+        # ridge-correct sandwich itself.
         Wi_local = _whiten_cols(jnp.eye(G_riem.shape[0], dtype=G_riem.dtype))
         weighting_matrix_local = Wi_local.T @ Wi_local
         weighting_matrix_local = 0.5 * (

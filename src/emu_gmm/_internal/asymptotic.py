@@ -68,10 +68,14 @@ def asymptotic_covariance(
     Notes
     -----
     Given :math:`\Lambda = W_i' W_i` with :math:`W_i = L_w^{-1}` (the estimator's
-    materialisation), :math:`G'\Lambda G` and :math:`G'\Lambda V\Lambda G`
-    reproduce the whitened bread / meat by the SAME arithmetic, so this
-    reconstruction is exact (not merely ``allclose``) against the pre-split
-    ``Sigma_theta`` -- the property the golden-fidelity gate asserts.
+    materialisation), :math:`G'\Lambda G` and :math:`G'\Lambda V\Lambda G` are the
+    SAME quantities as the estimator's whitened bread / meat
+    (:math:`Z_w'Z_w` / :math:`Z_w'CZ_w`, :math:`Z_w = W_i G`) --- but formed by a
+    different matrix-product ASSOCIATION (:math:`\Lambda` is materialised first,
+    then contracted with :math:`G`), so the reconstruction agrees with the
+    pre-split ``Sigma_theta`` to machine precision (~1e-16 absolute in practice),
+    NOT literally bit-for-bit. The golden-fidelity gate asserts this at
+    ``rtol=1e-9``.
     """
     G = jnp.asarray(moment_jacobian)
     Lam = jnp.asarray(weighting_matrix)

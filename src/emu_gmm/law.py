@@ -1331,10 +1331,25 @@ class AsymptoticLaw(EstimatorLaw):
         the regularised ``V* = Lambda^{-1}``
         (:attr:`~emu_gmm.types.OptimizationResult.weighting_matrix`) and the
         moment Jacobian (:attr:`~emu_gmm.types.OptimizationResult.moment_jacobian`).
+
+        **Precondition --- efficient weighting.** The generalised-chi-squared
+        adjustment is derived for the *efficient* GMM criterion
+        ``J = m'(V*)^{-1} m`` (the ``ContinuouslyUpdated`` / iterated default),
+        where ``Lambda = (V*)^{-1}`` exactly and ``V* = Lambda^{-1}`` recovers the
+        frozen ridged covariance. Under a NON-efficient weighting
+        (``Identity`` / ``Fixed``) ``Lambda`` is the analyst's fixed metric, so
+        ``Lambda^{-1}`` is that metric's implied covariance --- not the ridged
+        ``V*`` --- and the weighted-chi-squared limit does not apply; treat the
+        adjusted value as meaningful only under (near-)efficient weighting. (This
+        is a property of asking for a ridge-adjustment under an inefficient
+        weight, not of the estimation/inference split.)
         """
         if self._result is None:
-            # A persisted law carries only the nominal p-value.
-            return self.J_pvalue
+            # A persisted (moments-backed) law returns the stored adjusted value
+            # (persisted alongside the nominal one); older artifacts that predate
+            # its persistence fall back to the nominal p-value.
+            diag = getattr(self._backing, "diagnostics", {}) or {}
+            return float(diag.get("J_pvalue_adjusted", self.J_pvalue))
         r = self._result
         J, dof = self._objective_and_dof()
         if dof <= 0:
