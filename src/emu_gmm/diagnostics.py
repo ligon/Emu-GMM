@@ -211,13 +211,17 @@ def regularization_adjusted_pvalue(
     via :func:`jax.numpy.linalg.eigh` and the chi-squared survival
     function via :func:`jax.scipy.stats.chi2.sf`. Both accept tracers.
 
-    *Whitening assumption (#137):* the derivation hardcodes the
+    *Whitening assumption (#137/#188):* the derivation hardcodes the
     EFFICIENT whitening ``L_star = chol(V_star)`` --- i.e. it adjusts
     the J of a CU / Iterated solve. Under ``Identity`` / ``Fixed``
     weighting the realised ``J = ||y||^2`` lives in a different metric
     and has no chi-squared limit to adjust in the first place (the same
     caveat as the nominal ``J_pvalue``); treat both p-values as
-    unavailable there rather than approximate.
+    unavailable there rather than approximate. This is now ENFORCED at
+    the inference layer: :attr:`emu_gmm.law.AsymptoticLaw.J_pvalue` /
+    ``.J_pvalue_adjusted`` return ``nan`` (with a warning) when the
+    weighting advertises ``efficient_weighting=False``, so this function
+    is never reached with an inefficient weight through the law.
     """
     M, K = G.shape
     # Cholesky-whiten V into the L_star coordinates.

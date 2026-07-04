@@ -144,6 +144,19 @@ class WeightingStrategy(Protocol):
     ``requires_outer_loop = True`` and implement
     :meth:`outer_loop_driver` with the signature documented on
     :class:`~emu_gmm.weighting.IteratedWeighting.outer_loop_driver`.
+
+    Efficient-weighting flag
+    ------------------------
+    ``efficient_weighting: bool`` (optional; defaults to ``True`` when a
+    strategy omits it) declares whether the criterion ``m' Lambda m`` uses
+    the efficient weight ``Lambda = (V*)^{-1}`` at ``theta_hat`` --- the
+    condition under which the over-identification statistic has a
+    ``chi^2_{M-K}`` limit. :class:`~emu_gmm.law.AsymptoticLaw` reads it and
+    emits ``nan`` for ``J_pvalue`` / ``J_pvalue_adjusted`` when it is
+    ``False``, rather than a plausible-looking but meaningless p-value
+    (#188; the #133 sandwich already guards ``Sigma_theta`` for the same
+    inefficient-weighting case). ``ContinuouslyUpdated`` / ``IteratedWeighting``
+    / ``Fixed`` set it ``True``; ``Identity`` sets it ``False``.
     """
 
     def whitening_residual(

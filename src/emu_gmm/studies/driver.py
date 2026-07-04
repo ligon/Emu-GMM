@@ -68,6 +68,8 @@ def fit_record(result: OptimizationResult) -> FitRecord:
     live law asserts), not off the bare optimization result
     (docs/optimization-result-law-split.org).
     """
+    import warnings
+
     from emu_gmm.law import AsymptoticLaw
 
     law = AsymptoticLaw(result)
@@ -83,12 +85,23 @@ def fit_record(result: OptimizationResult) -> FitRecord:
         )
     diag = result.diagnostics
     assert diag is not None
+    # Under a non-efficient weighting the law reports the J p-values as NaN
+    # (the #188 guard) --- the correct, honest value to RECORD (a J-calibration
+    # study then surfaces NaN rather than a falsely-precise miscalibrated curve).
+    # The accompanying interactive warning belongs on a live-law read, not this
+    # per-rep batch builder, so silence just that one message here.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=".*non-efficient weighting.*", category=UserWarning
+        )
+        j_pvalue = jnp.asarray(law.J_pvalue)
+        j_pvalue_adjusted = jnp.asarray(law.J_pvalue_adjusted)
     return FitRecord(
         theta_flat=theta_arr,
         se=se_arr,
         J_stat=jnp.asarray(result.objective_value),
-        J_pvalue=jnp.asarray(law.J_pvalue),
-        J_pvalue_adjusted=jnp.asarray(law.J_pvalue_adjusted),
+        J_pvalue=j_pvalue,
+        J_pvalue_adjusted=j_pvalue_adjusted,
         converged=jnp.asarray(result.converged, dtype=jnp.float64),
         tau_realised=jnp.asarray(diag.tau_realised),
         binding_ridge=jnp.asarray(diag.binding_ridge, dtype=jnp.float64),

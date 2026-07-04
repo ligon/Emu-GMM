@@ -84,6 +84,16 @@ MANIF_SIGMA_TRACE = 0.00040719259103943204
 MANIF_SIGMA_FRO = 0.00016962850709101044
 MANIF_GAMMA_COV_TRACE = 0.0004239957231510945
 
+# Binding-ridge regime: the adjusted p-value is REASSEMBLED by the law from
+# ``V`` (moment_covariance), ``V* = inv(weighting_matrix)`` and ``G``
+# (moment_jacobian) --- a distinct #133/#137 codepath from the nominal one, so
+# it needs its own drift lock. Frozen from the deterministic ill-conditioned
+# fixture (kappa_target=10, tau_threshold=1e-6), where the adjusted value
+# departs measurably from the nominal.
+RIDGE_JSTAT = 1.5697455486495403e-05
+RIDGE_JPVAL_NOMINAL = 0.99683878848399776
+RIDGE_JPVAL_ADJUSTED = 0.89971500695696771
+
 
 @jdc.pytree_dataclass
 class _P2:
@@ -151,6 +161,65 @@ class TestScalarFidelity:
             ct["std_error"].to_numpy(), SCALAR_COEF_SE, rtol=1e-9
         )
         np.testing.assert_allclose(ct["t_stat"].to_numpy(), SCALAR_COEF_T, rtol=1e-9)
+
+
+def _fit_binding_ridge() -> OptimizationResult:
+    """A deterministic fit whose DiagonalTikhonov ridge binds (adjusted != nominal)."""
+    from emu_gmm import (
+        AnalyticalCovariance,
+        AnalyticalMeasure,
+        DiagonalTikhonov,
+    )
+
+    def _model(x, th):
+        del x, th
+        return jnp.zeros((3,))
+
+    def _moments(model, th):
+        del model
+        return jnp.array(
+            [
+                th.a + 0.5 * th.b - 0.1,
+                -0.3 * th.a + th.b - 0.05,
+                0.7 * th.a + 0.4 * th.b + 0.02,
+            ]
+        )
+
+    def _ill_cov(model, th):
+        del model, th
+        rng = np.random.default_rng(seed=11)
+        Q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+        V = jnp.asarray(Q) @ jnp.diag(jnp.array([1.0, 1e-3, 1e-6])) @ jnp.asarray(Q).T
+        return 0.5 * (V + V.T)
+
+    return estimate(
+        _model,
+        AnalyticalMeasure(expectation_fn=_moments),
+        covariance=AnalyticalCovariance(covariance_fn=_ill_cov),
+        weighting=ContinuouslyUpdated(),
+        regularization=DiagonalTikhonov(kappa_target=10.0, tau_threshold=1e-6),
+        optimizer=optimistix_lm(rtol=1e-8, atol=1e-8),
+        theta_init=_P2(a=0.0, b=0.0),
+    )
+
+
+class TestBindingRidgeFidelity:
+    r"""The reassembled adjusted J p-value (binding ridge) is drift-locked (#133/#137)."""
+
+    def test_binding_ridge_adjusted_pvalue_matches_golden(self):
+        r = _fit_binding_ridge()
+        assert bool(r.diagnostics.binding_ridge) is True
+        law = r.asymptotic()
+        np.testing.assert_allclose(
+            float(r.objective_value), RIDGE_JSTAT, rtol=1e-7, atol=1e-12
+        )
+        np.testing.assert_allclose(float(law.J_pvalue), RIDGE_JPVAL_NOMINAL, rtol=1e-9)
+        # The adjusted value is the reassembled generalised-chi^2 survival
+        # function --- a genuinely different number, not the nominal fallback.
+        np.testing.assert_allclose(
+            float(law.J_pvalue_adjusted), RIDGE_JPVAL_ADJUSTED, rtol=1e-8
+        )
+        assert abs(float(law.J_pvalue) - float(law.J_pvalue_adjusted)) > 1e-4
 
 
 class TestManifoldFidelity:

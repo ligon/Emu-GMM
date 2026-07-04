@@ -1303,20 +1303,62 @@ class AsymptoticLaw(EstimatorLaw):
         diag = getattr(self._backing, "diagnostics", {}) or {}
         return float(diag.get("J_stat", np.nan)), int(diag.get("J_dof", 0))
 
+    def _efficient_weighting(self) -> bool:
+        """Whether the fit used an *efficient* weighting --- the J-test precondition (#188).
+
+        The over-identification statistic :math:`J = m'\\Lambda m` has its
+        :math:`\\chi^2_{n_{overid}}` limit only under efficient weighting
+        :math:`\\Lambda = (V^\\star)^{-1}` (the ``ContinuouslyUpdated`` / iterated
+        default). Under a NON-efficient weight (``Identity``, or a ``Fixed``
+        metric not equal to the optimal one) :math:`J` is a quadratic form in an
+        asymptotically Gaussian moment vector with a non-idempotent kernel --- a
+        *weighted* sum of chi-squares whose mean need not be :math:`n_{overid}`
+        --- so neither the nominal nor the ridge-adjusted p-value is calibrated.
+        The weighting advertises this via its ``efficient_weighting`` flag
+        (default ``True``: absent the flag we assume the caller knows the limit
+        holds). A moments-backed (reloaded) law inherits the already-guarded
+        persisted value, so this only gates the live, result-backed path.
+        """
+        if self._result is None:
+            return True
+        return bool(getattr(self._result.weighting, "efficient_weighting", True))
+
+    def _warn_inefficient_j(self, what: str) -> None:
+        """Emit a once-per-instance J-not-calibrated warning (#188)."""
+        if getattr(self, "_warned_inefficient_j", False):
+            return
+        self._warned_inefficient_j = True
+        wname = type(self._result.weighting).__name__ if self._result else "?"
+        warnings.warn(
+            f"AsymptoticLaw.{what}: the fit used a non-efficient weighting "
+            f"({wname}), under which the over-identification J-statistic has no "
+            "chi^2_{n_overid} limit (it is a weighted sum of chi-squares whose "
+            "mean need not equal n_overid); the p-value is not calibrated and is "
+            "reported as nan. Use ContinuouslyUpdated / IteratedWeighting for a "
+            "calibrated over-identification test (#188).",
+            UserWarning,
+            stacklevel=3,
+        )
+
     @property
     def J_pvalue(self) -> float:
         r"""Nominal over-identification p-value, ``chi^2_{n_overid}.sf(J_stat)``.
 
         The chi-squared reading of the fit's ``objective_value`` --- the
         *inference* statement the estimator used to report on the result. ``nan``
-        for a just-identified fit (``n_overid == 0``). A persisted
-        (moments-backed) law returns its stored p-value.
+        for a just-identified fit (``n_overid == 0``), and ``nan`` (with a
+        warning) under a non-efficient weighting, where :math:`J` has no
+        ``chi^2_{n_overid}`` limit (see :meth:`_efficient_weighting`, #188). A
+        persisted (moments-backed) law returns its stored p-value.
         """
         if self._result is None:
             diag = getattr(self._backing, "diagnostics", {}) or {}
             return float(diag.get("J_pvalue", np.nan))
         J, dof = self._objective_and_dof()
         if dof <= 0:
+            return float("nan")
+        if not self._efficient_weighting():
+            self._warn_inefficient_j("J_pvalue")
             return float("nan")
         return float(jax.scipy.stats.chi2.sf(J, dof))
 
@@ -1353,6 +1395,9 @@ class AsymptoticLaw(EstimatorLaw):
         r = self._result
         J, dof = self._objective_and_dof()
         if dof <= 0:
+            return float("nan")
+        if not self._efficient_weighting():
+            self._warn_inefficient_j("J_pvalue_adjusted")
             return float("nan")
         nominal = float(jax.scipy.stats.chi2.sf(J, dof))
         diag = r.diagnostics
