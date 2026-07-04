@@ -58,9 +58,11 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -71,6 +73,42 @@ from emu_gmm.types import (
 )
 
 _STATISTICS = ("K", "S", "J")
+
+#: Default dimensionless tolerance on the squared Newton decrement below which
+#: the concentrated nuisance FOC is treated as satisfied (see
+#: :func:`_foc_decrement` and :func:`profiled_k_confidence_set`). Genuine optima
+#: land at the float noise floor (~1e-16); a real stall is O(1)+, so any value
+#: well inside that gap works. The bar is set by what the asymptotic subvector
+#: reference needs (score ``o_p(1)``), not by machine precision.
+_FOC_TOL_DEFAULT = 1e-3
+
+
+def _foc_decrement(inner: Any, gauge_dim: int) -> float | None:
+    r"""Squared Newton decrement :math:`\lambda^2 = g' H^{+} g` of the inner fit.
+
+    The scale-free, parameterisation-invariant first-order-optimality measure:
+    (twice) the criterion decrease a Newton step from the inner solution would
+    still achieve, with :math:`g` the concentrated nuisance score
+    (``inner.gradient``) and :math:`H` the Gauss--Newton curvature
+    (``inner.gn_hessian``). It sits at the float noise floor (~1e-16) at a
+    genuine stationary point of the concentrated criterion and is O(1)+ at a
+    stall --- independent of the moment scale, sample size, or leaf
+    parameterisation --- so a single dimensionless tolerance separates "reached
+    the optimum" from "did not", without trusting the optimiser's own
+    (conservative, platform-sensitive) convergence certification. ``gauge_dim``
+    near-zero Hessian directions (a ``PSDFixedRank`` nuisance's gauge orbit) are
+    dropped BY COUNT via the same :func:`pinv_eigvalrule` rule the sandwich
+    bread uses. Returns ``None`` when the result lacks the gradient / GN-Hessian
+    ingredients (e.g. a hand-built result), so the caller falls back to the
+    optimiser's ``converged`` flag.
+    """
+    g = getattr(inner, "gradient", None)
+    H = getattr(inner, "gn_hessian", None)
+    if g is None or H is None:
+        return None
+    g_arr = jnp.asarray(g)
+    H_pinv = pinv_eigvalrule(jnp.asarray(H), drop_smallest=int(gauge_dim))
+    return float(jnp.dot(g_arr, H_pinv @ g_arr))
 
 
 @dataclass(frozen=True)
@@ -273,6 +311,7 @@ def k_confidence_set(
     profile: Sequence[str] | None = None,
     nuisance_optimizer: Any = None,
     nuisance_weighting: Any = None,
+    foc_tol: float = _FOC_TOL_DEFAULT,
 ) -> KConfidenceSet:
     """Invert the K-statistic over a 1-D grid of nulls (#41 PR (b)).
 
@@ -389,6 +428,7 @@ def k_confidence_set(
                 keep_results=keep_results,
                 nuisance_optimizer=nuisance_optimizer,
                 nuisance_weighting=nuisance_weighting,
+                foc_tol=foc_tol,
             ),
         )
     if nuisance_optimizer is not None or nuisance_weighting is not None:
@@ -607,6 +647,7 @@ def profiled_k_confidence_set(
     strong_id_fallback: bool = False,
     keep_results: bool = False,
     return_profiled_points: bool = False,
+    foc_tol: float = _FOC_TOL_DEFAULT,
 ) -> KConfidenceSet | tuple[KConfidenceSet, tuple[ParamsLike, ...]]:
     r"""Profiled identification-robust set: concentrate out the nuisance (#176).
 
@@ -669,6 +710,16 @@ def profiled_k_confidence_set(
     return_profiled_points : bool, default False
         Also return the tuple of profiled full-``theta`` PyTrees (one per grid
         value) alongside the set, for inspecting the concentrated nuisance path.
+    foc_tol : float, default 1e-3
+        Dimensionless tolerance on the inner squared Newton decrement
+        :math:`\lambda^2 = g' H^{+} g` below which the concentrated nuisance FOC
+        is treated as satisfied even if the optimiser did not certify
+        convergence (see the *Inner convergence guard* note). Genuine optima
+        land at the float noise floor (~1e-16) and a real stall is O(1)+, so the
+        default sits well inside that gap; the bar is what the asymptotic
+        subvector reference needs (score ``o_p(1)``), not solver precision.
+        Raise it to be more permissive about near-stationary inner fits, lower
+        it to demand a tighter FOC.
 
     Returns
     -------
@@ -699,17 +750,26 @@ def profiled_k_confidence_set(
 
     **Inner convergence guard (#186).** The collapse onto the interest block
     holds only when the inner solve actually reaches the concentrated FOC —
-    a non-converged inner fit leaves the nuisance score non-zero and yields
+    a non-stationary inner fit leaves the nuisance score non-zero and yields
     a finite-but-*wrong* :math:`K`, indistinguishable from a good point by
-    value alone. Each grid point therefore reads the inner
-    ``OptimizationResult.converged`` flag (reliable on all optimiser paths
-    since the linear solver's ``done`` flag was threaded through); a
-    non-converged point is treated exactly like a NaN-p invalid point:
-    excluded from the set, counted in
+    value alone. The guard tests that FOC *directly* rather than trusting the
+    optimiser's self-certification: a Gauss--Newton / Riemannian-LM inner solve
+    can reach a genuine stationary point (score at the float noise floor) yet
+    report ``converged=False`` — hitting ``max_steps`` or the #156 ftol
+    cost-stagnation stop — and that certification is platform-sensitive, so
+    keying on the boolean alone excluded good optima and punched holes in the
+    set. A grid point is therefore kept when EITHER the optimiser certified
+    convergence OR the scale-free squared Newton decrement
+    :math:`\lambda^2 = g' H^{+} g` (:func:`_foc_decrement`, from the inner
+    ``gradient`` and ``gn_hessian``) is ``<= foc_tol`` — i.e. the concentrated
+    score genuinely vanishes. Only when BOTH fail (a real stall) is the point
+    treated like a NaN-p invalid one: excluded, counted in
     :attr:`KConfidenceSet.n_nonconverged` /
-    :attr:`~KConfidenceSet.nonconverged_indices`, never interpolated
-    against, and flagged by :meth:`KConfidenceSet.summary` (boundaries
-    adjacent to such points are unreliable).
+    :attr:`~KConfidenceSet.nonconverged_indices`, never interpolated against,
+    and flagged by :meth:`KConfidenceSet.summary` (boundaries adjacent to such
+    points are unreliable). The decrement is dimensionless, so the asymptotic
+    reference's ``score = o_p(1)`` requirement — far looser than machine-
+    precision certification — sets the tolerance, not the solver.
 
     **CU-only validity (#187).** The same FOC argument requires the nuisance
     to be concentrated under the *CUE* criterion; a non-CU
@@ -784,18 +844,32 @@ def profiled_k_confidence_set(
             theta_init=free_init,
         )
         # #186: the chi^2_{d_I} reference requires the concentrated nuisance
-        # score to vanish (the inner FOC), so a non-converged inner fit gives
-        # a finite-but-wrong K. Record the flag; _assemble_set treats the
-        # point exactly like a NaN-p invalid one. The grid loop is host-eager
-        # so the flag is concrete; guard the bool(...) coercion like the
-        # estimator does in case a traced flag ever leaks through — an
-        # undecidable flag counts as NON-converged (excluded AND surfaced)
-        # rather than silently accepted.
+        # FOC to hold -- the nuisance score must vanish at the inner solution,
+        # or K is finite-but-wrong. The RIGHT signal is the score itself, not
+        # the optimiser's boolean ``converged``: a Gauss--Newton / Riemannian-LM
+        # inner solve can reach a genuine stationary point (score at the float
+        # noise floor) yet fail to CERTIFY convergence -- riemannian_lm hitting
+        # ``max_steps`` or the #156 ftol cost-stagnation stop -- and that
+        # certification is platform-sensitive, which previously excluded good
+        # optima and punched holes in the set. So keep a point when EITHER the
+        # optimiser certified OR the scale-free Newton decrement
+        # lambda^2 = g' H^+ g is negligible (``foc_tol``); exclude (count as
+        # non-converged) only when BOTH fail -- a real stall. The asymptotic
+        # reference only needs the score ``o_p(1)``, a far looser bar than
+        # machine-precision certification, so ``foc_tol`` is a statistical
+        # tolerance, not a solver one. The grid loop is host-eager so the flags
+        # are concrete; guard the bool(...) coercion like the estimator does in
+        # case a traced flag ever leaks through -- an undecidable flag counts as
+        # NOT certified (then the FOC decrement decides).
         try:
-            converged = bool(inner.converged)
+            certified = bool(inner.converged)
         except (jax.errors.TracerBoolConversionError, TypeError):
-            converged = False
-        nonconverged.append(not converged)
+            certified = False
+        spec_nuisance = getattr(inner, "manifold_spec", None)
+        gd_nuisance = 0 if spec_nuisance is None else int(spec_nuisance.total_gauge_dim)
+        lam2 = _foc_decrement(inner, gd_nuisance)
+        foc_ok = lam2 is not None and np.isfinite(lam2) and lam2 <= foc_tol
+        nonconverged.append(not (certified or foc_ok))
         theta_prof = reducer.recombine(theta_full_init, inner.theta_hat)
         # The nuisance is concentrated, so reference K/J to the SUBVECTOR null
         # distribution via k_statistic's own `interest=` surface (#176/#179):

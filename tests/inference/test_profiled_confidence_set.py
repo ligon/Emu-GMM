@@ -336,24 +336,21 @@ class TestManifoldNuisance:
             ph4._model,
             profile=["phi"],
         )
-        # Strong identification is the invariant that phi's confidence set is
-        # NON-EMPTY and BOUNDED (closed on both sides *inside* the window) and
-        # concentrated at phi_hat -- NOT that it is a single connected
-        # 'interval'. We deliberately do not assert connectivity: the #186
-        # inner-convergence guard can exclude an interior grid point whose
-        # manifold nuisance re-fit reaches a fine optimum but fails to *certify*
-        # convergence (riemannian_lm's certification is platform-sensitive at
-        # the float noise floor), punching a hole that flips the topology to
-        # 'disconnected' without changing the identification conclusion. Assert
-        # the platform-independent invariant instead:
-        assert cs.in_set.any()  # non-empty: phi_hat itself is in the set
-        # bounded: the set reaches neither window edge (weak/unbounded ID would).
+        # phi is strongly identified: a bounded interval strictly inside the
+        # window. Every inner nuisance fit here reaches a genuine optimum (FOC
+        # decrement ~1e-16), so the #186 guard -- which now keys on the scale-
+        # free Newton decrement, not the optimiser's platform-sensitive
+        # ``converged`` flag -- keeps them all: no holes, a clean interval, on
+        # every platform (previously an interior manifold fit that reached its
+        # optimum but hit max_steps / the #156 ftol stop was falsely excluded,
+        # flipping the topology to 'disconnected' / 'empty' across platforms).
+        assert cs.n_nonconverged == 0
+        assert cs.topology == "interval"
         assert not cs.open_left and not cs.open_right
-        assert cs.topology in ("interval", "disconnected")
-        # every in-set null sits in the tight identified neighbourhood of phi_hat
-        # (a scattered set would refute strong identification).
+        assert int(cs.in_set.sum()) >= 3
+        # the interval sits in the tight identified neighbourhood of phi_hat.
         in_phi = grid[np.asarray(cs.in_set)]
-        assert np.all(np.abs(in_phi - phi_hat) <= 0.025)
+        assert np.all(np.abs(in_phi - phi_hat) <= 0.02)
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +605,27 @@ def _stub_estimate(nonconverged_calls: frozenset[int]):
     return fake
 
 
+def _stub_estimate_foc(*, converged, gradient, gn_hessian, manifold_spec=None):
+    """Inner-estimate stub that ALSO carries the FOC ingredients (#186 rework).
+
+    The guard now keys on the scale-free Newton decrement
+    ``lambda^2 = g' H^+ g`` (from ``gradient`` / ``gn_hessian``), not the bare
+    ``converged`` flag, so exercising the fix needs a stub that supplies those
+    ingredients. Same warm-start-as-theta_hat shortcut as :func:`_stub_estimate`.
+    """
+
+    def fake(model, measure, **kwargs):
+        return SimpleNamespace(
+            theta_hat=kwargs["theta_init"],
+            converged=converged,
+            gradient=jnp.asarray(gradient, dtype=float),
+            gn_hessian=jnp.asarray(gn_hessian, dtype=float),
+            manifold_spec=manifold_spec,
+        )
+
+    return fake
+
+
 def _cu_warnings(record) -> list:
     """The #187 CU-validity warnings among a recorded-warnings list."""
     return [
@@ -674,16 +692,142 @@ class TestInnerConvergenceGuard:
         assert cs.nonconverged_indices == ()
         assert "non-converged" not in cs.summary()
 
-    @pytest.mark.slow
-    def test_real_max_steps_one_inner_fits_all_flagged(self):
-        # Real-path leg (no stubs): a max_steps=1 inner optimiser cannot
-        # certify convergence from a far warm start, so EVERY grid point's
-        # inner fit reports converged=False through the estimator's threaded
-        # done flag — and every point is excluded and counted.
+    def test_uncertified_but_stationary_point_is_kept(self, monkeypatch):
+        # The fix: the optimiser did NOT certify (converged=False) but the
+        # concentrated FOC holds -- score ~ 0, well-conditioned curvature, so
+        # the Newton decrement is ~ 0. The guard must KEEP such points (a
+        # genuine optimum riemannian_lm reached but failed to certify). The
+        # pre-fix boolean guard excluded them, punching holes across platforms.
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)  # middle point is the truth (p>alpha)
+        monkeypatch.setattr(
+            estimator_mod,
+            "estimate",
+            _stub_estimate_foc(
+                converged=False, gradient=jnp.zeros(1), gn_hessian=jnp.eye(1)
+            ),
+        )
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            measure,
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+        )
+        assert cs.n_nonconverged == 0
+        assert cs.nonconverged_indices == ()
+        assert cs.in_set[1]  # the truth is admitted despite converged=False
+
+    def test_uncertified_and_nonstationary_point_is_excluded(self, monkeypatch):
+        # The other side: converged=False AND the FOC genuinely fails (large
+        # score => large Newton decrement) -- a real stall. Still excluded.
+        import emu_gmm.estimator as estimator_mod
+
         measure = _guard_measure()
         grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(
+            estimator_mod,
+            "estimate",
+            _stub_estimate_foc(
+                converged=False, gradient=jnp.array([3.0]), gn_hessian=jnp.eye(1)
+            ),
+        )
         cs = profiled_k_confidence_set(
-            lambda g: IVParams(theta_s=g, theta_w=5.0),  # nuisance start far off
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            measure,
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+        )
+        assert cs.n_nonconverged == len(grid)  # lambda^2 = 9 >> foc_tol
+        assert not cs.in_set.any()
+
+    def test_certified_point_kept_even_if_foc_large(self, monkeypatch):
+        # Superset-accept: a CERTIFIED fit is trusted regardless of the
+        # decrement, so the rework never *excludes* a previously-included
+        # point (no regression on the certified path).
+        import emu_gmm.estimator as estimator_mod
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(
+            estimator_mod,
+            "estimate",
+            _stub_estimate_foc(
+                converged=True, gradient=jnp.array([9.0]), gn_hessian=jnp.eye(1)
+            ),
+        )
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            measure,
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+        )
+        assert cs.n_nonconverged == 0
+
+    def test_foc_decrement_quadratic_form_and_gauge_drop(self):
+        # Unit test of the decrement: lambda^2 = g' H^+ g, gauge-aware.
+        from emu_gmm.inference.confidence_set import _foc_decrement
+
+        g = jnp.array([1.0, 2.0])
+        H = jnp.array([[2.0, 0.0], [0.0, 4.0]])
+        inner = SimpleNamespace(gradient=g, gn_hessian=H)
+        # 1^2/2 + 2^2/4 = 0.5 + 1.0 = 1.5
+        assert _foc_decrement(inner, 0) == pytest.approx(1.5)
+        # a zero score is a perfect FOC -> zero decrement.
+        assert _foc_decrement(
+            SimpleNamespace(gradient=jnp.zeros(2), gn_hessian=H), 0
+        ) == pytest.approx(0.0)
+        # gauge_dim drops the smallest-eigenvalue direction BY COUNT: the near-
+        # zero (gauge) axis is annihilated, so only the strong axis contributes.
+        Hg = jnp.array([[1e-12, 0.0], [0.0, 4.0]])
+        assert _foc_decrement(
+            SimpleNamespace(gradient=g, gn_hessian=Hg), 1
+        ) == pytest.approx(
+            1.0
+        )  # 0 (dropped) + 2^2/4
+        # missing ingredients -> None, so the caller falls back to `converged`.
+        assert _foc_decrement(SimpleNamespace(converged=True), 0) is None
+
+    @pytest.mark.slow
+    def test_real_uncertified_stationary_inner_fit_is_kept(self):
+        # Real-path leg (no stubs): the score-based guard keeps an inner fit
+        # that is stationary (concentrated FOC ~ 0) but which the optimiser did
+        # NOT certify. A max_steps=1 optimistix-LM solve stops at a stationary
+        # point of the CU criterion without certifying convergence (it needs a
+        # further step to confirm the residual stalled). Stationarity -- the
+        # nuisance score vanishing -- is exactly what the chi^2_{d_I} subvector
+        # reference requires (Kleibergen); certification is not. The pre-fix
+        # boolean guard excluded every such point (an empty set); the
+        # score-based guard keeps them.
+        from emu_gmm.inference.confidence_set import _foc_decrement
+
+        measure = _guard_measure()
+        grid = np.linspace(1.46, 1.54, 3)
+
+        # Premise, checked directly on one inner fit: uncertified yet stationary.
+        def _reduced(x, wonly, _s=1.5):
+            return _iv_model(x, IVParams(theta_s=_s, theta_w=wonly.theta_w))
+
+        inner = estimate(
+            _reduced,
+            measure,
+            covariance=IIDCovariance(),
+            weighting=ContinuouslyUpdated(),
+            theta_init=_WOnly(theta_w=5.0),
+            optimizer=optimistix_lm(max_steps=1),
+        )
+        assert not bool(inner.converged)  # optimiser did not certify...
+        assert _foc_decrement(inner, 0) <= 1e-3  # ...yet the FOC holds (score ~ 0)
+
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=5.0),
             grid,
             measure,
             IIDCovariance(),
@@ -691,11 +835,9 @@ class TestInnerConvergenceGuard:
             profile=["theta_s"],
             nuisance_optimizer=optimistix_lm(max_steps=1),
         )
-        assert cs.n_nonconverged == len(grid)
-        assert cs.nonconverged_indices == tuple(range(len(grid)))
-        assert not cs.in_set.any()
-        assert cs.topology == "empty"
-        assert "non-converged" in cs.summary()
+        # No stationary-but-uncertified point is dropped by the guard.
+        assert cs.n_nonconverged == 0
+        assert cs.nonconverged_indices == ()
 
 
 class TestCUOnlyWeightingGuard:
