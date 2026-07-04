@@ -62,10 +62,13 @@ fixed-:math:`L` whitening avoids the recompile / refit overhead and
 keeps the bootstrap loop vmappable across replicates.
 
 The same V used for the analytic J-test must be passed into the
-bootstrap to keep the calibration consistent --- typically obtained
-from ``EstimationResult.V_X``. Passing the labelled
-:class:`haliax.NamedArray` directly is supported; the helper
-auto-unwraps to the underlying array.
+bootstrap to keep the calibration consistent --- the regularised V* the
+fit whitened by, obtained as ``inv(result.weighting_matrix)`` on the
+:class:`~emu_gmm.types.OptimizationResult` (the estimation/inference
+split removed the old ``result.V_X`` attribute; ``weighting_matrix`` is
+``Lambda = (V*)^{-1}``). A labelled :class:`haliax.NamedArray` --- e.g.
+:attr:`emu_gmm.inference.JTestResult.V_X` --- is also accepted; the
+helper auto-unwraps it to the underlying array.
 
 JIT / vmap compatibility
 ------------------------
@@ -156,11 +159,11 @@ class WildBootstrapResult:
 def _to_plain(value: Any) -> Float[Array, "..."]:
     """Strip a :class:`haliax.NamedArray` wrapper if present.
 
-    Mirrors the same helper in the covariance subpackage. The wild-
-    bootstrap docstring guides callers to pass
-    ``EstimationResult.V_X`` directly; ``V_X`` is a NamedArray, so
-    without this unwrap ``jnp.asarray(V_X)`` would raise. Plain JAX
-    arrays pass through unchanged.
+    Mirrors the same helper in the covariance subpackage. A caller may
+    pass a labelled V --- e.g. :attr:`emu_gmm.inference.JTestResult.V_X`,
+    a :class:`haliax.NamedArray` --- so without this unwrap
+    ``jnp.asarray(V)`` would raise on the wrapper. Plain JAX arrays (such
+    as ``inv(result.weighting_matrix)``) pass through unchanged.
     """
     if isinstance(value, ha.NamedArray):
         return jnp.asarray(value.array)
@@ -269,14 +272,16 @@ def moment_wild_bootstrap(
         the bootstrap moments. When omitted the function recomputes it
         by calling ``covariance.covariance(model, theta_hat, measure)``
         and applies ``regularization`` to the result before
-        factorising; callers who already have ``EstimationResult.V_X``
-        should pass it directly (either the NamedArray or its
-        ``.array``) to avoid the extra evaluation and to guarantee the
-        Cholesky factor matches the one used by the analytic J-test.
+        factorising; callers who already have the regularised V* ---
+        ``inv(result.weighting_matrix)`` on the
+        :class:`~emu_gmm.types.OptimizationResult`, or a
+        :attr:`~emu_gmm.inference.JTestResult.V_X` NamedArray --- should
+        pass it directly to avoid the extra evaluation and to guarantee
+        the Cholesky factor matches the one used by the analytic J-test.
         A caller-supplied ``V`` is used **verbatim** --- it is presumed
-        already regularised (``result.V_X`` is), so ``regularization``
-        is not applied to it. The helper auto-unwraps a
-        :class:`haliax.NamedArray` to its underlying array.
+        already regularised (the fit's ``inv(weighting_matrix)`` is), so
+        ``regularization`` is not applied to it. The helper auto-unwraps
+        a :class:`haliax.NamedArray` to its underlying array.
     regularization : :class:`emu_gmm.types.RegularizationStrategy`, optional
         Adaptive PD-restoration applied to :math:`V` before
         factorisation when ``V`` is computed internally (``V=None``).
@@ -397,7 +402,7 @@ def moment_wild_bootstrap(
     # (commitment 3, #111) --- so it goes through the regularisation
     # strategy before factorisation, exactly as in ``j_test`` /
     # ``k_statistic``. Auto-unwrap a haliax NamedArray (the natural
-    # ``result.V_X`` hand-off) rather than letting jnp.asarray choke on
+    # ``JTestResult.V_X`` hand-off) rather than letting jnp.asarray choke on
     # the wrapper object.
     if V is None:
         V_raw = _to_plain(covariance.covariance(model, theta_hat, measure))
