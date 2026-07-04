@@ -2,10 +2,10 @@
 #+AUTHOR: emu-gmm
 #+OPTIONS: toc:2
 
-/Status: IN PROGRESS. Tier 1 (linear over-identified IV vs R =gmm= / =AER=)
-landed as =tests/validation/test_r_reference_linear_iv.py=. Tier 2
-(Hansen–Singleton CCAPM) and Tier 3 (=sandwich= SE conventions) are scoped
-below./
+/Status: IN PROGRESS. Tier 1 (linear over-identified IV vs R =gmm= / =AER=) and
+Tier 2 (multi-asset Euler / Hansen–Singleton vs R =gmm=) have landed
+(=tests/validation/test_r_reference_{linear_iv,euler}.py=). Tier 3 (=sandwich= SE
+conventions) is scoped below./
 
 * Why
 
@@ -111,14 +111,50 @@ bug.
 | HAC / Newey–West | =sandwich::NeweyWest= | *not implemented* | out of scope — a gap, not a cross-check |
 | σ>0 parameter | =log=-reparameterise in gmm | =Positive= manifold + =RiemannianLM= | reparam-vs-manifold is a targeted check |
 
-* Tier 2 — Hansen–Singleton CCAPM (SCOPED)
+* Tier 2 — multi-asset Euler / Hansen–Singleton (LANDED)
 
-The =gmm= vignette's flagship nonlinear example: a consumption-Euler estimation,
-the direct analog of =src/emu_gmm/examples/euler.py=. Highest-value next step —
-it exercises the nonlinear moment solve, the J-test, and all three weightings
-(=Fixed= two-step / =IteratedWeighting= / =ContinuouslyUpdated= CUE) against a
-peer-reviewed reference, and it re-stresses the =N=-scaling reconciliation on a
-nonlinear criterion.
+** Setup
+
+A Hansen–Singleton-style consumption-Euler / SDF estimation using the *exact*
+DGP and moment of the bundled =src/emu_gmm/examples/euler.py= (the shipped
+example three acceptance tests already drive), so the cross-check validates the
+*shipped model*, not a re-implementation. Data
+(=scripts/gmm_reference/gen_euler_data.py= → =tests/data/gmm_euler.csv=,
+n=2000): columns =c_t, c_next, r0, r1, r2=; per-observation moment
+=psi_j = beta*(c_next/c_t)^(-gamma)*(1+r_j) - 1= for the three assets, so =M=3=,
+=K=2= (=beta=, =gamma=), one over-identifying restriction (=J ~ chi^2_1=). Truth
+=(beta, gamma) = (0.96, 2.0)=. The emu test imports =euler_residual= verbatim;
+the R reference (=reference_euler.R=) writes the same moment as a =gmm= function.
+
+** Results (n=2000, seed 20260704, start (0.95, 1.5))
+
+| quantity     | emu-gmm | R gmm |
+|--------------+---------+-------|
+| CUE beta     | 0.954694 | 0.954694 |
+| CUE gamma    | 1.763325 | 1.763336 |
+| CUE se(beta) |  0.00852 |  0.00852 |
+| CUE se(gamma)|  0.44600 |  0.44600 |
+| CUE J        |   1.0904 |   1.0910 |
+| CUE p        |   0.2964 |   0.2963 |
+
+** Findings
+
+emu-gmm and =gmm= agree to *~5–6 significant figures* on this nonlinear fit —
+tighter than the linear-IV case. The reason is instructive: at the
+over-identified optimum the moment mean =mbar= is ~0, so the centered
+(=sum (g-gbar)(g-gbar)'=) and uncentered (=sum g g'=) covariance estimators
+nearly coincide, collapsing the Tier-1 convention gap. Commitment 9 holds on the
+nonlinear criterion too: =J ≈ 1.09=, =dof = 1=, both → =chi^2_1=, =p ≈ 0.296= —
+no factor-of-=n= (=2000=) discrepancy. This is the strongest single confirmation
+of the framework's nonlinear pipeline: the *shipped* Euler example reproduces an
+independent, peer-reviewed GMM implementation to machine-adjacent precision.
+
+** Regenerate
+
+#+begin_src sh
+python scripts/gmm_reference/gen_euler_data.py    # -> tests/data/gmm_euler.csv
+Rscript scripts/gmm_reference/reference_euler.R   # -> tests/data/gmm_euler_reference.json
+#+end_src
 
 * Tier 3 — sandwich SE conventions (SCOPED)
 

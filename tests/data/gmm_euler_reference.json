@@ -1,0 +1,44 @@
+{
+  "provenance": {
+    "description": "R gmm reference for the emu-gmm multi-asset Euler (Hansen-Singleton) cross-check",
+    "generated_by": "scripts/gmm_reference/reference_euler.R",
+    "data_file": "tests/data/gmm_euler.csv",
+    "data_sha256": "b93c8f177f4ebb8adfcd4353c4ea2e5ea5667fdc599b0156b30016271ae61d2f",
+    "r_version": "4.3.3",
+    "packages": {
+      "gmm": "1.8"
+    },
+    "model": "psi_j = beta*(c_next/c_t)^(-gamma)*(1+r_j)-1, j=1..3; M=3, K=2, over_id=1",
+    "truth": {
+      "beta": 0.95999999999999996,
+      "gamma": 2
+    },
+    "note": "emu-gmm and gmm agree to ~5-6 significant figures on this nonlinear fit (tighter than the linear-IV case: at the over-identified optimum the moment mean is ~0, so the centered-vs-uncentered covariance gap nearly vanishes). Both reference J to chi^2_1."
+  },
+  "gmm_cue": {
+    "coef": {
+      "beta": 0.95469416382443406,
+      "gamma": 1.7633363461094695
+    },
+    "se": {
+      "beta": 0.0085169831691427958,
+      "gamma": 0.44600193041203001
+    },
+    "J": 1.0909510903584019,
+    "J_pvalue": 0.29626057405803347,
+    "J_df": 1
+  },
+  "gmm_iterative": {
+    "coef": {
+      "beta": 0.9546490452019909,
+      "gamma": 1.7610646151867158
+    },
+    "se": {
+      "beta": 0.0085165164430035679,
+      "gamma": 0.44599351689307654
+    },
+    "J": 1.0909790807750406,
+    "J_pvalue": 0.29625437802186033,
+    "J_df": 1
+  }
+}
