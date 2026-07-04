@@ -1,0 +1,130 @@
+#+TITLE: Cross-validating emu-gmm against R reference implementations
+#+AUTHOR: emu-gmm
+#+OPTIONS: toc:2
+
+/Status: IN PROGRESS. Tier 1 (linear over-identified IV vs R =gmm= / =AER=)
+landed as =tests/validation/test_r_reference_linear_iv.py=. Tier 2
+(Hansen–Singleton CCAPM) and Tier 3 (=sandwich= SE conventions) are scoped
+below./
+
+* Why
+
+Independent confirmation that emu-gmm's numbers are correct, and a controlled
+way to find where our *conventions* differ from the reference econometrics
+literature. R is the natural oracle: Pierre Chaussé's =gmm= package (JSS 2010)
+is the canonical GMM implementation, =AER::ivreg= is the reference 2SLS, and
+=sandwich= is the reference for robust/clustered standard errors.
+
+The division of labour deliberately mirrors =tests/test_estimator_realdata.py=:
+the R fit is run *once* to freeze reference numbers + provenance into a JSON
+sidecar, and the committed acceptance test consumes those frozen numbers, so
+**CI needs no R toolchain**. Only regeneration needs R.
+
+* Running R in this environment
+
+R is *not* available through an environment module (=module add R=) here, and
+CRAN is blocked by the agent egress policy (=cran.r-project.org= → HTTP 000).
+The reachable route is the Ubuntu ~r-cran-*~ debs, installed via apt through the
+proxy:
+
+#+begin_src sh
+apt-get update
+apt-get install -y r-base-core r-cran-gmm r-cran-aer r-cran-sandwich r-cran-lmtest
+#+end_src
+
+This gives R 4.3.3 with =gmm= 1.8, =AER= 1.2.12, =sandwich= 3.1.0, =lmtest=
+0.9.40 — enough for Tiers 1–3. (=r-cran-momentfit= is not in the reachable
+repos; =gmm= covers the same ground.)
+
+* Tier 1 — linear over-identified IV (LANDED)
+
+** Setup
+
+A textbook over-identified IV DGP (=scripts/gmm_reference/gen_data.py=, seeded,
+committed as =tests/data/gmm_linear_iv.csv=): one endogenous regressor =xe=,
+three excluded instruments =z1,z2,z3= (plus the constant), truth =(b0,b1) =
+(1,2)=. The moment vector is =g_i = (1,z1,z2,z3)_i * (y_i - b0 - b1*xe_i)=, so
+=M=4=, =K=2=, and there are two over-identifying restrictions (=J ~ chi^2_2=).
+The identical CSV is read by both R (=scripts/gmm_reference/reference.R=) and
+emu-gmm (the test), with a =sha256= provenance guard so the two cannot silently
+drift.
+
+** Results (n=500, seed 20260704)
+
+| quantity      |   emu-gmm |    R gmm | note                         |
+|---------------+-----------+----------+------------------------------|
+| 2SLS b1 (matched weight) | 2.0241896 | 2.0241896 | =AER::ivreg=; exact to 1e-6  |
+| CUE b1        |    2.0204 |   2.0183 | gmm =type="cue"=             |
+| iterated b1   |    2.0269 |   2.0242 | gmm =type="iterative"=       |
+| iterated se(b1) |   0.0479 |   0.0492 | ~2.6% (convention)           |
+| iterated J    |     3.613 |    3.731 | both → chi^2_2, p≈0.155–0.164 |
+
+** Findings
+
+1. *The GMM solver is correct.* With the 2SLS weight =(Z'Z/n)^{-1}= held
+   identical on both sides, emu-gmm reproduces =AER::ivreg= to machine precision
+   (7+ digits). This isolates and confirms the estimator math, independent of
+   any covariance-estimator convention.
+
+2. *Commitment 9 (the =N= scaling) is validated against an independent
+   implementation.* emu-gmm folds the per-coordinate =N_j= into =V_X= and
+   carries no explicit =N=, so =objective_value = mbar' V_X^{-1} mbar=. R's =gmm=
+   reports =J = n * gbar' S^{-1} gbar=. These land on the *same scale* (≈3.6 vs
+   ≈3.7, both referenced to =chi^2_2=, p≈0.16) — a factor-of-=n= (=500=) error in
+   our convention would put =J= near 0.007 or near 1900. It does neither. This is
+   exactly the class of bug the downstream-contract section of =CLAUDE.md= warns
+   about, now checked externally.
+
+3. *The residual ~0.1–3% gap is a convention, not an error — and it is
+   localized.* emu-gmm's =IIDCovariance= uses an *uncentered,
+   PSD-by-construction* numerator =sum_i w_i^2 g_i g_i' / (N_j N_k)= (see its
+   docstring); R's =gmm= builds a different (centered-family) =S= and its
+   iterated estimator lands exactly on the 2SLS fixed point. Both are defensible;
+   they simply weight the moments differently, which moves the CUE / iterated
+   point by ~0.1% and the SE / J by ~2–3%. (Notably, gmm's own =centeredVcov=
+   toggle did *not* move its numbers on this fit, so the difference is in the
+   estimator *structure*, not centering alone — flagged for the follow-up.)
+
+** Regenerate
+
+#+begin_src sh
+python scripts/gmm_reference/gen_data.py         # -> tests/data/gmm_linear_iv.csv
+Rscript scripts/gmm_reference/reference.R        # -> tests/data/gmm_linear_iv_reference.json
+#+end_src
+
+The test asserts the CSV =sha256= matches the JSON's recorded value, so a data
+change that isn't accompanied by an R re-run fails loudly.
+
+* Where assumptions may matter (the divergence catalogue)
+
+These are the high-information axes — several are places emu-gmm is deliberately
+*more general* than R GMM, so a mismatch is expected and worth documenting, not a
+bug.
+
+| axis | R (gmm/sandwich) | emu-gmm | verdict |
+|------+------------------+---------+---------|
+| Moment-covariance estimator | centered-family =S= | uncentered PSD =sum w_i^2 g g'/(N_j N_k)= | ~2–3% SE/J gap on over-ID fits; the Tier-1 finding |
+| Per-moment missingness | listwise / complete-case | per-coordinate =mask=, unequal =N_j= (commitment 9) | no R analog; different estimand under MCAR (=mcar-asymptotics.org=). Balanced data must agree. |
+| Weight regularisation | none | =DiagonalTikhonov= anchor-freeze (commitment 3) | agree when well-conditioned (τ≈0); diverge by design when ill-conditioned |
+| Clustered dof | scalar =G/(G-1)= | per-*pair* effective counts =H_{c,jk}= (commitment 10) | match under balanced observability; emu generalises |
+| SE basis | analytic sandwich | =G'ΛG=, never numerical Hessian (commitment 5) | should match; an equality check |
+| HAC / Newey–West | =sandwich::NeweyWest= | *not implemented* | out of scope — a gap, not a cross-check |
+| σ>0 parameter | =log=-reparameterise in gmm | =Positive= manifold + =RiemannianLM= | reparam-vs-manifold is a targeted check |
+
+* Tier 2 — Hansen–Singleton CCAPM (SCOPED)
+
+The =gmm= vignette's flagship nonlinear example: a consumption-Euler estimation,
+the direct analog of =src/emu_gmm/examples/euler.py=. Highest-value next step —
+it exercises the nonlinear moment solve, the J-test, and all three weightings
+(=Fixed= two-step / =IteratedWeighting= / =ContinuouslyUpdated= CUE) against a
+peer-reviewed reference, and it re-stresses the =N=-scaling reconciliation on a
+nonlinear criterion.
+
+* Tier 3 — sandwich SE conventions (SCOPED)
+
+For one fixed fitted model, compare emu-gmm's =IIDCovariance= /
+=ClusteredCovariance= SEs against =sandwich::vcovHC= (HC0–HC3) and =vcovCL= (with
+its =cadjust= / =G/(G-1)= knobs) to pin down *which named convention* emu-gmm
+implements — and to decide whether the centered-vs-uncentered covariance
+divergence from Tier 1 should become a documented note, an issue, or an optional
+=centered=- knob on =IIDCovariance=.

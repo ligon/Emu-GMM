@@ -1,0 +1,51 @@
+{
+  "provenance": {
+    "description": "R reference estimates for the emu-gmm linear over-identified IV cross-check",
+    "generated_by": "scripts/gmm_reference/reference.R",
+    "data_file": "tests/data/gmm_linear_iv.csv",
+    "data_sha256": "cac2c514e2793dfd25d89efbd3554e19e026c1b19b7db4abb81507c71d0c7630",
+    "r_version": "4.3.3",
+    "packages": {
+      "gmm": "1.8",
+      "AER": "1.2.12",
+      "sandwich": "3.1.0"
+    },
+    "model": "y ~ xe, instruments (1, z1, z2, z3); M=4, K=2, over_id=2",
+    "note": "gmm uses vcov='iid'. The gmm CUE/iterative estimates differ from emu-gmm at the ~0.1-3% level by moment-covariance-estimator convention; the 2SLS point (fixed (Z'Z)^-1 weight) is the exact machine-precision anchor."
+  },
+  "twoStageLeastSquares": {
+    "coef": {
+      "b0": 0.9751804924935823,
+      "b1": 2.0241896364241825
+    },
+    "sargan_J": 3.7305965138874075,
+    "sargan_pvalue": 0.15485001790363748,
+    "J_df": 2
+  },
+  "gmm_cue": {
+    "coef": {
+      "b0": 0.9753402977374378,
+      "b1": 2.0182669567038656
+    },
+    "se": {
+      "b0": 0.06229767433202419,
+      "b1": 0.049347356844535575
+    },
+    "J": 3.7163132105921073,
+    "J_pvalue": 0.15595986112886209,
+    "J_df": 2
+  },
+  "gmm_iterative": {
+    "coef": {
+      "b0": 0.97518049249357774,
+      "b1": 2.0241896364241847
+    },
+    "se": {
+      "b0": 0.062057678615721,
+      "b1": 0.049157250963689156
+    },
+    "J": 3.7305965138874577,
+    "J_pvalue": 0.15485001790363359,
+    "J_df": 2
+  }
+}
