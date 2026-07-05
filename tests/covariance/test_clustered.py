@@ -359,3 +359,111 @@ class TestClusterIdRobustness:
             cluster_ids=jnp.array([0.0, 0.0, 1.0, 1.0]), n_clusters=2
         ).covariance(_identity_psi, theta, meas)
         np.testing.assert_allclose(np.asarray(V_int), np.asarray(V_float), atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# The centered= knob, shared with IIDCovariance via _OuterProductCovariance:
+# subtract the per-coordinate mean moment before the per-cluster totals.
+# ---------------------------------------------------------------------------
+def _clustered_centered_reference(X, mask, cluster_ids, n_clusters, dof=False):
+    """Independent numpy reference for the masked, centered clustered V_X."""
+    X, mask = np.asarray(X), np.asarray(mask)
+    cl = np.rint(np.asarray(cluster_ids)).astype(int)
+    N, M = X.shape
+    Nj = (mask).sum(0)  # unit weights
+    m = (mask * X).sum(0) / Nj  # per-coordinate observed mean
+    contrib = mask * (X - m[None, :])  # d_ij * (psi_j - m_j); masked rows -> 0
+    totals = np.zeros((n_clusters, M))
+    for i in range(N):
+        totals[cl[i]] += contrib[i]
+    numer = totals.T @ totals
+    if dof:
+        numer = numer * _numpy_cluster_correction(mask, cluster_ids, n_clusters)
+    return numer / np.outer(Nj, Nj)
+
+
+class TestCenteredKnob:
+    def test_static_field_default_false(self):
+        cl = jnp.array([0.0, 0.0, 1.0, 1.0])
+        assert ClusteredCovariance(cluster_ids=cl, n_clusters=2).centered is False
+        assert (
+            ClusteredCovariance(cluster_ids=cl, n_clusters=2, centered=True).centered
+            is True
+        )
+
+    def test_matches_numpy_reference_masked(self):
+        X = np.array(
+            [
+                [1.0, 10.0],
+                [2.0, 20.0],
+                [3.0, 30.0],
+                [4.0, 40.0],
+                [5.0, 50.0],
+                [6.0, 6.0],
+            ]
+        )
+        mask = np.array([[1, 1], [1, 0], [1, 1], [1, 1], [1, 0], [1, 1]], dtype=float)
+        cl = jnp.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0])
+        meas = EmpiricalMeasure(
+            x=jnp.asarray(X), mask=jnp.asarray(mask), weights=jnp.ones(6)
+        )
+        for dof in (False, True):
+            vc = np.asarray(
+                ClusteredCovariance(
+                    cluster_ids=cl, n_clusters=3, centered=True, dof_correction=dof
+                ).covariance(_identity_psi, _P(0.0, 0.0), meas)
+            )
+            ref = _clustered_centered_reference(X, mask, cl, 3, dof=dof)
+            np.testing.assert_allclose(vc, ref, rtol=1e-6, atol=1e-9)
+
+    def test_equal_when_moments_already_have_zero_mean(self):
+        rng = np.random.default_rng(3)
+        X = rng.normal(0.0, 1.0, size=(8, 2))
+        X = X - X.mean(axis=0)  # exact zero column means -> centering is a no-op
+        cl = jnp.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0])
+        meas = EmpiricalMeasure(
+            x=jnp.asarray(X), mask=jnp.ones((8, 2)), weights=jnp.ones(8)
+        )
+        base = ClusteredCovariance(cluster_ids=cl, n_clusters=4)
+        cent = ClusteredCovariance(cluster_ids=cl, n_clusters=4, centered=True)
+        vu = np.asarray(base.covariance(_identity_psi, _P(0.0, 0.0), meas))
+        vc = np.asarray(cent.covariance(_identity_psi, _P(0.0, 0.0), meas))
+        np.testing.assert_allclose(vu, vc, atol=1e-12)
+
+    def test_cached_self_parity_centered(self):
+        X = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]])
+        mask = np.array([[1, 1], [1, 0], [1, 1], [0, 1]], dtype=float)
+        meas = EmpiricalMeasure(
+            x=jnp.asarray(X), mask=jnp.asarray(mask), weights=jnp.ones(4)
+        )
+        cov = ClusteredCovariance(
+            cluster_ids=jnp.array([0.0, 0.0, 1.0, 1.0]), n_clusters=2, centered=True
+        )
+        cached = meas.expectation_and_contributions(_identity_psi, _P(0.0, 0.0))
+        V_self = cov.covariance(_identity_psi, _P(0.0, 0.0), meas)
+        V_cached = cov.covariance(
+            _identity_psi, _P(0.0, 0.0), meas, cached_intermediates=cached
+        )
+        np.testing.assert_allclose(np.asarray(V_self), np.asarray(V_cached), atol=1e-12)
+
+
+class TestSingletonReducesToIID:
+    """IID is the singleton-cluster reduction of Clustered in BOTH centering
+    directions --- the invariant the shared _OuterProductCovariance template
+    guarantees (same mean subtracted on both sides).
+    """
+
+    @pytest.mark.parametrize("centered", [False, True])
+    def test_singleton_matches_iid_masked_weighted(self, centered):
+        X = jnp.array([[1.0, 1.5], [2.0, 2.5], [3.0, 3.5], [4.0, 4.5], [5.0, 5.5]])
+        mask = jnp.array([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [1.0, 1.0]])
+        weights = jnp.array([1.0, 0.5, 2.0, 1.5, 1.0])
+        meas = EmpiricalMeasure(x=X, mask=mask, weights=weights)
+        cl = jnp.arange(5, dtype=jnp.float32)  # singleton clusters
+        V_iid = IIDCovariance(centered=centered).covariance(
+            _identity_psi, _P(0.0, 0.0), meas
+        )
+        V_clu = ClusteredCovariance(
+            cluster_ids=cl, n_clusters=5, centered=centered
+        ).covariance(_identity_psi, _P(0.0, 0.0), meas)
+        np.testing.assert_allclose(np.asarray(V_iid), np.asarray(V_clu), atol=1e-12)

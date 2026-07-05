@@ -109,6 +109,19 @@ for both, confirmed by the independent numpy CUE). Default stays =False=
 (uncentered, marginally better finite-sample conditioning) --- no behaviour
 change; pass =centered=True= to match a reference's centered J / SE reporting.
 
+The knob is *uniform across the sampling-covariance family*: =IIDCovariance= and
+=ClusteredCovariance= both take =centered=, sharing the same per-coordinate mean
+=m_j= subtraction through the =_OuterProductCovariance= template they inherit
+(=src/emu_gmm/covariance/_outer_product.py=). The single-PSU reduction
+=IIDCovariance(centered) == ClusteredCovariance(centered, singleton clusters)=
+holds *bit-for-bit in both centering directions* (a guard test), since the
+template subtracts the identical =m_j= on both sides. The *design* family
+(=StratifiedCovariance= / =DesignAwareCovariance=) is deliberately outside this
+base: it centers *intrinsically* (within each =(stratum x arm)= cell --- the
+Neyman between-PSU form, commitment 10) rather than by an optional knob, so
+"centered" is definitional there, not a toggle. =AnalyticalCovariance= /
+=SyntheticCovariance= carry no empirical moment mean and so no centering choice.
+
 ** Regenerate
 
 #+begin_src sh
