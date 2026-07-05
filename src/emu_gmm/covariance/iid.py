@@ -59,14 +59,55 @@ def _safe_outer_divide(
     return jnp.where(denom == 0.0, jnp.zeros_like(out), out)
 
 
+def _mean_moment(
+    mask: Float[Array, "N M"],
+    weights: Float[Array, " N"],
+    psi_safe: Float[Array, "N M"],
+    N_j: Float[Array, " M"],
+) -> Float[Array, " M"]:
+    """Per-coordinate mean moment ``m_j = (1/N_j) sum_i d_ij w_i psi_j``.
+
+    The centre subtracted by ``IIDCovariance(centered=True)``. Degenerate
+    coordinates (``N_j == 0``) get ``0`` rather than ``nan`` --- they are already
+    surfaced through ``Diagnostics.N_j``. Matches the mean the estimator computes
+    for the moment vector, so ``centered=True`` subtracts exactly the fitted
+    moment at ``theta``.
+    """
+    numer_m = jnp.sum(mask * weights[:, None] * psi_safe, axis=0)  # (M,)
+    safe_N = jnp.where(N_j == 0.0, 1.0, N_j)
+    return jnp.where(N_j == 0.0, 0.0, numer_m / safe_N)
+
+
 @jdc.pytree_dataclass
 class IIDCovariance:
     """Pairwise-overlap iid variance for an :class:`EmpiricalMeasure`.
 
-    No configurable state in v1: the strategy reads ``x``, ``mask``, and
-    ``weights`` off the measure and assembles the sample variance of the
-    moment estimator under the pairwise-overlap rule.
+    The strategy reads ``x``, ``mask``, and ``weights`` off the measure and
+    assembles the sample variance of the moment estimator under the
+    pairwise-overlap rule.
+
+    The one knob is :attr:`centered`: whether to subtract the per-coordinate
+    mean moment before forming the outer products. Both forms are PSD by
+    construction and coincide asymptotically at :math:`\\theta_0`; they differ in
+    finite samples at an over-identified :math:`\\hat\\theta`. ``centered=False``
+    (the default) is the uncentered form; ``centered=True`` matches R's ``gmm``
+    default and most textbooks (see
+    ``docs/validation/r-reference-crosschecks.org``).
     """
+
+    #: Center each moment coordinate by its mean :math:`m_j = (1/N_j) \\sum_i
+    #: d_{ij} w_i \\psi_j` before the pairwise-overlap outer products, so the
+    #: numerator is :math:`\\sum_i d_{ij} d_{ik} w_i^2 (\\psi_j - m_j)(\\psi_k -
+    #: m_k)`. Default ``False`` (the uncentered :math:`\\sum_i w_i^2 \\psi_j
+    #: \\psi_k` form). Both are PSD by construction --- a sum of outer products
+    #: of the masked, optionally-centered row vectors --- and agree
+    #: asymptotically at :math:`\\theta_0` (where :math:`E[\\psi]=0`); at an
+    #: over-identified :math:`\\hat\\theta` they differ by :math:`O(\\bar m^2)`.
+    #: ``centered=True`` reproduces the moment-covariance convention of R's
+    #: ``gmm`` (``centeredVcov=TRUE``); the uncentered default is retained for
+    #: back-compat and its marginally better finite-sample conditioning.
+    #: A static field (recompile, not traced).
+    centered: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     def covariance(
         self,
@@ -109,30 +150,32 @@ class IIDCovariance:
         Returns
         -------
         V : (M, M) jax array
-            Symmetric PSD by construction: the uncentered numerator is a
-            sum of outer products :math:`\\sum_i w_i^2 g_i g_i'`, and the
-            :math:`1/(N_j N_k)` scaling is a diagonal congruence, both of
-            which preserve PSD (possibly singular, hence still not
-            guaranteed *PD* --- the regularisation layer owns strict
-            definiteness). Contrast the *centered*
-            :class:`StratifiedCovariance` form and the per-pair
-            dof-corrected :class:`ClusteredCovariance`, which can be
-            indefinite (issue #120).
+            Symmetric PSD by construction: the numerator is a sum of outer
+            products :math:`\\sum_i w_i^2 v_i v_i'` --- of :math:`v_i = g_i`
+            (uncentered) or :math:`v_i = g_i - \\bar m` (``centered=True``),
+            masked per row --- and the :math:`1/(N_j N_k)` scaling is a diagonal
+            congruence, both of which preserve PSD (possibly singular, hence
+            still not guaranteed *PD* --- the regularisation layer owns strict
+            definiteness). Contrast the per-pair dof-corrected
+            :class:`ClusteredCovariance`, which can be indefinite (issue #120).
         """
         if cached_intermediates is not None:
-            _m, psi_safe, weight_mask, N_j = cached_intermediates
+            m, psi_safe, weight_mask, N_j = cached_intermediates
             # The IID estimator uses w_i^2 in the pairwise sum (not
             # the d_ij * w_i product squared), so derive w^2 from the
             # measure weights directly. Cached weight_mask is sufficient
             # for the d_ij * d_ik mask combination.
             weights = measure.weights  # (N,)
             w2 = weights * weights  # (N,)
-            # weighted_psi: d_ij * psi_safe with masked-out rows zeroed.
-            # weight_mask already encodes d_ij * w_i; to recover the
-            # IID closed form (sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k),
-            # factor out w_i to get d_ij and multiply back with w^2.
+            # weighted_psi: d_ij * (psi_safe [- m]) with masked-out rows zeroed.
+            # weight_mask already encodes d_ij * w_i; to recover the IID closed
+            # form (sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k), factor out w_i to
+            # get d_ij and multiply back with w^2. When centered, subtract the
+            # cached mean moment m; masked cells (psi_safe=0 -> -m_j) are re-zeroed
+            # by the mask, so only observed deviations enter.
             mask = measure.mask  # (N, M)
-            weighted_psi = mask * psi_safe  # (N, M)
+            centered_psi = psi_safe - m[None, :] if self.centered else psi_safe
+            weighted_psi = mask * centered_psi  # (N, M)
             numer = jnp.einsum("i,ij,ik->jk", w2, weighted_psi, weighted_psi)
             return _safe_outer_divide(numer, N_j)
 
@@ -162,10 +205,15 @@ class IIDCovariance:
         # Per-coordinate effective sample size N_j = sum_i d_ij * w_i.
         N_j = jnp.sum(mask * weights[:, None], axis=0)  # (M,)
 
-        # Pairwise overlap numerator: sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k.
-        # einsum: i is summed; j, k are kept.
+        # Pairwise overlap numerator: sum_i d_ij * d_ik * w_i^2 * psi_j * psi_k
+        # (centered: psi_j -> psi_j - m_j). einsum: i is summed; j, k are kept.
         w2 = weights * weights  # (N,)
-        weighted_psi = mask * psi_safe  # (N, M); zero masked-out rows
+        if self.centered:
+            m = _mean_moment(mask, weights, psi_safe, N_j)
+            centered_psi = psi_safe - m[None, :]
+        else:
+            centered_psi = psi_safe
+        weighted_psi = mask * centered_psi  # (N, M); zero masked-out rows
         numer = jnp.einsum("i,ij,ik->jk", w2, weighted_psi, weighted_psi)
 
         return _safe_outer_divide(numer, N_j)

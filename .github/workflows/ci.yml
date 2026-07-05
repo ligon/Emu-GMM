@@ -73,6 +73,7 @@ jobs:
           - numerics
           - examples
           - studies
+          - validation
           - toplevel
     steps:
       - uses: actions/checkout@v4
