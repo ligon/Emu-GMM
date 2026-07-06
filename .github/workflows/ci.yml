@@ -46,8 +46,20 @@ jobs:
         run: poetry run python -m black --check .
       - name: mypy
         run: poetry run python -m mypy src tests
-      - name: pytest (not slow)
-        run: poetry run python -m pytest -m "not slow"
+      # Parallel pytest (mirrors `make par-quick-check`): one xdist worker per
+      # runner core, each pinned to a single thread. The suite is
+      # compile-dominated (~1500 mostly-small tests) so it scales near-linearly;
+      # the thread caps stop each JAX/XLA worker from sizing its own pool to the
+      # core count and oversubscribing (the CLAUDE.md "JIT-mmap hazard"). This
+      # replaces the single-threaded run that had crept up to ~30 min and was
+      # tripping the job timeout mid-run.
+      - name: pytest (not slow, parallel)
+        env:
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          XLA_FLAGS: "--xla_force_host_platform_device_count=1"
+        run: poetry run python -m pytest -m "not slow" -n "$(nproc)"
 
   # --------------------------------------------------------------------- #
   # Full gate: the WHOLE suite (incl. slow), one matrix leg per test
