@@ -86,7 +86,13 @@ from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.optimizer import RiemannianOptimizer
 from emu_gmm.manifolds.riemannian_lm import riemannian_lm
 from emu_gmm.manifolds.spec import ManifoldSpec
-from emu_gmm.optimizer import _supports_args, _takes_manifold_spec, optimistix_lm
+from emu_gmm.optimizer import (
+    _LinearSolver,
+    _supports_args,
+    _takes_manifold_spec,
+    linear_solver,
+    optimistix_lm,
+)
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.runtime import maybe_warn_cpu_oversubscription
@@ -206,6 +212,67 @@ def _resolve_optimizer(
     )
 
 
+def _apply_linear_fast_path(
+    optimizer: Any,
+    dispatch_mode: str,
+    weighting: WeightingStrategy,
+) -> Any:
+    """Wrap the resolved optimiser in the affine one-step fast path (``linear=True``).
+
+    ``linear=True`` is the caller's **assertion** that the whitened moment is
+    affine in :math:`\\theta` --- so the least-squares minimiser is reached in a
+    single exact Gauss--Newton step, and the iterative optimiser is skipped
+    entirely (``linear_solver(verify=False)``: one ``lstsq`` step, no
+    certificate, no control flow --- the form that also wins under ``vmap`` /
+    ``replicate``, where the certified path's ``lax.cond`` would degrade to a
+    ``select`` that runs the fallback for every draw). Because the step is taken
+    *unchecked*, the two failure modes the framework **can** detect are turned
+    into loud errors rather than silently-wrong estimates:
+
+    * **Manifold parameters** (``dispatch_mode != "v1"``): the one-step ``lstsq``
+      is a Euclidean operation; a curved / gauge-quotient parameter has no such
+      closed form. Refuse.
+    * **Continuously-updated weighting**: with :math:`W = V(\\theta)^{-1}` the
+      criterion is a ratio of quadratics that is **not** solved in one step even
+      for a linear moment (CUE of a linear model is a genuinely nonlinear
+      program), so the affine assertion is false of the *whitened* residual.
+      Refuse and point at a :math:`\\theta`-independent weight.
+
+    The remaining failure mode --- a moment that is not in fact affine --- is the
+    caller's declared responsibility (exactly the ``linear_solver(verify=False)``
+    contract). Callers who want the framework to *verify* the one-step and fall
+    back to an iterative solve on a failed first-order certificate should pass
+    ``optimizer=linear_solver(verify=True)`` explicitly instead of ``linear=True``.
+    """
+    if dispatch_mode != "v1":
+        raise TypeError(
+            "estimate(linear=True) supports only Euclidean parameters: the "
+            "one-step linear least-squares solution is a Euclidean operation, "
+            "with no closed form on a curved / gauge-quotient manifold leaf "
+            "(e.g. Positive, PSDFixedRank). Drop linear=True (the manifold "
+            "solver handles the nonlinearity), or express the parameter on a "
+            "Euclidean leaf if the moment really is affine in it."
+        )
+    if isinstance(optimizer, _LinearSolver):
+        # An explicit ``optimizer=linear_solver(...)`` already provides the fast
+        # path (possibly with verify=True); don't double-wrap it.
+        return optimizer
+    if isinstance(weighting, ContinuouslyUpdated):
+        raise ValueError(
+            "estimate(linear=True) is incompatible with ContinuouslyUpdated "
+            "weighting: continuously-updated weighting makes the criterion "
+            "m(theta)' V(theta)^-1 m(theta) a ratio of quadratics that is not "
+            "reached in one Gauss-Newton step even when the moment is linear in "
+            "theta (CUE of a linear model is a nonlinear program). Use a "
+            "theta-independent weight -- weighting=Fixed(W) (the 2SLS-style "
+            "fixed weight), Identity(), or IteratedWeighting() (fixed within each "
+            "inner solve) -- or drop linear=True."
+        )
+    # verify=False: the assertion is honoured unchecked. ``fallback`` is unused
+    # under verify=False but retained for symmetry with the certified path.
+    return linear_solver(fallback=optimizer, verify=False)
+
+
 # Sentinel so a literal ``theta_init=None`` is distinguishable from "unset".
 _THETA_INIT_UNSET = object()
 
@@ -277,6 +344,7 @@ def build_estimator(
     theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
+    linear: bool = False,
 ) -> Callable[[ParamsLike, Measure], OptimizationResult]:
     """Build a re-usable estimator callable.
 
@@ -314,7 +382,7 @@ def build_estimator(
     covariance : :class:`CovarianceStrategy`
         Captured in the factory's closure; fixed for the lifetime of the
         returned callable.
-    weighting, regularization, optimizer, parameters, theta_init, moment_names, penalty
+    weighting, regularization, optimizer, parameters, theta_init, moment_names, penalty, linear
         See :func:`estimate`.
 
     Returns
@@ -350,6 +418,13 @@ def build_estimator(
     # with mode "v2".
     manifold_spec = params_mod.manifold_spec_from_params(theta_init)
     optimizer, dispatch_mode = _resolve_optimizer(manifold_spec, optimizer)
+
+    # linear=True: caller asserts the whitened moment is affine in theta, so the
+    # minimiser is one exact Gauss-Newton step -- wrap the resolved optimiser in
+    # the one-step fast path (guarded against the manifold / CU cases where the
+    # assertion cannot hold; see _apply_linear_fast_path).
+    if linear:
+        optimizer = _apply_linear_fast_path(optimizer, dispatch_mode, weighting)
 
     # #124 kernel-path gate (factory-static). The traced-argument path
     # serves the ported surface: v1 scalar parameters, a standard
@@ -1314,6 +1389,7 @@ def estimate(
     theta_init: Any = _THETA_INIT_UNSET,
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
+    linear: bool = False,
 ) -> OptimizationResult:
     """Estimate :math:`\\hat\\theta` by minimising
     :math:`Q_\\mu(\\theta) = \\| L_\\mu(\\theta)^{-1}\\, \\mathbb{E}_\\mu[\\psi(\\cdot,\\theta)] \\|^2`.
@@ -1381,6 +1457,30 @@ def estimate(
         p(\\theta)` and the NLLS residual gets :math:`\\sqrt{p(\\theta)}`
         appended so the LM Jacobian picks up the parameter-space ridge
         via JAX AD. ``penalty=None`` preserves v1 behaviour bitwise.
+    linear : bool, optional
+        Assert that the **whitened** moment condition is affine in
+        :math:`\\theta`, so the least-squares minimiser is reached in a single
+        exact Gauss--Newton step and the iterative optimiser is skipped
+        (``optimizer`` is wrapped in
+        :func:`emu_gmm.optimizer.linear_solver` with ``verify=False``). This is
+        the closed-form path for linear-IV / OLS / 2SLS-style moments, and it is
+        the form that also wins under ``vmap`` / ``replicate`` (unlike the
+        certified path, whose ``lax.cond`` degrades to a two-branch ``select``
+        under a batch axis). Default ``False``.
+
+        The step is taken **unchecked** --- ``linear=True`` trusts the caller's
+        affinity assertion, exactly like passing
+        ``optimizer=linear_solver(verify=False)`` by hand (the two detectable
+        ways the assertion can fail are refused loudly, though): it requires
+        **Euclidean** parameters (a manifold leaf raises :class:`TypeError`) and
+        a **:math:`\\theta`-independent weight** --- ``weighting=Fixed(...)``,
+        ``Identity()``, or ``IteratedWeighting()``, **not** the default
+        ``ContinuouslyUpdated`` (which makes even a linear moment a nonlinear
+        program and so raises :class:`ValueError`). Any in-objective ``penalty``
+        must itself be affine in :math:`\\theta` (a quadratic Tikhonov penalty
+        is). If you want the step *verified* --- taken only when a first-order
+        certificate holds, with a fall-back iterative solve otherwise --- pass
+        ``optimizer=linear_solver(verify=True)`` instead of ``linear=True``.
 
     Returns
     -------
@@ -1402,6 +1502,7 @@ def estimate(
         parameters=resolved_theta,
         moment_names=moment_names,
         penalty=penalty,
+        linear=linear,
     )
     return run(resolved_theta, measure)
 

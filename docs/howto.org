@@ -167,6 +167,20 @@ know you need to.
 | =weighting=      | =ContinuouslyUpdated()=  | =Identity()=, =Fixed(V0)=, =IteratedWeighting()=      |
 | =regularization= | =DiagonalTikhonov()=     | (tune =kappa_target=)                                 |
 | =optimizer=      | =optimistix_lm()=        | =scipy_lm()=                                          |
+| =linear=         | =False=                  | =True= (affine moment: skip the optimiser, one step)  |
+
+*Linear-in-parameters moments (OLS / linear IV / 2SLS).* When the moment
+condition is affine in \(\theta\), the least-squares minimiser is one exact
+Gauss--Newton step --- no iterative optimiser needed. Pass =linear=True= to
+=estimate()= to take it (it wraps the optimiser in
+=linear_solver(verify=False)=; the one-step form also wins under =vmap= /
+=replicate=). =linear=True= *asserts* affinity of the /whitened/ residual, so it
+requires a \(\theta\)-independent weight --- =Fixed(V0)= (the 2SLS fixed weight),
+=Identity()=, or =IteratedWeighting()= --- and refuses the default
+=ContinuouslyUpdated= (which makes even a linear moment a nonlinear program) and
+manifold parameters, loudly. If you'd rather the one-step be /verified/ (taken
+only when a first-order certificate holds, with an iterative fall-back), pass
+=optimizer=linear_solver(verify=True)= instead. See =examples/panel_regression.py=.
 
 * Putting it together: the smallest complete program
 

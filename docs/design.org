@@ -73,6 +73,27 @@ This document deliberately interleaves settled architecture, planned design, pro
 
 Each inference helper returns a typed result object exported alongside it (=JTestResult=, =KStatisticResult=, =KConfidenceSet=, =WildBootstrapResult=, =ClusterBootstrapResult=, and =AdaptiveBootstrapResult= with its target functionals =BootstrapMean= / =BootstrapSE= / =BootstrapQuantile= / =BootstrapPValue=). =estimate()= returns an =OptimizationResult= (the optimization surface: =theta_hat=, =objective_value=, =gradient=, =moment_jacobian=, =gn_hessian=, =weighting_matrix=, =moment_covariance=, =n_overid=, =diagnostics=), plus =to_pickle= / =from_pickle=; =EstimationResult= is a deprecated back-compat alias. The statistical surface --- =coef_table=, standard errors, and the gauge-invariant \(\Gamma\)-functional SEs (=eigenvalue_se()= / =gamma_se()= / =functional_se(f)=) --- lives on =result.asymptotic()= (an =AsymptoticLaw=), which assembles the ridge-correct sandwich from the result's ingredients (the estimation/inference split, =docs/optimization-result-law-split.org=). The stacked per-rep MC payload =FitRecord= (exported) is produced by =emu_gmm.studies.fit_record(result)=. The remaining top-level exports are public-named plumbing: the protocols user code can type against (=Measure=, =CovarianceStrategy=, =WeightingStrategy=, =RegularizationStrategy=, =PenaltyStrategy=, =Optimizer=, =StructuralModel=, =ManifoldParam=), the diagnostics builders (=build_diagnostics=, =build_optimizer_health=, =compute_cond_info=; =diagnostics.py=), =LabelContext=, and the typed input-validation error =Emu_GMM_DimensionError=.
 
+/Affine moments --- declare or certify, never detect/: when the moment is linear
+in \(\theta\) the least-squares minimiser is one exact Gauss--Newton step, so no
+iterative optimiser is needed. The predecessor (=ManifoldGMM=) tried to /detect/
+this by sampling: compare the Jacobian at two points and, if equal, declare the
+model affine. That is unsound --- finitely many evaluations cannot certify a
+/globally/ constant Jacobian (=cos(0) == cos(2*pi)= at the sampled points yet the
+function is not affine) --- so =emu-gmm= does not sample-detect. Instead it offers
+the sound pair: (a) =estimate(linear=True)= --- the caller /declares/ affinity
+and the one-step solution is taken unchecked (=linear_solver(verify=False)=), the
+form that also wins under =vmap= / =replicate=; and (b)
+=optimizer=linear_solver(verify=True)= --- the one step is /certified/ by the
+first-order optimality condition at the candidate (exact zero for an affine
+residual, \(O(\lVert g_0\rVert)\) for a nonlinear one) and delegates to an
+iterative fall-back on a failed certificate. =linear=True= guards the two
+detectable ways its assertion cannot hold --- a manifold parameter (the one-step
+=lstsq= is Euclidean-only) and =ContinuouslyUpdated= weighting (which makes even
+a linear moment a nonlinear program, since \(W = V(\theta)^{-1}\) reintroduces
+\(\theta\)) --- and refuses both loudly. Affinity of the /whitened/ residual, not
+just of \(\psi\), is what matters: a \(\theta\)-independent weight (=Fixed=,
+=Identity=, or the fixed inner weight of =IteratedWeighting=) is required.
+
 /Studies caveat/: =emu_gmm.studies= is implemented but deliberately not re-exported at the package top level --- its surface gets a release of real use before being frozen into the namespace (#130; the subpackage docstring carries the decision). Import =monte_carlo_study=, =replicate=, =MCRecords=, =StudyResult=, and the summarizers from =emu_gmm.studies= directly.
 
 Everything in this document that is not in the table is design discussion, and its status lives elsewhere:
