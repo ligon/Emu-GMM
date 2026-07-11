@@ -1,0 +1,90 @@
+#+TITLE: evolve/ -- AlphaEvolve harness for emu-gmm (pattern import from AggLC)
+#+DATE: [2026-07-11]
+#+AUTHOR: EL + Claude (AggLC meta-review session)
+
+* What this is
+
+The evolutionary-optimization harness pattern developed on the AggLC
+project (Computation/evolve_pilot on its =evolve-pilot= branch),
+instantiated for emu-gmm: LLM-evolved candidates propose ESTIMATOR
+CONFIGURATIONS; a truth-anchored evaluator scores them against the
+bundled Euler economy, whose ground truth is exact by construction
+(beta = 0.96, gamma = 2.0; all population moments vanish at the truth,
+plus a closed-form E[psi] oracle).  Nothing here runs evolution yet:
+this directory is the harness, its battery, and a pre-registration
+DRAFT.  Access mechanics (GCP project, engine, client checkout, ADC)
+are shared with the AggLC pilot -- same =alphaevolve-exploration=
+project; create a second Agent Platform engine (e.g. "emu-gmm") rather
+than a second project.
+
+* The pattern (what transferred, what changed)
+
+Imported unchanged from the AggLC pilot:
+- fixture cache with REGISTERED baselines (all-defaults config = score
+  exactly 0);
+- a budgeted probe oracle so candidates can search a little, never
+  brute-force (8 calls, 6 replicates each);
+- seed-scores-zero + determinism + budget + contract battery
+  (test_harness.py G1-G6);
+- HOLD-OUT fixtures at unseen PRNG keys AND unseen sample sizes,
+  never scored during evolution.  The AggLC registered run's winner
+  passed fitness spectacularly and FAILED hold-out transfer at H=4 --
+  the hold-out is not optional;
+- pre-registration with content-hash freeze before any run
+  ([t6:prereg-hash-freeze-lesson] in the AggLC ledger), and amendments
+  appended, never rewritten.
+
+Changed for emu-gmm:
+- Candidates return a WHITELISTED CONFIG DICT (weighting strategy +
+  iteration policy + optimizer tolerances), not arrays and not code:
+  the evaluator maps it to =Identity= / =IteratedWeighting= / CUE and
+  =optimistix_lm= objects.  Strictly narrower attack surface than the
+  AggLC pilot.
+- The gate is GOLDEN-FIXTURE truth recovery (normalized RMSE over CRN
+  replicates via jax.random.fold_in), NOT a soundness certificate.
+  Per the adopted AggLC norm [t6:proc-verify-by-certificate] and its
+  refinement (certificates verify instances; panels verify
+  instruments): this gate verifies instances OF THIS DGP; claims from
+  it cap at golden-fixture strength; instrument-level trust needs the
+  hold-outs plus, for any adoption, a review of the winning config's
+  statistical rationale.
+- Compute honesty is a GATE, not a metric: mean iterations <= 3x
+  baseline, all replicates converged, else score -1.
+
+* Score (frozen at ratification; DRAFT until then)
+
+Per fitness fixture: score = 1 - rmse/baseline_rmse, where rmse =
+sqrt(mean over replicates of ((beta_hat-0.96)/0.96)^2 +
+((gamma_hat-2.0)/2.0)^2), gates as above.  Combined = mean over
+{euler_n800_k0, euler_n200_k1} (24 registered replicates each);
+min_fixture_score reported.  Hold-outs {euler_n3000_k7,
+euler_n100_k11} enter only the post-run battery: transfer bar
+(DRAFT) >= half the fitness improvement on each hold-out, all gates
+passing.
+
+* Runbook
+
+- Battery: =.venv/bin/python evolve/test_harness.py= (repo root; the
+  first run builds and caches the fixture baselines to
+  =$EMU_EVOLVE_CACHE=, default sue-scratch).
+- Candidate evaluation: =.venv/bin/python evolve/evaluator_gmm.py
+  --candidate FILE=.
+- The AlphaEvolve adapter is the AggLC pilot's =run_experiment.py=
+  with an EXPERIMENTS entry pointing at =evaluator_gmm.py= (add a
+  "gmm_config" entry; single-file candidate = initial_config.py); a
+  dedicated engine ("emu-gmm") and its own .env keep experiment
+  lineage separate from aps-lc.  Wire this only AFTER EL ratifies the
+  pre-registration; freeze hashes first.
+
+* Open items for EL (gate before any run)
+
+1. Ratify or amend the score/gates/fixtures above (esp. the 3x
+   iteration budget and the DRAFT transfer bar).
+2. Decide the run size and whether this waits for the AggLC nodes run
+   to finish (shared per-project API quota).
+3. Create the "emu-gmm" engine in =alphaevolve-exploration= (console,
+   ~2 min) and a .env for it.
+4. Whether the whitelist should grow (regularization knobs
+   kappa_target/tau_threshold are the natural next surface; the
+   ladder_mc missingness fixture is the discriminating fitness for
+   them, at higher eval cost).
