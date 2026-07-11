@@ -89,6 +89,59 @@ passing.
    ladder_mc missingness fixture is the discriminating fitness for
    them, at higher eval cost).
 
+* Ratification and freeze (2026-07-11) -- run 1 is REGISTERED
+
+EL ratified the pre-registration in-session on 2026-07-11, as
+drafted: score = 1 - rmse/baseline_rmse per fitness fixture, combined
+= mean over {euler_n800_k0, euler_n200_k1} (24 registered replicates
+each); gates = 100 percent convergence AND mean iterations <= 3x
+baseline; probe oracle 8 calls x 6 replicates; hold-out transfer bar
+= the winner retains >= half its fitness improvement on EACH of
+{euler_n3000_k7, euler_n100_k11}, all gates passing.  The DRAFT
+labels above are hereby resolved; this section amends, the earlier
+text stands as drafted.
+
+Registered run-1 decisions (EL, same session):
+- Run size: 80 generated / 80 evaluated (larger than the AggLC pilot's
+  40/40).  Submission WAITS on the in-flight AggLC run (job 35592435,
+  shared per-project API quota) via =sbatch --dependency=afterany=.
+- Whitelist: unchanged (weighting strategy + iteration policy +
+  optimizer tolerances).  Regularizer knobs (kappa_target /
+  tau_threshold + a missingness fitness fixture) are deferred to a
+  possible run 2, informed by run 1.
+- Engine: dedicated =emu-gmm= Gemini Enterprise engine, created via
+  the Discovery Engine API this session (no console step); model
+  =gemini-3.1-pro-preview=; project-local =evolve/.env= (untracked).
+- OPERATIONAL (non-scoring, tunable without amendment): generation
+  concurrency 16 (AggLC measurement 2026-07-11: the ~2.5/min rate at
+  concurrency 4 was request-level, not project quota; 16 gave ~6-8
+  gen/min and the ceiling may be higher), per-evaluation affinity
+  slots of 2 cores (the CLAUDE.md JIT-mmap hazard), evaluation
+  timeout 900 s, 16-core =co_carleton= / =savio4_htc= /
+  =carleton_htc4_normal= batch job (=evolve/sbatch_evolve.sh=).
+
+Evidence, run 1, pre-submission: battery G1-G6 green on the
+savio4_htc slice (job 35592454) 2026-07-11; adapter dry-run seed
+score exactly 0.0 on both fitness fixtures through the full
+taskset-slot subprocess path.
+
+sha256 freeze (scoring-relevant content, frozen before submission):
+
+#+begin_example
+b0ea932b85ea1eb684409b7b47298ede14399c9cc7ae2a20cb1a6f36fc10524e  evolve/evaluator_gmm.py
+20d1732698fdfa65687f723e1c584c004e2f9bf6d6ab8fe7b249129f55c113ed  evolve/fixture_euler.py
+81f1f95a3276f50a47de7d5ba50b3a9d219eabf7a4eb4f2b744de037407bfe3a  evolve/initial_config.py
+275dd74e984398853ba54a9bc835eeed10e830fd6b832506212475450dc05f18  evolve/test_harness.py
+fdad39b825971c2391751f5cacb08e6e61e47edb44ee535bda797155a34a6ef2  evolve/run_experiment.py
+ed7a64ae5cc9b85f30fb5efc9c9883cd8ce95493ee2296b5382123e86e878e5e  fixtures/euler_n800_k0.json (registered baseline)
+0003d223b5bb01cd05250add34a9316f8074b25756b0ada1c41cfb4436f54fff  fixtures/euler_n200_k1.json (registered baseline)
+#+end_example
+
+The registered-baseline JSONs live in the fixture cache
+(=$EMU_EVOLVE_CACHE=, default sue-scratch =emu_gmm_evolve/fixtures/=);
+the seed-score-zero check in =run_experiment.py= aborts before any
+API spend if they drift.
+
 * Session bootstrap (for a fresh session picking this up)
 
 Work from this clone ($SUE_SCRATCH/emu_gmm_evolve/repo, branch
