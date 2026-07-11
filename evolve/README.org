@@ -88,3 +88,35 @@ passing.
    kappa_target/tau_threshold are the natural next surface; the
    ladder_mc missingness fixture is the discriminating fitness for
    them, at higher eval cost).
+
+* Session bootstrap (for a fresh session picking this up)
+
+Work from this clone ($SUE_SCRATCH/emu_gmm_evolve/repo, branch
+=evolve-harness=; origin = the home mirror) or the mirror itself.
+Operational specifics a fresh session needs:
+
+- Python: the mirror's in-project venv
+  =/global/home/users/ligon/mirrors/Emu-GMM/.venv/bin/python= -- its
+  pip editable install points at a STALE worktree, so always run with
+  the checkout's =src/= first on PYTHONPATH (the evolve/ modules do
+  this themselves).
+- AlphaEvolve access: GCP project =alphaevolve-exploration=; ADC at
+  =~/.config/gcloud/application_default_credentials.json= (quota
+  project baked in); client checkout
+  =/global/scratch/users/ligon/tmp/alphaevolve-on-googlecloud= with its
+  =ae_env= sibling venv at =/global/scratch/users/ligon/tmp/AlphaEvolve=.
+  Create a SEPARATE "emu-gmm" Agent Platform engine (console, ~2 min)
+  and a project-local .env for it -- do not reuse the aps-lc engine's
+  experiment lineage.  Free-use window ends ~2026-08-09.
+- The adapter pattern: copy the AggLC pilot's =run_experiment.py=
+  (AggLC repo, =Computation/evolve_pilot/= on branch =evolve-pilot=)
+  and add an EXPERIMENTS entry for =evaluator_gmm.py=; keep
+  =parallel_evaluation=True= (a sync evaluator otherwise serializes,
+  measured on AggLC run 1) and submit batch jobs only from
+  shared-filesystem checkouts (node-local paths die with the
+  allocation; measured, AggLC job 35591011).
+- House rules that transferred: pre-registration ratified by EL before
+  any API spend, sha256 freeze BEFORE submission, amendments appended
+  never rewritten, hold-outs never scored during evolution, evolved
+  candidates stay proposers (the gate verifies instances; panels/
+  rationale review verify instruments).
