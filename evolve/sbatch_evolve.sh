@@ -22,7 +22,18 @@
 # affinity-slot width are OPERATIONAL knobs.
 set -eu
 
-REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# Under sbatch, $0 is the SPOOLED copy (/var/spool/slurmd/...), so the
+# repo root must come from the submit directory (we document submitting
+# from the run-clone root) -- the $0-relative fallback only serves
+# direct ./evolve/sbatch_evolve.sh invocation.  (Job 35592532 failed on
+# exactly this: dirname $0 resolved to the spool dir.)
+REPO_ROOT=${EVOLVE_REPO_ROOT:-${SLURM_SUBMIT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}}
+if [ ! -f "$REPO_ROOT/evolve/run_experiment.py" ]; then
+    echo "ERROR: $REPO_ROOT does not look like the repo root (no" \
+         "evolve/run_experiment.py); submit from the run-clone root or" \
+         "set EVOLVE_REPO_ROOT" >&2
+    exit 2
+fi
 case "$REPO_ROOT" in
     /local/*|/tmp/*)
         echo "ERROR: repo at $REPO_ROOT is node-local; submit from a" \
