@@ -142,6 +142,83 @@ The registered-baseline JSONs live in the fixture cache
 the seed-score-zero check in =run_experiment.py= aborts before any
 API spend if they drift.
 
+* Run 1 results (2026-07-11) -- transfer FAILED; no adoption
+
+Registered run executed as frozen: Slurm job 35592564 (16 cores,
+co_carleton / savio4_htc), 11m33s wall, engine =emu-gmm=, model
+=gemini-3.1-pro-preview=, concurrency 16.  90 candidates evaluated
+(82 ok, 4 candidate_error, 4 fixture_failure); per-candidate records
+in =$SUE_SCRATCH/emu_gmm_evolve/runs/=.  Seed re-scored exactly 0.0 on
+the compute node before any API spend.
+
+** Fitness landscape: flat within families
+
+The whitelist surface collapsed to a three-point function of the
+weighting FAMILY alone; tolerances, iteration counts, and step limits
+had no effect anywhere within bounds:
+
+- cue (baseline family): 0.0 exactly, every config;
+- identity: +0.004564, every config (n=3);
+- iterated: [+0.004478, +0.004486] across all 77 ok configs.
+
+Winner (identity, rtol=atol=1e-5, max_steps=100): per-fixture
++0.0032 (n800) / +0.0059 (n200); mean LM iterations 12.0-12.25
+vs baseline 18.9/16.8.
+
+** Registered hold-out verdict: FAIL
+
+Transfer bar (ratified): >= half the fitness improvement on EACH
+hold-out.  Winner improvement 0.004564 -> bar 0.002282.
+
+- =euler_n3000_k7=: score *-0.00145* -- identity is WORSE than CUE at
+  n=3000.  FAILS.
+- =euler_n100_k11=: score +0.0058 -- passes.
+
+Exploratory (non-registered) check of the best iterated config
+(improvement 0.004486, bar 0.002243): n3000 score -0.00066 (FAILS),
+n100 +0.0066 (passes).  Same verdict.
+
+*Per the pre-registration, no adoption claim is made.*  The evolved
+winner is a proposer whose proposal did not survive the instrument-
+level check.
+
+** Rationale review (why this is the statistically coherent outcome)
+
+The Euler fixture is overidentified (M=3 assets, K=2 parameters), so
+weighting matters asymptotically and efficient weighting (CUE /
+iterated) must win as n grows -- which is exactly the observed sign
+flip at n=3000.  At n<=800 the fitness fixtures sit in the
+small-sample regime where CUE's sampling noise in V(theta) costs more
+than efficiency buys (the known CUE-erratic-in-small-samples effect;
+the n=100 hold-out shows it strongest).  The improvement the run
+found is therefore a REAL small-sample phenomenon but not a
+transferable config improvement; nothing in this whitelist can pass a
+bar that demands persistence at n=3000.  Defaults (CUE + LM at
+rtol=atol=1e-8) stand.
+
+Byproduct observation (compute, not statistics): identity weighting
+converges in ~12 LM iterations vs ~19 for CUE at equal (100 percent)
+convergence -- consistent with its simpler objective -- and iterated
+at n=3000 needed only ~9.6.  No action; recorded for reference.
+
+** Post-run battery provenance
+
+#+begin_example
+cd5d08c9cda3a8f0cd5cf4c1d39d72f2f1fb1c3b0c29d58c83a0745564756444  evolve/holdout_battery.py
+86cca6270f5746f0d656f5fcacaed8823e9856c1c92acd220982fa58e8a53631  fixtures/euler_n3000_k7.json (hold-out baseline, built post-run)
+713d2e697bd6741ab22039bc8affbee469c93054a087732f2b8b28e432871ded  fixtures/euler_n100_k11.json (hold-out baseline, built post-run)
+#+end_example
+
+** Implications for a possible run 2
+
+The pre-identified next surface (regularizer knobs kappa_target /
+tau_threshold with the ladder_mc missingness fixture as the
+discriminating fitness) is now the interesting one: run 1 established
+that the optimizer/weighting whitelist has no transferable headroom,
+so any remaining headroom lives where finite-sample non-PD repair
+actually binds.  A run 2 would need new fitness fixtures (missingness
+DGP), a fresh pre-registration, and EL ratification.
+
 * Session bootstrap (for a fresh session picking this up)
 
 Work from this clone ($SUE_SCRATCH/emu_gmm_evolve/repo, branch
