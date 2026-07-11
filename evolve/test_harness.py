@@ -23,8 +23,8 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-import evaluator_gmm as ev
-import fixture_euler as fx
+import evaluator_gmm as ev  # noqa: E402
+import fixture_euler as fx  # noqa: E402
 
 
 def test_g1_seed_zero():
@@ -49,7 +49,7 @@ def test_g2_contract():
             ev.validate_config(bad)
         except ev.ContractViolation:
             continue
-        raise AssertionError("accepted bad config {}".format(bad))
+        raise AssertionError(f"accepted bad config {bad}")
     print("G2 ok: contract violations rejected")
 
 

@@ -24,7 +24,6 @@ if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
 import jax  # noqa: E402
-
 from emu_gmm import (  # noqa: E402
     SyntheticCovariance,
     SyntheticMeasure,

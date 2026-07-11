@@ -60,7 +60,7 @@ def validate_config(cfg):
         raise ContractViolation("config must be a dict")
     unknown = set(cfg) - set(_BOUNDS)
     if unknown:
-        raise ContractViolation("unknown keys {}".format(sorted(unknown)))
+        raise ContractViolation(f"unknown keys {sorted(unknown)}")
     w = cfg.get("weighting", "cue")
     if w not in _BOUNDS["weighting"]:
         raise ContractViolation(
@@ -71,13 +71,13 @@ def validate_config(cfg):
             lo, hi = _BOUNDS[k]
             v = cfg[k]
             if not isinstance(v, int) or not lo <= v <= hi:
-                raise ContractViolation("{} must be int in [{}, {}]".format(k, lo, hi))
+                raise ContractViolation(f"{k} must be int in [{lo}, {hi}]")
     for k in ("weighting_tol", "rtol", "atol"):
         if k in cfg:
             lo, hi = _BOUNDS[k]
             v = float(cfg[k])
             if not lo <= v <= hi:
-                raise ContractViolation("{} must be in [{}, {}]".format(k, lo, hi))
+                raise ContractViolation(f"{k} must be in [{lo}, {hi}]")
     return cfg
 
 
@@ -115,9 +115,7 @@ def make_ctx(oracle_budget=8):
 
     def probe(cfg):
         if state["calls"] >= oracle_budget:
-            raise ProbeBudgetExceeded(
-                "probe budget of {} exhausted".format(oracle_budget)
-            )
+            raise ProbeBudgetExceeded(f"probe budget of {oracle_budget} exhausted")
         state["calls"] += 1
         objects = build_objects(validate_config(cfg))
         spec = dict(fx.REGISTRY[PROBE_FIXTURE], n_reps=PROBE_REPS)
