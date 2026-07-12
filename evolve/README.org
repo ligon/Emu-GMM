@@ -1,0 +1,483 @@
+#+TITLE: evolve/ -- AlphaEvolve harness for emu-gmm (pattern import from AggLC)
+#+DATE: [2026-07-11]
+#+AUTHOR: EL + Claude (AggLC meta-review session)
+
+* What this is
+
+The evolutionary-optimization harness pattern developed on the AggLC
+project (Computation/evolve_pilot on its =evolve-pilot= branch),
+instantiated for emu-gmm: LLM-evolved candidates propose ESTIMATOR
+CONFIGURATIONS; a truth-anchored evaluator scores them against the
+bundled Euler economy, whose ground truth is exact by construction
+(beta = 0.96, gamma = 2.0; all population moments vanish at the truth,
+plus a closed-form E[psi] oracle).  Nothing here runs evolution yet:
+this directory is the harness, its battery, and a pre-registration
+DRAFT.  Access mechanics (GCP project, engine, client checkout, ADC)
+are shared with the AggLC pilot -- same =alphaevolve-exploration=
+project; create a second Agent Platform engine (e.g. "emu-gmm") rather
+than a second project.
+
+* The pattern (what transferred, what changed)
+
+Imported unchanged from the AggLC pilot:
+- fixture cache with REGISTERED baselines (all-defaults config = score
+  exactly 0);
+- a budgeted probe oracle so candidates can search a little, never
+  brute-force (8 calls, 6 replicates each);
+- seed-scores-zero + determinism + budget + contract battery
+  (test_harness.py G1-G6);
+- HOLD-OUT fixtures at unseen PRNG keys AND unseen sample sizes,
+  never scored during evolution.  The AggLC registered run's winner
+  passed fitness spectacularly and FAILED hold-out transfer at H=4 --
+  the hold-out is not optional;
+- pre-registration with content-hash freeze before any run
+  ([t6:prereg-hash-freeze-lesson] in the AggLC ledger), and amendments
+  appended, never rewritten.
+
+Changed for emu-gmm:
+- Candidates return a WHITELISTED CONFIG DICT (weighting strategy +
+  iteration policy + optimizer tolerances), not arrays and not code:
+  the evaluator maps it to =Identity= / =IteratedWeighting= / CUE and
+  =optimistix_lm= objects.  Strictly narrower attack surface than the
+  AggLC pilot.
+- The gate is GOLDEN-FIXTURE truth recovery (normalized RMSE over CRN
+  replicates via jax.random.fold_in), NOT a soundness certificate.
+  Per the adopted AggLC norm [t6:proc-verify-by-certificate] and its
+  refinement (certificates verify instances; panels verify
+  instruments): this gate verifies instances OF THIS DGP; claims from
+  it cap at golden-fixture strength; instrument-level trust needs the
+  hold-outs plus, for any adoption, a review of the winning config's
+  statistical rationale.
+- Compute honesty is a GATE, not a metric: mean iterations <= 3x
+  baseline, all replicates converged, else score -1.
+
+* Score (frozen at ratification; DRAFT until then)
+
+Per fitness fixture: score = 1 - rmse/baseline_rmse, where rmse =
+sqrt(mean over replicates of ((beta_hat-0.96)/0.96)^2 +
+((gamma_hat-2.0)/2.0)^2), gates as above.  Combined = mean over
+{euler_n800_k0, euler_n200_k1} (24 registered replicates each);
+min_fixture_score reported.  Hold-outs {euler_n3000_k7,
+euler_n100_k11} enter only the post-run battery: transfer bar
+(DRAFT) >= half the fitness improvement on each hold-out, all gates
+passing.
+
+* Runbook
+
+- Battery: =.venv/bin/python evolve/test_harness.py= (repo root; the
+  first run builds and caches the fixture baselines to
+  =$EMU_EVOLVE_CACHE=, default sue-scratch).
+- Candidate evaluation: =.venv/bin/python evolve/evaluator_gmm.py
+  --candidate FILE=.
+- The AlphaEvolve adapter is the AggLC pilot's =run_experiment.py=
+  with an EXPERIMENTS entry pointing at =evaluator_gmm.py= (add a
+  "gmm_config" entry; single-file candidate = initial_config.py); a
+  dedicated engine ("emu-gmm") and its own .env keep experiment
+  lineage separate from aps-lc.  Wire this only AFTER EL ratifies the
+  pre-registration; freeze hashes first.
+
+* Open items for EL (gate before any run)
+
+1. Ratify or amend the score/gates/fixtures above (esp. the 3x
+   iteration budget and the DRAFT transfer bar).
+2. Decide the run size and whether this waits for the AggLC nodes run
+   to finish (shared per-project API quota).
+3. Create the "emu-gmm" engine in =alphaevolve-exploration= (console,
+   ~2 min) and a .env for it.
+4. Whether the whitelist should grow (regularization knobs
+   kappa_target/tau_threshold are the natural next surface; the
+   ladder_mc missingness fixture is the discriminating fitness for
+   them, at higher eval cost).
+
+* Ratification and freeze (2026-07-11) -- run 1 is REGISTERED
+
+EL ratified the pre-registration in-session on 2026-07-11, as
+drafted: score = 1 - rmse/baseline_rmse per fitness fixture, combined
+= mean over {euler_n800_k0, euler_n200_k1} (24 registered replicates
+each); gates = 100 percent convergence AND mean iterations <= 3x
+baseline; probe oracle 8 calls x 6 replicates; hold-out transfer bar
+= the winner retains >= half its fitness improvement on EACH of
+{euler_n3000_k7, euler_n100_k11}, all gates passing.  The DRAFT
+labels above are hereby resolved; this section amends, the earlier
+text stands as drafted.
+
+Registered run-1 decisions (EL, same session):
+- Run size: 80 generated / 80 evaluated (larger than the AggLC pilot's
+  40/40).  Submission WAITS on the in-flight AggLC run (job 35592435,
+  shared per-project API quota) via =sbatch --dependency=afterany=.
+- Whitelist: unchanged (weighting strategy + iteration policy +
+  optimizer tolerances).  Regularizer knobs (kappa_target /
+  tau_threshold + a missingness fitness fixture) are deferred to a
+  possible run 2, informed by run 1.
+- Engine: dedicated =emu-gmm= Gemini Enterprise engine, created via
+  the Discovery Engine API this session (no console step); model
+  =gemini-3.1-pro-preview=; project-local =evolve/.env= (untracked).
+- OPERATIONAL (non-scoring, tunable without amendment): generation
+  concurrency 16 (AggLC measurement 2026-07-11: the ~2.5/min rate at
+  concurrency 4 was request-level, not project quota; 16 gave ~6-8
+  gen/min and the ceiling may be higher), per-evaluation affinity
+  slots of 2 cores (the CLAUDE.md JIT-mmap hazard), evaluation
+  timeout 900 s, 16-core =co_carleton= / =savio4_htc= /
+  =carleton_htc4_normal= batch job (=evolve/sbatch_evolve.sh=).
+
+Evidence, run 1, pre-submission: battery G1-G6 green on the
+savio4_htc slice (job 35592454) 2026-07-11; adapter dry-run seed
+score exactly 0.0 on both fitness fixtures through the full
+taskset-slot subprocess path.
+
+sha256 freeze (scoring-relevant content, frozen before submission):
+
+#+begin_example
+b0ea932b85ea1eb684409b7b47298ede14399c9cc7ae2a20cb1a6f36fc10524e  evolve/evaluator_gmm.py
+20d1732698fdfa65687f723e1c584c004e2f9bf6d6ab8fe7b249129f55c113ed  evolve/fixture_euler.py
+81f1f95a3276f50a47de7d5ba50b3a9d219eabf7a4eb4f2b744de037407bfe3a  evolve/initial_config.py
+275dd74e984398853ba54a9bc835eeed10e830fd6b832506212475450dc05f18  evolve/test_harness.py
+fdad39b825971c2391751f5cacb08e6e61e47edb44ee535bda797155a34a6ef2  evolve/run_experiment.py
+ed7a64ae5cc9b85f30fb5efc9c9883cd8ce95493ee2296b5382123e86e878e5e  fixtures/euler_n800_k0.json (registered baseline)
+0003d223b5bb01cd05250add34a9316f8074b25756b0ada1c41cfb4436f54fff  fixtures/euler_n200_k1.json (registered baseline)
+#+end_example
+
+The registered-baseline JSONs live in the fixture cache
+(=$EMU_EVOLVE_CACHE=, default sue-scratch =emu_gmm_evolve/fixtures/=);
+the seed-score-zero check in =run_experiment.py= aborts before any
+API spend if they drift.
+
+* Run 1 results (2026-07-11) -- transfer FAILED; no adoption
+
+Registered run executed as frozen: Slurm job 35592564 (16 cores,
+co_carleton / savio4_htc), 11m33s wall, engine =emu-gmm=, model
+=gemini-3.1-pro-preview=, concurrency 16.  90 candidates evaluated
+(82 ok, 4 candidate_error, 4 fixture_failure); per-candidate records
+in =$SUE_SCRATCH/emu_gmm_evolve/runs/=.  Seed re-scored exactly 0.0 on
+the compute node before any API spend.
+
+** Fitness landscape: flat within families
+
+The whitelist surface collapsed to a three-point function of the
+weighting FAMILY alone; tolerances, iteration counts, and step limits
+had no effect anywhere within bounds:
+
+- cue (baseline family): 0.0 exactly, every config;
+- identity: +0.004564, every config (n=3);
+- iterated: [+0.004478, +0.004486] across all 77 ok configs.
+
+Winner (identity, rtol=atol=1e-5, max_steps=100): per-fixture
++0.0032 (n800) / +0.0059 (n200); mean LM iterations 12.0-12.25
+vs baseline 18.9/16.8.
+
+** Registered hold-out verdict: FAIL
+
+Transfer bar (ratified): >= half the fitness improvement on EACH
+hold-out.  Winner improvement 0.004564 -> bar 0.002282.
+
+- =euler_n3000_k7=: score *-0.00145* -- identity is WORSE than CUE at
+  n=3000.  FAILS.
+- =euler_n100_k11=: score +0.0058 -- passes.
+
+Exploratory (non-registered) check of the best iterated config
+(improvement 0.004486, bar 0.002243): n3000 score -0.00066 (FAILS),
+n100 +0.0066 (passes).  Same verdict.
+
+*Per the pre-registration, no adoption claim is made.*  The evolved
+winner is a proposer whose proposal did not survive the instrument-
+level check.
+
+** Rationale review (why this is the statistically coherent outcome)
+
+The Euler fixture is overidentified (M=3 assets, K=2 parameters), so
+weighting matters asymptotically and efficient weighting (CUE /
+iterated) must win as n grows -- which is exactly the observed sign
+flip at n=3000.  At n<=800 the fitness fixtures sit in the
+small-sample regime where CUE's sampling noise in V(theta) costs more
+than efficiency buys (the known CUE-erratic-in-small-samples effect;
+the n=100 hold-out shows it strongest).  The improvement the run
+found is therefore a REAL small-sample phenomenon but not a
+transferable config improvement; nothing in this whitelist can pass a
+bar that demands persistence at n=3000.  Defaults (CUE + LM at
+rtol=atol=1e-8) stand.
+
+Byproduct observation (compute, not statistics): identity weighting
+converges in ~12 LM iterations vs ~19 for CUE at equal (100 percent)
+convergence -- consistent with its simpler objective -- and iterated
+at n=3000 needed only ~9.6.  No action; recorded for reference.
+
+** Post-run battery provenance
+
+#+begin_example
+cd5d08c9cda3a8f0cd5cf4c1d39d72f2f1fb1c3b0c29d58c83a0745564756444  evolve/holdout_battery.py
+86cca6270f5746f0d656f5fcacaed8823e9856c1c92acd220982fa58e8a53631  fixtures/euler_n3000_k7.json (hold-out baseline, built post-run)
+713d2e697bd6741ab22039bc8affbee469c93054a087732f2b8b28e432871ded  fixtures/euler_n100_k11.json (hold-out baseline, built post-run)
+#+end_example
+
+** Implications for a possible run 2
+
+The pre-identified next surface (regularizer knobs kappa_target /
+tau_threshold with the ladder_mc missingness fixture as the
+discriminating fitness) is now the interesting one: run 1 established
+that the optimizer/weighting whitelist has no transferable headroom,
+so any remaining headroom lives where finite-sample non-PD repair
+actually binds.  A run 2 would need new fitness fixtures (missingness
+DGP), a fresh pre-registration, and EL ratification.
+
+* Run 2 pre-registration (ratified 2026-07-11) -- ridge/weighting calibration
+
+Motivated by run 1's negative result (no transferable headroom in the
+optimizer/weighting whitelist on theta-RMSE) and its pre-identified
+follow-on: the regularizer surface, scored on what the regularizer is
+FOR.  EL ratified the design in-session 2026-07-11 (questionnaire):
+calibration-composite score; run-1 whitelist + =kappa_target=
+(=tau_threshold= dropped as inert -- recon finding: it only sets the
+=binding_ridge= diagnostic flag); fitness = 2 binding fixtures at 96
+replicates; run size 80/80.
+
+** Fixtures (=fixture_binding.py= REGISTRY)
+
+The #130 ladder_mc DGP family (stratified PSU-randomized IV, M=5 with
+the near-collinear z5, K=2, genuine PSU-level missingness), estimated
+with =DesignAwareCovariance= -- the regime where the ridge actually
+binds (#130 pilot: eps-collinearity alone leaves V ill-conditioned but
+PD; the design-aware glue binds on ~30-50 percent of few-PSU
+datasets).  PER-REP ridge anchoring (bare =estimate()= per replicate,
+emu-gmm #142): the factory path would freeze replicate 0's tau_anchor
+and make kappa_target meaningless to evaluate.
+
+- Fitness: =fb_few_eps_k31= (n_strata=3, G_c=2, m=50, eps=1e-2, key
+  31) and =fb_strathet_eps_k32= (n_strata=6, G_c=2, m=25, p_x=.7,
+  p_w=.5, sigma_strat=.7, eps=2e-2, key 32); 96 reps each.
+- Hold-outs (never scored during evolution): =fb_mid_eps_k41= (unseen
+  binding spec -- every knob and the key differ) and =fb_benign_k42=
+  (no collinear moment, comfortable PSU counts, binding ~ 0; the
+  do-no-harm arm); 96 reps each.
+
+Registered baselines (96 reps, all-defaults config, measured at
+freeze):
+
+| fixture             | err    | cov_eff (b0, b1) | rej_eff | used  | binding |
+|---------------------+--------+------------------+---------+-------+---------|
+| fb_few_eps_k31      | 0.4312 | 0.625, 0.604     | 0.146   | 82/96 | 0.354   |
+| fb_strathet_eps_k32 | 0.6552 | 0.510, 0.396     | 0.208   | 82/96 | 0.439   |
+| fb_mid_eps_k41      | 0.3115 | 0.740, 0.688     | 0.125   | 85/96 | 0.106   |
+| fb_benign_k42       | 0.1146 | 0.906, 0.865     | 0.000   | 96/96 | 0.010   |
+
+Notes: the hold-out =fb_mid_eps_k41= binds at 10.6 percent -- a
+MILDER regime than the fitness fixtures by design (transfer to
+less-extreme binding is the interesting generalization); the benign
+arm binds on 1 of 96 reps (rare, not impossible -- the battery's G6
+asserts <= 5 percent, amended from the 24-rep pilot's exact 0).
+
+** Score and gates
+
+Per fitness fixture, with ADVERSARIAL accounting (every registered
+replicate in the denominator; breaking hard replicates always hurts):
+
+- cov_eff[k] = #{reps: converged AND finite se_k AND truth_k in the
+  95 percent Wald CI} / n_reps
+- rej_eff = #{reps: not converged OR non-finite J_pvalue OR J_pvalue
+  < 0.05} / n_reps
+- err = mean_k |cov_eff[k] - 0.95| + |rej_eff - 0.05|
+- score = 1 - err/err_baseline; combined = mean over the two fitness
+  fixtures; min_fixture_score reported.
+
+Gates, RELATIVE to the registered baseline (absolute gates are
+unusable in a regime that breaks replicates for everyone): n_used >=
+baseline n_used; mean iterations (over used reps) <= 3x baseline.
+Gate failure or contract violation = -1.  Probe oracle: 6 calls x 12
+replicates of =fb_few_eps_k31=.
+
+** Whitelist
+
+Run-1 knobs (weighting in {cue, identity, iterated};
+weighting_iterations 1..30; weighting_tol 1e-10..1e-2; rtol/atol
+1e-12..1e-4; max_steps 10..400) plus =kappa_target= in [1e2, 1e12]
+(absent = the package default DiagonalTikhonov(), kappa_target 1e6).
+
+** Hold-out bars (post-run battery, =holdout_battery_run2.py=)
+
+- =fb_mid_eps_k41=: transfer bar -- hold-out score >= half the
+  combined fitness improvement, same relative gates.
+- =fb_benign_k42=: do-no-harm bar -- candidate err <= baseline err +
+  0.05 absolute, gates passing (catches indiscriminate over-ridging
+  that "fixes" the binding regime by inflating every CI).
+
+Adoption claims cap at golden-fixture strength; the winner's
+statistical rationale is reviewed before any adoption.
+
+** Operational (non-scoring, tunable without amendment)
+
+Same engine (=emu-gmm=), model =gemini-3.1-pro-preview=, concurrency
+16, 2-core affinity slots; evaluation timeout 2700 s (per-rep
+anchoring makes evaluations ~20-25 min); submit with
+=EVOLVE_EXPERIMENT=ridge_config sbatch --time=08:00:00
+evolve/sbatch_evolve.sh=.  Run-1 scoring files are UNCHANGED (hashes
+re-verified post-lint); =run_experiment.py= gained the ridge_config
+experiment entry and per-experiment defaults, and is re-frozen below.
+
+** sha256 freeze (run 2; battery G1-G6 green 2026-07-11, frozen before submission)
+
+#+begin_example
+14439fe600d9ce449e58fcca5c248ae9e57a51be6b4efd9fcb66c5717a3d9982  evolve/evaluator_ridge.py
+ed68a09dd8e87597b5b29c3bd01f8f60dcbd6e499f2bd7a77126d1bcb4d1faec  evolve/fixture_binding.py
+b0cdf083200dc7f34b7635c2303f5b74f4bfd30afe7d050177f010f73892884d  evolve/initial_config_ridge.py
+ce887636f288354ee7915e7fc915ce94e3a3b852eaa8605a2161bb6e2207615e  evolve/test_harness_run2.py
+f0d65a427db2749d2e83d3f77a58b8198d6f134a067838c47a4591f6de977331  evolve/holdout_battery_run2.py
+d102c4cb24f48f8e4a9bc5dd90dfca6ddfdfe1f18ab4a5ef1b652b39fb64342f  evolve/run_experiment.py (amended for run 2)
+3119d93b4ea0e6c824ad593e183e3b91fa650b3dbaa09998bc4cb097ed4be706  binding/fb_few_eps_k31.json (registered baseline)
+731a13eaf18fead6fb3a880a7d65aec521d17748097162b6fbdbf95981b8b0bf  binding/fb_strathet_eps_k32.json (registered baseline)
+4113c2f4dfbe1bdc652703bb6272431c02d56e18d846362c0104d16f73ac3a77  binding/fb_mid_eps_k41.json (hold-out baseline)
+c7cf6d8c9801c01abe547004516713e7f63921d33349c376dc21d18dcbcb6c44  binding/fb_benign_k42.json (hold-out baseline)
+#+end_example
+
+Battery evidence: G1 seed exact 0.0 on both fitness fixtures at the
+registered 96-rep counts; G3's naive off-default (identity +
+kappa=1e4) validly scored -1.401 -- the landscape has real variation,
+unlike run 1's flat surface; G6 discriminance asserted (fitness
+binding 35/44 percent, benign <= 5 percent).
+
+* Run 2 results (2026-07-11/12) -- evolution negative; direct sweep positive
+
+Registered run executed as frozen: Slurm job 35593802 (16 cores),
+3h08m, 80 candidates evaluated on the =emu-gmm= engine; seed re-scored
+exactly 0.0 on the compute node before API spend.  Per-candidate
+records in =$SUE_SCRATCH/emu_gmm_evolve/runs/= (one record lost to a
+same-millisecond filename collision between evaluator threads --
+scoring unaffected; fix the stamp before run 3).
+
+** Registered outcome: NO evolved candidate beat the baseline
+
+Best evolved score -0.975 (an identity-weighting config; converges
+96/96 but roughly doubles the calibration error); the rest of the
+field gated at -1.  Family breakdown: 64/68 candidates went ITERATED
+weighting -- every one failed the n_used gate (convergence 50-68 of
+96 vs the baseline's 82) -- 2 were exact CUE default clones, 2
+identity.  The GA NEVER varied kappa_target under CUE weighting: the
+run's central hypothesis went untested by evolution.
+
+Two root causes, both process lessons:
+1. The problem text's statistical hint ("iterated GMM is steadier")
+   is WRONG in the binding regime and steered the mutator into a
+   family the convergence gate kills.  The prompt is part of the
+   instrument; a wrong hint contaminates the search.
+2. emu-gmm flags fixed-k / tol-exhausted iterated schedules
+   non-converged (estimator.py:1254) and does not surface
+   =iterated_status= -- filed as emu-gmm #201.  Part of the iterated
+   collapse is definitional, not statistical.
+
+** Reference arms (EXPLORATORY; =reference_arms.py=, both accountings)
+
+err_registered (flag-respecting, the frozen metric) vs
+err_practitioner (flag-blind, as a textbook two-step user -- who has
+no iteration flag -- would score the same fits):
+
+| arm               | F1 reg->prac              | F2 reg->prac              |
+|-------------------+---------------------------+---------------------------|
+| one_step_anchored | 1.90 -> 0.426 (score +0.01) | 1.90 -> 0.697 (-0.06)   |
+| two_step (k=2)    | 1.82 -> 0.494 (-0.15)     | 1.68 -> 0.718 (-0.10)     |
+| identity          | 1.035 -> 1.035 (-1.40)    | 1.020 -> 1.015 (-0.55)    |
+| cue_default       | 0.431 -> 0.302 (+0.30)    | 0.655 -> 0.452 (+0.31)    |
+
+The #201 flag artifact is TOTAL for fixed-k (k=1 flagged on 96/96
+reps by construction); under practitioner accounting the anchored
+one-step matches baseline and two-step trails by ~0.1, while
+identity's failure is real under both.  Caveat: one_step_anchored
+weights by V(theta_init) with theta_init = truth (an oracle weight);
+the fair "standard estimator" row is two_step.
+
+** Direct kappa sweep under CUE (EXPLORATORY; =kappa_sweep.py=, job 35594871)
+
+Registered metric, fixtures, and gates; only kappa_target varied:
+
+| kappa   | F1 score (used/96) | F2 score (used/96) |
+|---------+--------------------+--------------------|
+| 1e2     | +0.302 (91)        | +0.348 (95)        |
+| 1e3     | +0.217 (90)        | +0.310 (89)        |
+| 1e4     | +0.302 (90)        | +0.175 (84)        |
+| 1e5     |  0.000 (84)        | +0.207 (85)        |
+| 1e6 (default baseline) | 0 (82) | 0 (82)          |
+| >=1e7   | gated -1 (76-79)   | gated -1 (76-79)   |
+
+Monotone-ish dose-response: aggressive regularization improves BOTH
+convergence and calibration in the binding regime; the default 1e6
+sits at the cliff edge (>=1e7 regresses convergence below the gate).
+The improvement trend points at the whitelist's LOWER bound (1e2) --
+the in-bounds optimum may sit on the boundary.
+
+** Hold-out verdicts for the sweep's best configs: BOTH PASS
+
+(Exploratory in the prereg sense -- the GA did not propose these
+configs -- but measured with the registered fixtures, metric, gates,
+and bars via =holdout_battery_run2.py=.)
+
+| config    | H1 =fb_mid= score (bar)  | H1 err (base .3115) | H1 used | H2 =fb_benign= (do-no-harm)         |
+|-----------+--------------------------+---------------------+---------+-------------------------------------|
+| kappa=1e2 | *+0.415* (bar .163) PASS | 0.182               | 93/96   | err 0.114583 = baseline, PASS       |
+| kappa=1e3 | *+0.334* (bar .132) PASS | 0.207               | 92/96   | err 0.114583 = baseline, PASS       |
+
+Both show BETTER-than-full retention (H1 transfer exceeds the
+combined fitness improvement -- the opposite of fitness overfitting),
+and on the benign arm both are calibration-IDENTICAL to baseline: the
+adaptive ridge only engages where V needs repair (benign binding
+~1-2 percent), so a tight kappa_target has zero measured cost on
+healthy data.  The over-ridging Goodhart channel the do-no-harm bar
+was designed to catch is empirically absent for in-bounds kappa.
+At kappa=1e2, H1's J-rejection lands at 0.031 (~nominal) and n_used
+rises 85 -> 93; coverage improves (0.74, 0.69) -> (0.83, 0.74) but
+remains below nominal -- an improvement, not a full repair.
+
+** Bottom line and adoption path
+
+1. REGISTERED claim (run 2): the evolution found nothing; defaults
+   beat every evolved candidate.  Negative result stands as
+   registered.
+2. EXPLORATORY-but-registered-metric claim (sweep + hold-outs):
+   =DiagonalTikhonov(kappa_target ~ 1e3)= dominates the 1e6 default
+   in the binding regime -- better convergence, better coverage,
+   near-nominal J size -- transfers to an unseen milder-binding spec
+   above the bar, and is bit-identical to the default on healthy
+   data.  Claims cap at golden-fixture strength on this DGP family;
+   a default change in emu-gmm needs EL's rationale review and its
+   own confirmatory pass (the natural vehicle: an emu-gmm issue with
+   this section attached).
+3. Interface findings for the package: #201 (fixed-k two-step flagged
+   non-converged; iterated_status not surfaced).  The registered
+   metric inherited those semantics -- under flag-blind accounting
+   even the baseline's err drops ~30 percent (see reference arms) --
+   so any run 3 should decide deliberately which accounting it
+   freezes.
+4. Process lessons for future runs: the problem-text hint is part of
+   the instrument (a wrong "iterated is steadier" hint sent 64/68
+   candidates into a gated family); a whitelist boundary the sweep
+   trend points AT (kappa=1e2 here) should trigger a bounds review
+   before the next registration; audit-record filenames must be
+   collision-proof (fixed post-run in =run_experiment.py=).
+
+* Session bootstrap (for a fresh session picking this up)
+
+Work from this clone ($SUE_SCRATCH/emu_gmm_evolve/repo, branch
+=evolve-harness=; origin = the home mirror) or the mirror itself.
+Operational specifics a fresh session needs:
+
+- Python: the mirror's in-project venv
+  =/global/home/users/ligon/mirrors/Emu-GMM/.venv/bin/python= -- its
+  pip editable install points at a STALE worktree, so always run with
+  the checkout's =src/= first on PYTHONPATH (the evolve/ modules do
+  this themselves).
+- AlphaEvolve access: GCP project =alphaevolve-exploration=; ADC at
+  =~/.config/gcloud/application_default_credentials.json= (quota
+  project baked in); client checkout
+  =/global/scratch/users/ligon/tmp/alphaevolve-on-googlecloud= with its
+  =ae_env= sibling venv at =/global/scratch/users/ligon/tmp/AlphaEvolve=.
+  Create a SEPARATE "emu-gmm" Agent Platform engine (console, ~2 min)
+  and a project-local .env for it -- do not reuse the aps-lc engine's
+  experiment lineage.  Free-use window ends ~2026-08-09.
+- The adapter pattern: copy the AggLC pilot's =run_experiment.py=
+  (AggLC repo, =Computation/evolve_pilot/= on branch =evolve-pilot=)
+  and add an EXPERIMENTS entry for =evaluator_gmm.py=; keep
+  =parallel_evaluation=True= (a sync evaluator otherwise serializes,
+  measured on AggLC run 1) and submit batch jobs only from
+  shared-filesystem checkouts (node-local paths die with the
+  allocation; measured, AggLC job 35591011).
+- House rules that transferred: pre-registration ratified by EL before
+  any API spend, sha256 freeze BEFORE submission, amendments appended
+  never rewritten, hold-outs never scored during evolution, evolved
+  candidates stay proposers (the gate verifies instances; panels/
+  rationale review verify instruments).

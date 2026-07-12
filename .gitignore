@@ -12,6 +12,9 @@ dist/
 .venv/
 .env/
 
+# AlphaEvolve project-local env (engine id / model selection; per-clone)
+evolve/.env
+
 # Tool caches
 .mypy_cache/
 .pytest_cache/
