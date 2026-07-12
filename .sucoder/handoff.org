@@ -72,18 +72,32 @@ retention), and is bit-identical to the default on the benign arm
 (fixed-k two-step flagged non-converged; iterated_status not
 surfaced).
 
+* EVERYTHING LANDED (2026-07-12 session close)
+
+- #201 fixed and merged (PR #203): fixed-k two-step schedules +
+  iterated_status on Diagnostics.
+- evolve-harness merged to main (PR #204); black repair of that merge
+  in PR #207 (merged).
+- #202 RESOLVED as "no default change": the confirmatory pass on the
+  independent Euler-mask family FAILED criterion 1 per the
+  pre-declared protocol -- mechanism: the kappa gain is
+  indefiniteness-repair-specific; tight targets SATURATE (tau_max) on
+  PSD-but-ill-conditioned V and mildly hurt.  Full record in #202's
+  comments; per-rep data in sue-scratch =emu_gmm_evolve/
+  kappa_confirm_202/=; measurement script on branch
+  =confirm/202-kappa-euler-mask= (pushed, no PR needed).
+- PR #206 (docs: kappa_target regime guidance, #202 disposition) is
+  OPEN awaiting EL's merge; reviewed and recommended.
+- #205 filed (tau_saturated diagnostic) -- open, unassigned; natural
+  small follow-up.
+
 * Next concrete actions
 
-1. EL rationale review of the kappa finding; if adopted, open an
-   emu-gmm issue proposing the kappa_target default review with the
-   README section attached (claims cap at golden-fixture strength on
-   the ladder_mc DGP family; a confirmatory registered pass is the
-   clean path to a default change).
-2. Possible run 3 (needs fresh prereg): fix #201 first so two-step
-   races fairly; reconsider the kappa lower bound (sweep trend points
-   at 1e2, the boundary); decide flag-respecting vs flag-blind
-   accounting deliberately; correct the problem-text hints.
-3. Consider merging =evolve-harness= to main once EL has read both
-   runs' results (branch is additive).
-4. When truly done with the session, remind EL: =sucoder release= (or
-   scancel 35592454) frees the condo slice.
+1. EL: merge PR #206, then close #202.
+2. Optional: implement #205 (small; the #201-fix pattern applies).
+3. Possible run 3 (needs fresh prereg): two-step now races fairly
+   post-#203; decide flag-respecting vs flag-blind accounting
+   deliberately; correct the problem-text hints; note run-2's kappa
+   lower bound (1e2) was boundary-binding.
+4. When truly done, =sucoder release= (or scancel 35592454) frees the
+   condo slice.
