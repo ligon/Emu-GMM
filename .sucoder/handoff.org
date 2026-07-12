@@ -1,0 +1,76 @@
+#+TITLE: Handoff -- Emu-GMM evolve run 1
+#+DATE: [2026-07-11 Fri]
+
+* Status (written by Sue, Claude Fable 5 session, 2026-07-11)
+
+AlphaEvolve run 1 for the estimator-config experiment is SUBMITTED and
+QUEUED; everything before submission is done and frozen.
+
+- Branch: =evolve-harness= at =5760230= (pushed to GitHub origin).
+  Local main fast-forwarded to =3ccd782= earlier in the session.
+- Pre-registration: RATIFIED by EL 2026-07-11, as drafted, plus run-1
+  decisions (80/80, narrow whitelist, emu-gmm engine, operational
+  concurrency 16).  sha256 freeze recorded in =evolve/README.org=
+  "Ratification and freeze" section; hashes verified in the run clone.
+- Battery: G1-G6 green on this slice (2026-07-11).  Adapter dry-run:
+  seed scored exactly 0.0 on both fitness fixtures.
+- Engine: =emu-gmm= Gemini Enterprise engine CREATED via Discovery
+  Engine API in =alphaevolve-exploration= (no console step needed).
+  Project-local env: =evolve/.env= (untracked; also copied to the run
+  clone).  Model =gemini-3.1-pro-preview=.
+- Slurm: job *35592564* (=evolve_gmm_config=, 16 cores, co_carleton /
+  savio4_htc / carleton_htc4_normal, 2 h), submitted from the run
+  clone =$SUE_SCRATCH/emu_gmm_evolve/repo= at =14150a0=.  No
+  dependency: the AggLC =evolve_shifts_run= (35592435) COMPLETED
+  2026-07-11T14:22, freeing the shared API quota.  Log:
+  =$SUE_SCRATCH/emu_gmm_evolve/evolve_gmm_35592564.log=; per-candidate
+  records in =$SUE_SCRATCH/emu_gmm_evolve/runs/=.
+- History: first submission (35592532, afterany:35592435) failed at
+  startup with exit 2 and ZERO API spend -- under sbatch $0 is the
+  spooled script copy, so REPO_ROOT resolved to /var/spool/slurmd and
+  the .env guard aborted.  Fixed in =14150a0= (SLURM_SUBMIT_DIR;
+  operational file, outside the sha256 freeze -- scoring-relevant
+  hashes unchanged).
+
+* RUN 1 COMPLETE (2026-07-11): transfer FAILED, no adoption
+
+Everything above executed.  Run job 35592564 COMPLETED (11m33s, 90
+candidates).  Registered hold-out battery: the winner (identity
+weighting) FAILED transfer at n=3000 (-0.00145 vs bar +0.00228; the
+overidentified efficiency sign-flip); best iterated config fails the
+same way.  Full results, rationale, and provenance hashes appended to
+=evolve/README.org= ("Run 1 results"); branch at =c39d183=, pushed to
+GitHub origin; run clone synced.  Defaults (CUE + LM) stand.
+
+* RUN 2 IN FLIGHT (2026-07-11, same session)
+
+EL ratified run 2 via in-session questionnaire: calibration-composite
+score, whitelist = run-1 knobs + kappa_target [1e2,1e12]
+(tau_threshold dropped as inert), fitness = 2 binding fixtures x 96
+reps (per-rep anchoring, #142), run size 80/80.  Prereg appended to
+=evolve/README.org= ("Run 2 pre-registration"); registered baselines
+built and recorded (F1 err .431 binding 35%; F2 err .655 binding 44%;
+H1 err .312 binding 11%; H2-benign err .115 binding 1%).
+
+New files: =fixture_binding.py=, =evaluator_ridge.py=,
+=initial_config_ridge.py=, =test_harness_run2.py=,
+=holdout_battery_run2.py=; =run_experiment.py= gained the
+ridge_config entry (run-1 scoring hashes re-verified intact).
+
+* Next concrete actions
+
+1. Battery =test_harness_run2.py= was RUNNING in background at
+   handoff-write time (~40 min).  If green: sha256 freeze (append to
+   README run-2 section), commit+push evolve-harness, ff the run
+   clone, then submit:
+     cd $SUE_SCRATCH/emu_gmm_evolve/repo
+     EVOLVE_EXPERIMENT=ridge_config sbatch --time=08:00:00 \
+         evolve/sbatch_evolve.sh
+   Monitor the log (evolve_gmm_<jobid>.log); in-job seed gate aborts
+   before API spend if baselines drift.
+2. Post-run: =holdout_battery_run2.py --config <winner> \
+   --fitness-improvement <combined score>=; transfer bar >= half on
+   fb_mid_eps_k41 AND do-no-harm (err <= base+0.05) on fb_benign_k42;
+   rationale review before any adoption claim.
+3. Consider merging =evolve-harness= to main once EL has read both
+   runs' results.

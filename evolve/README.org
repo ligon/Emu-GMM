@@ -219,6 +219,120 @@ so any remaining headroom lives where finite-sample non-PD repair
 actually binds.  A run 2 would need new fitness fixtures (missingness
 DGP), a fresh pre-registration, and EL ratification.
 
+* Run 2 pre-registration (ratified 2026-07-11) -- ridge/weighting calibration
+
+Motivated by run 1's negative result (no transferable headroom in the
+optimizer/weighting whitelist on theta-RMSE) and its pre-identified
+follow-on: the regularizer surface, scored on what the regularizer is
+FOR.  EL ratified the design in-session 2026-07-11 (questionnaire):
+calibration-composite score; run-1 whitelist + =kappa_target=
+(=tau_threshold= dropped as inert -- recon finding: it only sets the
+=binding_ridge= diagnostic flag); fitness = 2 binding fixtures at 96
+replicates; run size 80/80.
+
+** Fixtures (=fixture_binding.py= REGISTRY)
+
+The #130 ladder_mc DGP family (stratified PSU-randomized IV, M=5 with
+the near-collinear z5, K=2, genuine PSU-level missingness), estimated
+with =DesignAwareCovariance= -- the regime where the ridge actually
+binds (#130 pilot: eps-collinearity alone leaves V ill-conditioned but
+PD; the design-aware glue binds on ~30-50 percent of few-PSU
+datasets).  PER-REP ridge anchoring (bare =estimate()= per replicate,
+emu-gmm #142): the factory path would freeze replicate 0's tau_anchor
+and make kappa_target meaningless to evaluate.
+
+- Fitness: =fb_few_eps_k31= (n_strata=3, G_c=2, m=50, eps=1e-2, key
+  31) and =fb_strathet_eps_k32= (n_strata=6, G_c=2, m=25, p_x=.7,
+  p_w=.5, sigma_strat=.7, eps=2e-2, key 32); 96 reps each.
+- Hold-outs (never scored during evolution): =fb_mid_eps_k41= (unseen
+  binding spec -- every knob and the key differ) and =fb_benign_k42=
+  (no collinear moment, comfortable PSU counts, binding ~ 0; the
+  do-no-harm arm); 96 reps each.
+
+Registered baselines (96 reps, all-defaults config, measured at
+freeze):
+
+| fixture             | err    | cov_eff (b0, b1) | rej_eff | used  | binding |
+|---------------------+--------+------------------+---------+-------+---------|
+| fb_few_eps_k31      | 0.4312 | 0.625, 0.604     | 0.146   | 82/96 | 0.354   |
+| fb_strathet_eps_k32 | 0.6552 | 0.510, 0.396     | 0.208   | 82/96 | 0.439   |
+| fb_mid_eps_k41      | 0.3115 | 0.740, 0.688     | 0.125   | 85/96 | 0.106   |
+| fb_benign_k42       | 0.1146 | 0.906, 0.865     | 0.000   | 96/96 | 0.010   |
+
+Notes: the hold-out =fb_mid_eps_k41= binds at 10.6 percent -- a
+MILDER regime than the fitness fixtures by design (transfer to
+less-extreme binding is the interesting generalization); the benign
+arm binds on 1 of 96 reps (rare, not impossible -- the battery's G6
+asserts <= 5 percent, amended from the 24-rep pilot's exact 0).
+
+** Score and gates
+
+Per fitness fixture, with ADVERSARIAL accounting (every registered
+replicate in the denominator; breaking hard replicates always hurts):
+
+- cov_eff[k] = #{reps: converged AND finite se_k AND truth_k in the
+  95 percent Wald CI} / n_reps
+- rej_eff = #{reps: not converged OR non-finite J_pvalue OR J_pvalue
+  < 0.05} / n_reps
+- err = mean_k |cov_eff[k] - 0.95| + |rej_eff - 0.05|
+- score = 1 - err/err_baseline; combined = mean over the two fitness
+  fixtures; min_fixture_score reported.
+
+Gates, RELATIVE to the registered baseline (absolute gates are
+unusable in a regime that breaks replicates for everyone): n_used >=
+baseline n_used; mean iterations (over used reps) <= 3x baseline.
+Gate failure or contract violation = -1.  Probe oracle: 6 calls x 12
+replicates of =fb_few_eps_k31=.
+
+** Whitelist
+
+Run-1 knobs (weighting in {cue, identity, iterated};
+weighting_iterations 1..30; weighting_tol 1e-10..1e-2; rtol/atol
+1e-12..1e-4; max_steps 10..400) plus =kappa_target= in [1e2, 1e12]
+(absent = the package default DiagonalTikhonov(), kappa_target 1e6).
+
+** Hold-out bars (post-run battery, =holdout_battery_run2.py=)
+
+- =fb_mid_eps_k41=: transfer bar -- hold-out score >= half the
+  combined fitness improvement, same relative gates.
+- =fb_benign_k42=: do-no-harm bar -- candidate err <= baseline err +
+  0.05 absolute, gates passing (catches indiscriminate over-ridging
+  that "fixes" the binding regime by inflating every CI).
+
+Adoption claims cap at golden-fixture strength; the winner's
+statistical rationale is reviewed before any adoption.
+
+** Operational (non-scoring, tunable without amendment)
+
+Same engine (=emu-gmm=), model =gemini-3.1-pro-preview=, concurrency
+16, 2-core affinity slots; evaluation timeout 2700 s (per-rep
+anchoring makes evaluations ~20-25 min); submit with
+=EVOLVE_EXPERIMENT=ridge_config sbatch --time=08:00:00
+evolve/sbatch_evolve.sh=.  Run-1 scoring files are UNCHANGED (hashes
+re-verified post-lint); =run_experiment.py= gained the ridge_config
+experiment entry and per-experiment defaults, and is re-frozen below.
+
+** sha256 freeze (run 2; battery G1-G6 green 2026-07-11, frozen before submission)
+
+#+begin_example
+14439fe600d9ce449e58fcca5c248ae9e57a51be6b4efd9fcb66c5717a3d9982  evolve/evaluator_ridge.py
+ed68a09dd8e87597b5b29c3bd01f8f60dcbd6e499f2bd7a77126d1bcb4d1faec  evolve/fixture_binding.py
+b0cdf083200dc7f34b7635c2303f5b74f4bfd30afe7d050177f010f73892884d  evolve/initial_config_ridge.py
+ce887636f288354ee7915e7fc915ce94e3a3b852eaa8605a2161bb6e2207615e  evolve/test_harness_run2.py
+f0d65a427db2749d2e83d3f77a58b8198d6f134a067838c47a4591f6de977331  evolve/holdout_battery_run2.py
+d102c4cb24f48f8e4a9bc5dd90dfca6ddfdfe1f18ab4a5ef1b652b39fb64342f  evolve/run_experiment.py (amended for run 2)
+3119d93b4ea0e6c824ad593e183e3b91fa650b3dbaa09998bc4cb097ed4be706  binding/fb_few_eps_k31.json (registered baseline)
+731a13eaf18fead6fb3a880a7d65aec521d17748097162b6fbdbf95981b8b0bf  binding/fb_strathet_eps_k32.json (registered baseline)
+4113c2f4dfbe1bdc652703bb6272431c02d56e18d846362c0104d16f73ac3a77  binding/fb_mid_eps_k41.json (hold-out baseline)
+c7cf6d8c9801c01abe547004516713e7f63921d33349c376dc21d18dcbcb6c44  binding/fb_benign_k42.json (hold-out baseline)
+#+end_example
+
+Battery evidence: G1 seed exact 0.0 on both fitness fixtures at the
+registered 96-rep counts; G3's naive off-default (identity +
+kappa=1e4) validly scored -1.401 -- the landscape has real variation,
+unlike run 1's flat surface; G6 discriminance asserted (fitness
+binding 35/44 percent, benign <= 5 percent).
+
 * Session bootstrap (for a fresh session picking this up)
 
 Work from this clone ($SUE_SCRATCH/emu_gmm_evolve/repo, branch

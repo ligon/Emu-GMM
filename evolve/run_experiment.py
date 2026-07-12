@@ -51,8 +51,13 @@ THIS_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
 _DEFAULT_EMU_PY = ("/global/scratch/fsa/fc_jevons/ligon/mirrors/"
                    "Emu-GMM/.venv/bin/python")
 EMU_PY = os.getenv("EVOLVE_EMU_PY", _DEFAULT_EMU_PY)
-ORACLE_BUDGET = int(os.getenv("EVOLVE_ORACLE_BUDGET", "8"))
-EVAL_TIMEOUT = int(os.getenv("EVOLVE_EVAL_TIMEOUT", "900"))
+EXPERIMENT_NAME = os.getenv("EVOLVE_EXPERIMENT", "gmm_config")
+# Registered per-experiment defaults (pre-registration): run 1 probes
+# 8 x 6 reps and evaluates in ~2 min; run 2 probes 6 x 12 reps with
+# per-rep anchoring and evaluates in ~20-25 min.
+_IS_RIDGE = EXPERIMENT_NAME == "ridge_config"
+ORACLE_BUDGET = int(os.getenv("EVOLVE_ORACLE_BUDGET", "6" if _IS_RIDGE else "8"))
+EVAL_TIMEOUT = int(os.getenv("EVOLVE_EVAL_TIMEOUT", "2700" if _IS_RIDGE else "900"))
 MAX_GENERATED = int(os.getenv("EVOLVE_MAX_GENERATED", "80"))
 MAX_EVALUATED = int(os.getenv("EVOLVE_MAX_EVALUATED", "80"))
 EVAL_THREADS = int(os.getenv("EVOLVE_EVAL_THREADS", "2"))
@@ -66,7 +71,7 @@ RESULTS_DIR = Path(os.getenv(
 EVALUATION_METRIC = "score"
 FAIL_SCORE = -1.0
 
-PROBLEM_GMM_CONFIG = """\
+PROBLEM_GMM_CONFIG = f"""\
 Evolve propose_config(ctx) in the given Python file.  Context: a GMM
 estimator for a multi-asset consumption Euler economy with EXACT known
 truth (beta = 0.96, gamma = 2.0) is configured by a whitelisted dict:
@@ -80,7 +85,7 @@ and n=200 observations; 24 replicates each).  Score = 1 -
 rmse/baseline_rmse averaged over the fixtures (0 = baseline, higher is
 better, -1 = failure), GATED on 100 percent convergence and mean
 optimizer iterations <= 3x baseline -- accuracy may not be bought with
-unbounded compute.  A budgeted probe oracle ({budget} calls, 6
+unbounded compute.  A budgeted probe oracle ({ORACLE_BUDGET} calls, 6
 replicates each on the n=800 fixture) lets you measure a candidate
 config before committing; respect it via
 ctx['probe_calls_remaining']().  Statistical hints: CUE (continuously
@@ -92,7 +97,47 @@ tighter ones waste iterations against the compute gate.  Return DATA
 (the config dict), never code; unknown keys or out-of-bounds values
 score -1.  Use no randomness.  Docstrings in the file state the full
 contract.
-""".format(budget=ORACLE_BUDGET)
+"""
+
+PROBLEM_RIDGE_CONFIG = f"""\
+Evolve propose_config(ctx) in the given Python file.  Context: a GMM
+estimator for a stratified PSU-randomized IV model with EXACT known
+truth, genuine cluster-level missingness, and a near-collinear
+instrument (M=5 moments, K=2 parameters), estimated with a
+design-aware covariance whose assembled V is NOT PSD-by-construction:
+on a third to half of replicates an adaptive Tikhonov ridge must
+repair an indefinite or ill-conditioned V.  The config dict is
+whitelisted: weighting in {{"cue", "identity", "iterated"}};
+weighting_iterations (int, 1..30) and weighting_tol (1e-10..1e-2);
+optimizer knobs rtol, atol (1e-12..1e-4) and max_steps (int, 10..400);
+and kappa_target (1e2..1e12), the ridge repair's condition-number
+target (default 1e6).  The all-defaults baseline is measurably
+MIS-CALIBRATED here: ~25-30 percent of replicates fail to converge,
+more have NaN analytic SEs (indefinite sandwich meat), and effective
+CI coverage sits far below the nominal 95 percent.  GOAL: minimize
+the calibration error err = mean_k |cov_eff_k - 0.95| + |rej_eff -
+0.05| over CRN replicates on two fitness fixtures, where EVERY
+registered replicate is in the denominator -- a replicate that fails
+to converge or has NaN SEs counts as NOT covered, and one that fails
+or has a NaN J p-value counts as a REJECTION, so breaking hard
+replicates always hurts.  Score = 1 - err/err_baseline averaged over
+the fixtures (0 = baseline, higher is better, -1 = failure), GATED on
+n_used >= baseline n_used and mean optimizer iterations <= 3x
+baseline.  A budgeted probe oracle ({ORACLE_BUDGET} calls, 12 replicates
+each on the first fitness fixture) lets you measure a candidate
+before committing; respect it via ctx['probe_calls_remaining']().
+Statistical hints: kappa_target trades repair against distortion (too
+high leaves V near-singular and kills convergence; too low distorts
+the criterion and the J distribution); the ridge anchors per
+replicate at theta_init then freezes; CUE re-evaluates the
+regularised V along the path and can be erratic when V is barely
+repaired, iterated GMM is steadier, identity ignores V for point
+estimation (maximal convergence robustness) but its SEs still
+sandwich the raw meat so coverage is not automatically better.
+Return DATA (the config dict), never code; unknown keys or
+out-of-bounds values score -1.  Use no randomness.  Docstrings in the
+file state the full contract.
+"""
 
 EXPERIMENTS = {
     "gmm_config": dict(
@@ -100,8 +145,13 @@ EXPERIMENTS = {
         title="emu-gmm estimator configuration (run 1)",
         problem=PROBLEM_GMM_CONFIG,
         extra_args=["--oracle-budget", str(ORACLE_BUDGET)]),
+    "ridge_config": dict(
+        evaluator="evaluator_ridge.py", initial="initial_config_ridge.py",
+        title="emu-gmm ridge/weighting calibration, binding regime (run 2)",
+        problem=PROBLEM_RIDGE_CONFIG,
+        extra_args=["--oracle-budget", str(ORACLE_BUDGET)]),
 }
-EXPERIMENT = EXPERIMENTS[os.getenv("EVOLVE_EXPERIMENT", "gmm_config")]
+EXPERIMENT = EXPERIMENTS[EXPERIMENT_NAME]
 
 # ---------------------------------------------------------------------------
 # CPU-affinity slots: pin each concurrent evaluation to a disjoint core
@@ -148,14 +198,13 @@ def evaluate_program(program_candidate) -> dict:
                 return {"scores": {"scores": [
                     {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
                     "artifacts": {"error": "evaluation timed out after "
-                                           "{}s".format(EVAL_TIMEOUT)}}
+                                           f"{EVAL_TIMEOUT}s"}}
     finally:
         _SLOTS.put(slot)
     if proc.returncode != 0:
         return {"scores": {"scores": [
             {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
-            "artifacts": {"error": "evaluator exit {}".format(
-                proc.returncode),
+            "artifacts": {"error": f"evaluator exit {proc.returncode}",
                 "stderr": proc.stderr[-2000:]}}
     try:
         result = json.loads(proc.stdout)
@@ -165,8 +214,8 @@ def evaluate_program(program_candidate) -> dict:
             "artifacts": {"error": "unparseable evaluator output",
                           "stdout": proc.stdout[-2000:]}}
     # Persist the full record next to the run (audit trail).
-    stamp = "{}-{}".format(int(time.time() * 1000), os.getpid())
-    (RESULTS_DIR / "cand-{}.json".format(stamp)).write_text(
+    stamp = f"{int(time.time() * 1000)}-{os.getpid()}"
+    (RESULTS_DIR / f"cand-{stamp}.json").write_text(
         json.dumps({"result": result,
                     "candidate": files[0].get("content", "")}, indent=2))
     artifacts = {"fixtures": json.dumps(result.get("fixtures", []))[:5000]}
@@ -186,8 +235,7 @@ def evaluate_program(program_candidate) -> dict:
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    logger.info("experiment: %s (%s)",
-                os.getenv("EVOLVE_EXPERIMENT", "gmm_config"),
+    logger.info("experiment: %s (%s)", EXPERIMENT_NAME,
                 EXPERIMENT["evaluator"])
     n_slots = _init_slots()
     initial_name = os.getenv("EVOLVE_INITIAL", EXPERIMENT["initial"])
@@ -208,16 +256,17 @@ def main():
     seed_expect = float(os.getenv("EVOLVE_SEED_EXPECT", "0.0"))
     if abs(seed_score - seed_expect) > 0.05:
         raise SystemExit(
-            "seed score {} differs from its registered value {} by > 0.05 "
+            f"seed score {seed_score} differs from its registered value {seed_expect} by > 0.05 "
             "-- fixtures/baseline out of sync (or EVOLVE_SEED_EXPECT not "
             "set for a non-baseline seed); rebuild/re-register before "
-            "spending API budget".format(seed_score, seed_expect))
+            "spending API budget")
 
     from dotenv import load_dotenv
     # Explicit path: the default find_dotenv would search upward from THIS
     # directory and never see a project-local .env.
     load_dotenv(os.getenv("AE_ENV_FILE", str(THIS_DIR / ".env")))
     import asyncio
+
     import nest_asyncio
     from alpha_evolve.client import AlphaEvolveClient
     from alpha_evolve.controller import run_controller_loop

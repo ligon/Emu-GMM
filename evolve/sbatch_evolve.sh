@@ -52,19 +52,25 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 # Registered run size (pre-registration, ratified 2026-07-11); override
-# via environment only for non-registered shakedowns.
+# via environment only for non-registered shakedowns.  Experiment
+# selector: gmm_config (run 1) | ridge_config (run 2).  Run 2's
+# per-rep-anchored evaluations take ~20-25 min each -- submit it with
+# a longer wall clock, e.g.:
+#   EVOLVE_EXPERIMENT=ridge_config sbatch --time=08:00:00 \
+#       evolve/sbatch_evolve.sh
+: "${EVOLVE_EXPERIMENT:=gmm_config}"
 : "${EVOLVE_MAX_GENERATED:=80}"
 : "${EVOLVE_MAX_EVALUATED:=80}"
 : "${EVOLVE_CONCURRENCY:=16}"
 : "${EVOLVE_EVAL_THREADS:=2}"
-: "${EVOLVE_EVAL_TIMEOUT:=900}"
 
 exec env PYTHONPATH="$AE_REPO/src" AE_ENV_FILE="$ENV_FILE" \
+    EVOLVE_EXPERIMENT="$EVOLVE_EXPERIMENT" \
     EVOLVE_MAX_GENERATED="$EVOLVE_MAX_GENERATED" \
     EVOLVE_MAX_EVALUATED="$EVOLVE_MAX_EVALUATED" \
     EVOLVE_CONCURRENCY="$EVOLVE_CONCURRENCY" \
     EVOLVE_EVAL_THREADS="$EVOLVE_EVAL_THREADS" \
-    EVOLVE_EVAL_TIMEOUT="$EVOLVE_EVAL_TIMEOUT" \
+    ${EVOLVE_EVAL_TIMEOUT:+EVOLVE_EVAL_TIMEOUT="$EVOLVE_EVAL_TIMEOUT"} \
     ${EVOLVE_INITIAL:+EVOLVE_INITIAL="$EVOLVE_INITIAL"} \
     ${EVOLVE_SEED_EXPECT:+EVOLVE_SEED_EXPECT="$EVOLVE_SEED_EXPECT"} \
     ${EVOLVE_NUM_SAMPLERS:+EVOLVE_NUM_SAMPLERS="$EVOLVE_NUM_SAMPLERS"} \
