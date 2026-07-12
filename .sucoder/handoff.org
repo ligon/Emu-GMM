@@ -91,10 +91,33 @@ surfaced).
 - #205 filed (tau_saturated diagnostic) -- open, unassigned; natural
   small follow-up.
 
+* LATER SAME SESSION (2026-07-12 afternoon)
+
+- #205 implemented: PR #208 (tau_saturated on Diagnostics + FitRecord;
+  reviewed, gate 1476 green) -- OPEN awaiting EL merge.
+- Site-saturation measurement (branch =measure/205-site-saturation=,
+  commit 0da5e1c; artifacts sue-scratch
+  =emu_gmm_evolve/site_saturation_205/=): analytic inference sites
+  (j_test / k_statistic / confidence-set grid / wild single-repair)
+  need NO plumbing -- saturation given anchor-clean-and-converged is
+  0 everywhere, both regimes.  cluster_bootstrap per-draw refits DO
+  have a channel (8.6 percent of draws given clean parents in the
+  rare-moment regime), invisible on the result object; verdict +
+  proposal posted on #205.
+- #209 filed (the bigger find): non-converged zero-support bootstrap
+  draws store FINITE theta_init rows in theta_boot; adaptive.py's
+  NaN-based validity accounting cannot see them -> degenerate atom at
+  theta_init (12 percent of draws in the measured regime), biasing
+  bootstrap SEs/CIs toward the initialization.  Pre-existing bug,
+  needs a maintainer design decision (poison vs exclude-and-count).
+
 * Next concrete actions
 
-1. EL: merge PR #206, then close #202.
-2. Optional: implement #205 (small; the #201-fix pattern applies).
+1. EL: merge PR #206 (docs note) and PR #208 (tau_saturated); close
+   #202.
+2. EL decision on #209 (semantics choice), then a small PR: per-draw
+   tau_saturated + exclude-and-count fields on ClusterBootstrapResult
+   (composes with whichever #209 option is chosen).
 3. Possible run 3 (needs fresh prereg): two-step now races fairly
    post-#203; decide flag-respecting vs flag-blind accounting
    deliberately; correct the problem-text hints; note run-2's kappa
