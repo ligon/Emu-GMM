@@ -249,8 +249,13 @@ stage2 = estimate(model=psi, measure=measure, covariance=cov,
                   weighting=Fixed(V0=V1), theta_init=stage1.theta_hat)
 #+END_SRC
 
-=IteratedWeighting(weighting_iterations=2)= is the supported one-call
-alternative, but it is /not/ bitwise the same idiom: its first inner
+=IteratedWeighting(weighting_iterations=2, weighting_tol=None)= is the
+supported one-call alternative --- =weighting_tol=None= selects the
+fixed-k schedule (issue #201): run exactly the requested V-refreshes
+and report =iterated_status='fixed_schedule_complete'= rather than
+flagging schedule exhaustion as non-convergence (a fixed-k scheme
+never promises the theta-drift tolerance a float =weighting_tol=
+tests). It is still /not/ bitwise the same idiom: its first inner
 stage weights by \(V(\theta_{init})\) rather than by the identity. The
 two converge to the same place when \(V(\theta_{init})\) is a sensible
 anchor; for pinning legacy ManifoldGMM numbers, use the two-call form.

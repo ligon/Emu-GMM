@@ -360,6 +360,25 @@ class IteratedWeighting:
     in pure Python in :func:`emu_gmm.estimate`; each inner Fixed-weight
     solve is JIT-compiled by the underlying optimiser.
 
+    Fixed-k schedules (textbook two-step GMM)
+    -----------------------------------------
+    ``weighting_tol=None`` selects a **fixed-k schedule** (#201): run
+    *exactly* ``weighting_iterations`` V-refreshes with no theta-drift
+    test, and report outer status ``"fixed_schedule_complete"``. This is
+    the textbook two-step estimator (``weighting_iterations=1``: a
+    single Fixed-weight solve at :math:`V(\\theta_{init})` --- the second
+    stage of a two-step whose first stage produced ``theta_init``;
+    ``weighting_iterations=2``: re-solve once more at the refreshed
+    :math:`V(\\theta_1)`). A fixed-k scheme never promises
+    :math:`\\| \\theta_{k+1} - \\theta_k \\|_2 < \\texttt{weighting_tol}`,
+    so exhausting the schedule is *completion, not failure*:
+    ``result.converged`` then reflects only whether every inner
+    Fixed-weight solve certified convergence, and no iteration-cap
+    warning is emitted. With a float ``weighting_tol`` (the default) the
+    original semantics are unchanged --- hitting ``weighting_iterations``
+    without meeting the tolerance reports ``"max_iterations"`` and flips
+    ``converged`` to ``False``.
+
     Iterated weighting and :class:`ContinuouslyUpdated` (CU) are
     asymptotically equivalent (Hansen-Heaton-Yaron 1996) but differ in
     finite samples. CU is the v1 default; ``IteratedWeighting`` exists
@@ -373,21 +392,29 @@ class IteratedWeighting:
     Iterated GMM is **not** guaranteed to be a contraction on
     misspecified models; K-Aggregators' ``V2_PORT.org`` documents an
     explicit divergence case. When ``weighting_iterations`` is exhausted
-    without reaching ``weighting_tol``, :func:`emu_gmm.estimate`
+    without reaching a float ``weighting_tol``, :func:`emu_gmm.estimate`
     surfaces a non-convergence flag through
-    :class:`~emu_gmm.types.Diagnostics` and the result's ``converged``
+    :class:`~emu_gmm.types.Diagnostics` (``iterated_status``, and the
+    outer ``optimizer_info.status``) and the result's ``converged``
     field rather than raising; the partially-converged
     :math:`\\theta_k` is returned. Users debugging non-convergence
-    should compare to a CU run on the same problem.
+    should compare to a CU run on the same problem. (Under a fixed-k
+    schedule --- ``weighting_tol=None`` --- there is no tolerance to
+    miss, so this flag never fires by construction; only genuine inner
+    non-convergence is reported.)
 
     Parameters
     ----------
     weighting_iterations : int
         Maximum number of outer (V-refresh) iterations. Must be at
-        least 1.
-    weighting_tol : float
+        least 1. Under a fixed-k schedule (``weighting_tol=None``) this
+        is the *exact* number of outer steps run.
+    weighting_tol : float or None
         Stop when :math:`\\| \\theta_{k+1} - \\theta_k \\|_2` falls below
-        this. Must be strictly positive.
+        this (rescaled by the parameter norm). Must be strictly positive
+        when a float. ``None`` selects the fixed-k schedule described
+        above: run exactly ``weighting_iterations`` V-refreshes with no
+        drift test.
 
     Notes
     -----
@@ -405,7 +432,9 @@ class IteratedWeighting:
     """
 
     weighting_iterations: int = jdc.static_field(default=10)  # type: ignore[attr-defined]
-    weighting_tol: float = jdc.static_field(default=1e-6)  # type: ignore[attr-defined]
+    #: ``None`` selects the fixed-k (two-step) schedule; see the class
+    #: docstring. A float keeps the original drift-test semantics.
+    weighting_tol: float | None = jdc.static_field(default=1e-6)  # type: ignore[attr-defined]
     #: Iterated GMM needs the estimator to drive an outer Python loop;
     #: see :meth:`outer_loop_driver`.
     requires_outer_loop: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
@@ -419,10 +448,12 @@ class IteratedWeighting:
                 "IteratedWeighting.weighting_iterations must be >= 1, got "
                 f"{self.weighting_iterations}"
             )
-        if float(self.weighting_tol) <= 0.0:
+        # ``None`` selects the fixed-k schedule (#201) and skips the
+        # positivity check; a float must be strictly positive.
+        if self.weighting_tol is not None and float(self.weighting_tol) <= 0.0:
             raise ValueError(
-                "IteratedWeighting.weighting_tol must be > 0, got "
-                f"{self.weighting_tol}"
+                "IteratedWeighting.weighting_tol must be > 0 (or None for "
+                f"a fixed-k schedule), got {self.weighting_tol}"
             )
 
     def whitening_residual(
@@ -527,7 +558,7 @@ class IteratedWeighting:
 
         Termination
         -----------
-        The loop terminates on either:
+        With a float ``weighting_tol`` the loop terminates on either:
 
         - :math:`\\| \\theta_{k+1} - \\theta_k \\|_2 < \\texttt{weighting_tol}
           \\cdot \\max(\\| \\theta_k \\|_2, \\texttt{eps})` (status
@@ -536,6 +567,14 @@ class IteratedWeighting:
           problems whose parameters differ by orders of magnitude, or
         - having performed ``weighting_iterations`` outer steps without
           meeting the rescaled tolerance (status ``"max_iterations"``).
+
+        With ``weighting_tol=None`` (the fixed-k schedule, #201) the
+        drift test is skipped entirely: the loop always performs exactly
+        ``weighting_iterations`` outer steps and terminates with status
+        ``"fixed_schedule_complete"`` --- completion by construction, not
+        a failure --- unless an inner solve failed to certify
+        (``"inner_non_convergence"`` still dominates, below). No
+        iteration-cap warning is emitted in this mode.
 
         Inner-solve divergence handling
         -------------------------------
@@ -555,8 +594,17 @@ class IteratedWeighting:
         theta_k_flat = jnp.asarray(theta_init_flat)
         last_info: OptimizerInfo | None = None
         total_inner_steps = 0
-        outer_status = "max_iterations"
-        # ``inner_non_convergence`` overrides ``max_iterations`` once seen,
+        # #201: ``weighting_tol=None`` is the fixed-k schedule -- run
+        # exactly ``weighting_iterations`` V-refreshes with no drift
+        # test. Exhausting the schedule is then completion by
+        # construction (``"fixed_schedule_complete"``), never the
+        # ``"max_iterations"`` failure flag. Bound to a local so mypy
+        # narrows the ``float | None`` field inside the loop.
+        weighting_tol = self.weighting_tol
+        outer_status = (
+            "fixed_schedule_complete" if weighting_tol is None else "max_iterations"
+        )
+        # ``inner_non_convergence`` overrides the schedule status once seen,
         # because it indicates a deeper failure (the inner LM gave up).
         saw_inner_non_convergence = False
         inner_non_convergence_statuses: list[str] = []
@@ -671,6 +719,12 @@ class IteratedWeighting:
                 # concrete.
                 pass
 
+            # Fixed-k schedule (#201): no drift test -- every outer step
+            # is taken and the loop exits only by exhausting ``range``.
+            if weighting_tol is None:
+                theta_k_flat = theta_next_flat
+                continue
+
             # Outer-loop convergence on a GAUGE-INVARIANT signal. On the
             # manifold path the raw ambient factor ``A`` is identified only
             # up to ``A -> A Q``, so compare ``vec(A A^T)`` (and the
@@ -690,7 +744,7 @@ class IteratedWeighting:
             # test on ``weighting_tol`` is still right.
             theta_scale = float(jnp.maximum(jnp.linalg.norm(conv_next), rescale_eps))
             theta_k_flat = theta_next_flat
-            if float(delta) < float(self.weighting_tol) * theta_scale:
+            if float(delta) < float(weighting_tol) * theta_scale:
                 outer_status = "converged"
                 break
 
