@@ -699,3 +699,236 @@ class TestIteratedWeightingEstimator:
         )
         assert result.converged
         assert result.diagnostics.optimizer_info.status == "converged"
+
+
+# ---------------------------------------------------------------------------
+#
+# #201: fixed-k (two-step) schedules and the surfaced ``iterated_status``.
+
+
+class TestFixedScheduleStrategyObject:
+    """Unit tests for ``IteratedWeighting(weighting_tol=None)`` (#201)."""
+
+    def test_weighting_tol_none_is_valid(self):
+        w = IteratedWeighting(weighting_iterations=2, weighting_tol=None)
+        assert w.weighting_tol is None
+        assert w.weighting_iterations == 2
+
+    def test_weighting_tol_none_satisfies_protocol(self):
+        w = IteratedWeighting(weighting_iterations=1, weighting_tol=None)
+        assert isinstance(w, t.WeightingStrategy)
+
+    def test_weighting_tol_none_is_static(self):
+        """``weighting_tol=None`` stays a static field (no pytree leaves)."""
+        w = IteratedWeighting(weighting_iterations=1, weighting_tol=None)
+        leaves, _ = jax.tree_util.tree_flatten(w)
+        assert leaves == []
+
+    def test_nonpositive_tol_still_rejected(self):
+        """Only ``None`` relaxes the validation; 0.0 stays invalid."""
+        with pytest.raises(ValueError, match="weighting_tol"):
+            IteratedWeighting(weighting_iterations=2, weighting_tol=-1e-6)
+
+
+class TestFixedScheduleEstimator:
+    """Drive :func:`emu_gmm.estimate` with a fixed-k schedule (#201).
+
+    Textbook two-step GMM is ``weighting_iterations`` of 1-2 with
+    ``weighting_tol=None``: the scheme takes theta_k after exactly k
+    V-refreshes and never promises ``||theta_{k+1} - theta_k|| <
+    weighting_tol``, so exhausting the schedule must NOT be flagged as
+    non-convergence. (Reference-arm measurement from the evolve-harness
+    run 2: with the old semantics a k=1 schedule was flagged
+    ``converged=False`` on 96/96 replicates by construction.)
+    """
+
+    @pytest.mark.parametrize("k", [1, 2])
+    def test_fixed_schedule_converges_and_does_not_warn(self, k):
+        """k V-refreshes with converging inner solves: ``converged=True``,
+        status ``"fixed_schedule_complete"``, and no iteration-cap warning."""
+        from emu_gmm import IteratedWeighting, SyntheticCovariance, estimate
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = estimate(
+                model=_mean_var_psi,
+                measure=_build_measure(),
+                covariance=SyntheticCovariance(),
+                weighting=IteratedWeighting(
+                    weighting_iterations=k,
+                    weighting_tol=None,
+                ),
+                theta_init=_MeanModelParams(mu=0.0),
+            )
+
+        iterated_warnings = [
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning)
+            and "IteratedWeighting" in str(w.message)
+        ]
+        assert iterated_warnings == []
+        assert result.converged is True
+        assert result.diagnostics.iterated_status == "fixed_schedule_complete"
+        assert result.diagnostics.optimizer_info.status == "fixed_schedule_complete"
+        # The fixed-k estimate is a genuine GMM fit: recovery holds.
+        assert float(result.theta_hat.mu) == pytest.approx(_MEAN_TRUTH, abs=0.05)
+
+    def test_fixed_schedule_matches_default_mode_theta(self):
+        """A k=2 fixed schedule reproduces the default-mode theta path.
+
+        The fixed schedule changes only the *stopping rule / flag
+        semantics*, never the V-refresh iterates: two outer steps under
+        ``weighting_tol=None`` must land exactly where two outer steps
+        under an unreachable tolerance do.
+        """
+        from emu_gmm import (
+            IteratedWeighting,
+            SyntheticCovariance,
+            estimate,
+            optimistix_lm,
+        )
+
+        measure = _build_measure()
+        cov = SyntheticCovariance()
+        opt = optimistix_lm(rtol=1e-10, atol=1e-10)
+        theta0 = _MeanModelParams(mu=0.0)
+
+        r_fixed = estimate(
+            model=_mean_var_psi,
+            measure=measure,
+            covariance=cov,
+            weighting=IteratedWeighting(weighting_iterations=2, weighting_tol=None),
+            optimizer=opt,
+            theta_init=theta0,
+        )
+        with warnings.catch_warnings():
+            # The tol-mode run hits its (unreachably tight) tolerance cap
+            # by construction; silence the expected iteration-cap warning.
+            warnings.simplefilter("ignore", UserWarning)
+            r_tol = estimate(
+                model=_mean_var_psi,
+                measure=measure,
+                covariance=cov,
+                weighting=IteratedWeighting(
+                    weighting_iterations=2, weighting_tol=1e-30
+                ),
+                optimizer=opt,
+                theta_init=theta0,
+            )
+        # Identical iterates -- only the flags differ.
+        assert float(r_fixed.theta_hat.mu) == pytest.approx(
+            float(r_tol.theta_hat.mu), abs=0.0
+        )
+        assert r_fixed.converged is True
+        assert r_tol.converged is False
+
+    def test_fixed_schedule_inner_failure_still_flags(self):
+        """Inner non-convergence dominates the fixed schedule too.
+
+        ``converged`` under a fixed-k schedule reflects the *inner*
+        solves' convergence only -- so a starved inner optimiser
+        (``max_steps=1``) must still flip it to ``False`` and surface
+        ``"inner_non_convergence"``, exactly as in default mode.
+        """
+        from emu_gmm import (
+            IteratedWeighting,
+            SyntheticCovariance,
+            estimate,
+            optimistix_lm,
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = estimate(
+                model=_mean_var_psi,
+                measure=_build_measure(),
+                covariance=SyntheticCovariance(),
+                weighting=IteratedWeighting(
+                    weighting_iterations=2,
+                    weighting_tol=None,
+                ),
+                optimizer=optimistix_lm(rtol=1e-12, atol=1e-12, max_steps=1),
+                theta_init=_MeanModelParams(mu=0.0),
+            )
+
+        inner_warnings = [
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning)
+            and "inner" in str(w.message).lower()
+            and "IteratedWeighting" in str(w.message)
+        ]
+        assert len(inner_warnings) == 1
+        assert result.converged is False
+        assert result.diagnostics.iterated_status == "inner_non_convergence"
+
+
+class TestIteratedStatusSurfaced:
+    """``Diagnostics.iterated_status`` is populated in every mode (#201).
+
+    Before the fix ``iterated_status`` was a local variable in
+    ``estimate()``; consumers could not distinguish inner-LM failure
+    from schedule exhaustion.
+    """
+
+    def test_status_converged_in_default_mode(self):
+        from emu_gmm import (
+            IteratedWeighting,
+            SyntheticCovariance,
+            estimate,
+            optimistix_lm,
+        )
+
+        result = estimate(
+            model=_mean_var_psi,
+            measure=_build_measure(),
+            covariance=SyntheticCovariance(),
+            weighting=IteratedWeighting(weighting_iterations=10, weighting_tol=1e-8),
+            optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+            theta_init=_MeanModelParams(mu=_MEAN_TRUTH),
+        )
+        assert result.converged is True
+        assert result.diagnostics.iterated_status == "converged"
+
+    def test_status_max_iterations_and_flag_unchanged_in_default_mode(self):
+        """Default-mode regression guard: a config that previously flagged
+        non-convergence still does, and now also surfaces the status."""
+        from emu_gmm import IteratedWeighting, SyntheticCovariance, estimate
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = estimate(
+                model=_mean_var_psi,
+                measure=_build_measure(),
+                covariance=SyntheticCovariance(),
+                weighting=IteratedWeighting(
+                    weighting_iterations=1,
+                    weighting_tol=1e-30,
+                ),
+                theta_init=_MeanModelParams(mu=0.0),
+            )
+
+        iterated_warnings = [
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning)
+            and "IteratedWeighting" in str(w.message)
+        ]
+        # The iteration-cap warning still fires in default (tol) mode.
+        assert len(iterated_warnings) == 1
+        assert result.converged is False
+        assert result.diagnostics.iterated_status == "max_iterations"
+
+    def test_status_none_for_non_outer_loop_weighting(self):
+        """CU (no outer loop) leaves ``iterated_status`` as ``None``."""
+        from emu_gmm import ContinuouslyUpdated, SyntheticCovariance, estimate
+
+        result = estimate(
+            model=_mean_var_psi,
+            measure=_build_measure(),
+            covariance=SyntheticCovariance(),
+            weighting=ContinuouslyUpdated(),
+            theta_init=_MeanModelParams(mu=_MEAN_TRUTH),
+        )
+        assert result.diagnostics.iterated_status is None

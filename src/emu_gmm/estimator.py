@@ -1304,6 +1304,7 @@ def build_estimator(
             gauge_nullspace_dim=manifold_spec.total_gauge_dim,
             sigma_meat_indefinite=sigma_meat_indefinite,
             v_star_indefinite=v_star_indefinite,
+            iterated_status=iterated_status,
         )
 
         # #78: prefer the optimiser's REAL traced ``done`` flag when the
@@ -1328,6 +1329,15 @@ def build_estimator(
         iterations = optimizer_info.steps
         if iterated_status in ("max_iterations", "inner_non_convergence"):
             converged = False
+        elif iterated_status == "fixed_schedule_complete":
+            # #201: a fixed-k schedule (``weighting_tol=None``) runs
+            # exactly ``weighting_iterations`` V-refreshes by
+            # construction -- exhausting the schedule is completion, not
+            # a tolerance miss. The driver returns this status only when
+            # every inner Fixed-weight solve certified convergence
+            # (inner failure dominates as ``"inner_non_convergence"``
+            # above), so ``converged`` reflects the inner solves alone.
+            converged = True
 
         return OptimizationResult(
             theta_hat=theta_hat,

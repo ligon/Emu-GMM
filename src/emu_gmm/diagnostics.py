@@ -53,6 +53,7 @@ def build_diagnostics(
     gauge_nullspace_dim: int = 0,
     sigma_meat_indefinite: Any = False,
     v_star_indefinite: Any = False,
+    iterated_status: str | None = None,
 ) -> Diagnostics:
     """Assemble a :class:`Diagnostics` from raw estimator-pipeline values.
 
@@ -93,6 +94,12 @@ def build_diagnostics(
     optimizer_health : dict, optional
         Lightweight optimiser-health summary. See
         :func:`build_optimizer_health`. Defaults to an empty dict.
+    iterated_status : str, optional
+        The outer-loop status from an outer-loop weighting's driver
+        (#201): ``"converged"`` / ``"max_iterations"`` /
+        ``"inner_non_convergence"`` / ``"fixed_schedule_complete"``.
+        ``None`` (the default) for non-outer-loop weightings. A plain
+        host-side string, never traced.
 
     Returns
     -------
@@ -123,6 +130,7 @@ def build_diagnostics(
         gauge_nullspace_dim=int(gauge_nullspace_dim),
         sigma_meat_indefinite=sigma_meat_indefinite,
         v_star_indefinite=v_star_indefinite,
+        iterated_status=iterated_status,
     )
 
 

@@ -445,6 +445,23 @@ class Diagnostics:
     #: the common cause) and ``tau_realised``. NaN eigenvalues of ``V*``
     #: count as flagged. Traced 0-d bool under jit, Python bool eagerly.
     v_star_indefinite: Any = False
+    #: #201: the outer-loop status returned by an outer-loop weighting's
+    #: ``outer_loop_driver`` (:class:`~emu_gmm.weighting.IteratedWeighting`),
+    #: so consumers can distinguish inner-solver failure from schedule
+    #: exhaustion. One of ``"converged"`` (theta-drift tolerance met),
+    #: ``"max_iterations"`` (float ``weighting_tol`` not met within the
+    #: iteration budget --- flips ``result.converged`` to False),
+    #: ``"inner_non_convergence"`` (an inner Fixed-weight solve failed to
+    #: certify --- also flips ``converged``), or
+    #: ``"fixed_schedule_complete"`` (``weighting_tol=None``: the fixed-k
+    #: schedule ran exactly ``weighting_iterations`` V-refreshes; every
+    #: inner solve certified, so ``converged`` is True). ``None`` for
+    #: every non-outer-loop weighting (Identity / Fixed / CU). A plain
+    #: Python string --- like ``OptimizerInfo.status`` it is host-side
+    #: metadata, never traced (:class:`Diagnostics` is assembled eagerly,
+    #: outside any jit/vmap boundary; the outer-loop path is
+    #: documented eager-only).
+    iterated_status: str | None = None
 
 
 def _is_non_scalar_spec(manifold_spec: Any) -> bool:
