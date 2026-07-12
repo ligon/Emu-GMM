@@ -445,6 +445,28 @@ class Diagnostics:
     #: the common cause) and ``tau_realised``. NaN eigenvalues of ``V*``
     #: count as flagged. Traced 0-d bool under jit, Python bool eagerly.
     v_star_indefinite: Any = False
+    #: #205: True when the anchor-time ridge bisection *saturated* --- it
+    #: exhausted at its tau upper bound with the joint PD/kappa feasibility
+    #: test (CLAUDE.md commitment 3: ``lambda_min > 0`` AND ``lambda_max <=
+    #: kappa_target * lambda_min``, on the signed spectrum) still failing at
+    #: the returned ``V*``. Saturation means the requested ``kappa_target``
+    #: is *unattainable in the diagonal-ridge family* for this ``V`` --- the
+    #: #202 mechanism: e.g. a PSD ``V`` whose diagonal ratio exceeds a tight
+    #: target (there ``kappa(V*)`` plateaus at the diagonal ratio, so tau
+    #: runs to the cap and ``V*`` comes back diag-dominated), or an
+    #: exactly-zero diagonal entry (which additionally leaves ``V*``
+    #: non-PD --- the ``v_star_indefinite`` sub-case). ``binding_ridge``
+    #: alone conflates this event with an ordinary small repair (#202
+    #: evidence: median realised tau 0.0032 at kappa_target=1e6 vs 1000.0
+    #: (= tau_max) at 1e3 on the same fixture, both flagged binding); a
+    #: legitimate repair --- feasibility met, even at tau == tau_max ---
+    #: and the already-feasible ``tau = 0`` case are NOT saturation.
+    #: Unlike ``v_star_indefinite`` (evaluated at ``theta_hat``), this is a
+    #: property of the anchor ``apply()`` where the bisection runs, like
+    #: ``tau_realised`` itself. False for regularisers without the concept.
+    #: Traced 0-d bool under jit, Python bool eagerly. Recorded per-rep as
+    #: the stackable 0/1 float ``FitRecord.tau_saturated``.
+    tau_saturated: Any = False
     #: #201: the outer-loop status returned by an outer-loop weighting's
     #: ``outer_loop_driver`` (:class:`~emu_gmm.weighting.IteratedWeighting`),
     #: so consumers can distinguish inner-solver failure from schedule
@@ -565,6 +587,17 @@ class FitRecord:
     ``se`` entries are NaN BY DESIGN. Carrying it here (#143) makes the
     NaN-SE event auditable in committed MC records rather than only on
     the live ``EstimationResult.diagnostics``.
+
+    ``tau_saturated`` is the #205 saturation event as a stackable 0/1
+    float (same pattern, required like ``binding_ridge`` --- the #143
+    precedent): ``1.0`` when the anchor-time ridge bisection exhausted at
+    its tau cap without the joint PD/kappa feasibility test holding at
+    ``V*`` --- the requested ``kappa_target`` was unattainable in the
+    ridge family (the #202 mechanism). It disambiguates
+    ``binding_ridge``, which flags an ordinary small repair and a
+    saturated cap identically. Persisted artifacts written before the
+    field existed reload with an all-zero column
+    (:mod:`emu_gmm.persistence`; additive schema).
     """
 
     theta_flat: Float[Array, " D"]
@@ -576,6 +609,7 @@ class FitRecord:
     tau_realised: Float[Array, ""]
     binding_ridge: Float[Array, ""]  # 0/1
     sigma_meat_indefinite: Float[Array, ""]  # 0/1; the #138 NaN-SE event
+    tau_saturated: Float[Array, ""]  # 0/1; the #205 saturated-at-tau-max event
     J_dof: int = jdc.static_field()  # type: ignore[attr-defined]
     param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
 

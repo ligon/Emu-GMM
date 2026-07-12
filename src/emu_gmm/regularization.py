@@ -142,6 +142,20 @@ def _feasible(
     return pd_ok & cond_ok
 
 
+def _pd_floor(V: Float[Array, "M M"]) -> Float[Array, ""]:
+    """The relative PD floor :meth:`DiagonalTikhonov.apply` targets for ``V``.
+
+    Fixed from the *input* spectrum (the largest-magnitude eigenvalue of
+    ``V``, floored at 1.0) so feasibility is a clean function of ``tau``
+    across the bisection. Factored out so
+    :meth:`DiagonalTikhonov.tau_saturated` re-tests feasibility against
+    exactly the floor the bisection used, rather than re-deriving it.
+    """
+    lam_min0, lam_max0 = _spectrum(V)
+    scale0 = jnp.maximum(jnp.maximum(jnp.abs(lam_max0), jnp.abs(lam_min0)), 1.0)
+    return jnp.asarray(_PD_FLOOR_REL) * scale0
+
+
 def _is_diagonal(V: Float[Array, "M M"]) -> Bool[Array, ""]:
     """Return a 0-d boolean array: ``True`` iff ``V`` is (near-)diagonal.
 
@@ -236,14 +250,27 @@ class DiagonalTikhonov:
         \\tau_{\\max}]` for the smallest ridge meeting both, with a fixed
         iteration count so the routine traces under ``jit`` / ``vmap``.
 
-        When NO :math:`\\tau` in the family can repair ``V`` --- e.g. an
-        exactly-zero diagonal entry (a zero-support moment coordinate),
-        which the multiplicative ridge leaves at ``(1 + tau) * 0 == 0``
-        for every :math:`\\tau` --- the bisection saturates at
-        :math:`\\tau_{\\max}` (``_TAU_MAX``) and the returned
-        :math:`V^\\star` may remain singular or indefinite. The routine
-        does not raise (it must stay trace-compatible); the event is
-        detected downstream by the estimator's ``v_star_indefinite``
+        When NO :math:`\\tau` in the family can meet the joint target ---
+        **saturation**: the requested target is unattainable in this
+        ridge family --- the bisection exhausts at :math:`\\tau_{\\max}`
+        (``_TAU_MAX``) and the returned :math:`V^\\star` still fails the
+        joint feasibility test. Two mechanisms, one flag (#205):
+
+        - an exactly-zero diagonal entry (a zero-support moment
+          coordinate), which the multiplicative ridge leaves at
+          ``(1 + tau) * 0 == 0`` for every :math:`\\tau`, so
+          :math:`V^\\star` stays singular / indefinite; or
+        - a PSD ``V`` whose diagonal ratio exceeds ``kappa_target``
+          (#202): as :math:`\\tau \\to \\infty` the ridged spectrum
+          approaches that of :math:`\\tau \\operatorname{diag}(V)`, so
+          :math:`\\kappa(V^\\star)` plateaus at the diagonal ratio and a
+          tighter target is unattainable --- :math:`V^\\star` is PD but
+          diag-dominated and over the target.
+
+        The routine does not raise (it must stay trace-compatible); the
+        event is detected downstream via :meth:`tau_saturated` (surfaced
+        as the ``tau_saturated`` diagnostic, #205) and --- in the
+        still-non-PD sub-case --- the estimator's ``v_star_indefinite``
         diagnostic (:class:`emu_gmm.types.Diagnostics`), which warns
         eagerly that the downstream Cholesky will NaN the fit.
 
@@ -270,9 +297,7 @@ class DiagonalTikhonov:
         # clean function of tau. The spectral scale is the largest-magnitude
         # eigenvalue of V (floored at 1.0 so a tiny-scaled V keeps a sane
         # absolute floor and an all-zero V does not produce a zero floor).
-        lam_min0, lam_max0 = _spectrum(V)
-        scale0 = jnp.maximum(jnp.maximum(jnp.abs(lam_max0), jnp.abs(lam_min0)), 1.0)
-        pd_floor = jnp.asarray(_PD_FLOOR_REL) * scale0
+        pd_floor = _pd_floor(V)
 
         # Bisection state: (lo, hi). Loop invariant: V_star(hi) is always
         # feasible (PD + within the kappa target), or hi is the explicit
@@ -308,6 +333,53 @@ class DiagonalTikhonov:
         tau = jnp.where(already_ok, jnp.asarray(0.0), tau_search)
         V_star = _apply_tau(V, tau, is_diag)
         return V_star, tau
+
+    def tau_saturated(
+        self,
+        V: Float[Array, "M M"],
+        tau: Float[Array, ""],
+    ) -> Bool[Array, ""]:
+        """Whether ``apply(V) -> tau`` was a *saturation*, not a repair (#205).
+
+        True exactly when the :meth:`apply` bisection exhausted at
+        ``_TAU_MAX`` **without** the joint PD/kappa feasibility test
+        holding at the returned :math:`V^\\star` --- i.e. ``kappa_target``
+        is unattainable for the diagonal-ridge family on this ``V`` (the
+        #202 mechanism: e.g. a PSD ``V`` whose diagonal ratio exceeds the
+        target, or an exactly-zero diagonal entry). Distinct from a
+        *binding* ridge (``tau > tau_threshold``, a successful repair
+        that happened to need a visible ridge) and from the
+        already-feasible ``tau = 0`` case --- both return False. A
+        legitimate repair that lands at ``_TAU_MAX`` with feasibility
+        met is also NOT saturation.
+
+        The probe recomputes :math:`V^\\star` and the PD floor from
+        ``(V, tau)`` with the same primitives :meth:`apply` used, so no
+        extra output has to ride :meth:`apply`'s public
+        ``(V_star, tau)`` return (the
+        :class:`~emu_gmm.types.RegularizationStrategy` protocol).
+        Pure JAX and trace-compatible: returns a 0-d bool array under
+        ``jit`` / ``vmap`` (concrete eagerly), mirroring the
+        ``v_star_indefinite`` convention.
+
+        Parameters
+        ----------
+        V : (M, M) symmetric array
+            The matrix :meth:`apply` was handed.
+        tau : scalar array
+            The realised :math:`\\tau` that :meth:`apply` returned for
+            ``V``. May be a Python float or a 0-d JAX array.
+
+        Returns
+        -------
+        saturated : 0-d bool array
+            ``(tau >= _TAU_MAX) & ~feasible(V + tau * R(V))``.
+        """
+        tau_arr = jnp.asarray(tau)
+        V_star = _apply_tau(V, tau_arr, _is_diagonal(V))
+        exhausted = tau_arr >= jnp.asarray(_TAU_MAX)
+        feasible = _feasible(V_star, jnp.asarray(self.kappa_target), _pd_floor(V))
+        return exhausted & ~feasible
 
     def apply_fixed_tau(
         self,

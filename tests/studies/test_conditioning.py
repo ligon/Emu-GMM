@@ -54,6 +54,7 @@ def _rec(
         tau_realised=0.0 * o,
         binding_ridge=v(binding, 0.0 * o),
         sigma_meat_indefinite=0.0 * o,
+        tau_saturated=0.0 * o,
         J_dof=1,
         param_names=param_names,
     )
@@ -441,8 +442,12 @@ class TestSelectionConditionalGate:
             binding=[1, 0, 1],
         )
 
-    @pytest.mark.parametrize("flag", ["binding_ridge", "sigma_meat_indefinite"])
+    @pytest.mark.parametrize(
+        "flag", ["binding_ridge", "sigma_meat_indefinite", "tau_saturated"]
+    )
     def test_warns_on_internal_hazard_flags(self, flag):
+        # tau_saturated (#205) is the saturated sub-regime of binding_ridge:
+        # equally estimator-internal, equally selection-conditional.
         with pytest.warns(SelectionConditionalWarning, match="SELECTION-CONDITIONAL"):
             given(self._rec3(), flag)
 

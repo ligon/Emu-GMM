@@ -258,6 +258,16 @@ def tau_binding(
     so its frequency is ``records.records.sigma_meat_indefinite.mean()``;
     the per-summary ``n_valid_se`` counts (#140) already account for the
     resulting NaN SEs here.
+
+    ``binding_ridge`` conflates an ordinary small repair with a bisection
+    *saturated* at its tau cap because ``kappa_target`` was unattainable
+    (#205; the #202 mechanism --- median realised tau 0.0032 vs 1000.0
+    (= tau_max) on the same fixture, both "binding"). The saturation
+    event rides the records as the 0/1 ``tau_saturated`` field (also a
+    ``to_pandas`` column), so its frequency is
+    ``records.records.tau_saturated.mean()``; a binding-with-saturation
+    arm and a binding-with-repair arm are different regimes even at
+    equal ``binding_frequency``.
     """
     rec = _stacked(records)
     mask, n_used, n_excluded = _used(rec)

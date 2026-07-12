@@ -53,6 +53,7 @@ def build_diagnostics(
     gauge_nullspace_dim: int = 0,
     sigma_meat_indefinite: Any = False,
     v_star_indefinite: Any = False,
+    tau_saturated: Any = False,
     iterated_status: str | None = None,
 ) -> Diagnostics:
     """Assemble a :class:`Diagnostics` from raw estimator-pipeline values.
@@ -94,6 +95,13 @@ def build_diagnostics(
     optimizer_health : dict, optional
         Lightweight optimiser-health summary. See
         :func:`build_optimizer_health`. Defaults to an empty dict.
+    tau_saturated : bool or 0-d bool array, optional
+        The #205 ridge-saturation event: the anchor-time tau bisection
+        exhausted at its cap without the joint PD/kappa feasibility
+        test holding at ``V*`` (``kappa_target`` unattainable in the
+        ridge family --- the #202 mechanism). Defaults to ``False``
+        (regularisers without the concept). Passed through untouched,
+        like ``sigma_meat_indefinite`` / ``v_star_indefinite``.
     iterated_status : str, optional
         The outer-loop status from an outer-loop weighting's driver
         (#201): ``"converged"`` / ``"max_iterations"`` /
@@ -130,6 +138,7 @@ def build_diagnostics(
         gauge_nullspace_dim=int(gauge_nullspace_dim),
         sigma_meat_indefinite=sigma_meat_indefinite,
         v_star_indefinite=v_star_indefinite,
+        tau_saturated=tau_saturated,
         iterated_status=iterated_status,
     )
 

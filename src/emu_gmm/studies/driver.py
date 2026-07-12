@@ -56,7 +56,8 @@ def fit_record(result: OptimizationResult) -> FitRecord:
     repeated-estimation consumers need --- ``theta_flat`` (manifold-aware
     ambient flatten, the ``Sigma_theta`` axis), ``se``, the J triple,
     ``converged``, ``tau_realised``, ``binding_ridge``,
-    ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143) --- as a
+    ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143),
+    ``tau_saturated`` (the #205 ridge-saturation event) --- as a
     :class:`~emu_gmm.types.FitRecord` ready for ``tree_map(jnp.stack,
     *records)``.
 
@@ -108,6 +109,9 @@ def fit_record(result: OptimizationResult) -> FitRecord:
         sigma_meat_indefinite=jnp.asarray(
             diag.sigma_meat_indefinite, dtype=jnp.float64
         ),
+        # A pre-#205 pickled result's Diagnostics resolves this through the
+        # class-level dataclass default (False), so old results record 0.0.
+        tau_saturated=jnp.asarray(diag.tau_saturated, dtype=jnp.float64),
         J_dof=int(result.n_overid),
         param_names=param_names,
     )
@@ -185,7 +189,8 @@ class MCRecords:
 
         Columns: ``theta_<name>`` / ``se_<name>`` per parameter, the J
         triple, ``converged``, ``tau_realised``, ``binding_ridge``,
-        ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143), and one
+        ``sigma_meat_indefinite`` (the #138 NaN-SE event; #143),
+        ``tau_saturated`` (the #205 ridge-saturation event), and one
         column per custom statistic in :attr:`extra` (#179).
         Pandas stays outside the compiled boundary --- this is the only
         pandas touchpoint in the studies module.
@@ -204,6 +209,7 @@ class MCRecords:
         data["tau_realised"] = np.asarray(rec.tau_realised)
         data["binding_ridge"] = np.asarray(rec.binding_ridge)
         data["sigma_meat_indefinite"] = np.asarray(rec.sigma_meat_indefinite)
+        data["tau_saturated"] = np.asarray(rec.tau_saturated)
         for name, col in (self.extra or {}).items():
             data[name] = np.asarray(col)
         df = pd.DataFrame(data)

@@ -159,6 +159,31 @@ def _binding_ridge(
     return jnp.asarray(tau) > jnp.asarray(threshold)
 
 
+def _tau_saturated(
+    regularization: RegularizationStrategy,
+    V: Float[Array, "M M"],
+    tau: Float[Array, ""],
+) -> Float[Array, ""]:
+    """Whether the ridge bisection *saturated* at its cap without repairing V.
+
+    True exactly when ``regularization.apply(V) -> tau`` exhausted its tau
+    upper bound with the joint PD/kappa feasibility test still failing at
+    the returned ``V*`` --- i.e. the requested ``kappa_target`` is
+    unattainable in the ridge family for this ``V`` (#205; the #202
+    mechanism). Distinct from ``_binding_ridge`` (a successful repair
+    with a visible tau) --- ``binding_ridge`` alone conflates the two.
+
+    Returns a traced 0-d boolean JAX array (the ``_binding_ridge``
+    pattern). Only :class:`~emu_gmm.regularization.DiagonalTikhonov`
+    exposes the ``tau_saturated`` probe; other regularisers default to
+    ``False``.
+    """
+    probe = getattr(regularization, "tau_saturated", None)
+    if probe is None:
+        return jnp.asarray(False)
+    return jnp.asarray(probe(V, tau))
+
+
 def _all_euclidean(manifold_spec: ManifoldSpec) -> bool:
     """True when every leaf is Euclidean and there is no gauge structure."""
     if manifold_spec.total_gauge_dim != 0:
@@ -587,6 +612,13 @@ def build_estimator(
     V0 = covariance.covariance(model, theta_init, template_measure)
     _V0_star, tau_anchor = regularization.apply(V0)
     tau_anchor = jnp.asarray(tau_anchor)
+    # #205: did the anchor apply() SATURATE (tau exhausted at its cap with
+    # the joint PD/kappa feasibility test still failing at V*), rather than
+    # repair? The bisection only runs here --- the anchored path re-applies
+    # the frozen tau_anchor --- so the flag is a property of the anchor,
+    # like tau_anchor itself. Traced 0-d bool; False for regularisers
+    # without the concept (the _binding_ridge pattern).
+    tau_saturated_anchor = _tau_saturated(regularization, V0, tau_anchor)
 
     def _apply_anchored(V: Float[Array, "M M"]) -> Float[Array, "M M"]:
         """Apply the ridge at the anchored ``tau_anchor`` deterministically."""
@@ -1304,6 +1336,7 @@ def build_estimator(
             gauge_nullspace_dim=manifold_spec.total_gauge_dim,
             sigma_meat_indefinite=sigma_meat_indefinite,
             v_star_indefinite=v_star_indefinite,
+            tau_saturated=tau_saturated_anchor,
             iterated_status=iterated_status,
         )
 

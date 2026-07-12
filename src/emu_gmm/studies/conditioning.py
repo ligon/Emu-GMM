@@ -61,6 +61,7 @@ FLAG_FIELDS: tuple[str, ...] = (
     "converged",
     "binding_ridge",
     "sigma_meat_indefinite",
+    "tau_saturated",
 )
 
 #: Estimator-INTERNAL flags whose value is a function of the same data as
@@ -74,6 +75,10 @@ FLAG_FIELDS: tuple[str, ...] = (
 SELECTION_CONDITIONAL_FLAGS: tuple[str, ...] = (
     "binding_ridge",
     "sigma_meat_indefinite",
+    # #205: fires when the anchor V made kappa_target unattainable for the
+    # ridge -- a function of the same data as theta_hat/se, exactly like
+    # binding_ridge (of which it is the saturated sub-regime).
+    "tau_saturated",
 )
 
 
