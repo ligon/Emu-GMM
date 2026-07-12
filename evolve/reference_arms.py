@@ -36,13 +36,12 @@ for _p in (
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import evaluator_ridge as ev  # noqa: E402
+import fixture_binding as fx  # noqa: E402
 import jax  # noqa: E402
 import ladder_mc as lm  # noqa: E402
 import numpy as np  # noqa: E402
 from emu_gmm import estimate  # noqa: E402
-
-import evaluator_ridge as ev  # noqa: E402
-import fixture_binding as fx  # noqa: E402
 
 REFERENCE_CONFIGS = {
     # Textbook-ish two-step: one V-refresh after the V(theta_init) solve.
