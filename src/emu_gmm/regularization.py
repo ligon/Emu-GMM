@@ -192,7 +192,24 @@ class DiagonalTikhonov:
     Parameters
     ----------
     kappa_target : float (static, default 1e6)
-        Upper bound on :math:`\\kappa(V^\\star)`.
+        Upper bound on :math:`\\kappa(V^\\star)`. The right value is
+        regime-dependent (#202). The default is calibrated for ``V``
+        that is PSD by construction but ill-conditioned (e.g. the
+        :class:`~emu_gmm.covariance.iid.IIDCovariance` pairwise-overlap
+        form under extreme per-moment support disparity): binding there
+        is conditioning-driven, and a much tighter target is typically
+        *unattainable* for the multiplicative diagonal ridge --- the
+        bisection saturates at :math:`\\tau_{\\max}`, leaving a
+        diag-dominated :math:`V^\\star` that mildly degrades convergence
+        and CI coverage (the #202 confirmatory measurement). Where the
+        assembled ``V`` can instead be *indefinite* --- e.g.
+        :class:`~emu_gmm.covariance.stratified.DesignAwareCovariance`
+        coupled assemblies --- ``kappa_target`` around ``1e3`` measurably
+        improves convergence and CI/J calibration (the #202 run-2
+        evidence, hold-outs passed) because a tight target is attainable
+        and directs the indefiniteness repair. Note ``binding_ridge``
+        does not distinguish a small applied repair from saturation at
+        an unattainable target (#205).
     tau_threshold : float (static, default 0.01)
         Threshold for the ``binding_ridge`` diagnostic flag elsewhere in
         the pipeline. Not used inside :meth:`apply` itself; carried for
