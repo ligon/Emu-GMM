@@ -164,6 +164,10 @@ def _coerce_factory_spec(value: Any) -> FactorySpec | None:
 
 
 # The stackable (per-rep array) fields of a FitRecord, in declaration order.
+# ``tau_saturated`` (#205) is additive: artifacts written before it existed
+# simply lack the ``rec_tau_saturated`` array, and the loaders below
+# synthesize an all-zero column (no schema-version bump --- the pre-#183
+# ``extra_names`` precedent).
 _FITRECORD_ARRAY_FIELDS = (
     "theta_flat",
     "se",
@@ -174,6 +178,7 @@ _FITRECORD_ARRAY_FIELDS = (
     "tau_realised",
     "binding_ridge",
     "sigma_meat_indefinite",
+    "tau_saturated",
 )
 
 
@@ -359,7 +364,13 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
             else law._records
         )
         record_arrays = {
-            f: np.asarray(getattr(rec, f)) for f in _FITRECORD_ARRAY_FIELDS
+            # hasattr guard: a FitRecord unpickled from a pre-#205 pickle
+            # lacks the ``tau_saturated`` instance attribute (a required
+            # field leaves no class-level fallback); skip rather than
+            # raise -- the load path synthesizes the all-zero column.
+            f: np.asarray(getattr(rec, f))
+            for f in _FITRECORD_ARRAY_FIELDS
+            if hasattr(rec, f)
         }
         key = None
         coupling_id = None
@@ -555,7 +566,12 @@ def _read_state(target: Any) -> LawState:
             return LawState(
                 **common,
                 record_arrays={
-                    f: np.asarray(data[f"rec_{f}"]) for f in _FITRECORD_ARRAY_FIELDS
+                    # Fields absent from older artifacts (e.g. the #205
+                    # ``tau_saturated``) are skipped here; the FitRecord
+                    # reconstruction synthesizes the all-zero column.
+                    f: np.asarray(data[f"rec_{f}"])
+                    for f in _FITRECORD_ARRAY_FIELDS
+                    if f"rec_{f}" in data
                 },
                 extra_arrays=(
                     None
@@ -621,8 +637,16 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
 
     if state.backing == "records":
         assert state.record_arrays is not None
+        arrays = dict(state.record_arrays)
+        if "tau_saturated" not in arrays:
+            # Pre-#205 artifact: reload with an all-zero column of the
+            # same leading rep axis (additive back-compat -- the flag is
+            # required on FitRecord, matching binding_ridge / #143).
+            arrays["tau_saturated"] = np.zeros_like(
+                np.asarray(arrays["converged"], dtype=np.float64)
+            )
         record = FitRecord(
-            **{f: jnp.asarray(state.record_arrays[f]) for f in _FITRECORD_ARRAY_FIELDS},
+            **{f: jnp.asarray(arrays[f]) for f in _FITRECORD_ARRAY_FIELDS},
             J_dof=int(state.j_dof),  # type: ignore[arg-type]
             param_names=tuple(state.param_names),
         )

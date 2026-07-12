@@ -516,6 +516,7 @@ class TestFitRecord:
         assert float(rec.converged) == 1.0
         assert float(rec.binding_ridge) == 0.0
         assert float(rec.sigma_meat_indefinite) == 0.0
+        assert float(rec.tau_saturated) == 0.0
         assert rec.param_names == ("beta", "gamma")
 
     def test_record_carries_sigma_meat_indefinite_flag(self):
@@ -540,6 +541,29 @@ class TestFitRecord:
         )
         assert stacked.sigma_meat_indefinite.shape == (2,)
         assert float(stacked.sigma_meat_indefinite.mean()) == 0.5
+
+    def test_record_carries_tau_saturated_flag(self):
+        """A fit whose diagnostics raised the #205 ridge-saturation event
+        records it as the stackable 0/1 float, exactly like
+        ``sigma_meat_indefinite`` (#143)."""
+        import dataclasses
+
+        base = _make_result()
+        r = dataclasses.replace(
+            base,
+            diagnostics=dataclasses.replace(
+                base.diagnostics, tau_saturated=jnp.asarray(True)
+            ),
+        )
+        rec = fit_record(r)
+        assert float(rec.tau_saturated) == 1.0
+        assert rec.tau_saturated.dtype == jnp.float64
+        # Stackable and mean()-able alongside an un-flagged fit.
+        stacked = jax.tree_util.tree_map(
+            lambda *xs: jnp.stack(xs), rec, fit_record(base)
+        )
+        assert stacked.tau_saturated.shape == (2,)
+        assert float(stacked.tau_saturated.mean()) == 0.5
 
     def test_records_stack_via_tree_map(self):
         """The canonical batching gesture: tree_map(jnp.stack, *records)

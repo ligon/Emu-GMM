@@ -458,3 +458,124 @@ class TestZeroDiagonalSaturation:
         V_star, _tau = DiagonalTikhonov().apply(V)
         L = jnp.linalg.cholesky(V_star)
         assert bool(jnp.isnan(L).any())
+
+
+def _psd_unattainable_target_V() -> jnp.ndarray:
+    """PSD ``V`` whose diagonal ratio (1e8) exceeds a tight ``kappa_target``.
+
+    The #202 mechanism: as tau grows, ``V + tau * diag(V)``'s spectrum
+    approaches that of ``tau * diag(V)``, so ``kappa(V_star)`` plateaus at
+    the diagonal ratio -- a target below that ratio is unattainable and
+    the bisection exhausts at ``_TAU_MAX`` with ``V_star`` PD but
+    diag-dominated. Off-diagonal entries are nonzero so the canonical
+    multiplicative branch (not the additive diagonal-branch shift, which
+    COULD repair this) is exercised.
+    """
+    return jnp.array(
+        [
+            [1.0e8, 1.0, 0.0],
+            [1.0, 1.0, 0.1],
+            [0.0, 0.1, 1.0],
+        ]
+    )
+
+
+class TestTauSaturatedProbe:
+    """``DiagonalTikhonov.tau_saturated`` (#205): saturation vs repair.
+
+    ``binding_ridge`` (tau > tau_threshold) conflates two qualitatively
+    different events: an ordinary successful repair that needed a visible
+    ridge, and a bisection that exhausted at ``_TAU_MAX`` because the
+    joint PD/kappa target is UNATTAINABLE in the diagonal-ridge family
+    (#202: median realised tau 0.0032 at kappa_target=1e6 vs 1000.0
+    (= tau_max) at 1e3 on the same fixture). The probe is True exactly
+    for the latter.
+    """
+
+    def test_unattainable_target_on_psd_v_is_saturated(self):
+        """The #202 mechanism: PSD V, diag ratio 1e8, target 1e3 ->
+        tau exhausts at the cap, V* stays over the target (though PD),
+        and the probe flags saturation."""
+        from emu_gmm.regularization import _TAU_MAX
+
+        V = _psd_unattainable_target_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e3)
+        V_star, tau = reg.apply(V)
+        # The bisection exhausted at the cap ...
+        assert float(tau) == pytest.approx(_TAU_MAX)
+        # ... V* is PD (this is NOT the v_star_indefinite case) ...
+        assert float(np.linalg.eigvalsh(np.asarray(V_star))[0]) > 0.0
+        # ... but the kappa target was not met (unattainable).
+        assert float(jnp.linalg.cond(V_star)) > 1.0e3
+        assert bool(reg.tau_saturated(V, tau))
+
+    def test_zero_diagonal_v_is_saturated(self):
+        """The documented non-repairable case (zero-support moment):
+        saturates AND stays singular -- flagged by the probe too."""
+        from emu_gmm.regularization import _TAU_MAX
+
+        V = TestZeroDiagonalSaturation._zero_diag_V()
+        reg = DiagonalTikhonov()
+        _V_star, tau = reg.apply(V)
+        assert float(tau) == pytest.approx(_TAU_MAX)
+        assert bool(reg.tau_saturated(V, tau))
+
+    def test_ordinary_binding_repair_is_not_saturated(self):
+        """A ridge that binds (tau > tau_threshold) but meets the joint
+        feasibility test is a repair, not saturation."""
+        # kappa 1e8 against a 1e3 target: the repair needs tau ~ 1e-2,
+        # over the 0.01 binding threshold but far from the 1e3 cap.
+        V = _ill_conditioned_V(target_kappa=1.0e8, dim=3)
+        reg = DiagonalTikhonov(kappa_target=1.0e3)
+        _V_star, tau = reg.apply(V)
+        assert float(tau) > float(reg.tau_threshold)  # binding ...
+        assert not bool(reg.tau_saturated(V, tau))  # ... not saturated
+
+    def test_indefinite_repair_is_not_saturated(self):
+        """The #111 indefinite-but-well-conditioned V is repairable:
+        binding, feasible at the realised tau, not saturated."""
+        V = _indefinite_well_conditioned_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e10)
+        _V_star, tau = reg.apply(V)
+        assert float(tau) > 0.0
+        assert not bool(reg.tau_saturated(V, tau))
+
+    def test_already_feasible_tau_zero_is_not_saturated(self):
+        V = _diag_V(jnp.array([1.0, 2.0, 4.0]))
+        reg = DiagonalTikhonov()
+        _V_star, tau = reg.apply(V)
+        assert float(tau) == pytest.approx(0.0, abs=1e-10)
+        assert not bool(reg.tau_saturated(V, tau))
+
+    def test_feasible_at_tau_max_is_not_saturated(self):
+        """Landing AT the cap with feasibility met is a legitimate repair,
+        not saturation: the probe tests feasibility, not just tau's value.
+        (Direct semantic pin: at tau = _TAU_MAX the #111 fixture's ridge
+        is heavily diagonally dominant -> PD and far under the loose
+        target, so the probe must stay False despite tau == _TAU_MAX.)"""
+        from emu_gmm.regularization import _TAU_MAX
+
+        V = _indefinite_well_conditioned_V()
+        reg = DiagonalTikhonov(kappa_target=1.0e10)
+        assert not bool(reg.tau_saturated(V, jnp.asarray(_TAU_MAX)))
+
+    def test_probe_jits(self):
+        """Traceable: a 0-d bool JAX array under jit, matching eager."""
+        reg = DiagonalTikhonov(kappa_target=1.0e3)
+
+        @jax.jit
+        def probe(r, vv):
+            _, tau = r.apply(vv)
+            return r.tau_saturated(vv, tau)
+
+        for V, expected in (
+            (_psd_unattainable_target_V(), True),
+            (_ill_conditioned_V(target_kappa=1.0e6, dim=3), False),
+        ):
+            out = probe(reg, V)
+            assert out.shape == ()
+            assert out.dtype == jnp.bool_
+            assert bool(out) is expected
+            # Eager agreement.
+            _, tau = reg.apply(V)
+            assert bool(reg.tau_saturated(V, tau)) is expected

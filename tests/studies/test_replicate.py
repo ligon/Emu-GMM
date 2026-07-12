@@ -68,6 +68,7 @@ class TestShapesAndMetadata:
         assert recs.records.tau_realised.shape == (3,)
         assert recs.records.binding_ridge.shape == (3,)
         assert recs.records.sigma_meat_indefinite.shape == (3,)
+        assert recs.records.tau_saturated.shape == (3,)
         assert recs.records.J_dof == 1  # M=3, K=2; static, unstacked
         assert recs.param_names == ("beta", "gamma")
 
@@ -109,6 +110,7 @@ class TestShapesAndMetadata:
             "tau_realised",
             "binding_ridge",
             "sigma_meat_indefinite",
+            "tau_saturated",
         ):
             assert col in df.columns
 
@@ -130,6 +132,7 @@ class TestShapesAndMetadata:
             tau_realised=jnp.zeros(n),
             binding_ridge=jnp.zeros(n),
             sigma_meat_indefinite=flag,
+            tau_saturated=jnp.zeros(n),
             J_dof=1,
             param_names=("beta", "gamma"),
         )
@@ -137,6 +140,35 @@ class TestShapesAndMetadata:
         df = recs.to_pandas()
         np.testing.assert_array_equal(
             df["sigma_meat_indefinite"].to_numpy(), np.array([0.0, 1.0, 0.0])
+        )
+
+    def test_to_pandas_carries_tau_saturated_values(self):
+        """The #205 ridge-saturation flag survives record -> stack ->
+        to_pandas (the sigma_meat_indefinite pattern): hand-build a
+        stacked FitRecord with the flag set on one rep and read it back
+        out of the DataFrame."""
+        from emu_gmm.types import FitRecord
+
+        n = 3
+        flag = jnp.asarray([0.0, 1.0, 0.0])
+        rec = FitRecord(
+            theta_flat=jnp.zeros((n, 2)),
+            se=jnp.ones((n, 2)),
+            J_stat=jnp.zeros(n),
+            J_pvalue=0.5 * jnp.ones(n),
+            J_pvalue_adjusted=0.5 * jnp.ones(n),
+            converged=jnp.ones(n),
+            tau_realised=jnp.zeros(n),
+            binding_ridge=jnp.zeros(n),
+            sigma_meat_indefinite=jnp.zeros(n),
+            tau_saturated=flag,
+            J_dof=1,
+            param_names=("beta", "gamma"),
+        )
+        recs = MCRecords(records=rec, key=jax.random.PRNGKey(0), n_reps=n)
+        df = recs.to_pandas()
+        np.testing.assert_array_equal(
+            df["tau_saturated"].to_numpy(), np.array([0.0, 1.0, 0.0])
         )
 
     def test_n_reps_must_be_positive(self):

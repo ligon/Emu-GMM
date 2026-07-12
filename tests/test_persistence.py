@@ -306,6 +306,7 @@ def _fake_mcrecords(seed: int = 0, n: int = 80, d: int = 2, extra=None):
         tau_realised=jnp.asarray(np.abs(rng.normal(size=n)) * 0.01),
         binding_ridge=jnp.asarray((rng.uniform(size=n) < 0.25).astype(float)),
         sigma_meat_indefinite=jnp.asarray((rng.uniform(size=n) < 0.1).astype(float)),
+        tau_saturated=jnp.asarray((rng.uniform(size=n) < 0.15).astype(float)),
         J_dof=1,
         param_names=("a", "b"),
     )
@@ -365,6 +366,43 @@ class TestEmpiricalRoundTrip:
         rb = load_law(tmp_path / "b.npz")
         coupled = ra.couple(rb)  # raises if the CRN provenance was lost
         assert coupled is not None
+
+    def test_records_tau_saturated_round_trips(self, tmp_path):
+        # #205: the per-rep tau_saturated column survives persistence.
+        from emu_gmm import EmpiricalLaw
+
+        mc = _fake_mcrecords(seed=11)
+        flag = np.asarray(mc.records.tau_saturated)
+        assert flag.sum() > 0  # the fixture exercises a nontrivial mix
+        law = EmpiricalLaw.from_records(mc)
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        r = load_law(p)
+        np.testing.assert_array_equal(
+            np.asarray(r._records.records.tau_saturated), flag
+        )
+
+    def test_pre_205_artifact_loads_with_zero_tau_saturated(self, tmp_path):
+        # An artifact written before #205 carries no rec_tau_saturated
+        # array; it must still load (additive schema, no version bump ---
+        # the pre-#183 extra_names precedent), the loader synthesizing an
+        # all-zero column on the same leading rep axis.
+        from emu_gmm import EmpiricalLaw
+
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=12))
+        p = tmp_path / "emp.npz"
+        save_law(law, p)
+        with np.load(p, allow_pickle=False) as data:
+            arrays = {k: data[k] for k in data.files}
+        assert "rec_tau_saturated" in arrays  # written by the current schema
+        del arrays["rec_tau_saturated"]  # simulate the pre-#205 layout
+        np.savez(p, **arrays)
+
+        r = load_law(p)
+        assert r.grade == "empirical"
+        got = np.asarray(r._records.records.tau_saturated)
+        np.testing.assert_array_equal(got, np.zeros(80))
+        np.testing.assert_array_equal(np.asarray(r.se()), np.asarray(law.se()))
 
     def test_records_extra_statistics_round_trip(self, tmp_path):
         # The #183 per-draw custom-statistics channel (MCRecords.extra) must

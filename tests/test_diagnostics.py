@@ -7,6 +7,7 @@ import warnings
 from contextlib import redirect_stdout
 
 import haliax as ha
+import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
@@ -303,6 +304,26 @@ class TestBuildDiagnosticsExtraFields:
         assert bool(build_diagnostics(**common).v_star_indefinite) is False
         d = build_diagnostics(**common, v_star_indefinite=jnp.asarray(True))
         assert bool(d.v_star_indefinite) is True
+
+    def test_tau_saturated_passthrough_and_default(self):
+        """``tau_saturated`` (#205) rides ``build_diagnostics`` like
+        ``v_star_indefinite`` and defaults to False."""
+        Moments = axes_mod.moments_axis(1)
+        common = dict(
+            tau_realised=0.0,
+            kappa_V=1.0,
+            binding_ridge=False,
+            cholesky_pivot_min=1.0,
+            final_objective=0.0,
+            final_gradient_norm=0.0,
+            N_j_array=jnp.array([1.0]),
+            moment_residual_array=jnp.array([0.0]),
+            moments_axis=Moments,
+            optimizer_info=_stub_optimizer_info(),
+        )
+        assert bool(build_diagnostics(**common).tau_saturated) is False
+        d = build_diagnostics(**common, tau_saturated=jnp.asarray(True))
+        assert bool(d.tau_saturated) is True
 
     def test_defaults_to_empty_dicts(self):
         """Backwards-compat: caller may omit cond_info/optimizer_health
@@ -648,3 +669,119 @@ class TestVStarIndefiniteDiagnostic:
         # Healthy fit: finite J and SEs (the flag is not a false alarm).
         assert bool(jnp.isfinite(res.objective_value))
         assert not np.isnan(np.asarray(res.asymptotic().se())).any()
+
+
+# ---------------------------------------------------------------------------
+# tau_saturated (#205): the ridge bisection exhausting at tau_max with the
+# joint PD/kappa feasibility test still failing at V* -- i.e. kappa_target
+# unattainable in the diagonal-ridge family (the #202 mechanism). Distinct
+# from binding_ridge (which flags an ordinary small repair and a saturated
+# cap identically) and from v_star_indefinite (saturation can leave V* PD).
+# Unit pins of the probe live in
+# tests/test_regularization.py::TestTauSaturatedProbe; here we drive
+# estimate() end-to-end.
+# ---------------------------------------------------------------------------
+
+
+def _psd_diag_ratio_V() -> jnp.ndarray:
+    """PSD V with diagonal ratio 1e8: a kappa_target below that ratio is
+    unattainable for the multiplicative ridge (#202)."""
+    return jnp.array(
+        [
+            [1.0e8, 1.0, 0.0],
+            [1.0, 1.0, 0.1],
+            [0.0, 0.1, 1.0],
+        ]
+    )
+
+
+def _repairable_ill_conditioned_V() -> jnp.ndarray:
+    """Non-axis-aligned PD V with kappa ~ 1e8: repairable to any target.
+
+    Against a 1e3 target the repair needs tau ~ 1e-2 -- over the binding
+    threshold (0.01), far from the tau cap: the ordinary-binding regime.
+    """
+    rng = np.random.default_rng(seed=1)
+    eigvals = np.geomspace(1.0, 1.0e-8, num=3)
+    Q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+    V = (Q * eigvals) @ Q.T
+    return jnp.asarray(0.5 * (V + V.T))
+
+
+class TestTauSaturatedDiagnostic:
+    """``estimate()`` surfaces saturation distinctly from repair (#205)."""
+
+    @staticmethod
+    def _estimate_with_V(V, kappa_target, theta_init=None):
+        exp_fn, _ = _well_conditioned_setup()
+
+        def cov_fn(model, theta):
+            return V
+
+        return estimate(
+            model=_model_unused,
+            measure=AnalyticalMeasure(expectation_fn=exp_fn),
+            covariance=AnalyticalCovariance(covariance_fn=cov_fn),
+            weighting=ContinuouslyUpdated(),
+            regularization=DiagonalTikhonov(kappa_target=kappa_target),
+            optimizer=optimistix_lm(rtol=1e-10, atol=1e-10),
+            theta_init=(
+                theta_init if theta_init is not None else _TwoParam(a=0.0, b=0.0)
+            ),
+        )
+
+    def test_unattainable_target_sets_flag_with_v_star_pd(self):
+        """The #202 regime: tau saturates, binding_ridge is True (the
+        conflation the flag disambiguates), yet V* is PD -- so
+        v_star_indefinite stays False and the fit itself is finite."""
+        res = self._estimate_with_V(_psd_diag_ratio_V(), kappa_target=1.0e3)
+        d = res.diagnostics
+        assert bool(d.tau_saturated)
+        assert bool(d.binding_ridge)  # same True as a small repair ...
+        assert float(d.tau_realised) == pytest.approx(_TAU_MAX)
+        assert not bool(d.v_star_indefinite)  # ... but V* is PD here
+        assert bool(jnp.isfinite(res.objective_value))
+
+    def test_ordinary_binding_repair_flag_false(self):
+        """A binding-but-successful repair must NOT read as saturation:
+        same binding_ridge=True, different regime."""
+        res = self._estimate_with_V(_repairable_ill_conditioned_V(), kappa_target=1.0e3)
+        d = res.diagnostics
+        assert bool(d.binding_ridge)
+        assert float(d.tau_realised) < _TAU_MAX
+        assert not bool(d.tau_saturated)
+
+    def test_already_feasible_flag_false(self):
+        res = self._estimate_with_V(jnp.eye(3), kappa_target=1.0e6)
+        d = res.diagnostics
+        assert float(d.tau_realised) == pytest.approx(0.0, abs=1e-12)
+        assert not bool(d.tau_saturated)
+
+    def test_zero_support_moment_saturates_and_v_star_indefinite(self):
+        """The non-repairable empirical case (zero-support moment) is a
+        saturation too -- there tau_saturated and v_star_indefinite are
+        BOTH True (the still-non-PD sub-case)."""
+        measure = _empirical_measure(zero_support_col=2)
+        with pytest.warns(UserWarning, match="not positive-definite"):
+            res = TestVStarIndefiniteDiagnostic._estimate(measure)
+        assert bool(res.diagnostics.tau_saturated)
+        assert bool(res.diagnostics.v_star_indefinite)
+
+    def test_flag_traces_under_jit_and_vmap(self):
+        """The v_star_indefinite traceability convention: a 0-d bool JAX
+        array under jit, batched under vmap, agreeing with eager."""
+        V_sat = _psd_diag_ratio_V()
+
+        def run(theta):
+            res = self._estimate_with_V(V_sat, kappa_target=1.0e3, theta_init=theta)
+            return jnp.asarray(res.diagnostics.tau_saturated)
+
+        out = jax.jit(run)(_TwoParam(a=0.0, b=0.0))
+        assert out.shape == ()
+        assert out.dtype == jnp.bool_
+        assert bool(out) is True
+
+        batch = _TwoParam(a=jnp.array([0.0, 0.1]), b=jnp.array([0.0, -0.1]))
+        batched = jax.vmap(run)(batch)
+        assert batched.shape == (2,)
+        assert bool(batched.all()) is True
