@@ -32,25 +32,32 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--config", required=True, help="config dict as JSON")
     ap.add_argument(
-        "--fitness-improvement", type=float, required=True,
+        "--fitness-improvement",
+        type=float,
+        required=True,
         help="the winner's combined fitness score (its improvement over "
-             "the all-defaults baseline); the bar is >= half this on "
-             "each hold-out")
+        "the all-defaults baseline); the bar is >= half this on "
+        "each hold-out",
+    )
     args = ap.parse_args(argv)
 
     cfg = ev.validate_config(json.loads(args.config))
     objects = ev.build_objects(cfg)
     bar = 0.5 * args.fitness_improvement
 
-    out = dict(config=cfg, fitness_improvement=args.fitness_improvement,
-               transfer_bar=bar, holdouts=[], transfer="PASS")
+    out = dict(
+        config=cfg,
+        fitness_improvement=args.fitness_improvement,
+        transfer_bar=bar,
+        holdouts=[],
+        transfer="PASS",
+    )
     for name, spec in fx.REGISTRY.items():
         if spec["role"] != "holdout":
             continue
         fx.build_baseline(name)  # ensure cached
         res = ev.score_on_fixture(objects, name)
-        res["passes_bar"] = bool(
-            res["status"] == "ok" and res["score"] >= bar)
+        res["passes_bar"] = bool(res["status"] == "ok" and res["score"] >= bar)
         out["holdouts"].append(res)
         if not res["passes_bar"]:
             out["transfer"] = "FAIL"

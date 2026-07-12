@@ -49,8 +49,9 @@ logger = logging.getLogger(__name__)
 
 THIS_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
 
-_DEFAULT_EMU_PY = ("/global/scratch/fsa/fc_jevons/ligon/mirrors/"
-                   "Emu-GMM/.venv/bin/python")
+_DEFAULT_EMU_PY = (
+    "/global/scratch/fsa/fc_jevons/ligon/mirrors/" "Emu-GMM/.venv/bin/python"
+)
 EMU_PY = os.getenv("EVOLVE_EMU_PY", _DEFAULT_EMU_PY)
 EXPERIMENT_NAME = os.getenv("EVOLVE_EXPERIMENT", "gmm_config")
 # Registered per-experiment defaults (pre-registration): run 1 probes
@@ -62,12 +63,18 @@ EVAL_TIMEOUT = int(os.getenv("EVOLVE_EVAL_TIMEOUT", "2700" if _IS_RIDGE else "90
 MAX_GENERATED = int(os.getenv("EVOLVE_MAX_GENERATED", "80"))
 MAX_EVALUATED = int(os.getenv("EVOLVE_MAX_EVALUATED", "80"))
 EVAL_THREADS = int(os.getenv("EVOLVE_EVAL_THREADS", "2"))
-RESULTS_DIR = Path(os.getenv(
-    "EVOLVE_RESULTS_DIR",
-    os.path.join(os.getenv("SUE_SCRATCH",
-                           "/global/scratch/fsa/fc_jevons/ligon/"
-                           "sue-scratch"),
-                 "emu_gmm_evolve", "runs")))
+RESULTS_DIR = Path(
+    os.getenv(
+        "EVOLVE_RESULTS_DIR",
+        os.path.join(
+            os.getenv(
+                "SUE_SCRATCH", "/global/scratch/fsa/fc_jevons/ligon/" "sue-scratch"
+            ),
+            "emu_gmm_evolve",
+            "runs",
+        ),
+    )
+)
 
 EVALUATION_METRIC = "score"
 FAIL_SCORE = -1.0
@@ -142,15 +149,19 @@ file state the full contract.
 
 EXPERIMENTS = {
     "gmm_config": dict(
-        evaluator="evaluator_gmm.py", initial="initial_config.py",
+        evaluator="evaluator_gmm.py",
+        initial="initial_config.py",
         title="emu-gmm estimator configuration (run 1)",
         problem=PROBLEM_GMM_CONFIG,
-        extra_args=["--oracle-budget", str(ORACLE_BUDGET)]),
+        extra_args=["--oracle-budget", str(ORACLE_BUDGET)],
+    ),
     "ridge_config": dict(
-        evaluator="evaluator_ridge.py", initial="initial_config_ridge.py",
+        evaluator="evaluator_ridge.py",
+        initial="initial_config_ridge.py",
         title="emu-gmm ridge/weighting calibration, binding regime (run 2)",
         problem=PROBLEM_RIDGE_CONFIG,
-        extra_args=["--oracle-budget", str(ORACLE_BUDGET)]),
+        extra_args=["--oracle-budget", str(ORACLE_BUDGET)],
+    ),
 }
 EXPERIMENT = EXPERIMENTS[EXPERIMENT_NAME]
 
@@ -167,13 +178,17 @@ _STAMP_SEQ = 0
 def _init_slots():
     cores = sorted(os.sched_getaffinity(0))
     t = max(1, EVAL_THREADS)
-    groups = [cores[i:i + t] for i in range(0, len(cores) - t + 1, t)]
+    groups = [cores[i : i + t] for i in range(0, len(cores) - t + 1, t)]
     if not groups:
         groups = [cores]
     for g in groups:
         _SLOTS.put(",".join(str(c) for c in g))
-    logger.info("affinity slots (%d cores, %d per eval): %d concurrent",
-                len(cores), t, len(groups))
+    logger.info(
+        "affinity slots (%d cores, %d per eval): %d concurrent",
+        len(cores),
+        t,
+        len(groups),
+    )
     return len(groups)
 
 
@@ -181,41 +196,62 @@ def evaluate_program(program_candidate) -> dict:
     """AlphaEvolve evaluation callback: files in, scores out (local run)."""
     files = program_candidate.get("content", {}).get("files", [])
     if not files:
-        return {"scores": {"scores": [
-            {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
-            "artifacts": {"error": "no files in candidate"}}
+        return {
+            "scores": {"scores": [{"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
+            "artifacts": {"error": "no files in candidate"},
+        }
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     slot = _SLOTS.get()  # blocks until a core group frees up
     try:
         with tempfile.TemporaryDirectory(prefix="ae_cand_") as td:
             cand = Path(td) / "candidate.py"
             cand.write_text(files[0].get("content", ""))
-            cmd = (["taskset", "-c", slot,
-                    EMU_PY, str(THIS_DIR / EXPERIMENT["evaluator"]),
-                    "--candidate", str(cand)] + EXPERIMENT["extra_args"])
+            cmd = [
+                "taskset",
+                "-c",
+                slot,
+                EMU_PY,
+                str(THIS_DIR / EXPERIMENT["evaluator"]),
+                "--candidate",
+                str(cand),
+            ] + EXPERIMENT["extra_args"]
             try:
                 proc = subprocess.run(
-                    cmd, capture_output=True, text=True,
-                    timeout=EVAL_TIMEOUT, cwd=str(THIS_DIR))
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=EVAL_TIMEOUT,
+                    cwd=str(THIS_DIR),
+                )
             except subprocess.TimeoutExpired:
-                return {"scores": {"scores": [
-                    {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
-                    "artifacts": {"error": "evaluation timed out after "
-                                           f"{EVAL_TIMEOUT}s"}}
+                return {
+                    "scores": {
+                        "scores": [{"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]
+                    },
+                    "artifacts": {
+                        "error": "evaluation timed out after " f"{EVAL_TIMEOUT}s"
+                    },
+                }
     finally:
         _SLOTS.put(slot)
     if proc.returncode != 0:
-        return {"scores": {"scores": [
-            {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
-            "artifacts": {"error": f"evaluator exit {proc.returncode}",
-                "stderr": proc.stderr[-2000:]}}
+        return {
+            "scores": {"scores": [{"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
+            "artifacts": {
+                "error": f"evaluator exit {proc.returncode}",
+                "stderr": proc.stderr[-2000:],
+            },
+        }
     try:
         result = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return {"scores": {"scores": [
-            {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
-            "artifacts": {"error": "unparseable evaluator output",
-                          "stdout": proc.stdout[-2000:]}}
+        return {
+            "scores": {"scores": [{"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
+            "artifacts": {
+                "error": "unparseable evaluator output",
+                "stdout": proc.stdout[-2000:],
+            },
+        }
     # Persist the full record next to the run (audit trail).  The stamp
     # includes a process-wide counter: with parallel_evaluation=True two
     # evaluator threads share a pid and can finish in the same
@@ -226,27 +262,29 @@ def evaluate_program(program_candidate) -> dict:
         seq = _STAMP_SEQ
     stamp = f"{int(time.time() * 1000)}-{os.getpid()}-{seq:04d}"
     (RESULTS_DIR / f"cand-{stamp}.json").write_text(
-        json.dumps({"result": result,
-                    "candidate": files[0].get("content", "")}, indent=2))
+        json.dumps(
+            {"result": result, "candidate": files[0].get("content", "")}, indent=2
+        )
+    )
     artifacts = {"fixtures": json.dumps(result.get("fixtures", []))[:5000]}
     if "config" in result:
         artifacts["config"] = json.dumps(result["config"])[:800]
     if result.get("status") not in (None, "ok"):
         artifacts["status"] = str(result.get("status"))[:200]
     return {
-        "scores": {"scores": [
-            {"metric": EVALUATION_METRIC, "score": result["score"]},
-            {"metric": "min_fixture_score",
-             "score": result["min_fixture_score"]},
-        ]},
+        "scores": {
+            "scores": [
+                {"metric": EVALUATION_METRIC, "score": result["score"]},
+                {"metric": "min_fixture_score", "score": result["min_fixture_score"]},
+            ]
+        },
         "artifacts": artifacts,
     }
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    logger.info("experiment: %s (%s)", EXPERIMENT_NAME,
-                EXPERIMENT["evaluator"])
+    logger.info("experiment: %s (%s)", EXPERIMENT_NAME, EXPERIMENT["evaluator"])
     n_slots = _init_slots()
     initial_name = os.getenv("EVOLVE_INITIAL", EXPERIMENT["initial"])
     logger.info("seed file: %s", initial_name)
@@ -255,8 +293,8 @@ def main():
     # Score the seed locally first: its real score seeds the experiment,
     # and a broken harness fails HERE, before any API call.
     seed_eval = evaluate_program(
-        {"content": {"files": [{"path": initial_name,
-                                "content": initial_src}]}})
+        {"content": {"files": [{"path": initial_name, "content": initial_src}]}}
+    )
     seed_score = seed_eval["scores"]["scores"][0]["score"]
     logger.info("seed score: %s (expect ~0.0)", seed_score)
     if "--dry-run" in sys.argv:
@@ -269,9 +307,11 @@ def main():
             f"seed score {seed_score} differs from its registered value {seed_expect} by > 0.05 "
             "-- fixtures/baseline out of sync (or EVOLVE_SEED_EXPECT not "
             "set for a non-baseline seed); rebuild/re-register before "
-            "spending API budget")
+            "spending API budget"
+        )
 
     from dotenv import load_dotenv
+
     # Explicit path: the default find_dotenv would search upward from THIS
     # directory and never see a project-local .env.
     load_dotenv(os.getenv("AE_ENV_FILE", str(THIS_DIR / ".env")))
@@ -296,43 +336,53 @@ def main():
     # (measured on the AggLC pilot's run 1).  Our evaluator is an
     # isolated deterministic subprocess in its own affinity slot, so
     # thread-dispatch cannot affect scores.
-    experiment = AlphaEvolveExperiment(client, evaluate_program,
-                                       MAX_EVALUATED,
-                                       parallel_evaluation=True)
-    experiment.create_experiment({
-        "title": EXPERIMENT["title"],
-        "problem_description": EXPERIMENT["problem"],
-        "program_language": "python",
-        "run_settings": {
-            "max_programs": MAX_GENERATED,
-            # Request-level, not project-quota (AggLC measurement
-            # 2026-07-11: 16 -> ~6-8 gen/min vs ~2.5/min at 4).
-            "concurrency": int(os.getenv("EVOLVE_CONCURRENCY", "16")),
-        },
-    })
-    experiment.create_initial_program({
-        "content": {"files": [
-            {"path": initial_name, "content": initial_src}]},
-        "evaluation": {"scores": {"scores": [
-            {"metric": EVALUATION_METRIC, "score": seed_score}]}},
-    })
+    experiment = AlphaEvolveExperiment(
+        client, evaluate_program, MAX_EVALUATED, parallel_evaluation=True
+    )
+    experiment.create_experiment(
+        {
+            "title": EXPERIMENT["title"],
+            "problem_description": EXPERIMENT["problem"],
+            "program_language": "python",
+            "run_settings": {
+                "max_programs": MAX_GENERATED,
+                # Request-level, not project-quota (AggLC measurement
+                # 2026-07-11: 16 -> ~6-8 gen/min vs ~2.5/min at 4).
+                "concurrency": int(os.getenv("EVOLVE_CONCURRENCY", "16")),
+            },
+        }
+    )
+    experiment.create_initial_program(
+        {
+            "content": {"files": [{"path": initial_name, "content": initial_src}]},
+            "evaluation": {
+                "scores": {
+                    "scores": [{"metric": EVALUATION_METRIC, "score": seed_score}]
+                }
+            },
+        }
+    )
     experiment.start_experiment()
     nest_asyncio.apply()
-    asyncio.run(run_controller_loop(
-        experiment,
-        num_samplers=int(os.getenv("EVOLVE_NUM_SAMPLERS", "4")),
-        num_evaluators=int(os.getenv("EVOLVE_NUM_EVALUATORS",
-                                     str(n_slots)))))
+    asyncio.run(
+        run_controller_loop(
+            experiment,
+            num_samplers=int(os.getenv("EVOLVE_NUM_SAMPLERS", "4")),
+            num_evaluators=int(os.getenv("EVOLVE_NUM_EVALUATORS", str(n_slots))),
+        )
+    )
 
     response = experiment.list_programs(params={"order_by": "score desc"})
     programs = (response or {}).get("alphaEvolvePrograms", [])
-    programs.sort(key=lambda p: get_score(p, EVALUATION_METRIC),
-                  reverse=True)
+    programs.sort(key=lambda p: get_score(p, EVALUATION_METRIC), reverse=True)
     logger.info("top programs:")
     for i, prog in enumerate(programs[:5]):
-        logger.info("rank %d: %s score=%s", i + 1,
-                    prog.get("name", "?"),
-                    get_score(prog, EVALUATION_METRIC))
+        logger.info(
+            "rank %d: %s score=%s",
+            i + 1,
+            prog.get("name", "?"),
+            get_score(prog, EVALUATION_METRIC),
+        )
 
 
 if __name__ == "__main__":
