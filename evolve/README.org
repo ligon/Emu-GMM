@@ -333,6 +333,123 @@ kappa=1e4) validly scored -1.401 -- the landscape has real variation,
 unlike run 1's flat surface; G6 discriminance asserted (fitness
 binding 35/44 percent, benign <= 5 percent).
 
+* Run 2 results (2026-07-11/12) -- evolution negative; direct sweep positive
+
+Registered run executed as frozen: Slurm job 35593802 (16 cores),
+3h08m, 80 candidates evaluated on the =emu-gmm= engine; seed re-scored
+exactly 0.0 on the compute node before API spend.  Per-candidate
+records in =$SUE_SCRATCH/emu_gmm_evolve/runs/= (one record lost to a
+same-millisecond filename collision between evaluator threads --
+scoring unaffected; fix the stamp before run 3).
+
+** Registered outcome: NO evolved candidate beat the baseline
+
+Best evolved score -0.975 (an identity-weighting config; converges
+96/96 but roughly doubles the calibration error); the rest of the
+field gated at -1.  Family breakdown: 64/68 candidates went ITERATED
+weighting -- every one failed the n_used gate (convergence 50-68 of
+96 vs the baseline's 82) -- 2 were exact CUE default clones, 2
+identity.  The GA NEVER varied kappa_target under CUE weighting: the
+run's central hypothesis went untested by evolution.
+
+Two root causes, both process lessons:
+1. The problem text's statistical hint ("iterated GMM is steadier")
+   is WRONG in the binding regime and steered the mutator into a
+   family the convergence gate kills.  The prompt is part of the
+   instrument; a wrong hint contaminates the search.
+2. emu-gmm flags fixed-k / tol-exhausted iterated schedules
+   non-converged (estimator.py:1254) and does not surface
+   =iterated_status= -- filed as emu-gmm #201.  Part of the iterated
+   collapse is definitional, not statistical.
+
+** Reference arms (EXPLORATORY; =reference_arms.py=, both accountings)
+
+err_registered (flag-respecting, the frozen metric) vs
+err_practitioner (flag-blind, as a textbook two-step user -- who has
+no iteration flag -- would score the same fits):
+
+| arm               | F1 reg->prac              | F2 reg->prac              |
+|-------------------+---------------------------+---------------------------|
+| one_step_anchored | 1.90 -> 0.426 (score +0.01) | 1.90 -> 0.697 (-0.06)   |
+| two_step (k=2)    | 1.82 -> 0.494 (-0.15)     | 1.68 -> 0.718 (-0.10)     |
+| identity          | 1.035 -> 1.035 (-1.40)    | 1.020 -> 1.015 (-0.55)    |
+| cue_default       | 0.431 -> 0.302 (+0.30)    | 0.655 -> 0.452 (+0.31)    |
+
+The #201 flag artifact is TOTAL for fixed-k (k=1 flagged on 96/96
+reps by construction); under practitioner accounting the anchored
+one-step matches baseline and two-step trails by ~0.1, while
+identity's failure is real under both.  Caveat: one_step_anchored
+weights by V(theta_init) with theta_init = truth (an oracle weight);
+the fair "standard estimator" row is two_step.
+
+** Direct kappa sweep under CUE (EXPLORATORY; =kappa_sweep.py=, job 35594871)
+
+Registered metric, fixtures, and gates; only kappa_target varied:
+
+| kappa   | F1 score (used/96) | F2 score (used/96) |
+|---------+--------------------+--------------------|
+| 1e2     | +0.302 (91)        | +0.348 (95)        |
+| 1e3     | +0.217 (90)        | +0.310 (89)        |
+| 1e4     | +0.302 (90)        | +0.175 (84)        |
+| 1e5     |  0.000 (84)        | +0.207 (85)        |
+| 1e6 (default baseline) | 0 (82) | 0 (82)          |
+| >=1e7   | gated -1 (76-79)   | gated -1 (76-79)   |
+
+Monotone-ish dose-response: aggressive regularization improves BOTH
+convergence and calibration in the binding regime; the default 1e6
+sits at the cliff edge (>=1e7 regresses convergence below the gate).
+The improvement trend points at the whitelist's LOWER bound (1e2) --
+the in-bounds optimum may sit on the boundary.
+
+** Hold-out verdicts for the sweep's best configs: BOTH PASS
+
+(Exploratory in the prereg sense -- the GA did not propose these
+configs -- but measured with the registered fixtures, metric, gates,
+and bars via =holdout_battery_run2.py=.)
+
+| config    | H1 =fb_mid= score (bar)  | H1 err (base .3115) | H1 used | H2 =fb_benign= (do-no-harm)         |
+|-----------+--------------------------+---------------------+---------+-------------------------------------|
+| kappa=1e2 | *+0.415* (bar .163) PASS | 0.182               | 93/96   | err 0.114583 = baseline, PASS       |
+| kappa=1e3 | *+0.334* (bar .132) PASS | 0.207               | 92/96   | err 0.114583 = baseline, PASS       |
+
+Both show BETTER-than-full retention (H1 transfer exceeds the
+combined fitness improvement -- the opposite of fitness overfitting),
+and on the benign arm both are calibration-IDENTICAL to baseline: the
+adaptive ridge only engages where V needs repair (benign binding
+~1-2 percent), so a tight kappa_target has zero measured cost on
+healthy data.  The over-ridging Goodhart channel the do-no-harm bar
+was designed to catch is empirically absent for in-bounds kappa.
+At kappa=1e2, H1's J-rejection lands at 0.031 (~nominal) and n_used
+rises 85 -> 93; coverage improves (0.74, 0.69) -> (0.83, 0.74) but
+remains below nominal -- an improvement, not a full repair.
+
+** Bottom line and adoption path
+
+1. REGISTERED claim (run 2): the evolution found nothing; defaults
+   beat every evolved candidate.  Negative result stands as
+   registered.
+2. EXPLORATORY-but-registered-metric claim (sweep + hold-outs):
+   =DiagonalTikhonov(kappa_target ~ 1e3)= dominates the 1e6 default
+   in the binding regime -- better convergence, better coverage,
+   near-nominal J size -- transfers to an unseen milder-binding spec
+   above the bar, and is bit-identical to the default on healthy
+   data.  Claims cap at golden-fixture strength on this DGP family;
+   a default change in emu-gmm needs EL's rationale review and its
+   own confirmatory pass (the natural vehicle: an emu-gmm issue with
+   this section attached).
+3. Interface findings for the package: #201 (fixed-k two-step flagged
+   non-converged; iterated_status not surfaced).  The registered
+   metric inherited those semantics -- under flag-blind accounting
+   even the baseline's err drops ~30 percent (see reference arms) --
+   so any run 3 should decide deliberately which accounting it
+   freezes.
+4. Process lessons for future runs: the problem-text hint is part of
+   the instrument (a wrong "iterated is steadier" hint sent 64/68
+   candidates into a gated family); a whitelist boundary the sweep
+   trend points AT (kappa=1e2 here) should trigger a bounds review
+   before the next registration; audit-record filenames must be
+   collision-proof (fixed post-run in =run_experiment.py=).
+
 * Session bootstrap (for a fresh session picking this up)
 
 Work from this clone ($SUE_SCRATCH/emu_gmm_evolve/repo, branch

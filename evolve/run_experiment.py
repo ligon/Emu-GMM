@@ -41,6 +41,7 @@ import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -159,6 +160,8 @@ EXPERIMENT = EXPERIMENTS[EXPERIMENT_NAME]
 # "64-core JIT-mmap hazard"; validated mechanism: taskset + affinity).
 # ---------------------------------------------------------------------------
 _SLOTS: "queue.Queue[str]" = queue.Queue()
+_STAMP_LOCK = threading.Lock()
+_STAMP_SEQ = 0
 
 
 def _init_slots():
@@ -213,8 +216,15 @@ def evaluate_program(program_candidate) -> dict:
             {"metric": EVALUATION_METRIC, "score": FAIL_SCORE}]},
             "artifacts": {"error": "unparseable evaluator output",
                           "stdout": proc.stdout[-2000:]}}
-    # Persist the full record next to the run (audit trail).
-    stamp = f"{int(time.time() * 1000)}-{os.getpid()}"
+    # Persist the full record next to the run (audit trail).  The stamp
+    # includes a process-wide counter: with parallel_evaluation=True two
+    # evaluator threads share a pid and can finish in the same
+    # millisecond, and run 2 lost one record to exactly that collision.
+    with _STAMP_LOCK:
+        global _STAMP_SEQ
+        _STAMP_SEQ += 1
+        seq = _STAMP_SEQ
+    stamp = f"{int(time.time() * 1000)}-{os.getpid()}-{seq:04d}"
     (RESULTS_DIR / f"cand-{stamp}.json").write_text(
         json.dumps({"result": result,
                     "candidate": files[0].get("content", "")}, indent=2))
