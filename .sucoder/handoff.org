@@ -57,20 +57,33 @@ New files: =fixture_binding.py=, =evaluator_ridge.py=,
 =holdout_battery_run2.py=; =run_experiment.py= gained the
 ridge_config entry (run-1 scoring hashes re-verified intact).
 
+* RUN 2 COMPLETE (2026-07-12): evolution negative, kappa sweep POSITIVE
+
+Full results in =evolve/README.org= "Run 2 results" (branch at
+=6ad132d=, pushed; run clone synced).  Registered outcome: no evolved
+candidate beat defaults (GA stuck in the gated iterated family; never
+tried kappa-under-CUE).  Post-run exploratory analyses with the
+registered metric found the real result: =DiagonalTikhonov=
+kappa_target ~1e3 (vs default 1e6) dominates in the binding regime
+(fitness scores +0.2..+0.35, better convergence), transfers ABOVE the
+bar on the unseen binding hold-out (+0.33/+0.41, better-than-full
+retention), and is bit-identical to the default on the benign arm
+(adaptive ridge only engages under repair).  emu-gmm #201 filed
+(fixed-k two-step flagged non-converged; iterated_status not
+surfaced).
+
 * Next concrete actions
 
-1. Battery =test_harness_run2.py= was RUNNING in background at
-   handoff-write time (~40 min).  If green: sha256 freeze (append to
-   README run-2 section), commit+push evolve-harness, ff the run
-   clone, then submit:
-     cd $SUE_SCRATCH/emu_gmm_evolve/repo
-     EVOLVE_EXPERIMENT=ridge_config sbatch --time=08:00:00 \
-         evolve/sbatch_evolve.sh
-   Monitor the log (evolve_gmm_<jobid>.log); in-job seed gate aborts
-   before API spend if baselines drift.
-2. Post-run: =holdout_battery_run2.py --config <winner> \
-   --fitness-improvement <combined score>=; transfer bar >= half on
-   fb_mid_eps_k41 AND do-no-harm (err <= base+0.05) on fb_benign_k42;
-   rationale review before any adoption claim.
+1. EL rationale review of the kappa finding; if adopted, open an
+   emu-gmm issue proposing the kappa_target default review with the
+   README section attached (claims cap at golden-fixture strength on
+   the ladder_mc DGP family; a confirmatory registered pass is the
+   clean path to a default change).
+2. Possible run 3 (needs fresh prereg): fix #201 first so two-step
+   races fairly; reconsider the kappa lower bound (sweep trend points
+   at 1e2, the boundary); decide flag-respecting vs flag-blind
+   accounting deliberately; correct the problem-text hints.
 3. Consider merging =evolve-harness= to main once EL has read both
-   runs' results.
+   runs' results (branch is additive).
+4. When truly done with the session, remind EL: =sucoder release= (or
+   scancel 35592454) frees the condo slice.
