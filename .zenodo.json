@@ -1,0 +1,25 @@
+{
+  "upload_type": "software",
+  "title": "Emu-GMM: Measure-Theoretic Generalized Method of Moments Estimation",
+  "creators": [
+    {
+      "name": "Ligon, Ethan",
+      "affiliation": "University of California, Berkeley",
+      "orcid": "0000-0003-4928-0616"
+    }
+  ],
+  "description": "<p><strong>emu-gmm</strong> is a JAX-native framework for Generalized Method of Moments estimation. The framework is named for the operator at its centre: <em>emu</em> reads as E_mu, the expectation under a measure mu. One operator interface &mdash; implemented against empirical, analytical, or synthetic measures &mdash; drives sample estimation, identification analysis, and simulation-based inference through a single computational pipeline.</p><p>The central architectural commitment is that variance construction is orthogonal to integration: E_mu[psi] is a property of the measure, while V_mu(theta) is a property of a separate <code>CovarianceStrategy</code> that can be swapped (iid vs cluster-robust vs replicate-weight) without changing what is being integrated.</p><p>The package provides Riemannian-manifold parameter geometry, a stratified and design-aware covariance ladder, identification diagnostics, iterated and continuously-updating weighting schemes, and a query algebra over the law of the estimator.</p>",
+  "license": "cc-by-nc-sa-4.0",
+  "access_right": "open",
+  "keywords": [
+    "generalized method of moments",
+    "GMM",
+    "econometrics",
+    "measure theory",
+    "JAX",
+    "automatic differentiation",
+    "Riemannian optimization",
+    "statistical inference",
+    "Python"
+  ]
+}
