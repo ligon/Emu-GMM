@@ -117,6 +117,28 @@ def _orthogonal(seed: int, k: int, reflect: bool = False) -> jnp.ndarray:
     return q
 
 
+def _signed_permutation(seed: int, k: int, reflect: bool = False) -> jnp.ndarray:
+    """An EXACT ``Q in O(k)``: a permutation matrix with +/-1 entries.
+
+    ``_orthogonal`` above is the qr of a Gaussian, so its entries are rounded
+    and ``Y0 @ Q`` is a rounded product -- leaving the two gauge trajectories
+    equivalent only to ~1e-9 (see ``test_gamma_invariant_under_YQ``). Every
+    entry here is exactly representable in binary floating point, so ``Y0 @ Q``
+    is an exact permutation-and-negation of columns and the gauge relation
+    carries no rounding at all. That lets the strict cross-gauge assertion the
+    class docstring asks for be tested where it is actually meaningful.
+    """
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(k)
+    signs = rng.choice([-1.0, 1.0], size=k)
+    q = np.zeros((k, k))
+    q[perm, np.arange(k)] = signs
+    want = -1.0 if reflect else 1.0
+    if np.linalg.det(q) * want < 0:
+        q[:, 0] = -q[:, 0]
+    return jnp.asarray(q)
+
+
 def _nonconvex_residual(theta_flat, x_bar, k: int, n: int = N):
     r"""A deliberately NON-CONVEX least-squares residual in ``Gamma``.
 
@@ -181,6 +203,34 @@ class TestGaugeInvariantConvergence:
     A loose tolerance would hide a partial gauge leak; do NOT loosen. If
     these fail, suspect the horizontal projection / the missing
     re-tangentialization, not the test.
+
+    ONE carve-out (owner decision 2026-07-27), and the strict assertion is
+    RELOCATED rather than dropped.
+
+    ``test_reported_gradnorm_is_horizontal_and_YQ_invariant`` compares the
+    two REPORTED ``||g||`` values under a DENSE ``Q``. But ``Y0 @ Q`` is then
+    a rounded product, so the two trajectories are gauge-equivalent only to
+    ~1e-9 -- the same noise floor already documented for the outer-step count
+    below -- and both reported norms are numerical zeroes by the solver's own
+    criterion (rtol=1e-8, atol=1e-10). Comparing them at abs=1e-9 therefore
+    asks for agreement AT the noise floor, and what it actually measures is
+    which side of the stopping threshold each trajectory landed on. That is
+    settled by platform floating-point: green on CI, deterministically red on
+    other hardware at k=3. That ONE comparison is now made at the solver's
+    convergence scale.
+
+    The strict form lives on in
+    ``test_reported_gradnorm_exact_gauge_is_strictly_invariant``, where ``Q``
+    is a SIGNED PERMUTATION -- exactly representable, so the gauge relation
+    carries no rounding and abs=1e-9 is a fair demand. It passes at full
+    strength, including at k=3 where the dense-rotation form fails; that is
+    the evidence that the dense failure is rounding in the construction and
+    NOT a gauge leak.
+
+    Everything else stays strict: the 1e-9 ``Gamma`` agreement above, and the
+    definitional guard against a raw ambient ``||grad||`` in
+    ``test_horizontal_gradnorm_matches_manifold_projection``, which recomputes
+    the horizontal projection test-side.
     """
 
     def _setup(self, k: int):
@@ -251,6 +301,69 @@ class TestGaugeInvariantConvergence:
         # The reported final gradient norm must be the HORIZONTAL norm and so
         # be (near-)identical along the fibre. A raw ambient ||grad|| would
         # carry the gauge-rotated vertical component and differ under Y->YQ.
+        ga = float(jnp.asarray(info_a.final_gradient_norm))
+        gb = float(jnp.asarray(info_b.final_gradient_norm))
+        assert np.isfinite(ga) and np.isfinite(gb)
+
+        # The load-bearing claim: BOTH gauges certify convergence. A solver
+        # certifying on a gauge-contaminated norm would fail this, or fail the
+        # definitional check in the next test.
+        assert bool(info_a.done) is True
+        assert bool(info_b.done) is True
+
+        # Compare at the solver's own convergence scale, NOT below it. ``Q``
+        # here is a DENSE rotation, so -- exactly as
+        # test_gamma_invariant_under_YQ records -- ``Y0 @ Q`` is a rounded
+        # product and the two trajectories are gauge-equivalent only to ~1e-9.
+        # Asserting their reported norms agree to abs=1e-9 is asking for
+        # agreement AT that documented noise floor. Both values are also
+        # numerical zeroes by the solver's own criterion (rtol=1e-8,
+        # atol=1e-10), so what such an assertion measures is which side of the
+        # stopping threshold each trajectory landed on -- decided by platform
+        # floating-point, hence green on CI and red elsewhere (observed here,
+        # deterministically and bit-identically across runs: 4.2206e-10 vs
+        # 1.0788e-8, at k=3 only, where Y0 @ Q carries more rounding).
+        #
+        # This is the same category as the outer-step count dropped in
+        # test_gamma_invariant_under_YQ: a hard threshold crossing near
+        # convergence, not a continuous invariant.
+        #
+        # The strict form of this assertion is NOT abandoned -- it is moved to
+        # test_reported_gradnorm_exact_gauge_is_strictly_invariant below, where
+        # Q is exactly representable and the noise floor is absent. A genuine
+        # gauge leak is not hidden by the looser bound here either: the
+        # vertical component it would add is O(||g_ambient||), orders of
+        # magnitude above 1e-7, and the definition of the reported norm is
+        # pinned independently in
+        # test_horizontal_gradnorm_matches_manifold_projection.
+        GTOL = 1e-8  # the solver rtol both solves are certified against
+        assert ga <= 10 * GTOL and gb <= 10 * GTOL
+        assert ga == pytest.approx(gb, abs=10 * GTOL)
+
+    def test_reported_gradnorm_exact_gauge_is_strictly_invariant(self, k, reflect):
+        # Companion to the test above with the noise floor removed. ``Q`` is a
+        # SIGNED PERMUTATION: exactly representable, so ``Y0 @ Q`` is an exact
+        # permutation-and-negation of columns and the two starts are gauge-
+        # related with NO rounding. The strict 1e-9 agreement the class
+        # docstring demands is meaningful here, so it is kept at full strength.
+        residual_fn, params_a, spec, _A = self._setup(k)
+        Y0 = jnp.asarray(params_a.Y.array)
+        phi0 = float(jnp.reshape(jnp.asarray(params_a.phi.array), ()))
+        Q = _signed_permutation(13 + k, k, reflect=reflect)
+
+        # Q is EXACTLY orthogonal -- note ``==``, not allclose.
+        assert bool(jnp.all(Q @ Q.T == jnp.eye(k)))
+        assert float(jnp.linalg.det(Q)) == (-1.0 if reflect else 1.0)
+
+        params_b = _make_params(Y0 @ Q, phi0, k)
+
+        opt = riemannian_tr(max_steps=200, rtol=1e-8, atol=1e-10)
+        _th_a, info_a = opt(residual_fn, params_a, spec)
+        _th_b, info_b = opt(residual_fn, params_b, spec)
+
+        assert bool(info_a.done) is True
+        assert bool(info_b.done) is True
+
         ga = float(jnp.asarray(info_a.final_gradient_norm))
         gb = float(jnp.asarray(info_b.final_gradient_norm))
         assert np.isfinite(ga) and np.isfinite(gb)
