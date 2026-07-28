@@ -3,6 +3,8 @@
 #+AUTHOR: Ethan Ligon
 #+OPTIONS: toc:nil num:nil
 
+[[https://doi.org/10.5281/zenodo.21629016][https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21629016-blue.svg]]
+
 =emu-gmm= is a JAX-native framework for Generalized Method of Moments estimation. The framework is named for the operator at its centre: =emu= reads as $\mathbb{E}_\mu$, the expectation under a measure $\mu$.  One operator interface --- implemented against empirical, analytical, or synthetic measures --- drives sample estimation, identification analysis, and simulation-based inference through a single computational pipeline.
 
 The most important architectural commitment is that variance construction is orthogonal to integration: $\mathbb{E}_\mu[\psi]$ is a property of the measure; $V_\mu(\theta)$ is a property of a separate =CovarianceStrategy= that can be swapped (iid vs cluster-robust vs replicate-weight) without changing what is being integrated.
