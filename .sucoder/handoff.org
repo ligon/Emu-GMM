@@ -28,18 +28,33 @@ Both fixes are on branches off =main= (=bb67c2c=, v0.4.0 + Zenodo DOI).
   #156 CU+clustered and CU+IID, Positive stuck start -- ALL bitwise
   identical (steps, J, theta).  Table is in the PR #213 body.
 
-** Gates
-- #210: =make par-check= GREEN (1584 passed, 25 skipped; job 40371792,
-  n4247).  Serial =make check= on the same job: PENDING at the time of
-  this note -- log =/global/scratch/users/ligon/sue/emu210/check_40371792.log=,
-  look for =CHECK_EXIT==.  Record it as a comment on PR #212.
-- #211: full gate job 40372061 (clones the published branch from the
-  mirror): PENDING -- log
-  =/global/scratch/users/ligon/sue/emu210/check211_40372061.log=
-  (=PAR_CHECK_EXIT== then =CHECK_EXIT==).  Record on PR #213.
-- Burst scripts: =/global/scratch/users/ligon/sue/emu210/check210.slurm=,
-  =check211.slurm= (note: use the uv-managed Python 3.11 under =$HOME=;
-  not every savio4_htc node has =/usr/bin/python3.11=).
+** Gates (all GREEN, 2026-10-22)
+- #210 (job 40371792, n4247): =make par-check= 1584 passed / 25 skipped
+  (13m31s); canonical serial =make check= 1584 passed / 25 skipped
+  (47m55s), =CHECK_EXIT=0=.  Recorded on PR #212.  CI 11/11.
+- #211 (job 40372061, published branch @ =dc60e34=): =make par-check=
+  1589 passed / 25 skipped (12m45s); serial =make check= 1589 passed /
+  25 skipped (43m25s), =CHECK_EXIT=0=.  Recorded on PR #213.  CI 11/11.
+- Logs: =/global/scratch/users/ligon/sue/emu210/check_40371792.log=,
+  =check211_40372061.log=; burst scripts =check210.slurm= / =check211.slurm=
+  there (use the uv-managed Python 3.11 under =$HOME=; not every
+  savio4_htc node has =/usr/bin/python3.11=).
+
+** Release path (PR #214, =ci/publish-pypi= @ =a90a63b=)
+PyPI has emu-gmm 0.3.1; GitHub is at v0.4.0 (tagged + Released, Zenodo
+DOI, no assets) -- 0.4.0 was never uploaded because =make release= only
+makes a local tag and =make publish= needs a token.  #214 adds
+=.github/workflows/publish.yml= (on =release: published=: poetry check,
+tag == pyproject version, build, attach dist/ to the Release, upload via
+=pypa/gh-action-pypi-publish= through environment =pypi= with an OIDC
+id-token) and =make release-publish= (push =--follow-tags= + =gh release
+create=).  INERT until EL does the one-time setup: trusted publisher on
+pypi.org (owner ligon / repo Emu-GMM / workflow publish.yml / env pypi)
+and a =pypi= environment on GitHub (required reviewer recommended).
+Then 0.4.1 = merge #212 -> #213 -> =make release BUMP=patch= on clean
+main -> =make release-publish= -> approve the environment run.  Fold the
+0.4.0 notes into the 0.4.1 release notes (first index release with the
+estimation/inference split).
 
 ** Issues filed this session
 - Emu-GMM #211 (precision-aware acceptance; now addressed by PR #213).
@@ -69,10 +84,11 @@ Both fixes are on branches off =main= (=bb67c2c=, v0.4.0 + Zenodo DOI).
 - Mirror has untracked =.coder/= logs; untouched.
 
 ** Next concrete actions
-1. Read both gate logs; comment results on PR #212 / #213.
-2. Merge #212, then #213 (CI should also run on both).
-3. After merge: delete =fix/210-lm-stagnation= / =fix/211-accurate-reduction=
-   on mirror and GitHub; close #210, #211 (PR bodies say "Closes").
+1. Merge #212, then #213 (both fully gated), then #214.
+2. After merge: delete =fix/210-lm-stagnation=, =fix/211-accurate-reduction=,
+   =ci/publish-pypi= on mirror and GitHub; #210/#211 close via the PRs.
+3. EL: PyPI trusted publisher + GitHub =pypi= environment; then cut 0.4.1
+   as above.
 4. =sucoder release= (or =scancel 40371651=) when EL is done with this
    slice; nothing long-running is attached to it.
 
