@@ -83,16 +83,30 @@ estimation/inference split).
   =fix/*=) untouched.
 - Mirror has untracked =.coder/= logs; untouched.
 
-** Next concrete actions
-1. Merge #212, then #213 (both fully gated), then #214.
-2. After merge: delete =fix/210-lm-stagnation=, =fix/211-accurate-reduction=,
-   =ci/publish-pypi= on mirror and GitHub; #210/#211 close via the PRs.
-3. EL: PyPI trusted publisher + GitHub =pypi= environment; then cut 0.4.1
-   as above.
-4. =sucoder release= (or =scancel 40371651=) when EL is done with this
-   slice; nothing long-running is attached to it.
+** RELEASED: emu-gmm v0.4.1 (2026-10-22 16:38Z)
+- Merged in order: PR #212 (=79d589a=), #213 (=672b37d=; GitHub CLOSED it
+  when #212's branch was deleted instead of retargeting -- restored the
+  branch, reopened, retargeted to main, deleted again), #214 (=f713939=).
+  #210 / #211 closed by the PRs.  Main CI run 39805617390 green.
+- =make release BUMP=patch GATE== -> =08c1928= "Bump version to 0.4.1",
+  tag =v0.4.1=; pushed =--follow-tags=; Release
+  https://github.com/ligon/Emu-GMM/releases/tag/v0.4.1 created with a
+  preamble (0.3.1 -> 0.4.1 jump, v0.4.0 API split) + generated notes.
+- publish.yml run 39815544826: build + upload SUCCESS; artifacts attached
+  to the Release; PyPI latest = 0.4.1 (wheel + sdist, 16:38Z).
+  Zenodo version DOI 10.5281/zenodo.23571938 (concept 10.5281/zenodo.21629016).
+- Smoke: =pip install emu-gmm==0.4.1= resolves cleanly (picks
+  haliax 1.4.dev453); =uv= needs =--prerelease=allow= for the transitive
+  haliax pre-release pin -> issue #215 (docs; not a regression, 0.3.1 had
+  the same pin; no stable haliax 1.4 yet).
+- Mirror and clone: =main= at =08c1928=, branches =main= + =handoff= only.
 
-** Scratch (job-local; gone at turnover)
-=$SUCODER_LOCAL_ROOT/tmp/claude-43292/.../scratchpad/=: =repro210.py=,
-=exp211.py= (in-memory patched-solver experiment), =measure211.py= +
-=measure211.log= (the bitwise table), =targeted211.log= (175 passed).
+** Next concrete actions
+1. #215: README "Setup" note for uv users; revisit the haliax pin when a
+   stable 1.4 lands.
+2. EL's call: delete unmerged =confirm/202-kappa-euler-mask= /
+   =measure/205-site-saturation=; GitHub's stale =claude/*= /
+   =worktree-wf_*= / old merged =fix/*= branches; GitHub =evolve-harness=
+   (its two handoff commits are rebased into this branch).
+3. =sucoder release= (or =scancel 40371651=) -- nothing is attached to
+   this slice.
