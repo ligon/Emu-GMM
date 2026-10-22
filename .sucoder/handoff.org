@@ -101,12 +101,37 @@ estimation/inference split).
   the same pin; no stable haliax 1.4 yet).
 - Mirror and clone: =main= at =08c1928=, branches =main= + =handoff= only.
 
+** Branch tidy (2026-10-22, EL approved "all three")
+- Deleted 15 GitHub branches that were fully merged, squash-merged
+  (content on main; verified with git cherry / diff), superseded
+  (PR #25 -> #26), or handoff-only (evolve-harness; rebased into this
+  branch): fix/159-design-pin-robustness, claude/linear-kwarg,
+  docs/202-kappa-regime-note, feat/205-tau-saturated,
+  fix/black-evolve-formatting, v2-manifold-12-phase3, five
+  worktree-wf_*, feat/115-configure-cpu-defaults, fix/156-riemannian-ftol,
+  fix/150-cluster-bootstrap-manifold-penalty, evolve-harness.
+- PR #216 (=scripts/archive-202-205-measurements= @ =69c9dbe=): archives
+  =scripts/validation/kappa_confirm_202.py= and =site_saturation_205.py=
+  (from branches confirm/202-kappa-euler-mask / measure/205-site-saturation;
+  2 ruff auto-fixes + black).
+- PR #217 (=examples/blp-scaling-benchmark= @ =501b3e7=): salvages
+  =examples/blp/scaling_benchmark.py= + the measured "Scaling" REPORT
+  section from claude/pyblp-gmm-blp-dg4f2j (its run_emu.py delta is
+  pre-migration; dropped).  Smoke-run against main with pyblp 1.3.0
+  reference arrays (scratch venv =$SUCODER_LOCAL_ROOT/tmp/blp-smoke=;
+  =examples/blp/reference/= is gitignored): same pattern as June; a
+  dated re-run note was added under the (B) table.
+- AFTER #216 and #217 merge: delete confirm/202-kappa-euler-mask and
+  measure/205-site-saturation (GitHub + mirror) and
+  claude/pyblp-gmm-blp-dg4f2j (GitHub).  Then GitHub = main + handoff.
+- Note for stacked PRs: GitHub CLOSED #213 when #212's branch was deleted
+  on merge instead of retargeting; retarget (=gh pr edit --base main=)
+  BEFORE deleting the base branch.
+
 ** Next concrete actions
-1. #215: README "Setup" note for uv users; revisit the haliax pin when a
+1. Merge #216 and #217 (CI running at hand-off), then delete the three
+   source branches listed above.
+2. #215: README "Setup" note for uv users; revisit the haliax pin when a
    stable 1.4 lands.
-2. EL's call: delete unmerged =confirm/202-kappa-euler-mask= /
-   =measure/205-site-saturation=; GitHub's stale =claude/*= /
-   =worktree-wf_*= / old merged =fix/*= branches; GitHub =evolve-harness=
-   (its two handoff commits are rebased into this branch).
 3. =sucoder release= (or =scancel 40371651=) -- nothing is attached to
    this slice.
