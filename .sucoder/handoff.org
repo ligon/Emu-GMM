@@ -121,17 +121,17 @@ estimation/inference split).
   reference arrays (scratch venv =$SUCODER_LOCAL_ROOT/tmp/blp-smoke=;
   =examples/blp/reference/= is gitignored): same pattern as June; a
   dated re-run note was added under the (B) table.
-- AFTER #216 and #217 merge: delete confirm/202-kappa-euler-mask and
-  measure/205-site-saturation (GitHub + mirror) and
-  claude/pyblp-gmm-blp-dg4f2j (GitHub).  Then GitHub = main + handoff.
+- DONE: #216 merged (=c053fb1=), #217 merged (=72702b7=); the three
+  source branches deleted.  GitHub, mirror and clone now hold exactly
+  =main= (@ =72702b7=) + =handoff=.
 - Note for stacked PRs: GitHub CLOSED #213 when #212's branch was deleted
   on merge instead of retargeting; retarget (=gh pr edit --base main=)
   BEFORE deleting the base branch.
 
 ** Next concrete actions
-1. Merge #216 and #217 (CI running at hand-off), then delete the three
-   source branches listed above.
-2. #215: README "Setup" note for uv users; revisit the haliax pin when a
+1. #215: README "Setup" note for uv users; revisit the haliax pin when a
    stable 1.4 lands.
+2. #209 (cluster_bootstrap zero-support draws) remains the oldest open
+   substantive issue.
 3. =sucoder release= (or =scancel 40371651=) -- nothing is attached to
-   this slice.
+   this slice; session work is complete.
