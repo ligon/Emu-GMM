@@ -75,10 +75,9 @@ bootstrap law, so its ``theta_boot`` / ``J_boot`` rows are stored as
 ``NaN`` --- the package's "NaN is an event, not a value" convention
 (#140, ``docs/design.org``), with the per-replicate ``convergence``
 flag naming the event. The case that forced the rule: cluster
-resampling can extinguish a rare moment's support entirely (in a
-regime with :math:`E[N_j] \\approx 3` this happens on roughly
-:math:`e^{-N_j} \\approx 12\\%` of draws). The refit's ridge then
-saturates, its criterion is ``NaN`` by design (#138), and the
+resampling can extinguish a rare moment's support entirely (observed
+on roughly 12% of draws in the #205 rare-moment measurement). The
+refit's ridge then saturates, its criterion is ``NaN`` by design (#138), and the
 optimiser exits at step 1 **without moving** --- so ``theta_hat`` comes
 back *finite and equal to* ``theta_init``. Storing that row
 unconditionally planted a degenerate atom at the initialisation point
@@ -231,8 +230,8 @@ class ClusterBootstrapResult:
         never converges (its criterion is ``NaN`` by design), so every
         flagged replicate is a ``NaN`` row. ``False`` on the raising
         divergence pathways, where no diagnostics exist. Additive
-        (default ``None``) so older pickles still unflatten; always
-        populated by :func:`cluster_bootstrap`.
+        (default ``None``) so callers can construct results without
+        the new flags; always populated by :func:`cluster_bootstrap`.
     tau_saturated : :class:`jax.Array` of bool
         Per-replicate #205 event flag, shape ``(n_boot,)``: the refit's
         ridge bisection saturated at ``tau_max`` (``diagnostics.tau_saturated``).
@@ -250,8 +249,8 @@ class ClusterBootstrapResult:
     param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
     # #209 / #205 per-replicate event flags. Traced bool leaves with a
     # ``None`` default (the ``OptimizerInfo.stagnated`` precedent, #210):
-    # additive on the pytree, so results pickled before the fields existed
-    # still unflatten, and ``tree_map(jnp.stack, *results)`` keeps working
+    # additive on the constructor, so callers can omit the new flags,
+    # and ``tree_map(jnp.stack, *results)`` keeps working
     # because the counts below are *properties*, not static int fields
     # (a static field that differed across results would split the treedef).
     zero_support: Any = None

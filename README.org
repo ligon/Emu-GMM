@@ -70,6 +70,7 @@ Estimation gives you =theta_hat=; inference gives you the uncertainty around it.
 The capability is easy to miss, so it's worth naming why it exists: a refit bootstrap is just =estimate()= on a resampled =Measure=. Because variance construction is orthogonal to integration (the commitment at the top of this README), resampling is a measure-construction concern, and the bootstrap is a thin re-run of the ordinary pipeline rather than a bespoke variance routine. That's also why there's no monolithic =bootstrap_se=: the capability falls out of the architecture.
 
 #+begin_src python
+import numpy as np
 from emu_gmm.inference import cluster_bootstrap
 
 boot = cluster_bootstrap(
