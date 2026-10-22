@@ -1,5 +1,30 @@
-#+TITLE: Handoff -- Emu-GMM evolve run 1
-#+DATE: [2026-07-11 Fri]
+#+TITLE: Handoff -- Emu-GMM backlog sweep
+#+DATE: [2026-10-22 Thu]
+
+* Current session -- 2026-10-22 (Sue)
+
+The owner authorized implementing reasonable backlog features and posting evidence-based pushback.
+The six studies requests #220-#225 are implemented, independently reviewed, and passed the full gate including slow tests.
+All work is on review branches; =main= remains clean at =69298c2=.
+
+- Branch :: =backlog/studies-records-statistics=.
+- Last code commit :: =e352721a3cc4c0b7d276f7391ad763d20ef74af0=.
+- Full gate :: =make par-check NPROC=16=, pinned to CPUs 0-19 with the working tree's =src= on =PYTHONPATH= and the main clone's Poetry environment.
+- Durable publication :: The post-commit hook published the ledger and code commits to the shared mirror.
+- Studies PR :: Find with =gh pr list --repo ligon/Emu-GMM --head backlog/studies-records-statistics=.
+- Installation docs :: [[https://github.com/ligon/Emu-GMM/pull/227][PR #227]], branch =backlog/uv-install-docs=, commit =1647723=.
+- Triage detail :: [[file:../.coder/backlog-2026-10-22.org][Full inventory, decisions, and remaining work]].
+- Shared skill :: [[https://github.com/ligon/sucoder-skills/issues/8][sucoder-skills #8]] tracks the missing shared backlog-workflow skill; the LSMS project copy was used.
+- Next concrete action :: Human review and merge of the two PRs.
+- Next statistical priority :: #145 covariance centering, with #219 numerical-rank versus boundary-inference scope kept distinct.
+
+The auxiliary =backlog-crn= worktree contains only changes already integrated into the studies branch.
+No unique work remains there.
+The node is =n0242.savio3=, job =40386059=, with 40 CPUs and 93 GiB RAM.
+Starting FCA usage was 73755.6 of 1500000 SUs.
+The allocation remains billed until the owner runs =sucoder release=.
+
+The evolution notes below are historical; no evolution work was resumed in this session.
 
 * Status (written by Sue, Claude Fable 5 session, 2026-07-11)
 
