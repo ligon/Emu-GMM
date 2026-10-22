@@ -30,9 +30,14 @@ bootstrap world :math:`E^*[\\psi] = \\hat m(\\hat\\theta) \\neq 0` and
 miscalibrated (conservative) however precise the MCSE machinery makes it
 look (Hall-Horowitz 1996; issue #185 tracks a recentred variant).
 Theta-coordinate functionals are unaffected. Non-converged
-replicates may be returned as ``NaN``; they are excluded from the functional
-but counted in the denominator (``n_invalid``), so a degenerate resampling
-world cannot masquerade as precision.
+replicates arrive as ``NaN`` --- ``cluster_bootstrap`` NaN-poisons the
+``theta_boot`` / ``J_boot`` rows of every refit with ``convergence == False``
+(#209), including the zero-support resampling worlds whose refit exits at
+step 1 with a finite, unmoved ``theta_init`` --- and they are excluded from
+the functional but counted in the denominator (``n_invalid``), so a
+degenerate resampling world cannot masquerade as precision and a draw
+callable that forwards raw ``theta_boot`` columns needs no filtering of
+its own.
 
 A :class:`_Target` says how to map the pooled finite replicates to
 ``(value, mcse)`` --- the functional and its Monte Carlo standard error:

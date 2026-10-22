@@ -247,16 +247,19 @@ The distinction trips people up, so be explicit about it.
 - =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap. It resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns =theta_boot=, the bootstrap distribution of \(\hat\theta\) itself (Cameron, Gelbach & Miller 2008). It captures nonlinearity the delta method can't, and it's the one to reach for under few clusters, a boundary optimum, or a badly non-Gaussian sampling distribution.
 
 #+begin_src python
-import jax, jax.numpy as jnp
+import jax, jax.numpy as jnp, numpy as np
 from emu_gmm.inference import cluster_bootstrap
 
 boot = cluster_bootstrap(
     model=psi, theta_init=result.theta_hat, measure=measure,
     covariance=cov, n_boot=999, key=jax.random.PRNGKey(1),
 )
-se   = boot.theta_boot.array.std(axis=0)                                  # bootstrap SE
-ci95 = jnp.quantile(boot.theta_boot.array, jnp.array([0.025, 0.975]), axis=0)
+tb   = boot.theta_boot.array[np.asarray(boot.convergence)]   # non-converged refits are NaN rows (#209)
+se   = tb.std(axis=0)                                        # bootstrap SE
+ci95 = jnp.quantile(tb, jnp.array([0.025, 0.975]), axis=0)
 #+end_src
+
+A refit that does not converge is stored as a =NaN= row --- not as its =theta_hat=, which on a resampled world that extinguished a rare moment's support is just =theta_init=, finite and unmoved (#209). =boot.convergence= names the event, =boot.zero_support= / =boot.tau_saturated= say why, and =boot.n_nonconverged= counts; reduce over the converged rows as above, or let =adaptive_bootstrap= exclude and count the =NaN= draws for you.
 
 ** The trick: a bootstrap is just =estimate()= on a resampled =Measure=
 

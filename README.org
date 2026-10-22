@@ -70,14 +70,18 @@ Estimation gives you =theta_hat=; inference gives you the uncertainty around it.
 The capability is easy to miss, so it's worth naming why it exists: a refit bootstrap is just =estimate()= on a resampled =Measure=. Because variance construction is orthogonal to integration (the commitment at the top of this README), resampling is a measure-construction concern, and the bootstrap is a thin re-run of the ordinary pipeline rather than a bespoke variance routine. That's also why there's no monolithic =bootstrap_se=: the capability falls out of the architecture.
 
 #+begin_src python
+import numpy as np
 from emu_gmm.inference import cluster_bootstrap
 
 boot = cluster_bootstrap(
     model=euler_residual, theta_init=result.theta_hat, measure=measure,
     covariance=cov, n_boot=999, key=jax.random.PRNGKey(1),
 )
-se = boot.theta_boot.array.std(axis=0)   # bootstrap SE, per parameter
+ok = np.asarray(boot.convergence)        # non-converged refits are NaN rows (#209)
+se = boot.theta_boot.array[ok].std(axis=0)   # bootstrap SE, per parameter
 #+end_src
+
+A refit that does not converge --- a resampled world can extinguish a rare moment's support entirely --- is stored as a =NaN= row, flagged in =boot.convergence= and explained by =boot.zero_support= / =boot.tau_saturated=; =boot.n_nonconverged= counts them. Reduce over the converged rows as above, or hand raw columns to =adaptive_bootstrap=, which excludes and counts =NaN= draws.
 
 =docs/howto.org= has the expanded menu and the refit-vs-refit-free decision in full. Design-aware note: =cluster_bootstrap= resamples flat clusters; the /stratified/ refit bootstrap (resample PSUs within strata) is tracked in issue #155.
 

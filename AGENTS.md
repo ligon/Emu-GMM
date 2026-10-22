@@ -105,6 +105,17 @@ been through four reviewer iterations; the abstractions are deliberate.
 - **Float64 is the default precision.** See "Architectural commitments"
   point 7. Float32 silently degrades both convergence (optimistix LM
   can't certify) and accuracy (theta_hat drifts at the third digit).
+- **NaN is an event, not a value (#140; `docs/design.org`).** A NaN in a
+  diagnostic output propagates loudly or is counted explicitly, never
+  folded into a rate, and every emitter pairs it with a named flag.
+  `cluster_bootstrap` is an emitter (#209): a refit with
+  `converged=False` -- including the zero-support resampling world whose
+  refit exits at step 1 with `theta_hat == theta_init`, finite -- is stored
+  as a NaN `theta_boot` / `J_boot` row, flagged by `convergence` and
+  explained by the per-draw `zero_support` / `tau_saturated` events, with
+  `n_nonconverged` / `n_valid` counts. Never store a non-converged
+  `theta_hat` as a bootstrap draw: NaN-based validity accounting
+  (`adaptive_bootstrap.n_invalid`) cannot see a finite row.
 
 ## Architectural commitments worth knowing
 
