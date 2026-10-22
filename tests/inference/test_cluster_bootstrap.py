@@ -934,7 +934,7 @@ class TestManifoldSupport:
         _, _, spec = params_mod.flatten_params_for_ad(theta_true)
         assert names == tuple(labels_mod.tangent_basis_names(spec))
 
-    def test_replicates_produce_finite_ambient_estimates(self):
+    def test_ambient_estimates_match_convergence_flags(self):
         theta_true, measure, covariance = _manifold_cluster_setup(seed=3)
         result = cluster_bootstrap(
             model=_manifold_model,
@@ -945,19 +945,17 @@ class TestManifoldSupport:
             key=jax.random.PRNGKey(2),
         )
         boot = np.asarray(result.theta_boot.array)
-        # Every replicate completes (no documented-divergence NaN rows) and
-        # yields a finite ambient estimate -- the actual deliverable.
-        #
-        # We deliberately do NOT gate on ``result.convergence``: the
-        # Riemannian LM does not always *certify* convergence on the
-        # gauge-invariant quotient at the default tolerance (a direct
-        # full-sample solve on this same fixture also reports
-        # ``converged=False`` while returning a finite, sensible estimate,
-        # J ~ 6 with well-separated Gamma eigenvalues). That certification
-        # behaviour is a manifold-LM property orthogonal to #150; here we
-        # only assert the bootstrap returns usable finite draws.
+        converged = np.asarray(result.convergence)
+        # Riemannian LM can return a finite point without certifying
+        # convergence. Under #209 those refits are NaN rows, including
+        # on manifold parameter trees; only converged refits are draws.
+        # Keep the fixture and solver tolerances unchanged, and require
+        # that it still produces usable ambient estimates.
         assert boot.shape == (4, _AMBIENT_P)
-        assert np.all(np.isfinite(boot))
+        assert np.any(converged)
+        np.testing.assert_array_equal(np.all(np.isfinite(boot), axis=1), converged)
+        np.testing.assert_array_equal(np.all(np.isnan(boot), axis=1), ~converged)
+        np.testing.assert_array_equal(np.isnan(np.asarray(result.J_boot)), ~converged)
 
 
 @jdc.pytree_dataclass
