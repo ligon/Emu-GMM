@@ -51,7 +51,7 @@ from typing import Any, NamedTuple
 import jax
 import numpy as np
 
-from emu_gmm.studies.driver import MCRecords
+from emu_gmm.studies.driver import MCRecords, _keys_equal
 from emu_gmm.types import FitRecord
 
 #: The 0/1 diagnostic flag fields ``given``/``event_share`` accept by name.
@@ -286,7 +286,7 @@ class Flips(NamedTuple):
     n_both: int
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, init=False)
 class CoupledRecords:
     """Two CRN-verified arms, aligned rep-for-rep (see :func:`crn_pair`)."""
 
@@ -294,12 +294,77 @@ class CoupledRecords:
     b: FitRecord
     key: Any
     n_reps: int
-    param_names: tuple[str, ...]
     coupling_id: Any
+    rep_indices: Any
+
+    def __init__(
+        self,
+        a: FitRecord,
+        b: FitRecord,
+        key: Any,
+        n_reps: int,
+        param_names: tuple[str, ...] | None = None,
+        coupling_id: Any = None,
+        rep_indices: Any = None,
+    ) -> None:
+        # Preserve the exported constructor's original positional/keyword order.
+        # The old common-label argument cannot relabel two different estimands.
+        if param_names is not None and (
+            tuple(param_names) != tuple(a.param_names)
+            or tuple(param_names) != tuple(b.param_names)
+        ):
+            raise ValueError("Supplied param_names must match both coupled arms.")
+        for name, value in (
+            ("a", a),
+            ("b", b),
+            ("key", key),
+            ("n_reps", n_reps),
+            ("coupling_id", coupling_id),
+            ("rep_indices", np.arange(n_reps) if rep_indices is None else rep_indices),
+        ):
+            object.__setattr__(self, name, value)
+
+    @property
+    def param_names_a(self) -> tuple[str, ...]:
+        """Parameter labels of arm A, which may differ from arm B (#225)."""
+        return tuple(self.a.param_names)
+
+    @property
+    def param_names_b(self) -> tuple[str, ...]:
+        """Parameter labels of arm B, which may differ from arm A (#225)."""
+        return tuple(self.b.param_names)
+
+    @property
+    def param_names(self) -> tuple[str, ...]:
+        """Shared parameter labels; refuse ambiguity for nested models."""
+        if self.param_names_a != self.param_names_b:
+            raise ValueError(
+                "Coupled arms have different param_names; use param_names_a/b."
+            )
+        return self.param_names_a
+
+    def _paired_arrays(self, x_a: Any, x_b: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Validate caller-selected codomains without inventing alignment."""
+        a, b = np.asarray(x_a), np.asarray(x_b)
+        if a.shape != b.shape:
+            raise ValueError(
+                "Paired arrays must have the same shape; broadcasting is unsafe."
+            )
+        if a.ndim < 1 or a.shape[0] != self.n_reps:
+            raise ValueError("Paired arrays must have leading dimension n_reps.")
+        return a, b
+
+    def _row_mask(self, where: Any) -> np.ndarray:
+        """A selection indexes rep rows, never coordinates or integer offsets."""
+        mask = np.asarray(where)
+        if mask.shape != (self.n_reps,) or mask.dtype != np.bool_:
+            raise ValueError("where must be a Boolean row mask with shape (n_reps,).")
+        return mask
 
     def both_finite(self, arr_a: Any, arr_b: Any) -> np.ndarray:
-        """Per-rep mask: finite in both arms (NaN = invalid verdict)."""
-        return np.isfinite(np.asarray(arr_a)) & np.isfinite(np.asarray(arr_b))
+        """Elementwise joint finiteness for matching rep-indexed arrays."""
+        a, b = self._paired_arrays(arr_a, arr_b)
+        return np.isfinite(a) & np.isfinite(b)
 
     def flips(
         self,
@@ -313,9 +378,10 @@ class CoupledRecords:
         Over ``where`` (default: ``both_finite(ind_a, ind_b)``),
         ``gain = #{b==1 & a==0}``, ``lose = #{b==0 & a==1}``.
         """
-        a = np.asarray(ind_a)
-        b = np.asarray(ind_b)
-        w = self.both_finite(a, b) if where is None else np.asarray(where)
+        a, b = self._paired_arrays(ind_a, ind_b)
+        if a.ndim != 1:
+            raise ValueError("flips requires indicator vectors with shape (n_reps,).")
+        w = self.both_finite(a, b) if where is None else self._row_mask(where)
         gain = int(np.sum((b == 1) & (a == 0) & w))
         lose = int(np.sum((b == 0) & (a == 1) & w))
         return Flips(gain=gain, lose=lose, n_both=int(np.sum(w)))
@@ -334,9 +400,12 @@ class CoupledRecords:
         own finiteness would silently disagree with :meth:`flips`'s
         denominator (e.g. ``J_stat`` is finite where the coverage indicator is
         not), so the printed ``n`` would not match the diff's ``n``.
+        Inputs must have identical shapes with a leading ``n_reps`` axis;
+        ``where`` is a Boolean row mask of shape ``(n_reps,)``. For nested
+        models, select comparable coordinates or scalar functionals explicitly.
         """
-        w = np.asarray(where)
-        return (np.asarray(x_b) - np.asarray(x_a))[w]
+        a, b = self._paired_arrays(x_a, x_b)
+        return (b - a)[self._row_mask(where)]
 
     def mean_paired_diff(self, x_a: Any, x_b: Any, *, where: Any) -> float:
         """Mean paired difference over ``where``; NaN (no warning) if empty."""
@@ -357,8 +426,8 @@ def crn_pair(
     --- which needs the same master key **and** the same DGP/fold-in scheme.
     ``crn_pair`` refuses (raises) unless it can witness that:
 
-    * ``n_reps``, ``param_names``, and the master ``key`` must match (necessary
-      conditions; a mismatch is a hard refusal);
+    * ``n_reps``, ordered global rep indices, and the master ``key`` must match
+      (necessary conditions; a mismatch is a hard refusal);
     * the :attr:`~emu_gmm.studies.MCRecords.coupling_id` must match. Master-key
       equality alone is necessary but **not sufficient** --- it does not see
       the DGP's internal ``split`` scheme, so two arms with the same seed but
@@ -370,6 +439,9 @@ def crn_pair(
     A conditioned/masked record can never be paired (masking destroys the
     rep-index alignment); pass whole :class:`~emu_gmm.studies.MCRecords` arms
     and condition a paired contrast afterwards via ``flips(..., where=...)``.
+    Different parameterizations and ``J_dof`` are allowed: coupling witnesses
+    identical draws, not identical estimands (ledger Section 9). A paired J
+    difference is descriptive, not a calibrated nested-model test.
     """
     if not isinstance(a, MCRecords) or not isinstance(b, MCRecords):
         raise TypeError(
@@ -385,11 +457,11 @@ def crn_pair(
             f"crn_pair(): arms have different n_reps ({a.n_reps} vs {b.n_reps}); "
             "they are not coupled."
         )
-    if tuple(a.param_names) != tuple(b.param_names):
+    indices_a = a._validated_rep_indices()
+    indices_b = b._validated_rep_indices()
+    if not np.array_equal(indices_a, indices_b):
         raise ValueError(
-            "crn_pair(): arms have different param_names "
-            f"({tuple(a.param_names)} vs {tuple(b.param_names)}); not the same "
-            "estimand."
+            "crn_pair(): ordered global rep indices differ; arms are not aligned."
         )
     a_id, b_id = a.coupling_id, b.coupling_id
     if a_id is not None and b_id is not None:
@@ -407,7 +479,7 @@ def crn_pair(
             "monte_carlo_study(..., coupling_id=...), or pass assert_coupled=True "
             "to assert same-DGP on your own authority."
         )
-    if not np.array_equal(np.asarray(a.key), np.asarray(b.key)):
+    if not _keys_equal(a.key, b.key):
         raise ValueError(
             "crn_pair(): master PRNG keys differ; the arms cannot be CRN-aligned."
         )
@@ -416,8 +488,8 @@ def crn_pair(
         b=b.records,
         key=a.key,
         n_reps=a.n_reps,
-        param_names=tuple(a.param_names),
         coupling_id=a_id,
+        rep_indices=a.effective_rep_indices,
     )
 
 

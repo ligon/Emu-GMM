@@ -434,6 +434,26 @@ class TestEmpiricalRoundTrip:
         assert state.extra_arrays is not None
         assert set(state.extra_arrays) == {"k_pvalue", "id_strength"}
 
+    def test_vector_and_tensor_extra_statistics_round_trip(self, tmp_path):
+        from emu_gmm import EmpiricalLaw
+
+        extra = {
+            "gbar": jnp.arange(160.0).reshape(80, 2),
+            "omega": jnp.tile(jnp.array([[1.0, jnp.nan], [0.0, 2.0]]), (80, 1, 1)),
+        }
+        law = EmpiricalLaw.from_records(_fake_mcrecords(seed=9, extra=extra))
+        p = tmp_path / "vector-extras.npz"
+        save_law(law, p)
+        reloaded = load_law(p)
+        state = load_law_state(p)
+        for name, values in extra.items():
+            np.testing.assert_array_equal(reloaded._records.extra[name], values)
+            np.testing.assert_array_equal(state.extra_arrays[name], values)
+        np.testing.assert_array_equal(
+            reloaded._records.to_pandas()["gbar[1]"], extra["gbar"][:, 1]
+        )
+        assert reloaded._records.to_pandas()["omega[0,1]"].isna().all()
+
     def test_records_extra_none_round_trips_to_none(self, tmp_path):
         from emu_gmm import EmpiricalLaw
 
@@ -607,3 +627,111 @@ class TestGuardrails:
         # The schema is a typed dataclass, not a dict (validation/migration).
         assert hasattr(LawState, "__dataclass_fields__")
         assert "schema_version" in LawState.__dataclass_fields__
+
+
+class TestShardedProvenance:
+    def test_nonzero_indices_and_typed_key_round_trip(self, tmp_path):
+        from dataclasses import replace
+
+        import jax
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import crn_pair
+
+        mc = replace(
+            _fake_mcrecords(n=3),
+            rep_indices=jnp.asarray([7, 8, 9]),
+            key=jax.random.key(0),
+        )
+        path = tmp_path / "shard.npz"
+        save_law(EmpiricalLaw.from_records(mc), path)
+        restored = load_law(path)._records
+        np.testing.assert_array_equal(restored.effective_rep_indices, [7, 8, 9])
+        np.testing.assert_array_equal(load_law_state(path).rep_indices, [7, 8, 9])
+        np.testing.assert_array_equal(
+            jax.random.key_data(restored.key), jax.random.key_data(mc.key)
+        )
+        assert jax.dtypes.issubdtype(restored.key.dtype, jax.dtypes.prng_key)
+        crn_pair(mc, restored)
+
+    def test_nondefault_typed_key_implementation_round_trip(self, tmp_path):
+        from dataclasses import replace
+
+        import jax
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import crn_pair
+
+        mc = replace(_fake_mcrecords(n=3), key=jax.random.key(0, impl="unsafe_rbg"))
+        path = tmp_path / "typed.npz"
+        save_law(EmpiricalLaw.from_records(mc), path)
+        restored = load_law(path)._records
+        assert str(jax.random.key_impl(restored.key)) == "unsafe_rbg"
+        crn_pair(mc, restored)
+
+    def test_old_artifact_implicitly_uses_zero_based_indices(self, tmp_path):
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import crn_pair
+
+        mc = _fake_mcrecords(n=3)
+        path = tmp_path / "old.npz"
+        save_law(EmpiricalLaw.from_records(mc), path)
+        with np.load(path, allow_pickle=False) as data:
+            arrays = {name: data[name] for name in data.files if name != "rep_indices"}
+        manifest = json.loads(str(arrays["__manifest__"]))
+        manifest.pop("key_impl")
+        arrays["__manifest__"] = np.asarray(json.dumps(manifest))
+        np.savez(path, **arrays)
+        restored = load_law(path)._records
+        np.testing.assert_array_equal(restored.effective_rep_indices, [0, 1, 2])
+        np.testing.assert_array_equal(restored.key, mc.key)
+        assert restored.key.dtype == mc.key.dtype
+        crn_pair(mc, restored)
+
+    def test_reloaded_different_shards_still_refuse_pairing(self, tmp_path):
+        from dataclasses import replace
+
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import crn_pair
+
+        a = replace(_fake_mcrecords(n=3), rep_indices=jnp.asarray([3, 4, 5]))
+        b = replace(a, rep_indices=jnp.asarray([6, 7, 8]))
+        save_law(EmpiricalLaw.from_records(a), tmp_path / "a.npz")
+        save_law(EmpiricalLaw.from_records(b), tmp_path / "b.npz")
+        with pytest.raises(ValueError, match="rep indices differ"):
+            crn_pair(
+                load_law(tmp_path / "a.npz")._records,
+                load_law(tmp_path / "b.npz")._records,
+                assert_coupled=True,
+            )
+
+    def test_reloaded_shards_concat_preserves_rows_and_extra(self, tmp_path):
+        from dataclasses import replace
+
+        import jax
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import MCRecords
+
+        whole = _fake_mcrecords(
+            n=4, extra={"marker": jnp.asarray([11.0, 12.0, 13.0, 14.0])}
+        )
+        shards = []
+        for start, stop in [(2, 4), (0, 2)]:
+            shard = replace(
+                whole,
+                records=jax.tree_util.tree_map(
+                    lambda x, lo=start, hi=stop: x[lo:hi], whole.records
+                ),
+                n_reps=stop - start,
+                extra={"marker": whole.extra["marker"][start:stop]},
+                rep_indices=jnp.arange(start, stop),
+            )
+            path = tmp_path / f"shard-{start}.npz"
+            save_law(EmpiricalLaw.from_records(shard), path)
+            shards.append(load_law(path)._records)
+        joined = MCRecords.concat(shards, reps=range(4))
+        for actual, expected in zip(
+            jax.tree_util.tree_leaves(joined.records),
+            jax.tree_util.tree_leaves(whole.records),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(joined.extra["marker"], whole.extra["marker"])
