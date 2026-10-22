@@ -561,19 +561,28 @@ class TestInnerFailureSurfacing:
         measure, covariance = _euler_cluster_setup(
             n_clusters=4, obs_per_cluster=5, seed=0
         )
-        result = cluster_bootstrap(
-            model=euler_residual,
-            theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
-            measure=measure,
-            covariance=covariance,
-            n_boot=3,
-            key=jax.random.PRNGKey(0),
-        )
+        # #209: non-convergence is also reported once, in summary.
+        with pytest.warns(
+            UserWarning, match="3 of 3 replicate refits did not converge"
+        ):
+            result = cluster_bootstrap(
+                model=euler_residual,
+                theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+                measure=measure,
+                covariance=covariance,
+                n_boot=3,
+                key=jax.random.PRNGKey(0),
+            )
         # All three replicates diverged in the documented way: the
         # framework records this on the result rather than raising.
         assert not np.any(result.convergence)
         assert np.all(np.isnan(np.asarray(result.theta_boot.array)))
         assert np.all(np.isnan(np.asarray(result.J_boot)))
+        # A refit that raised has no diagnostics, so the #209 / #205 event
+        # flags stay False; the failure is counted under n_nonconverged.
+        assert not np.any(np.asarray(result.zero_support))
+        assert not np.any(np.asarray(result.tau_saturated))
+        assert result.n_nonconverged == 3 and result.n_valid == 0
 
 
 # ---------------------------------------------------------------------------

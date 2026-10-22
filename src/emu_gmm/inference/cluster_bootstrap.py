@@ -64,7 +64,37 @@ Given an empirical measure with ``N`` observations partitioned into
    ``optimizer``, and ``penalty`` --- so a penalized point estimate is
    refit under the *same* in-objective penalty (issue #150).
 4. Record :math:`\\hat\\theta^{(b)}`, :math:`J^{(b)}`, and a Python
-   boolean convergence flag.
+   boolean convergence flag --- or, when the refit did **not**
+   converge, a ``NaN`` row (next section).
+
+Non-converged replicates are NaN rows (#209)
+============================================
+
+A refit that reports ``converged=False`` is not a draw from the
+bootstrap law, so its ``theta_boot`` / ``J_boot`` rows are stored as
+``NaN`` --- the package's "NaN is an event, not a value" convention
+(#140, ``docs/design.org``), with the per-replicate ``convergence``
+flag naming the event. The case that forced the rule: cluster
+resampling can extinguish a rare moment's support entirely (in a
+regime with :math:`E[N_j] \\approx 3` this happens on roughly
+:math:`e^{-N_j} \\approx 12\\%` of draws). The refit's ridge then
+saturates, its criterion is ``NaN`` by design (#138), and the
+optimiser exits at step 1 **without moving** --- so ``theta_hat`` comes
+back *finite and equal to* ``theta_init``. Storing that row
+unconditionally planted a degenerate atom at the initialisation point
+that NaN-based validity accounting
+(:func:`~emu_gmm.inference.adaptive.adaptive_bootstrap`'s ``n_invalid``)
+could not see, silently pulling bootstrap SEs and CIs toward
+``theta_init``.
+
+Two per-replicate event flags say *why* a refit failed, both read off
+the refit's diagnostics at the storage site: ``zero_support`` (the
+resampled world left a moment with :math:`N_j = 0`) and
+``tau_saturated`` (the #205 ridge-saturation event, which the #205
+measurement found to be a real per-draw channel that the result
+previously discarded). One summary warning reports the counts.
+Consumers reduce over ``convergence`` or hand raw columns to a
+NaN-aware reducer, which excludes and counts.
 
 Implementation note
 ===================
@@ -96,8 +126,10 @@ the estimator on each replicate.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
+from typing import Any
 
 import haliax as ha
 import jax
@@ -160,10 +192,14 @@ class ClusterBootstrapResult:
         :func:`cluster_bootstrap`'s manifold note).
     J_boot : :class:`jax.Array`
         Per-replicate J statistic, shape ``(n_boot,)``. ``NaN`` for
-        replicates whose solver diverged.
+        every replicate with ``convergence == False`` (#209).
     convergence : :class:`jax.Array` of bool
         Per-replicate boolean convergence flag, shape ``(n_boot,)``.
-        Carried as a JAX bool array (rather than NumPy) so the
+        ``False`` names the event behind a ``NaN`` row of
+        ``theta_boot`` / ``J_boot``: the refit either raised on a
+        documented divergence pathway or returned ``converged=False``
+        (#209) --- in both cases the row carries no bootstrap
+        information. Carried as a JAX bool array (rather than NumPy) so the
         whole result is a single pytree --- the underlying optimiser
         status is resolved on the host but lifted into a JAX array
         when packaged into the result, so that ``jax.vmap`` over
@@ -188,6 +224,23 @@ class ClusterBootstrapResult:
         on the pytree treedef rather than as a traced leaf (strings
         are not JAX values; they trigger re-tracing on configuration
         change rather than re-tracing per-replicate).
+    zero_support : :class:`jax.Array` of bool
+        Per-replicate event flag, shape ``(n_boot,)``: the resampled
+        world left at least one moment with no supported observation
+        (``diagnostics.N_j == 0`` on the refit; #209). Such a refit
+        never converges (its criterion is ``NaN`` by design), so every
+        flagged replicate is a ``NaN`` row. ``False`` on the raising
+        divergence pathways, where no diagnostics exist. Additive
+        (default ``None``) so older pickles still unflatten; always
+        populated by :func:`cluster_bootstrap`.
+    tau_saturated : :class:`jax.Array` of bool
+        Per-replicate #205 event flag, shape ``(n_boot,)``: the refit's
+        ridge bisection saturated at ``tau_max`` (``diagnostics.tau_saturated``).
+        A saturated refit *can* still converge (saturation with support
+        is rare but was observed), so this is not a subset of
+        ``~convergence``; it is the per-draw channel the #205
+        measurement found the result discarding. ``False`` on the
+        raising divergence pathways. Additive, always populated.
     """
 
     theta_boot: ha.NamedArray
@@ -195,6 +248,42 @@ class ClusterBootstrapResult:
     convergence: jnp.ndarray
     key: jax.Array
     param_names: tuple[str, ...] = jdc.static_field()  # type: ignore[attr-defined]
+    # #209 / #205 per-replicate event flags. Traced bool leaves with a
+    # ``None`` default (the ``OptimizerInfo.stagnated`` precedent, #210):
+    # additive on the pytree, so results pickled before the fields existed
+    # still unflatten, and ``tree_map(jnp.stack, *results)`` keeps working
+    # because the counts below are *properties*, not static int fields
+    # (a static field that differed across results would split the treedef).
+    zero_support: Any = None
+    tau_saturated: Any = None
+
+    # -- exclude-and-count summaries (#140 consumer obligation). Host-side
+    # Python ints over the bootstrap axis; call them on an eager result,
+    # not under ``jit`` / ``vmap`` where the flags are tracers.
+
+    @property
+    def n_nonconverged(self) -> int:
+        """Replicates with ``convergence == False`` --- the ``NaN`` rows."""
+        return int(np.sum(~np.asarray(self.convergence, dtype=bool)))
+
+    @property
+    def n_valid(self) -> int:
+        """Replicates that converged: the rows a reducer should use."""
+        return int(np.asarray(self.convergence, dtype=bool).size) - self.n_nonconverged
+
+    @property
+    def n_zero_support(self) -> int:
+        """Replicates whose resampled world had a zero-support moment."""
+        if self.zero_support is None:
+            return 0
+        return int(np.sum(np.asarray(self.zero_support, dtype=bool)))
+
+    @property
+    def n_tau_saturated(self) -> int:
+        """Replicates whose refit ridge saturated at ``tau_max`` (#205)."""
+        if self.tau_saturated is None:
+            return 0
+        return int(np.sum(np.asarray(self.tau_saturated, dtype=bool)))
 
     @property
     def coords(self) -> Mapping[str, tuple[str | int, ...]]:
@@ -445,6 +534,10 @@ def cluster_bootstrap(
     theta_boot = np.empty((n_boot, K), dtype=np.float64)
     J_boot = np.empty(n_boot, dtype=np.float64)
     convergence = np.empty(n_boot, dtype=bool)
+    # Per-replicate event flags (#209 / #205), False unless the refit's
+    # diagnostics say otherwise.
+    zero_support = np.zeros(n_boot, dtype=bool)
+    tau_saturated = np.zeros(n_boot, dtype=bool)
 
     for b in range(n_boot):
         # Bare estimate() builds fresh closures per call, so JAX's
@@ -505,11 +598,51 @@ def cluster_bootstrap(
             theta_boot[b] = np.nan
             J_boot[b] = np.nan
             convergence[b] = False
+            # No diagnostics exist for a refit that raised, so the event
+            # flags stay False; the row is already NaN and counted under
+            # ``n_nonconverged``.
+            continue
+        converged_b = bool(result.converged)
+        convergence[b] = converged_b
+        diag = result.diagnostics
+        if diag is not None:
+            # Per-replicate event flags read off the refit's diagnostics
+            # at the storage site (the #140 producer obligation; the #205
+            # disposition's per-draw channel).
+            zero_support[b] = bool(np.any(np.asarray(diag.N_j.array) == 0.0))
+            tau_saturated[b] = bool(diag.tau_saturated)
+        if not converged_b:
+            # #209: a non-converged refit is not a draw from the bootstrap
+            # law, so store a NaN row -- NOT ``theta_hat``, which on the
+            # zero-support pathway is ``theta_init`` itself, finite and
+            # unmoved (the optimiser exits at step 1 on a NaN criterion).
+            # Stored as a value it sat in ``theta_boot`` as a degenerate
+            # atom that NaN-based validity accounting cannot see;
+            # ``convergence[b]`` names the event (#140).
+            theta_boot[b] = np.nan
+            J_boot[b] = np.nan
             continue
         theta_hat_flat, _, _ = params_mod.flatten_params_for_ad(result.theta_hat)
         theta_boot[b] = np.asarray(theta_hat_flat)
         J_boot[b] = float(result.objective_value)
-        convergence[b] = bool(result.converged)
+
+    n_nonconverged = int(np.sum(~convergence))
+    if n_nonconverged:
+        # One summary warning per call (not per replicate; the #138 eager
+        # warning already fires per zero-support refit). Loud, per #140:
+        # the rows are excluded, and here is how many and why.
+        warnings.warn(
+            f"cluster_bootstrap: {n_nonconverged} of {n_boot} replicate "
+            f"refits did not converge ({int(zero_support.sum())} with a "
+            "zero-support moment in the resampled world; "
+            f"{int(tau_saturated.sum())} ridge-saturated); their theta_boot "
+            "/ J_boot rows are NaN (#209) and carry no bootstrap "
+            "information. Reduce over result.convergence, or hand raw "
+            "columns to adaptive_bootstrap, which excludes and counts NaN "
+            "draws.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # Label the (n_boot, K) array along the canonical parameters axis;
     # the bootstrap-replicate axis carries no semantic labels (just a
@@ -532,6 +665,8 @@ def cluster_bootstrap(
         convergence=jnp.asarray(convergence),
         key=key,
         param_names=param_names,
+        zero_support=jnp.asarray(zero_support),
+        tau_saturated=jnp.asarray(tau_saturated),
     )
 
 
