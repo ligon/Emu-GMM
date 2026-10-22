@@ -702,3 +702,67 @@ through the carrier byte-identically.
 example (=examples/blp/*=, commit =6adc81e=) failed =black --check .= on =main=
 independent of #144; added a mirroring =force-exclude= to =[tool.black]=
 (=pyproject.toml=). 47 new tests (40 fast + 7 slow), all pass.
+
+** 8.9 -- Generic replication and fit-time functional records (#220/#221/#223/#224)
+
+1. Task :: Extend the existing replication engine to accept arbitrary datasets and a custom =(result, dataset) -> FitRecord= extractor, forward the record/statistics extractors through =replicate_coupled=, and materialize fixed-shape vector/tensor extras without losing coordinates.
+   Extend =fit_record= with =f= / =names= so existing =bias_sd= and =coverage= can summarize functionals recorded with their full-covariance delta-method SE at fit time.
+2. Existing machinery :: Search tier: git history and ripgrep, at base =69298c2=; reconciled merged PRs #172 and #183.
+   =studies/driver.py:52= owns the =AsymptoticLaw=-based =FitRecord= projection; =:375= runs the fold-in replication loop and =:398= already stacks fixed-shape extra arrays.
+   =:424= composes =replicate= for coupled arms (tested by =tests/studies/test_replicate.py::TestReplicateCoupled=); =:187= owns pandas materialization.
+   =law.py:1423= implements =functional_se(f) -> (se, cov)= from the joint covariance (tested by =tests/test_result_law_fidelity.py= and =tests/test_law.py=).
+   =studies/summaries.py= already implements =bias_sd= and =coverage=, including NaN-SE accounting (=tests/studies/test_summaries.py=).
+   =persistence.py:389= validates only the leading extra-array axis; a vector extra already round-trips, while =MCRecords.to_pandas= currently raises for a vector column.
+3. Definitions :: Rep =r= receives =jax.random.fold_in(key, r)=; a matching key alone does not establish CRN coupling (Section 3 and 6.2).
+   =f= consumes the ambient =result.components()= tuple in convention-B scale and must be JAX-differentiable and gauge-invariant (=inference/functional_se.py:52-60=).
+   Its output is a scalar or one-dimensional array; names identify the functional codomain, with explicit truth in that same order for summaries.
+4. Invariants :: Preserve the original fit's J statistic, degrees of freedom, convergence and named events even when recording a functional.
+   Never reconstruct functional SEs from marginal SEs: cross-covariances are required and historical =FitRecord= stacks do not contain them.
+   =anchor_per_rep=True= remains restricted to =build_estimator= factories and Measure datasets; custom procedures own their own refitting policy.
+   Preserve scalar extra names and NaNs; tensor extras expand to indexed columns in row-major order, with all column collisions refused explicitly.
+   Functional coverage summarizes the supplied Wald procedure; it does not establish validity at rank boundaries or repeated eigenvalues.
+5. Reuse decisions :: *Extend* =replicate= / =replicate_coupled= rather than add another loop; custom records remain =FitRecord= and retain exclude-but-count semantics.
+   *Extend* =fit_record= to evaluate =f= and delegate SEs to the same =AsymptoticLaw.functional_se=; *reuse* existing summaries with functional truth.
+   *Extend* =MCRecords.to_pandas= for indexed columns; *reuse* extra stacking, pytree registration and persistence without another storage format.
+6. Open questions :: None for the approved fit-time path; reconstructing functionals and their SEs from historical marginal records is outside this change.
+
+Verification against 8.9 :: *OK*: =fit_record(f=...)= delegates the joint-covariance SE, and the off-diagonal covariance and PSD-rotation tests distinguish that delegation from marginal-SE reconstruction.
+=replicate= / =replicate_coupled= retain the fold-in schedule, factory-only anchoring, event flags and static J degrees of freedom; indexed materialization preserves scalar names and NaNs while refusing column collisions.
+Targeted pytest passed for =tests/studies/test_replicate.py=, =tests/studies/test_functional_records.py=, =tests/test_persistence.py=, =tests/test_types.py= and =tests/test_sigma_sandwich.py=; ruff, black and source mypy passed.
+No =REINVENTION= or =CONTRADICTION= with the definitions and invariants above; the full combined gate remains the dispatcher's integration step.
+
+* Section 9 -- Sharded replication and nested CRN arms (#222 / #225)
+
+** 9.1 -- Task and search
+
+Extend the existing replication driver to draw global =fold_in(key, r)= indices across shards, concatenate compatible shards, and couple different parameterizations over identical draws.
+Search tier: ripgrep + git history, including #168 / #172 / #182 / #183; no parallel implementation of shard assembly exists.
+
+** 9.2 -- Existing machinery and definitions
+
+- Driver :: =src/emu_gmm/studies/driver.py:151= owns =MCRecords= (=concat:226=), =replicate:375=, and =replicate_coupled:582=; =tests/studies/test_replicate.py:660= pins the exact sharded fold-in schedule and =:755= tests shard assembly, event flags, exclusions, and shared-token construction.
+- Coupling :: =src/emu_gmm/studies/conditioning.py:290= owns =CoupledRecords= and =crn_pair:417=; =tests/studies/test_conditioning.py:242= guards key/token/index mismatches, nested metadata, conditioned-record rejection, explicit paired masks, and directional flips; =:537= guards against array/mask broadcasting.
+- Persistence :: =src/emu_gmm/persistence.py:350= / =:648= own the inert records-backed =LawState= save/rebuild; =tests/test_persistence.py:612= guards shard provenance, extras, typed-key implementations, and additive legacy defaults.
+- Static metadata :: =FitRecord.J_dof= and =param_names= ride the pytree treedef; concatenation extends the existing tree-map stacking gesture without recomputing statistics.
+
+** 9.3 -- Invariants and reuse decisions
+
+- Reuse :: Replicate r sees =jax.random.fold_in(key, r)=; =n_reps= remains the actual leading-axis length, while =rep_indices= records global indices.
+- Extend :: Exactly one of =n_reps= or a nonempty increasing unit-step =reps= range selects draws; uint32-safe indices prevent wrapped duplicate random streams.
+- Extend :: =MCRecords.concat= validates key, known shared token for multiple shards, parameter labels, J dof, leaf shapes/dtypes, and extras; it sorts every row-bearing array together and preserves NaNs/events.
+- New :: Explicit expected =reps= gives exact coverage validation; omitted expectation checks only the inferred contiguous interval and cannot discover a missing terminal shard.
+- Reuse :: Per-call UUIDs remain the coupled factory default; separate shard jobs must pass a shared explicit study token, never a token derived from callable identity (Section 6.2).
+- Extend :: CRN pairing always checks exact ordered global indices, keys, and tokens; =assert_coupled= cannot bypass a known mismatch.
+- Corrected invariant :: Identical draws need not imply identical estimands: different parameter labels and J dof are allowed across coupled arms, with each arm's metadata retained; common =param_names= refuses ambiguity.
+- Extend :: Paired arrays must have identical shapes and a leading =n_reps= axis; selections are Boolean row masks, and =flips= accepts indicator vectors only, so NumPy broadcasting cannot invent parameter alignment or inflate event counts.
+- Interpretation :: Paired J differences are descriptive; coupling supplies no calibrated likelihood-ratio reference law.
+- Extend :: Additive optional persisted indices preserve shard provenance; legacy zero-based studies infer =range(n_reps)=, with no schema bump.
+- Extend :: Typed keys persist both key data and their PRNG implementation; key comparison accepts equivalent typed/legacy keys while refusing equal words under different algorithms.
+
+** 9.4 -- Open questions and verification
+
+The user-approved contract resolves coverage ambiguity through an optional explicit expected range.
+Verification must exercise shard equivalence, reordered shards, gaps/overlaps, metadata/shape/dtype mismatches, nested-model pairing, persisted indices, and legacy zero-based defaults.
+Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replicate/conditioning/persistence suites and a fresh-process concat/persistence/constructor check pass, as do ruff, black, and mypy on the changed Python files.
+The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
+No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
