@@ -61,6 +61,44 @@ Euclidean / Positive solve -- including the ill-conditioned ``sigma -> 0``
 boundary collapse -- keeps its exact stopping point. The cost ``||r||^2`` is
 itself gauge-invariant.
 
+Numerical-stagnation exit (#210)
+--------------------------------
+A fourth exit is a *failure report*, not a certification. Strict
+``cost_new < cost`` acceptance rejects every step once the squared cost sits
+at a float64 representational floor (``1 + x'x`` with ``x ~ 1e-9`` rounds to
+exactly ``1.0`` for both the current and the proposed point, while the
+horizontal gradient ``||x|| ~ 1.4e-9`` stays above the stationarity
+threshold), and the rejected-step rule ``lam -> 2 lam`` has no upper bound:
+``lam`` overflowed to ``inf`` after ~1000 doublings, ``lam * eye`` then
+NaN'd the off-diagonals in dimension > 1, and the loop kept evaluating
+nonfinite proposals until ``max_steps``. The loop now stops -- with
+``done=False``, ``status="stagnated"`` and the traced
+``OptimizerInfo.stagnated`` flag -- on a **rejected** step from which no
+later step can ever be accepted:
+
+- the retracted proposal is bitwise the current point (``x_new == x``, so
+  ``r_new == r`` and the cost can only tie, never improve, while ``lam``
+  only grows and the step only shrinks from there), or
+- the LM step ``d`` or the damping ``lam`` is nonfinite (the Gram and the
+  gradient are fixed on a rejected step, so a nonfinite solve stays
+  nonfinite as ``lam`` grows).
+
+Both are absorbing states of the pre-#210 loop, so the exit shortens only
+runs that would otherwise have exhausted ``max_steps`` -- and returns
+bitwise the iterate they would have returned. A transient rejected
+overshoot (the stuck start of a ``Positive`` leaf climbing off a sub-true
+value: a *large*, finite, point-moving Gauss--Newton step rejected for a
+dozen-odd iterations before the LM breaks free) never trips it; the
+rejected-start fixture in ``tests/manifolds/test_riemannian_lm_ftol.py`` is
+the guard. The two conditions are deliberately narrower than MINPACK's
+``xtol`` collapse (``delta <= eps * ||x||``) or a cost-tie test: those fire
+earlier on the floor fixture but are not absorbing (a sub-ulp step can still
+flip the cost by rounding) and could pre-empt the #156 ftol certification on
+a gauge-bearing solve. A precision-aware acceptance
+``(r - r_new)'(r + r_new) > 0``, which would resolve genuine descent through
+the cost tie, is a separate follow-up (#211: it changes accepted
+trajectories).
+
 #78 done-flag (Phase-3 contract item 3; red-team R6/R10/R16)
 ------------------------------------------------------------
 The convergence ``done`` flag is a traced bool living in the
@@ -409,7 +447,7 @@ class _RiemannianLM:
 
         def _solve(
             theta0_flat: Float[Array, " K"], args_in: Any
-        ) -> tuple[Any, Any, Any, Any]:
+        ) -> tuple[Any, Any, Any, Any, Any]:
             """Pure solve core in ``(theta0_flat, args_in)``.
 
             On the legacy path it is called eagerly with ``args_in=None``
@@ -434,13 +472,16 @@ class _RiemannianLM:
             lam0 = jnp.maximum(lam0, lam_floor)
 
             def cond_fun(carry: Any) -> Any:
-                x, lam, step, done, stall = carry
+                x, lam, step, done, stall, stagnated = carry
                 del x, lam, stall
-                return jnp.logical_and(step < self.max_steps, jnp.logical_not(done))
+                return jnp.logical_and(
+                    step < self.max_steps,
+                    jnp.logical_not(jnp.logical_or(done, stagnated)),
+                )
 
             def body_fun(carry: Any) -> Any:
-                x, lam, step, done, stall = carry
-                del done
+                x, lam, step, done, stall, stagnated = carry
+                del done, stagnated
                 r = residuals(x)
                 cost = jnp.sum(r * r)
                 J = jax.jacfwd(residuals)(x)  # (M, K) ambient
@@ -519,7 +560,41 @@ class _RiemannianLM:
                     converged = jnp.logical_or(
                         converged, stall_next >= self.ftol_patience
                     )
-                return (x_out, lam_out, step + 1, converged, stall_next)
+
+                #   4. Numerical-stagnation exit (#210): a REJECTED step from
+                #      which no later step can be accepted. Either the
+                #      retracted proposal is bitwise the current point (the
+                #      cost can only tie, never improve, while ``lam`` only
+                #      grows and the step only shrinks), or the step / damping
+                #      is nonfinite (the Gram and gradient are fixed on a
+                #      rejected step, so a nonfinite solve stays nonfinite).
+                #      Both are absorbing states of the pre-#210 loop, so this
+                #      exit only shortens runs that would have exhausted
+                #      ``max_steps`` and returns bitwise their iterate. A large
+                #      rejected overshoot (the ``Positive`` stuck start) moves
+                #      the point and is finite, so it never trips. It is a
+                #      failure report, exclusive with ``converged``: a
+                #      stationarity certification on the same step wins.
+                null_step = jnp.all(x_new == x)
+                nonfinite_step = jnp.logical_or(
+                    jnp.logical_not(jnp.all(jnp.isfinite(d))),
+                    jnp.logical_not(jnp.isfinite(lam)),
+                )
+                stagnated_next = jnp.logical_and(
+                    jnp.logical_not(improved),
+                    jnp.logical_or(null_step, nonfinite_step),
+                )
+                stagnated_next = jnp.logical_and(
+                    stagnated_next, jnp.logical_not(converged)
+                )
+                return (
+                    x_out,
+                    lam_out,
+                    step + 1,
+                    converged,
+                    stall_next,
+                    stagnated_next,
+                )
 
             init_carry = (
                 theta0_flat,
@@ -527,20 +602,21 @@ class _RiemannianLM:
                 jnp.asarray(0),
                 jnp.asarray(False),
                 jnp.asarray(0),
+                jnp.asarray(False),  # #210 stagnated
             )
-            x_final, _lam, steps, done, _stall = jax.lax.while_loop(
+            x_final, _lam, steps, done, _stall, stagnated = jax.lax.while_loop(
                 cond_fun, body_fun, init_carry
             )
 
             r_final = residuals(x_final)
             final_objective = 0.5 * jnp.sum(r_final * r_final)
             del r0  # only used to seed the jacfwd trace shape
-            return x_final, steps, done, final_objective
+            return x_final, steps, done, stagnated, final_objective
 
         if not two_arg:
             # Legacy contract: eager call, while_loop traced per call --
             # the exact pre-#124 behaviour.
-            x_final, steps, done, final_objective = _solve(theta_flat, None)
+            x_final, steps, done, stagnated, final_objective = _solve(theta_flat, None)
         else:
             # Memoised on the kernel object itself (#139): the trace dies
             # with the kernel, and same-(solver, spec) calls on a live
@@ -548,14 +624,24 @@ class _RiemannianLM:
             solve_jit = _TRACED_SOLVE_CACHE.get_or_build(
                 residual_fn, lambda: jax.jit(_solve), key=(self, manifold_spec)
             )
-            x_final, steps, done, final_objective = solve_jit(theta_flat, args)
+            x_final, steps, done, stagnated, final_objective = solve_jit(
+                theta_flat, args
+            )
 
         # Status: under jit these are traced; eagerly (including after the
         # memoised jitted solve, whose outputs are concrete) they are
         # concrete.
+        # #210: ``"stagnated"`` is the numerical-stagnation failure report
+        # (rejected null / nonfinite step); it is exclusive with ``done``.
         try:
             done_concrete = bool(done)
-            status = "converged" if done_concrete else "max_iterations"
+            stagnated_concrete = bool(stagnated)
+            if done_concrete:
+                status = "converged"
+            elif stagnated_concrete:
+                status = "stagnated"
+            else:
+                status = "max_iterations"
         except (jax.errors.TracerBoolConversionError, TypeError):
             status = "traced"
         # Manifold-aware unflatten so non-scalar leaves are reshaped to
@@ -634,6 +720,7 @@ class _RiemannianLM:
             status=status,
             backend="riemannian_lm",
             done=jnp.asarray(done),
+            stagnated=jnp.asarray(stagnated),
             stalled_indefinite=stalled_indefinite,
             min_curvature=min_curvature,
         )
@@ -696,6 +783,18 @@ def riemannian_lm(
         iterate drifts at a large gradient on a correct estimate), so it does
         not trigger the probe. Set ``False`` to silence the warning and skip the
         probe entirely.
+
+    Notes
+    -----
+    A solve that can make no further numerical progress -- a rejected step
+    whose retracted proposal is bitwise the current point, or a nonfinite LM
+    step / damping -- stops early with ``status="stagnated"``,
+    ``OptimizerInfo.stagnated=True`` and ``done=False`` (#210), instead of
+    doubling ``lam`` to overflow and running to ``max_steps``. This is a
+    failure report, not a certification: the requested stationarity test did
+    not pass, so ``result.converged`` is ``False``. Both trigger conditions
+    are absorbing states of the loop, so the returned iterate is bitwise the
+    one ``max_steps`` would have returned; see the module docstring.
     """
     return _RiemannianLM(
         rtol=rtol,

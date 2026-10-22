@@ -240,7 +240,12 @@ been through four reviewer iterations; the abstractions are deliberate.
   warns and sets `OptimizerInfo.stalled_indefinite` / `.min_curvature`,
   suggesting `riemannian_tr()` (eager-only; never under the vmapped/replicate
   path; a #156 ftol cost-stagnation stop drifts at large gradient and is
-  excluded as non-stationary). There is still no pymanopt RUNTIME backend (#3 —
+  excluded as non-stationary). `riemannian_lm` also stops early with
+  `status="stagnated"` / `OptimizerInfo.stagnated` (`done=False`, so
+  `converged=False`) on a rejected step that cannot move the point or a
+  nonfinite step/damping (#210) — previously `lam` doubled to overflow and
+  the loop ran to `max_steps`; both triggers are absorbing states, so
+  iterates are bitwise unchanged. There is still no pymanopt RUNTIME backend (#3 —
   native constructors only; pymanopt is a dev-only gated cross-check). The
   high-gauge-fraction `k/n > 0.7` regime remains surfaced as a caveat, not
   supported. Validated against a pymanopt-TrustRegions baseline on the
