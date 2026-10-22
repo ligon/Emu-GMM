@@ -245,7 +245,10 @@ been through four reviewer iterations; the abstractions are deliberate.
   `converged=False`) on a rejected step that cannot move the point or a
   nonfinite step/damping (#210) — previously `lam` doubled to overflow and
   the loop ran to `max_steps`; both triggers are absorbing states, so
-  iterates are bitwise unchanged. There is still no pymanopt RUNTIME backend (#3 —
+  iterates are bitwise unchanged. Step acceptance reads the cancellation-free
+  reduction `(r - r_new)'(r + r_new) > 0` (#211), not `cost_new < cost`, so
+  genuine descent below `eps * cost` is taken rather than rejected as a tie —
+  no noise floor on the test, by design (see the solver docstring). There is still no pymanopt RUNTIME backend (#3 —
   native constructors only; pymanopt is a dev-only gated cross-check). The
   high-gauge-fraction `k/n > 0.7` regime remains surfaced as a caveat, not
   supported. Validated against a pymanopt-TrustRegions baseline on the
