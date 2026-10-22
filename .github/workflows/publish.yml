@@ -1,0 +1,82 @@
+# Publish emu-gmm to PyPI via trusted publishing (OIDC): no API token is
+# stored anywhere.  Triggered by publishing a GitHub Release, which is the
+# single event behind BOTH downstream publishers -- this workflow (PyPI) and
+# the GitHub->Zenodo integration (version DOI).  `make release` produces the
+# version bump + annotated tag locally; `make release-publish` pushes them
+# and creates the Release (see Makefile).
+#
+# One-time setup (outside this repo):
+#   * pypi.org -> project emu-gmm -> Publishing -> add a trusted publisher:
+#       owner ligon, repository Emu-GMM, workflow publish.yml, environment pypi
+#   * GitHub -> Settings -> Environments -> `pypi` (required reviewer
+#     recommended; restrict to v* tags).
+# Until both exist the `publish` job fails at the OIDC exchange and nothing
+# is uploaded; the `build` job still runs and attaches dist/ to the Release.
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # build-only dry run (no upload) on any ref
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # attach dist/ to the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install poetry
+        run: pipx install poetry
+      - name: Check project metadata
+        run: poetry check
+      - name: Tag must match pyproject version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          v="$(poetry version -s)"
+          t="${TAG#v}"
+          if [ "$v" != "$t" ]; then
+            echo "pyproject version $v does not match release tag $TAG" >&2
+            exit 1
+          fi
+      - name: Build
+        run: poetry build
+      - name: Show artifacts
+        run: ls -l dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+      - name: Attach artifacts to the GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+  publish:
+    name: Upload to PyPI
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/emu-gmm
+    permissions:
+      id-token: write  # OIDC token for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

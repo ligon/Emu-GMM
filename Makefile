@@ -22,7 +22,7 @@ else
 PYTEST_CMD = $(POETRY) run python -m pytest $(PYTEST_FLAGS)
 endif
 
-.PHONY: setup lint black mypy test test-parallel check quick-check par-check par-quick-check slow-tests clean build publish release
+.PHONY: setup lint black mypy test test-parallel check quick-check par-check par-quick-check slow-tests clean build publish release release-publish
 
 setup: .venv/pyvenv.cfg
 
@@ -119,3 +119,27 @@ release: $(GATE)
 	echo "Tagged v$$NEW_VER and built dist/ at that version." && \
 	echo "Publish (if desired) with 'make publish'; fetch the tag from" && \
 	echo "the source repo with 'git fetch coder --tags'."
+
+# Usage: make release-publish            (after `make release`)
+#
+# Pushes the release commit + annotated tag to GitHub and creates the
+# GitHub Release.  That Release is the single trigger for BOTH downstream
+# publishers: .github/workflows/publish.yml (PyPI via trusted publishing --
+# no token stored anywhere) and the GitHub->Zenodo integration (version
+# DOI).  `make publish` (poetry publish, token-based) stays as the manual
+# fallback.  GH_REMOTE is the remote that points at GitHub: `origin` on a
+# laptop checkout or the shared mirror; a node-local clone that publishes
+# to the mirror names GitHub differently (e.g. `make release-publish
+# GH_REMOTE=github`).
+GH_REMOTE ?= origin
+release-publish:
+	@git diff --quiet && git diff --cached --quiet || \
+		{ echo "release-publish: working tree not clean; commit or stash first"; exit 1; }
+	@VER=$$($(POETRY) version -s) && \
+	git rev-parse -q --verify "refs/tags/v$$VER" >/dev/null || \
+		{ echo "release-publish: no tag v$$VER here; run 'make release' first"; exit 1; }
+	@VER=$$($(POETRY) version -s) && \
+	git push $(GH_REMOTE) HEAD:main --follow-tags && \
+	gh release create "v$$VER" --verify-tag --generate-notes --title "emu-gmm v$$VER" && \
+	echo "Release v$$VER created: publish.yml builds dist/ and uploads to PyPI" && \
+	echo "(environment 'pypi'; approve it on GitHub if the environment requires a reviewer)."

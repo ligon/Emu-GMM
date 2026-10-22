@@ -117,6 +117,25 @@ To install pre-commit hooks (ruff + black on every commit):
 poetry run pre-commit install
 #+end_src
 
+** Releasing
+
+Releases are cut locally and published from GitHub; no PyPI token is
+stored anywhere (PyPI trusted publishing).
+
+#+begin_src shell
+make release BUMP=patch   # full check gate, clean-tree guard, version bump,
+                          # commit, annotated tag vX.Y.Z, poetry build
+make release-publish      # push commit + tag, create the GitHub Release
+#+end_src
+
+Publishing the GitHub Release triggers =.github/workflows/publish.yml=,
+which rebuilds the sdist and wheel, checks the tag against =pyproject.toml=,
+attaches them to the Release, and uploads to PyPI through the =pypi=
+environment; the same Release event mints the Zenodo version DOI.  One-time
+setup lives in the workflow's header comment (a trusted publisher on
+pypi.org and a =pypi= environment on GitHub).  =make publish= (=poetry
+publish=, token-based) remains the manual fallback.
+
 * Layout
 
 #+begin_example
