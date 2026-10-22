@@ -94,10 +94,35 @@ the guard. The two conditions are deliberately narrower than MINPACK's
 ``xtol`` collapse (``delta <= eps * ||x||``) or a cost-tie test: those fire
 earlier on the floor fixture but are not absorbing (a sub-ulp step can still
 flip the cost by rounding) and could pre-empt the #156 ftol certification on
-a gauge-bearing solve. A precision-aware acceptance
-``(r - r_new)'(r + r_new) > 0``, which would resolve genuine descent through
-the cost tie, is a separate follow-up (#211: it changes accepted
-trajectories).
+a gauge-bearing solve. Since #211 the acceptance test reads the
+cancellation-free reduction ``(r - r_new)'(r + r_new)`` (next section), so
+the exact-tie floor above no longer stalls -- that fixture converges in two
+steps -- and this exit is reached only through a null step (an optimum
+unrepresentable next to the iterate, e.g. ``1 - 1e-17`` next to ``1.0``) or
+a nonfinite step / damping.
+
+Accurate step acceptance (#211)
+-------------------------------
+A step is accepted when the cost reduction is positive, and the reduction
+is computed as ``(r - r_new)'(r + r_new)`` -- algebraically ``||r||^2 -
+||r_new||^2`` -- rather than as the difference of the two rounded squared
+norms. The difference form cannot resolve a reduction below ``eps * cost``
+(``1 + x'x`` with ``x ~ 1e-9`` rounds to ``1.0`` on both sides, so the step
+was rejected as a tie although the exact reduction is ``2e-18 > 0``); the
+product form resolves it to the accuracy of the residual entries
+themselves. The same quantity feeds the #156 ftol stagnation counter.
+
+Two consequences are deliberate. (1) The test is ``reduction > 0`` with no
+noise floor: a floor of ``c * eps * cost`` would reinstate the exact-tie
+stall, and the old difference test had no floor either -- at the floor on a
+generic (rounding-noisy) residual it accepted a rounding flip as readily as
+the product form does, so the product form is no worse there and strictly
+better on exact ties. (2) The two tests agree bitwise whenever
+``|cost - cost_new|`` exceeds a few ulps of ``cost``, i.e. on every step of
+a healthy solve except possibly the last one or two inside the rounding
+band; the #156 bitwise tests and the ``Positive`` rejected-start fixture
+are the guards. A nonfinite ``r_new`` gives a NaN or ``-inf`` reduction,
+which compares False, so the step is rejected exactly as before.
 
 #78 done-flag (Phase-3 contract item 3; red-team R6/R10/R16)
 ------------------------------------------------------------
@@ -496,9 +521,17 @@ class _RiemannianLM:
                 d = project_flat(x, d_raw)
                 x_new = retract(x, d)
                 r_new = residuals(x_new)
-                cost_new = jnp.sum(r_new * r_new)
+                # #211: the cost reduction ||r||^2 - ||r_new||^2 computed
+                # cancellation-free as (r - r_new)'(r + r_new). The difference
+                # of the two rounded squared norms cannot resolve a reduction
+                # below eps * cost and rejected genuine descent as a tie at
+                # the float64 floor (#210); this form resolves it to the
+                # accuracy of the residual entries. No noise floor on the
+                # test -- see the module docstring. A nonfinite r_new gives a
+                # NaN / -inf reduction, which compares False: rejected.
+                reduction = jnp.sum((r - r_new) * (r + r_new))
 
-                improved = cost_new < cost
+                improved = reduction > 0.0
                 x_out = jnp.where(improved, x_new, x)
                 lam_decreased = jnp.maximum(jnp.maximum(1e-12, lam_floor), 0.5 * lam)
                 lam_out = jnp.where(improved, lam_decreased, 2.0 * lam)
@@ -544,7 +577,7 @@ class _RiemannianLM:
                 #      ``grad_ok``, the counter never accumulates and the
                 #      iterate / step count of an already-converging solve are
                 #      unchanged (the all-scalar / all-Euclidean path included).
-                actual_reduction = cost - cost_new
+                actual_reduction = reduction
                 stagnant_accepted = jnp.logical_and(
                     improved, actual_reduction < self.ftol * cost
                 )
@@ -794,7 +827,10 @@ def riemannian_lm(
     failure report, not a certification: the requested stationarity test did
     not pass, so ``result.converged`` is ``False``. Both trigger conditions
     are absorbing states of the loop, so the returned iterate is bitwise the
-    one ``max_steps`` would have returned; see the module docstring.
+    one ``max_steps`` would have returned; see the module docstring. Step
+    acceptance reads the cancellation-free reduction
+    ``(r - r_new)'(r + r_new) > 0`` (#211), so a genuine descent that the
+    rounded squared norms cannot distinguish from a tie is still taken.
     """
     return _RiemannianLM(
         rtol=rtol,
