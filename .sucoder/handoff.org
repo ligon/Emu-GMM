@@ -1,126 +1,82 @@
-#+TITLE: Handoff -- Emu-GMM evolve run 1
-#+DATE: [2026-07-11 Fri]
+#+TITLE: Handoff -- Emu-GMM
+#+DATE: [2026-10-22 Thu]
 
-* Status (written by Sue, Claude Fable 5 session, 2026-07-11)
+* Status (written by Sue, Claude Fable 5.1 session, 2026-10-22)
 
-AlphaEvolve run 1 for the estimator-config experiment is SUBMITTED and
-QUEUED; everything before submission is done and frozen.
+Session purpose: GitHub issue #210 (RiemannianLM overflows damping after
+float64 cost ties and runs to max_steps), filed the same morning.
+Both fixes are on branches off =main= (=bb67c2c=, v0.4.0 + Zenodo DOI).
 
-- Branch: =evolve-harness= at =5760230= (pushed to GitHub origin).
-  Local main fast-forwarded to =3ccd782= earlier in the session.
-- Pre-registration: RATIFIED by EL 2026-07-11, as drafted, plus run-1
-  decisions (80/80, narrow whitelist, emu-gmm engine, operational
-  concurrency 16).  sha256 freeze recorded in =evolve/README.org=
-  "Ratification and freeze" section; hashes verified in the run clone.
-- Battery: G1-G6 green on this slice (2026-07-11).  Adapter dry-run:
-  seed scored exactly 0.0 on both fitness fixtures.
-- Engine: =emu-gmm= Gemini Enterprise engine CREATED via Discovery
-  Engine API in =alphaevolve-exploration= (no console step needed).
-  Project-local env: =evolve/.env= (untracked; also copied to the run
-  clone).  Model =gemini-3.1-pro-preview=.
-- Slurm: job *35592564* (=evolve_gmm_config=, 16 cores, co_carleton /
-  savio4_htc / carleton_htc4_normal, 2 h), submitted from the run
-  clone =$SUE_SCRATCH/emu_gmm_evolve/repo= at =14150a0=.  No
-  dependency: the AggLC =evolve_shifts_run= (35592435) COMPLETED
-  2026-07-11T14:22, freeing the shared API quota.  Log:
-  =$SUE_SCRATCH/emu_gmm_evolve/evolve_gmm_35592564.log=; per-candidate
-  records in =$SUE_SCRATCH/emu_gmm_evolve/runs/=.
-- History: first submission (35592532, afterany:35592435) failed at
-  startup with exit 2 and ZERO API spend -- under sbatch $0 is the
-  spooled script copy, so REPO_ROOT resolved to /var/spool/slurmd and
-  the .env guard aborted.  Fixed in =14150a0= (SLURM_SUBMIT_DIR;
-  operational file, outside the sha256 freeze -- scoring-relevant
-  hashes unchanged).
+** Landed on branches, PRs open
+- *#210 stagnation exit* -- =fix/210-lm-stagnation= at =fbcec48=,
+  PR #212 -> =main=.  =riemannian_lm= now stops on a REJECTED step from
+  which no later step can be accepted (retracted proposal bitwise the
+  current point, or nonfinite step / damping): =done=False=,
+  =status="stagnated"=, traced =OptimizerInfo.stagnated= (additive).
+  Absorbing-state argument => every existing iterate bitwise unchanged.
+  New =tests/manifolds/test_riemannian_lm_stagnation.py=.
+- *#211 accurate acceptance* -- =fix/211-accurate-reduction= at
+  =dc60e34=, PR #213 -> =fix/210-lm-stagnation= (STACKED; merge #212
+  first, #213 retargets to =main= automatically).  Acceptance and the
+  #156 ftol counter read =(r - r_new)'(r + r_new) > 0= instead of
+  =cost_new < cost=; no noise floor, by design (solver docstring
+  explains why a =c*eps*cost= floor would be wrong).  The #210 floor
+  fixture now CONVERGES (2 steps); the stagnation tests were retargeted
+  to the null-step / nonfinite routes.  New
+  =tests/manifolds/test_riemannian_lm_accurate_reduction.py=.
+  Measurement (old vs new, same process): realdata published + design,
+  #156 CU+clustered and CU+IID, Positive stuck start -- ALL bitwise
+  identical (steps, J, theta).  Table is in the PR #213 body.
 
-* RUN 1 COMPLETE (2026-07-11): transfer FAILED, no adoption
+** Gates
+- #210: =make par-check= GREEN (1584 passed, 25 skipped; job 40371792,
+  n4247).  Serial =make check= on the same job: PENDING at the time of
+  this note -- log =/global/scratch/users/ligon/sue/emu210/check_40371792.log=,
+  look for =CHECK_EXIT==.  Record it as a comment on PR #212.
+- #211: full gate job 40372061 (clones the published branch from the
+  mirror): PENDING -- log
+  =/global/scratch/users/ligon/sue/emu210/check211_40372061.log=
+  (=PAR_CHECK_EXIT== then =CHECK_EXIT==).  Record on PR #213.
+- Burst scripts: =/global/scratch/users/ligon/sue/emu210/check210.slurm=,
+  =check211.slurm= (note: use the uv-managed Python 3.11 under =$HOME=;
+  not every savio4_htc node has =/usr/bin/python3.11=).
 
-Everything above executed.  Run job 35592564 COMPLETED (11m33s, 90
-candidates).  Registered hold-out battery: the winner (identity
-weighting) FAILED transfer at n=3000 (-0.00145 vs bar +0.00228; the
-overidentified efficiency sign-flip); best iterated config fails the
-same way.  Full results, rationale, and provenance hashes appended to
-=evolve/README.org= ("Run 1 results"); branch at =c39d183=, pushed to
-GitHub origin; run clone synced.  Defaults (CUE + LM) stand.
+** Issues filed this session
+- Emu-GMM #211 (precision-aware acceptance; now addressed by PR #213).
+- sucoder #57: the injected SKILL CATALOG listed =working-with-github=
+  and =sucoder-peers=, which do not exist on this host (nor on GitHub
+  sucoder-skills); catalog is rendered from the launcher's tree and
+  only the base dir is probed (=sucoder/mirror.py= @ =77b7a29=).
 
-* RUN 2 IN FLIGHT (2026-07-11, same session)
+** Mirror hygiene (done, at EL's request)
+- Mirror =main= fast-forwarded =36d5151 -> bb67c2c= (GitHub main).
+- Mirror checked out on =main= (was left on =evolve-harness= since
+  2026-07-12).  Deleted merged branches =feat/144-estimator-law=,
+  =docs/202-kappa-regime-note=, =feat/205-tau-saturated=,
+  =fix/201-iterated-status=, four =worktree-agent-*=; deleted
+  =evolve-harness= locally (GitHub keeps =365854c=); removed four dead,
+  clean agent worktrees under the mirror's =.claude/worktrees/=.
+- This =handoff= branch: created from the old evolve-harness handoff
+  commits rebased onto =main=.  Handoff notes go HERE from now on
+  (EL's decision 2026-10-22), not on feature branches.
 
-EL ratified run 2 via in-session questionnaire: calibration-composite
-score, whitelist = run-1 knobs + kappa_target [1e2,1e12]
-(tau_threshold dropped as inert), fitness = 2 binding fixtures x 96
-reps (per-rep anchoring, #142), run size 80/80.  Prereg appended to
-=evolve/README.org= ("Run 2 pre-registration"); registered baselines
-built and recorded (F1 err .431 binding 35%; F2 err .655 binding 44%;
-H1 err .312 binding 11%; H2-benign err .115 binding 1%).
+** Open questions for EL
+- =confirm/202-kappa-euler-mask= and =measure/205-site-saturation=
+  are UNMERGED local+GitHub branches (measurement scripts); left in
+  place -- delete?
+- GitHub's own stale branches (=claude/*=, =worktree-wf_*=, old merged
+  =fix/*=) untouched.
+- Mirror has untracked =.coder/= logs; untouched.
 
-New files: =fixture_binding.py=, =evaluator_ridge.py=,
-=initial_config_ridge.py=, =test_harness_run2.py=,
-=holdout_battery_run2.py=; =run_experiment.py= gained the
-ridge_config entry (run-1 scoring hashes re-verified intact).
+** Next concrete actions
+1. Read both gate logs; comment results on PR #212 / #213.
+2. Merge #212, then #213 (CI should also run on both).
+3. After merge: delete =fix/210-lm-stagnation= / =fix/211-accurate-reduction=
+   on mirror and GitHub; close #210, #211 (PR bodies say "Closes").
+4. =sucoder release= (or =scancel 40371651=) when EL is done with this
+   slice; nothing long-running is attached to it.
 
-* RUN 2 COMPLETE (2026-07-12): evolution negative, kappa sweep POSITIVE
-
-Full results in =evolve/README.org= "Run 2 results" (branch at
-=6ad132d=, pushed; run clone synced).  Registered outcome: no evolved
-candidate beat defaults (GA stuck in the gated iterated family; never
-tried kappa-under-CUE).  Post-run exploratory analyses with the
-registered metric found the real result: =DiagonalTikhonov=
-kappa_target ~1e3 (vs default 1e6) dominates in the binding regime
-(fitness scores +0.2..+0.35, better convergence), transfers ABOVE the
-bar on the unseen binding hold-out (+0.33/+0.41, better-than-full
-retention), and is bit-identical to the default on the benign arm
-(adaptive ridge only engages under repair).  emu-gmm #201 filed
-(fixed-k two-step flagged non-converged; iterated_status not
-surfaced).
-
-* EVERYTHING LANDED (2026-07-12 session close)
-
-- #201 fixed and merged (PR #203): fixed-k two-step schedules +
-  iterated_status on Diagnostics.
-- evolve-harness merged to main (PR #204); black repair of that merge
-  in PR #207 (merged).
-- #202 RESOLVED as "no default change": the confirmatory pass on the
-  independent Euler-mask family FAILED criterion 1 per the
-  pre-declared protocol -- mechanism: the kappa gain is
-  indefiniteness-repair-specific; tight targets SATURATE (tau_max) on
-  PSD-but-ill-conditioned V and mildly hurt.  Full record in #202's
-  comments; per-rep data in sue-scratch =emu_gmm_evolve/
-  kappa_confirm_202/=; measurement script on branch
-  =confirm/202-kappa-euler-mask= (pushed, no PR needed).
-- PR #206 (docs: kappa_target regime guidance, #202 disposition) is
-  OPEN awaiting EL's merge; reviewed and recommended.
-- #205 filed (tau_saturated diagnostic) -- open, unassigned; natural
-  small follow-up.
-
-* LATER SAME SESSION (2026-07-12 afternoon)
-
-- #205 implemented: PR #208 (tau_saturated on Diagnostics + FitRecord;
-  reviewed, gate 1476 green) -- OPEN awaiting EL merge.
-- Site-saturation measurement (branch =measure/205-site-saturation=,
-  commit 0da5e1c; artifacts sue-scratch
-  =emu_gmm_evolve/site_saturation_205/=): analytic inference sites
-  (j_test / k_statistic / confidence-set grid / wild single-repair)
-  need NO plumbing -- saturation given anchor-clean-and-converged is
-  0 everywhere, both regimes.  cluster_bootstrap per-draw refits DO
-  have a channel (8.6 percent of draws given clean parents in the
-  rare-moment regime), invisible on the result object; verdict +
-  proposal posted on #205.
-- #209 filed (the bigger find): non-converged zero-support bootstrap
-  draws store FINITE theta_init rows in theta_boot; adaptive.py's
-  NaN-based validity accounting cannot see them -> degenerate atom at
-  theta_init (12 percent of draws in the measured regime), biasing
-  bootstrap SEs/CIs toward the initialization.  Pre-existing bug,
-  needs a maintainer design decision (poison vs exclude-and-count).
-
-* Next concrete actions
-
-1. EL: merge PR #206 (docs note) and PR #208 (tau_saturated); close
-   #202.
-2. EL decision on #209 (semantics choice), then a small PR: per-draw
-   tau_saturated + exclude-and-count fields on ClusterBootstrapResult
-   (composes with whichever #209 option is chosen).
-3. Possible run 3 (needs fresh prereg): two-step now races fairly
-   post-#203; decide flag-respecting vs flag-blind accounting
-   deliberately; correct the problem-text hints; note run-2's kappa
-   lower bound (1e2) was boundary-binding.
-4. When truly done, =sucoder release= (or scancel 35592454) frees the
-   condo slice.
+** Scratch (job-local; gone at turnover)
+=$SUCODER_LOCAL_ROOT/tmp/claude-43292/.../scratchpad/=: =repro210.py=,
+=exp211.py= (in-memory patched-solver experiment), =measure211.py= +
+=measure211.log= (the bitwise table), =targeted211.log= (175 passed).
