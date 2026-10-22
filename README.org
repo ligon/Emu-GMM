@@ -99,13 +99,33 @@ A refit that does not converge --- a resampled world can extinguish a rare momen
 
 * Setup
 
-Requires Python >= 3.11 and [[https://python-poetry.org/][Poetry]].
+Requires Python >= 3.11.
+
+Install the published package from PyPI with pip:
+
+#+begin_src shell
+pip install emu-gmm
+#+end_src
+
+With uv, explicitly allow prereleases:
+
+#+begin_src shell
+uv pip install --prerelease=allow emu-gmm
+#+end_src
+
+The transitive =haliax>=1.4.dev452,<1.5= dependency deliberately uses a development release for compatibility with current JAX.
+The flag explicitly permits that prerelease under [[https://docs.astral.sh/uv/concepts/resolution/#pre-release-handling][uv's resolution policy]].
+
+** Development checkout
+
+For a source checkout, install [[https://python-poetry.org/][Poetry]] and run:
 
 #+begin_src shell
 make setup
 #+end_src
 
-This runs =poetry install= and creates =.venv/= in the project root. Activate with =direnv allow= or =poetry shell=.
+This runs =poetry install= and creates =.venv/= in the project root.
+Activate with =direnv allow= or =poetry shell=.
 
 * Development
 
