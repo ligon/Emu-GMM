@@ -76,6 +76,7 @@ from emu_gmm.inference import (
     j_test,
     k_confidence_set,
     k_statistic,
+    k_statistic_from_arrays,
     moment_wild_bootstrap,
     profiled_k_confidence_set,
 )
@@ -153,6 +154,7 @@ __all__ = [
     "k_confidence_set",
     "profiled_k_confidence_set",
     "k_statistic",
+    "k_statistic_from_arrays",
     "KConfidenceSet",
     "KStatisticResult",
     # Measures

@@ -239,6 +239,29 @@ These fields are *authoritative*; read them, do not recompute them:
 | SEs on functionals of \(AA'\) (gauge)   | =functional_se= / =gamma_se=         | no (analytic)   |
 | =n_boot= to a precision target          | =adaptive_bootstrap=                 | wraps the above |
 
+** Kleibergen tests from externally constructed arrays
+
+=k_statistic_from_arrays(m, G, V, score_covariance=C)= tests the full parameter vector when the caller supplies the matched covariance tensors.
+=m= contains moment means, =G= differentiates those same means, =V= is their symmetric positive-definite covariance, and =C[j]= is =Cov(G[:,j], m)= with shape =(p,M,M)=.
+The cross-covariance is required and need not be symmetric; the function neither substitutes raw =G= nor adds a ridge to =V=.
+Both covariance tensors must match the same null, clustering, centering, and normalization.
+The numerical symmetry check scales each entry by the product of its marginal standard deviations, so a large-variance moment cannot hide another pair's asymmetry.
+For common-N long-run covariances, divide both tensors by N before calling; unequal observability requires matching pair-specific denominators, with no extra N multiplier in the statistic.
+
+#+begin_src python
+from emu_gmm import k_statistic_from_arrays
+
+test = k_statistic_from_arrays(m, G, V, score_covariance=C)
+if bool(test.invalid_input):
+    raise ValueError("Invalid numerical inputs to the Kleibergen test")
+print(test.K, test.p_K)
+#+end_src
+
+For ambient manifold coordinates, pass the exact structural =gauge_nullspace_dim=; the quotient dimension controls both the singular projection and the reference degrees of freedom.
+The function supports =jit= / =vmap= with a static gauge count.
+Invalid numerical inputs produce NaN statistics and p-values and set =invalid_input= to true; for a valid just-identified test, =p_S= is NaN while =invalid_input= is false.
+The existing model/measure =k_statistic= path leaves this new flag as =None= because it does not perform the array input checks.
+
 ** Two bootstraps, and why they differ
 
 The distinction trips people up, so be explicit about it.

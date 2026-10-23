@@ -120,13 +120,14 @@ previous thin-QR form).
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from numbers import Integral
 from typing import Any
 
 import haliax as ha
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
-from jaxtyping import Array, Float
+from jaxtyping import Array, Bool, Float
 
 from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal.params import (
@@ -154,8 +155,8 @@ class KStatisticResult:
     """Output of :func:`k_statistic`: K/S/J decomposition at :math:`\\theta_0`.
 
     A :func:`jax_dataclasses.pytree_dataclass` so the record threads
-    cleanly through ``jit`` / ``vmap`` boundaries: every field except
-    the three integer degrees-of-freedom is a 0-d JAX array. The dofs
+    cleanly through ``jit`` / ``vmap`` boundaries: statistical fields are
+    0-d JAX arrays. The dofs
     are :func:`jdc.static_field` so they are baked into the compiled
     graph rather than traced.
 
@@ -184,6 +185,12 @@ class KStatisticResult:
     df_K, df_S, df_J : int (static)
         Degrees of freedom: ``df_K = p_id``, ``df_J = M``,
         ``df_S = M - p_id``.
+    invalid_input : 0-d bool array or None
+        The validated array entry point flags non-real/non-finite inputs,
+        a nonsymmetric/non-PD covariance, or non-finite arithmetic, and
+        returns NaN statistics and p-values. ``None`` on the existing
+        model/measure path, which does not perform these input checks.
+        The expected ``p_S`` NaN when ``df_S == 0`` is not an input failure.
     """
 
     K: Float[Array, ""]
@@ -195,6 +202,7 @@ class KStatisticResult:
     df_K: int = jdc.static_field()  # type: ignore[attr-defined]
     df_S: int = jdc.static_field()  # type: ignore[attr-defined]
     df_J: int = jdc.static_field()  # type: ignore[attr-defined]
+    invalid_input: Bool[Array, ""] | None = None
 
 
 def _resolve_theta_null(
@@ -450,8 +458,17 @@ def _compute_d_tilde(
             "strong-identification limit."
         )
 
-    # z = V_star^{-1} m via Cholesky: solve L y = m, then L' z = y.
-    L = cho.cholesky(V_star)
+    return _orthogonalized_jacobian(m, G, sigma_jm, cho.cholesky(V_star))
+
+
+def _orthogonalized_jacobian(
+    m: Float[Array, " M"],
+    G: Float[Array, "M p"],
+    sigma_jm: Float[Array, "p M M"],
+    L: Float[Array, "M M"],
+) -> Float[Array, "M p"]:
+    """The shared Kleibergen correction in mean-covariance units (ledger 7.6)."""
+    # z = V^{-1} m via Cholesky: solve L y = m, then L' z = y.
     y = cho.forward_solve(L, m)  # L y = m
     z = cho.back_solve(L, y)  # L' z = y -> z = V^{-1} m
 
@@ -514,6 +531,157 @@ def _stats_from_whitened(
     return K_stat, S_stat, J_stat
 
 
+def _whiten_moments_and_jacobian(
+    m: Float[Array, " M"],
+    D_tilde: Float[Array, "M p"],
+    L: Float[Array, "M M"],
+) -> tuple[Float[Array, " M"], Float[Array, "M p"]]:
+    """Use one supplied covariance metric for the residual and score directions."""
+    return (
+        jax.scipy.linalg.solve_triangular(L, m, lower=True),
+        jax.scipy.linalg.solve_triangular(L, D_tilde, lower=True),
+    )
+
+
+def _statistic_result(
+    K: Float[Array, ""],
+    S: Float[Array, ""],
+    J: Float[Array, ""],
+    df_K: int,
+    df_S: int,
+    df_J: int,
+    *,
+    invalid_input: Bool[Array, ""] | None = None,
+) -> KStatisticResult:
+    """Shared tails and result assembly, retaining zero-dof NaN sentinels."""
+    if invalid_input is not None:
+        K = jnp.where(invalid_input, jnp.nan, K)
+        S = jnp.where(invalid_input, jnp.nan, S)
+        J = jnp.where(invalid_input, jnp.nan, J)
+    return KStatisticResult(
+        K=K,
+        S=S,
+        J=J,
+        p_K=_kappa_chi2_sf(K, df_K),
+        p_S=_kappa_chi2_sf(S, df_S),
+        p_J=_kappa_chi2_sf(J, df_J),
+        df_K=df_K,
+        df_S=df_S,
+        df_J=df_J,
+        invalid_input=invalid_input,
+    )
+
+
+def k_statistic_from_arrays(
+    m: Float[Array, " M"],
+    G: Float[Array, "M p"],
+    V: Float[Array, "M M"],
+    *,
+    score_covariance: Float[Array, "p M M"],
+    gauge_nullspace_dim: int = 0,
+) -> KStatisticResult:
+    r"""Full-vector Kleibergen K/S/J test from matched mean-level arrays.
+
+    ``m`` contains moment means and ``G`` differentiates those same means.
+    ``V`` is their symmetric positive-definite covariance, used unchanged
+    as the metric for both correction and whitening; no ridge is added.
+    ``score_covariance[j] = Cov(G[:, j], m)`` must have shape ``(p, M, M)``
+    and need not be symmetric. It is required: there is no raw-G fallback.
+    All arrays must use the same moment and parameter coordinates at the
+    hypothesized null, and the same clustering, centering and normalization.
+
+    In a balanced sample with common N, convert BOTH long-run covariance
+    tensors to covariance-of-means units by dividing by N. With unequal
+    observability, use the matching pair-specific N_j N_k normalization
+    instead. There is no additional N multiplier in the statistic.
+
+    The static integer ``gauge_nullspace_dim`` specifies an exact structural
+    gauge nullspace, not an estimated numerical rank. The top ``p_id = p -
+    gauge_nullspace_dim`` singular directions determine both the projection
+    and degrees of freedom ``(p_id, M - p_id, M)``. Subvector tests and
+    contribution aggregation are outside this entry point.
+
+    Missing cross-covariance, shape errors, and invalid static gauge counts
+    raise before numerical arithmetic. Non-real/non-finite numeric arrays,
+    nonsymmetric/non-PD V, and non-finite intermediate arithmetic return
+    NaN statistics/p-values with ``invalid_input=True``, including under
+    jit/vmap. Symmetry allows roundoff of at most 32 machine epsilons times
+    each pair's product of marginal standard deviations; accepted roundoff
+    is symmetrized. A valid
+    just-identified test has ``p_S=NaN`` and ``invalid_input=False``.
+
+    Matched arrays alone do not establish the joint moment/Jacobian CLT or
+    other assumptions underlying the Kleibergen reference distribution.
+    """
+    if score_covariance is None:
+        raise ValueError("k_statistic_from_arrays: score_covariance is required.")
+    raw = tuple(_to_plain(x) for x in (m, G, V, score_covariance))
+    m, G, V, sigma_jm = raw
+    if m.ndim != 1 or G.ndim != 2:
+        raise ValueError("k_statistic_from_arrays: m must be 1-D and G must be 2-D.")
+    M, p = G.shape
+    if M < 1 or p < 1:
+        raise ValueError(
+            "k_statistic_from_arrays: moments and parameters must be nonempty."
+        )
+    if m.shape != (M,) or V.shape != (M, M) or sigma_jm.shape != (p, M, M):
+        raise ValueError(
+            "k_statistic_from_arrays: expected shapes "
+            f"m=({M},), G=({M}, {p}), V=({M}, {M}), "
+            f"score_covariance=({p}, {M}, {M})."
+        )
+    if isinstance(gauge_nullspace_dim, bool) or not isinstance(
+        gauge_nullspace_dim, Integral
+    ):
+        raise TypeError("gauge_nullspace_dim must be a static integer, not a bool.")
+    gauge_dim = int(gauge_nullspace_dim)
+    if not 0 <= gauge_dim <= p:
+        raise ValueError(f"gauge_nullspace_dim must lie in [0, p={p}].")
+    identified_dim = p - gauge_dim
+    if M < identified_dim:
+        raise ValueError("k_statistic_from_arrays: under-identified on the quotient.")
+
+    # Keep the numerical guards traced, and keep invalid data out of the SVD.
+    # Cross-covariances are NOT symmetric in general (ledger 7.6).
+    real_numeric = all(
+        jnp.issubdtype(a.dtype, jnp.number) and not jnp.iscomplexobj(a) for a in raw
+    )
+    real_arrays = tuple(jnp.real(a) for a in raw)
+    # The linear-algebra backend requires at least float32, while float64
+    # inputs and the package's default precision remain unchanged.
+    dtype = jnp.promote_types(jnp.result_type(*real_arrays, 1.0), jnp.float32)
+    m, G, V, sigma_jm = (jnp.asarray(a, dtype=dtype) for a in real_arrays)
+    finite = jnp.all(jnp.stack([jnp.all(jnp.isfinite(a)) for a in (m, G, V, sigma_jm)]))
+    # Pairwise covariance scales preserve the check under changes of moment
+    # units. A global maximum can hide order-one correlation asymmetry.
+    # Apply epsilon before multiplying scales to avoid overflow at huge V_jj.
+    marginal_scale = jnp.sqrt(jnp.abs(jnp.diag(V)))
+    symmetry_tol = (
+        (32 * jnp.finfo(dtype).eps) * marginal_scale[:, None]
+    ) * marginal_scale[None, :]
+    symmetric = jnp.all(jnp.abs(V - V.T) <= symmetry_tol)
+    valid = finite & real_numeric & symmetric
+    identity = jnp.eye(M, dtype=dtype)
+    L = cho.cholesky(jnp.where(valid, 0.5 * V + 0.5 * V.T, identity))
+    valid = valid & jnp.all(jnp.isfinite(L)) & jnp.all(jnp.diag(L) > 0)
+    L = jnp.where(valid, L, identity)
+    safe_m = jnp.where(valid, m, jnp.zeros_like(m))
+    safe_G = jnp.where(valid, G, jnp.zeros_like(G))
+    safe_sigma = jnp.where(valid, sigma_jm, jnp.zeros_like(sigma_jm))
+    D_tilde = _orthogonalized_jacobian(safe_m, safe_G, safe_sigma, L)
+    m_w, D_w = _whiten_moments_and_jacobian(safe_m, D_tilde, L)
+    valid = valid & jnp.all(jnp.isfinite(m_w)) & jnp.all(jnp.isfinite(D_w))
+    K, S, J = _stats_from_whitened(
+        jnp.where(valid, m_w, jnp.zeros_like(m_w)),
+        jnp.where(valid, D_w, jnp.zeros_like(D_w)),
+        keep=identified_dim,
+    )
+    valid = valid & jnp.all(jnp.isfinite(jnp.stack([K, S, J])))
+    return _statistic_result(
+        K, S, J, identified_dim, M - identified_dim, M, invalid_input=~valid
+    )
+
+
 def _k_statistic_arrays(
     theta_0: ParamsLike,
     measure: Measure,
@@ -573,8 +741,7 @@ def _k_statistic_arrays(
         L = jnp.asarray(L_override)
     else:
         L = cho.cholesky(V_star)
-    m_tilde = jax.scipy.linalg.solve_triangular(L, m, lower=True)
-    D_tilde_w = jax.scipy.linalg.solve_triangular(L, D_tilde, lower=True)
+    m_tilde, D_tilde_w = _whiten_moments_and_jacobian(m, D_tilde, L)
 
     # 4-5. K / S / J via the top-`identified_dim` SVD projection.
     K_stat, S_stat, J_stat = _stats_from_whitened(
@@ -800,22 +967,7 @@ def k_statistic(
         df_K = d_i
         df_J = M - identified_dim + d_i  # restricted over-id; == df_K + df_S
 
-    # p-values via jax.scipy.stats.chi2.sf — traceable under jit / vmap.
-    p_K = _kappa_chi2_sf(K_stat, df_K)
-    p_S = _kappa_chi2_sf(S_stat, df_S)
-    p_J = _kappa_chi2_sf(J_stat, df_J)
-
-    return KStatisticResult(
-        K=K_stat,
-        S=S_stat,
-        J=J_stat,
-        p_K=p_K,
-        p_S=p_S,
-        p_J=p_J,
-        df_K=df_K,
-        df_S=df_S,
-        df_J=df_J,
-    )
+    return _statistic_result(K_stat, S_stat, J_stat, df_K, df_S, df_J)
 
 
-__all__ = ["k_statistic", "KStatisticResult"]
+__all__ = ["k_statistic", "k_statistic_from_arrays", "KStatisticResult"]
