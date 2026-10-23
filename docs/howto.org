@@ -269,8 +269,8 @@ The existing model/measure =k_statistic= path leaves this new flag as =None= bec
 
 The distinction trips people up, so be explicit about it.
 
-- =moment_wild_bootstrap= is /refit-free/. It perturbs the empirical moments with a wild weighting and reads off the \(J\) distribution (and, via the first-order delta, an approximate parameter distribution). It never re-solves the GMM problem, so it's cheap --- and it's the right tool for the \(J\) test.
-- =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap. It resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns =theta_boot=, the bootstrap distribution of \(\hat\theta\) itself (Cameron, Gelbach & Miller 2008). It captures nonlinearity the delta method can't, and it's the one to reach for under few clusters, a boundary optimum, or a badly non-Gaussian sampling distribution.
+- =moment_wild_bootstrap= is /refit-free/. It perturbs the empirical moments with a wild weighting and reads off the \(J\) distribution (and, via the first-order delta, an approximate parameter distribution). It never re-solves the GMM problem, so it's cheap.
+- =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap. It resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns =theta_boot=, the bootstrap distribution of \(\hat\theta\) itself (Cameron, Gelbach & Miller 2008). It captures nonlinearity the delta method can't, and it's the one to reach for under few clusters, a boundary optimum, or a badly non-Gaussian sampling distribution. Its opt-in =null_result= mode supplies a null-recentred \(J\) law in the positive cluster-exposure domain described below.
 
 The coin data above are independent; the groups below illustrate the API rather than a clustered data-generating process. Supply the actual sampling-cluster IDs for a clustered application.
 
@@ -296,6 +296,67 @@ ci95 = jnp.quantile(tb, jnp.array([0.025, 0.975]), axis=0) if boot.n_valid else 
 #+end_src
 
 A refit that does not converge is stored as a =NaN= row --- not as its =theta_hat=, which on a resampled world that extinguished a rare moment's support is just =theta_init=, finite and unmoved (#209). =boot.convergence= names the event, =boot.zero_support= / =boot.tau_saturated= say why, and =boot.n_nonconverged= counts; reduce over the converged rows as above, or let =adaptive_bootstrap= exclude and count the =NaN= draws for you.
+
+** Null-recentred cluster J test
+
+The ordinary pairs =boot.J_boot= is shifted away from the null and must not be used as an over-identification reference law.
+When weights and masks are finite and nonnegative and every original cluster has positive exposure for every moment, =null_result= computes the exact expectation of each bootstrap moment at the original estimate, including unequal per-moment exposure.
+The same frozen offset is subtracted from the residual in every refit.
+Pass a converged, overidentified original fit obtained from the same model, measure, covariance settings, weighting, regularization, optimizer policy, and penalty:
+
+#+begin_src python
+import jax_dataclasses as jdc
+
+@jdc.pytree_dataclass
+class CommonMean:
+    theta: float
+
+def common_mean(x, params):
+    return jnp.array([x[0] - params.theta, x[1] - params.theta])
+
+measure_J = EmpiricalMeasure(
+    x=jax.random.normal(jax.random.PRNGKey(7), (20, 2)),
+    mask=jnp.ones((20, 2)), weights=jnp.ones(20),
+)
+cov_J = ClusteredCovariance(
+    cluster_ids=jnp.arange(20), n_clusters=20, centered=True,
+)
+fit_J = estimate(common_mean, measure_J, covariance=cov_J,
+                 theta_init=CommonMean(theta=0.0))
+null_boot = cluster_bootstrap(
+    model=common_mean, theta_init=fit_J.theta_hat, measure=measure_J,
+    covariance=cov_J, n_boot=999, key=jax.random.PRNGKey(2),
+    null_result=fit_J,
+)
+print(null_boot.j_pvalue(), null_boot.n_valid, null_boot.n_nonconverged)
+#+end_src
+
+=j_pvalue()= uses the original unshifted J and the finite-draw upper-tail correction \((1+\#\{J_b^*\ge J_{obs}\})/(1+n_{valid})\).
+Nonconverged refits remain NaN rows and are excluded from =n_valid=; check the event counts before interpreting a p-value.
+The method refuses zero cluster-moment exposure, so a rare-moment design that can lose joint support remains outside this option.
+See =docs/cluster-bootstrap-j-recentering.org= for the offset derivation, numerical checks, and limits.
+
+For a precision-targeted run in the same supported domain, =adaptive_bootstrap= can draw recentered J batches while excluding and counting NaN refits:
+
+#+begin_src python
+from emu_gmm.inference import BootstrapPValue, adaptive_bootstrap
+
+def draw_null_J(batch_key, size):
+    batch = cluster_bootstrap(
+        model=common_mean, theta_init=fit_J.theta_hat, measure=measure_J,
+        covariance=cov_J, n_boot=size, key=batch_key,
+        null_result=fit_J,
+    )
+    return np.asarray(batch.J_boot)
+
+adaptive_J = adaptive_bootstrap(
+    draw_null_J, BootstrapPValue(float(fit_J.objective_value)),
+    key=jax.random.PRNGKey(3), b_min=250, b_max=5000, atol=0.01,
+)
+print(adaptive_J.value, adaptive_J.n_valid, adaptive_J.n_invalid, adaptive_J.converged)
+#+end_src
+
+An =adaptive_J.converged=False= result has not met the requested Monte Carlo precision.
 
 ** The trick: a bootstrap is just =estimate()= on a resampled =Measure=
 

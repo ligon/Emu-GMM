@@ -1,0 +1,50 @@
+#+title: Exact null recentring for the cluster-refit J law (#185)
+
+* Scope
+
+=cluster_bootstrap(..., null_result=fit)= supplies an opt-in J reference law for a converged, overidentified original fit.
+The original fit and bootstrap must use the same model, measure, covariance settings, weighting, regularization, optimizer policy, and penalty.
+The implemented domain requires finite nonnegative observation weights and masks, and strictly positive exposure for every moment in every original resampling cluster.
+Thus every resampling world supports all moments jointly, and no conditional-support adjustment is needed.
+The option checks the supplied original fit's stored moment residual and per-coordinate \(N_j\) against the model and measure evaluated at its \(\hat\theta\), rejecting a mismatched fit.
+The ordinary pairs bootstrap remains the default for parameter draws; its =J_boot= is not a null J law.
+
+* Offset and refit
+
+For cluster \(g\), moment \(j\), and original estimate \(\hat\theta\), define
+\[
+n_{gj}=\sum_{i\in g}d_{ij}w_i,\qquad
+u_{gj}=\sum_{i\in g}d_{ij}w_i\psi_j(x_i,\hat\theta).
+\]
+Each bootstrap world draws \(G\) clusters independently and uniformly, with replacement.
+At the original estimate its moment is the ratio \(m_j^*=\sum_b u_{C_bj}/\sum_b n_{C_bj}\).
+The exact null offset is \(c_j=E^*[m_j^*]\), which is generally not \(\sum_g u_{gj}/\sum_g n_{gj}\) under unequal exposure.
+Using \(1/z=\int_0^\infty e^{-tz}\,dt\), the implementation evaluates
+\[
+A_j(t)=G^{-1}\sum_g e^{-t n_{gj}},\qquad
+\alpha_{gj}=\int_0^\infty e^{-t n_{gj}}A_j(t)^{G-1}\,dt,\qquad
+c_j=\sum_g u_{gj}\alpha_{gj}.
+\]
+The quadrature checks its vector-norm error using a Cauchy bound on the contraction with \(u_{gj}\), and checks \(\sum_g n_{gj}\alpha_{gj}=1\).
+For \((n,u)=((1,0),(2,2))\), \(c=7/12\), while the original-sample ratio is \(2/3\).
+The frozen model \(\psi_j^0(x,\theta)=\psi_j(x,\theta)-c_j\) enters every refit, including its covariance, weighting, derivative, regularization, and final J statistic.
+The resampled covariance preserves the original =centered= and =dof_correction= settings in both modes.
+
+* P-value and validity
+
+The observed statistic is the original unshifted =fit.objective_value=.
+For finite converged null-recentred refits, =boot.j_pvalue()= returns the upper-tail finite-draw value \((1+\#\{J_b^*\ge J_{obs}\})/(1+n_{valid})\).
+Nonconverged refits remain NaN rows with =convergence=False= and contribute to =n_nonconverged=, not to the denominator.
+If no finite valid refit exists, the p-value method raises.
+Users should inspect =n_valid=, =n_nonconverged=, =zero_support=, and =tau_saturated= before interpreting the result.
+The opt-in metadata are dynamic PyTree leaves; ordinary results keep =None= values and their existing seed-stacking behavior.
+
+* Validation and limits
+
+The two-coordinate \(G=3\) unequal-exposure fixture compares quadrature with all 27 resampling worlds to maximum absolute error \(2.22\times10^{-16}\).
+A real =estimate= + four-refit fixture matches the closed-form centered-covariance J contrast in each drawn world.
+For a Gaussian two-moment common-mean null, seed 185, \(G=20\), 500 independent samples and 500 worlds per sample, nominal 5% rejection is 30/500 (0.060) with recentring and 0/500 (0.000) with ordinary pairs J.
+The analytic contrast used for this larger calibration is cross-checked against the package refits in the smaller fixture.
+This is a discriminating numerical check for that fixture, not a uniform finite-sample validity theorem.
+The method refuses negative weights, zero cluster-moment exposure, and numerical quadrature whose accuracy checks fail.
+Sparse-support inclusion-exclusion, partial joint support, and signed-weight semantics remain outside this slice.

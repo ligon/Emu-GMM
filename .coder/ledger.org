@@ -860,6 +860,32 @@ Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replica
 The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
 No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
 
+* Section 14 -- Exact null-recentred cluster-refit J law (#185)
+
+1. Task :: Add an opt-in, finite-draw J reference law to the existing whole-cluster refit bootstrap only when every original cluster has positive exposure for every moment.
+   Section 13 is reserved for #155's stratified bootstrap.
+2. Existing machinery :: Search tier: ripgrep, source/tests, issue #185 discussion, and ledger history.
+   =inference/cluster_bootstrap.py:168= owns the PyTree result and NaN/event accounting; =:358= assembles resampled measures and covariance; =:505= owns the refit loop.
+   =measures/empirical.py:368= supplies mask-safe residuals and =weight_mask=; =covariance/clustered.py:42= defines =centered= and =dof_correction=; =inference/adaptive.py:215= owns finite-draw p-value correction and =:325= owns precision-targeted batches.
+   =tests/inference/test_cluster_bootstrap.py= covers the existing refit, NaN/event and PyTree contracts; =tests/inference/test_cluster_bootstrap_recentered.py= covers the new offset/domain/calibration.
+3. Definitions :: For cluster =g= and moment =j=, =n_gj=sum(mask_ij*weight_i)= and =u_gj=sum(mask_ij*weight_i*psi_j(x_i,theta_hat))=.
+   The null offset is =E*[sum_b u_Cbj / sum_b n_Cbj]= over all =G^G= uniform with-replacement worlds, not the original-sample ratio of totals.
+   Positive =n_gj= for all =g,j= makes every world jointly supported; the scalar integral equals the joint-support conditional expectation in this domain.
+   The observed J is the original unshifted =OptimizationResult.objective_value=; refit J uses the frozen =psi-c= model.
+4. Invariants :: Keep the default ordinary pairs path and its parameter draw stream; preserve source covariance centering and finite-cluster correction in each refit.
+   Apply the shift before moment/covariance/weighting/gradient/J construction; do not post-adjust J.
+   Compare the original fit's stored moment residual and =N_j= against the supplied model/measure at =theta_hat= before using its J.
+   A nonconverged refit remains a NaN =theta_boot= /=J_boot= row with named event flags and is excluded from =n_valid=.
+   The p-value is =(1+# valid J_boot >= observed_J)/(1+n_valid)=; no finite valid draws must raise.
+5. Reuse decision :: Extend =cluster_bootstrap= and its PyTree result with optional dynamic null metadata; reuse =expectation_and_contributions= for mask-safe totals, =estimate= for all refit internals, and =BootstrapPValue= for the plus-one correction.
+   New: one-coordinate Laplace-integral coefficients for the exact random-ratio offset, since no existing routine computes that expectation; bound the coefficient vector's quadrature error by Cauchy against the cluster totals and reject failed checks.
+6. Open questions :: Sparse-support inclusion-exclusion, signed weights, and partial joint-support conditioning are outside the first slice.
+   The fixed-G Gaussian null calibration is a discriminating check, not a general finite-sample validity theorem; independent review remains required before a ready PR.
+
+Verification against Section 14 :: *OK*: the 27-world unequal-exposure example matches the integral to maximum absolute error =2.22e-16=; a real package refit agrees with the centered-covariance J contrast.
+Seed 185, 500 Gaussian-null samples with 500 worlds each at nominal 5% reject 30/500 with recentring and 0/500 with ordinary pairs J.
+The targeted tests check both covariance flags on the ordinary path, frozen shifted residual, positive-domain refusal, NaN/valid denominator, and PyTree stacking.
+
 * Section 10 -- #232 Jacobian-memory design and opt-in implementation
 
 1. Task :: Add one opt-in bounded-memory route across both the LM solve and postfit moment Jacobian \(G\), preserving default behavior.

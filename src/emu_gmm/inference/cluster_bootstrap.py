@@ -135,17 +135,20 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import numpy as np
+from scipy.integrate import quad_vec
 
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
 from emu_gmm.covariance.clustered import ClusteredCovariance
 from emu_gmm.estimator import estimate
+from emu_gmm.inference.adaptive import BootstrapPValue
 from emu_gmm.measures.empirical import EmpiricalMeasure
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     Emu_GMM_DimensionError,
+    OptimizationResult,
     ParamsLike,
     RegularizationStrategy,
     StructuralModel,
@@ -240,6 +243,13 @@ class ClusterBootstrapResult:
         ``~convergence``; it is the per-draw channel the #205
         measurement found the result discarding. ``False`` on the
         raising divergence pathways. Additive, always populated.
+    null_offset : :class:`jax.Array` or None
+        Frozen per-moment shift for the opt-in null-recentred J law.
+        ``None`` on an ordinary pairs bootstrap. A dynamic PyTree leaf so
+        results from different seeds in the same mode remain stackable.
+    observed_J : scalar :class:`jax.Array` or None
+        Original unshifted fit's J statistic, compared with the recentered
+        ``J_boot`` by :meth:`j_pvalue`. ``None`` for ordinary pairs draws.
     """
 
     theta_boot: ha.NamedArray
@@ -255,6 +265,10 @@ class ClusterBootstrapResult:
     # (a static field that differed across results would split the treedef).
     zero_support: Any = None
     tau_saturated: Any = None
+    # Present only for the opt-in null-recentred J law. A dynamic leaf keeps
+    # the default constructor and the existing pytree storage additive.
+    null_offset: Any = None
+    observed_J: Any = None
 
     # -- exclude-and-count summaries (#140 consumer obligation). Host-side
     # Python ints over the bootstrap axis; call them on an eager result,
@@ -283,6 +297,24 @@ class ClusterBootstrapResult:
         if self.tau_saturated is None:
             return 0
         return int(np.sum(np.asarray(self.tau_saturated, dtype=bool)))
+
+    def j_pvalue(self) -> float:
+        """Upper-tail J p-value from a null-recentred refit law only.
+
+        Excludes and counts non-converged rows via ``convergence``. The
+        plus-one correction delegates to :class:`BootstrapPValue`:
+        ``(1 + # finite valid J_boot >= observed_J) / (1 + n_valid)``.
+        Call this on an eager result after checking ``n_valid`` /
+        ``n_nonconverged``.
+        """
+        if self.null_offset is None or self.observed_J is None:
+            raise ValueError("J p-value requires null-recentred cluster bootstrap")
+        valid = np.asarray(self.convergence, dtype=bool)
+        draws = np.asarray(self.J_boot)[valid]
+        if draws.size == 0 or not np.all(np.isfinite(draws)):
+            raise ValueError("J p-value requires finite converged refit draws")
+        p, _ = BootstrapPValue(float(self.observed_J), tail="greater").evaluate(draws)
+        return p
 
     @property
     def coords(self) -> Mapping[str, tuple[str | int, ...]]:
@@ -327,6 +359,8 @@ def _resample_one(
     measure: EmpiricalMeasure,
     rows_by_cluster: list[np.ndarray],
     drawn: np.ndarray,
+    *,
+    source_covariance: ClusteredCovariance | None = None,
 ) -> tuple[EmpiricalMeasure, ClusteredCovariance]:
     """Build the resampled measure + covariance for one bootstrap draw.
 
@@ -393,8 +427,81 @@ def _resample_one(
     boot_cov = ClusteredCovariance(
         cluster_ids=cluster_ids_b,
         n_clusters=n_clusters_b,
+        dof_correction=(
+            source_covariance.dof_correction if source_covariance is not None else False
+        ),
+        centered=(
+            source_covariance.centered if source_covariance is not None else False
+        ),
     )
     return boot_measure, boot_cov
+
+
+def _exact_null_offset(exposure: np.ndarray, total: np.ndarray) -> np.ndarray:
+    r"""Evaluate E*[sum(u_C) / sum(n_C)] for every positive-support moment.
+
+    For G independent uniform cluster draws and each moment j, the identity
+    ``1/z = integral_0^infinity exp(-tz) dt`` gives coefficients
+    ``alpha_g = integral exp(-t n_g) A(t)^(G-1) dt`` with
+    ``A(t) = mean_h exp(-t n_h)``. Then ``c_j = sum_g u_g alpha_g``.
+    Positive exposures make every denominator and the joint J law defined.
+    Numerical integration is checked against ``sum_g n_g alpha_g = 1`` and
+    its conservative quadrature error bound; it refuses unclear accuracy.
+    """
+    G, M = exposure.shape
+    if total.shape != (G, M):
+        raise ValueError("cluster_bootstrap: cluster total/exposure shape mismatch")
+    if not np.all(np.isfinite(exposure)) or np.any(exposure <= 0):
+        raise ValueError(
+            "cluster_bootstrap: null recentring needs positive cluster exposure for every moment"
+        )
+    if not np.all(np.isfinite(total)):
+        raise ValueError(
+            "cluster_bootstrap: null recentring needs finite cluster totals"
+        )
+    offset = np.empty(M, dtype=np.float64)
+    for j in range(M):
+        n = exposure[:, j]
+        scale = float(np.mean(n))
+        scaled_n = n / scale
+
+        def kernel(t: float, scaled_n: np.ndarray = scaled_n) -> np.ndarray:
+            e = np.exp(-t * scaled_n)
+            return e * float(np.mean(e)) ** (G - 1)
+
+        coefficients, error = quad_vec(kernel, 0.0, np.inf, epsabs=1e-12, epsrel=1e-12)
+        coefficients = np.asarray(coefficients) / scale
+        value = float(np.dot(total[:, j], coefficients))
+        # quad_vec bounds the Euclidean norm of the coefficient error.
+        # Cauchy bounds its contraction with the cluster totals.
+        error_bound = float(error) * float(np.linalg.norm(total[:, j])) / scale
+        normalization = float(np.dot(n, coefficients))
+        if (
+            not np.isfinite(value)
+            or not np.isfinite(error_bound)
+            or error_bound > 1e-8 * max(1.0, abs(value))
+            or not np.isclose(normalization, 1.0, rtol=1e-8, atol=1e-10)
+        ):
+            raise ArithmeticError(
+                f"cluster_bootstrap: null offset quadrature failed accuracy check for moment {j}"
+            )
+        offset[j] = value
+    return offset
+
+
+def _null_recentered_model(
+    model: StructuralModel, offset: np.ndarray
+) -> StructuralModel:
+    """Freeze the same residual shift for every refit and covariance pass."""
+    shift = jnp.asarray(offset)
+
+    def shifted(x: jax.Array, theta: ParamsLike) -> jax.Array | ha.NamedArray:
+        residual = model(x, theta)
+        if isinstance(residual, ha.NamedArray):
+            return ha.NamedArray(residual.array - shift, residual.axes)
+        return jnp.asarray(residual) - shift
+
+    return shifted
 
 
 def cluster_bootstrap(
@@ -409,6 +516,7 @@ def cluster_bootstrap(
     regularization: RegularizationStrategy | None = None,
     optimizer: _OptimizerLike | None = None,
     penalty: PenaltyStrategy | None = None,
+    null_result: OptimizationResult | None = None,
 ) -> ClusterBootstrapResult:
     """Refit-based cluster bootstrap for a GMM estimator.
 
@@ -454,6 +562,16 @@ def cluster_bootstrap(
         land in a different, non-reportable optimum rather than merely
         widening the interval. ``penalty=None`` (the default) reproduces
         the prior unpenalized behaviour bitwise.
+    null_result : :class:`~emu_gmm.types.OptimizationResult`, optional
+        Opt into a null-recentred over-identification J law. Pass the
+        *converged original fit* of this model and sample. The original
+        ``theta_hat`` fixes the per-moment shift once; every resampled refit
+        uses ``psi(x, theta) - shift`` throughout its moment, covariance,
+        weighting, gradient, and final J. The option requires nonnegative
+        weights, nonnegative masks, and strictly positive exposure for every
+        moment in every original cluster. Those conditions make joint
+        support certain in every bootstrap world. The default ``None``
+        keeps the ordinary pairs bootstrap and forbids ``j_pvalue()``.
 
     Returns
     -------
@@ -515,9 +633,71 @@ def cluster_bootstrap(
 
     # Pre-compute the cluster -> row-indices lookup once. Pulled to
     # NumPy here so the per-replicate assembly stays cheap.
-    cluster_ids_np = np.asarray(covariance.cluster_ids).astype(np.int64)
+    cluster_ids_raw = np.asarray(covariance.cluster_ids)
+    cluster_ids_np = np.rint(cluster_ids_raw).astype(np.int64)
     n_clusters = int(covariance.n_clusters)
     rows_by_cluster = _cluster_row_indices(cluster_ids_np, n_clusters)
+
+    null_offset: np.ndarray | None = None
+    observed_J: float | None = None
+    refit_model = model
+    if null_result is not None:
+        if not bool(null_result.converged) or int(null_result.n_overid) <= 0:
+            raise ValueError(
+                "cluster_bootstrap: null_result must be a converged over-identified fit"
+            )
+        observed_J = float(np.asarray(null_result.objective_value))
+        if not np.isfinite(observed_J):
+            raise ValueError("cluster_bootstrap: null_result J must be finite")
+        weights = np.asarray(measure.weights)
+        mask = np.asarray(measure.mask)
+        if (
+            not np.all(np.isfinite(weights))
+            or np.any(weights < 0)
+            or not np.all(np.isfinite(mask))
+            or np.any(mask < 0)
+        ):
+            raise ValueError(
+                "cluster_bootstrap: null recentring requires nonnegative finite weights and mask"
+            )
+        if (
+            cluster_ids_np.shape != (weights.size,)
+            or not np.all(np.isfinite(cluster_ids_raw))
+            or np.any(cluster_ids_np < 0)
+            or np.any(cluster_ids_np >= n_clusters)
+        ):
+            raise ValueError(
+                "cluster_bootstrap: invalid cluster IDs for null recentring"
+            )
+        mean, psi_safe, weight_mask, N_j = measure.expectation_and_contributions(
+            model, null_result.theta_hat
+        )
+        diagnostics = null_result.diagnostics
+        if diagnostics is None:
+            raise ValueError(
+                "cluster_bootstrap: null_result needs original moment diagnostics"
+            )
+        stored_mean = np.asarray(diagnostics.moment_residual.array)
+        stored_N_j = np.asarray(diagnostics.N_j.array)
+        actual_mean = np.asarray(mean)
+        actual_N_j = np.asarray(N_j)
+        if (
+            stored_mean.shape != actual_mean.shape
+            or stored_N_j.shape != actual_N_j.shape
+            or not np.allclose(stored_mean, actual_mean, rtol=1e-8, atol=1e-10)
+            or not np.allclose(stored_N_j, actual_N_j, rtol=1e-8, atol=1e-10)
+        ):
+            raise ValueError(
+                "cluster_bootstrap: null_result moments or N_j do not match the model and measure"
+            )
+        weighted_mask = np.asarray(weight_mask)
+        weighted_psi = weighted_mask * np.asarray(psi_safe)
+        exposure = np.zeros((n_clusters, weighted_mask.shape[1]), dtype=np.float64)
+        total = np.zeros_like(exposure)
+        np.add.at(exposure, cluster_ids_np, weighted_mask)
+        np.add.at(total, cluster_ids_np, weighted_psi)
+        null_offset = _exact_null_offset(exposure, total)
+        refit_model = _null_recentered_model(model, null_offset)
 
     # Draw the cluster indices for all replicates from a single key
     # via split: B splits give B independent (n_clusters,) draws.
@@ -551,7 +731,12 @@ def cluster_bootstrap(
         # ``continue`` below cannot skip it.
         if b > 0 and b % 25 == 0:
             jax.clear_caches()
-        boot_measure, boot_cov = _resample_one(measure, rows_by_cluster, drawn_all[b])
+        boot_measure, boot_cov = _resample_one(
+            measure,
+            rows_by_cluster,
+            drawn_all[b],
+            source_covariance=covariance,
+        )
         # NB: do *not* wrap this call in a broad ``except Exception``.
         # The framework's optimisers (``optimistix_lm`` with
         # ``throw=False``, ``scipy_lm``) report non-convergence via
@@ -563,7 +748,7 @@ def cluster_bootstrap(
         # the real bug instead of a silent NaN row.
         try:
             result = estimate(
-                model=model,
+                model=refit_model,
                 measure=boot_measure,
                 covariance=boot_cov,
                 weighting=weighting,
@@ -666,6 +851,8 @@ def cluster_bootstrap(
         param_names=param_names,
         zero_support=jnp.asarray(zero_support),
         tau_saturated=jnp.asarray(tau_saturated),
+        null_offset=(jnp.asarray(null_offset) if null_offset is not None else None),
+        observed_J=(jnp.asarray(observed_J) if observed_J is not None else None),
     )
 
 
