@@ -847,3 +847,22 @@ Verification must exercise shard equivalence, reordered shards, gaps/overlaps, m
 Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replicate/conditioning/persistence suites and a fresh-process concat/persistence/constructor check pass, as do ruff, black, and mypy on the changed Python files.
 The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
 No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
+
+* Section 10 -- #232 Jacobian-memory design (read-only)
+
+1. Task :: Propose one opt-in bounded-memory route across both the LM solve and postfit moment Jacobian \(G\), preserving default behavior.
+2. Existing machinery :: =optimizer.py:212-214= creates Optimistix LM with default QR; the installed Optimistix 0.1.0 builds a =FunctionLinearOperator= from =jax.linearize= before damping, and installed Lineax 0.1.1 QR materializes it through =as_matrix()=.
+   =estimator.py:855-868= computes postfit \(G\), delegating scalar trees to =measure.jacobian=; =measures/empirical.py:589-606= constructs =(N,M,K)= with =vmap(jacfwd)=.
+   =manifolds/riemannian_lm.py:493,512,725= and =optimizer.py:537,551,560= have separate native =jacfwd= sites.
+   =optimizer.py:39-98= and =tests/test_estimator_traced_measure.py:117-160= establish stable residual/args identity and no-retrace behavior.
+3. Definitions :: \(G=\partial m(\theta)/\partial\theta_{\mathrm{flat}}\) is an ambient =(M,K)= matrix, projected horizontally for gauge-bearing leaves; =G' Lambda G= is the information matrix.
+   The empirical \(m_j\) uses masked, weighted per-coordinate means with \(N_j\), and differentiates only observed cells after safe-x preprocessing.
+4. Invariants :: Keep the default QR and existing measure/parameter dispatch bitwise; keep the complete whitened residual derivative for CU weighting and penalties; preserve analytical user-supplied =jacobian_fn= on its existing scalar path; keep the final \(G\) and gauge projection.
+   A bounded mode cannot promise memory independent of \(K\): \(G\), its \(K\times K\) information matrix, and JAX's primal tape remain.
+5. Reuse decision :: An opt-in factory-static estimator setting could select matrix-free =lx.LSMR= for built-in Optimistix LM and a shared =lax.map= columnwise JVP helper for Emu's internal dense-Jacobian sites and postfit \(G\).
+   =lx.Normal(lx.CG(...))= is matrix-free but squares condition number; =NormalCG= spelling is deprecated in installed Lineax.
+   Custom opaque optimizers/measures require an explicit bounded capability or a clear early rejection.
+6. Open questions :: LSMR tolerance/iteration policy and conditioning parity; exact custom-capability surface; whether a retained =jax.linearize= tape or repeated =jax.jvp= yields lower peak for the consumer-size model.
+
+Verification against ledger: design only; no code or numerical claim yet.
+See =.coder/design-232-jacobian-memory.org= for source paths, falsification fixtures, and a static-HLO/peak-memory gate.

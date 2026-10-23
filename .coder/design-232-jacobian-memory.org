@@ -1,0 +1,84 @@
+#+TITLE: #232 -- Bounded Jacobian work in estimation
+#+OPTIONS: toc:nil
+
+* Scope and prior art
+
+This is a design proposal, not an implementation.
+The installed environment has Optimistix 0.1.0 and Lineax 0.1.1.
+Its =optimistix.LevenbergMarquardt= defaults to =lx.QR()=; the Emu adapter constructs that default at =src/emu_gmm/optimizer.py:212=.
+Optimistix first calls =jax.linearize= and retains a =FunctionLinearOperator= for the residual Jacobian (=optimistix/_solver/gauss_newton.py:160-169=).
+The LM damping path wraps this operator, then passes it to Lineax (=optimistix/_solver/levenberg_marquardt.py:37-76=).
+Lineax QR calls =operator.as_matrix()= (=lineax/_solver/qr.py:65=), which materializes every parameter column.
+Thus a different LM linear solver can avoid this particular \(K\)-wide derivative allocation without replacing Optimistix.
+The default must remain QR.
+
+Postfit inference has a separate \(K\)-wide allocation.
+For scalar parameters it calls =measure.jacobian= (=src/emu_gmm/estimator.py:864-868=); the empirical implementation uses =vmap(jacfwd(psi))= and produces an =(N,M,K)= array before aggregation (=src/emu_gmm/measures/empirical.py:589-606=).
+Synthetic and analytical measures use =jacfwd= of a flattened expectation (=src/emu_gmm/measures/synthetic.py:153-169=; =src/emu_gmm/measures/analytical.py:86-108=).
+For non-scalar parameter trees, the estimator applies =jacfwd= directly to its manifold-aware expectation closure (=src/emu_gmm/estimator.py:855-863=).
+This \(G\) feeds the existing horizontal projection and \(G'\Lambda G\) inference; its final =(M,K)= value cannot disappear.
+
+* Proposed single opt-in contract
+
+Add =jacobian_memory="bounded"= to =estimate= and =build_estimator=, default ="default"=.
+The mode is factory-static, forwarded by =estimate=, included in =_emu_gmm_factory_spec= for =anchor_per_rep= rebuilding, and applies to both the solve and postfit \(G\).
+No default code path changes.
+For the built-in Euclidean Optimistix LM, keep the same residual (including CU covariance derivatives and penalty residual) and the same solver tolerances, but supply =linear_solver= as =lx.LSMR(rtol=..., atol=..., max_steps=...)=.
+Lineax LSMR consumes the existing matrix-free operator and its transpose (=lineax/_solver/lsmr.py:55-95=); it does not call =as_matrix()=.
+The Krylov tolerance/step policy needs a bounded numerical study before selecting published defaults.
+Add Lineax as an explicit direct runtime dependency if its API is imported.
+
+Build the postfit moment Jacobian by columnwise JVP: =jax.linearize(moment_of_flat, theta_flat)= once; =jax.lax.map(linear_fn, jnp.eye(K))= returns a =(K,M)= buffer, then transpose to =(M,K)=.
+The map is a JAX loop, not a Python loop or =vmap= across \(K\), and its resident derivative workspace should scale with one tangent lane plus the linearization tape.
+The retained primal tape can still be large, and the output \(G\) and downstream \(K\times K\) information matrix remain unavoidable.
+If the tape dominates peak memory, use a fresh =jax.jvp= per column inside the same =lax.map= as a slower, lower-residency variant.
+For =EmpiricalMeasure=, this differentiates its existing =expectation=, preserving =safe_x_for_psi=, mask-before-weight NaN handling, coordinate-specific \(N_j\), and labels.
+For =SyntheticMeasure=, retain CRN-frozen draws.
+For =AnalyticalMeasure= with a supplied =jacobian_fn= and scalar parameters, call that function as today; its memory use belongs to the supplied function.
+For non-scalar trees, retain the estimator's manifold-aware ambient flatten/unflatten and subsequent horizontal projection.
+Custom measures without an explicit bounded-Jacobian capability should fail the opt-in at construction, rather than quietly use an unbounded =jacobian=.
+
+The native Riemannian LM is another internal dense derivative path: it calls =jacfwd= for its initial, iterative, and stationary-check residual Jacobians (=src/emu_gmm/manifolds/riemannian_lm.py:493,512,725=).
+Use the same columnwise helper there, then retain its current horizontal projection, Gram solve, damping, and convergence logic.
+The one-step =linear_solver= adapter also has three =jacfwd= sites (=src/emu_gmm/optimizer.py:537,551,560=); use the same helper for =linear=True= and the explicit certified path.
+=riemannian_tr()= already uses Hessian-vector products in its solve; the mode changes only postfit \(G\) there.
+=scipy_lm()= evaluates finite-difference residuals sequentially; the mode changes only postfit \(G\).
+An opaque third-party optimizer cannot promise bounded solve memory, so reject this opt-in unless it declares a compatible capability.
+These dispatch checks occur at factory construction, never inside a JIT trace.
+
+* Why not =NormalCG= or QR with columnwise \(G\) alone?
+
+In this installed Lineax, =NormalCG= is deprecated; its spelling is =lx.Normal(lx.CG(...))= (=lineax/_solver/cg.py:271-282=).
+That solver is matrix-free here because =Normal.init= only linearizes an iterative operator (=lineax/_solver/normal.py:106-112=).
+It also solves normal equations and squares the condition number, raising sensitivity near weak identification; Lineax's own docstring warns of this (=lineax/_solver/normal.py:42-61=).
+=lx.LSMR= is the first candidate because it is matrix-free and handles rectangular or singular systems without explicitly forming \(J'J\).
+Its convergence and numerical parity with QR still need tests; this is a candidate, not a claim of equal finite-sample estimates.
+
+Columnwise \(G\) alone does not remove QR's solve allocation.
+Conversely, matrix-free LM alone leaves the empirical =(N,M,K)= postfit temporary.
+Trying to make QR columnwise would require changing Optimistix's hard-coded damped =FunctionLinearOperator= or Lineax QR's =as_matrix()= call; neither is an Emu adapter setting.
+Sequentially assembling a dense Jacobian also leaves its final =(M,K)= buffer and QR factorization resident, although it can reduce AD intermediates.
+
+* No-retrace and falsification gates
+
+Construct the mode and solver once in =build_estimator=; retain the stable residual function and =args= kernel identities (#124).
+Within inference, =lax.map= and =jax.linearize= are in the existing one-time JIT closure.
+The second call with a fresh same-structure measure must not execute the Python model again (=tests/test_estimator_traced_measure.py:117-160=); a new shape may compile once and then cache.
+Preserve the =_OPTIMISTIX_FN_CACHE= / =_JITTED_FN_CACHE= behavior (=src/emu_gmm/optimizer.py:39-98=).
+
+Check numerical parity of bounded vs default on a small, overidentified empirical fixture with ragged masks, CU weighting, a penalty, and non-scalar Euclidean parameters.
+Add analytical supplied-Jacobian and synthetic CRN fixtures; check a gauge-bearing manifold fixture separately.
+Require \(G\), objective, convergence flag, and asymptotic covariance to agree at stated tolerances, with an explicitly rank-poor case that may expose iterative-solver failure.
+Do not turn a failed Krylov solve into a finite converged draw.
+
+For a memory check, compile the same nonlinear per-observation fixture at fixed \(N,M\) and \(K=4,8,16\), with a large intermediate inside =psi= so the \(K\)-lane AD temporary dominates.
+Inspect =jax.make_jaxpr= for =scan= in bounded \(G\), and compiled HLO for a loop rather than a \(K\)-lane broadcast.
+Compare =compiled.memory_analysis().temp_size_in_bytes= or isolated subprocess peak RSS after warm compilation; report all shapes, x64 setting, backend, and method.
+A flat or much slower-growing temporary with \(K\), plus parity tests, is evidence; a single tiny fixture's absolute RSS is not.
+Also verify the LM HLO contains no QR/as-matrix materialization in bounded mode; a matrix-free solver may trade memory for runtime.
+
+* Open decisions
+
+- Choose LSMR tolerance and =max_steps= after a small ill-conditioned parity grid; bounded mode may be slower and may converge differently from QR.
+- Decide whether to expose the setting as =jacobian_memory= or a strategy object before coding; the key contract is one estimator-level opt-in covering solve and \(G\).
+- Confirm exact handling of custom measures/optimizers: reject unsupported objects early or define a narrow explicit capability protocol.

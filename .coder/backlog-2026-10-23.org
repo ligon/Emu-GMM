@@ -1,0 +1,102 @@
+#+TITLE: Emu-GMM backlog review -- 2026-10-23
+#+AUTHOR: Sue (GPT-6)
+#+OPTIONS: toc:nil
+
+* Scope and inspected state
+
+This is a read-only backlog review of [[https://github.com/ligon/Emu-GMM][ligon/Emu-GMM]].
+GitHub was retrieved on 2026-10-23 between 13:04 and 13:10 UTC with the open-issues REST endpoint (all pages, PRs filtered out), the open-PR list, and individual issue/PR views.
+There were 24 open issues and three open PRs; no retrieval failed.
+The local checkout was clean =main= at =9da09859e4deef8696c4857aa0922b669d9a26d4=, matching GitHub main.
+The origin is the durable local mirror; this checkout is the node-local clone on Slurm job 40401644 (12 allocated CPUs, 96G requested memory).
+The project =.venv= was absent, so no tests were run in this review.
+No GitHub tracker edits, merges, commits, dependency installs, or code changes were made.
+
+Six issues were examined from live bodies, discussions, source, and/or validation evidence: #145, #180, #185, #191, #219, and #232.
+Issues #220-#226 and #229 were checked against their open PR descriptions and CI state, but their full acceptance criteria were not re-audited today.
+The remaining ten open issues were inventoried by metadata and carried forward from the 2026-10-22 triage, not reassessed: #18, #40, #77, #113, #127, #132, #141, #155, #166, and #173.
+The prior triage is =.coder/backlog-2026-10-22.org= on branch =backlog/studies-records-statistics=; the prior session handoff is on =handoff-backlog-2026-10-22=.
+
+* Repository map and constraints
+
+- =docs/design.org= is the architecture/status source of truth; =docs/implementation-plan.org= Section 13 records the v2 exit arcs, but many of its issue notes are historical.
+- =src/emu_gmm/= has separate Measure and CovarianceStrategy interfaces; the empirical pipeline uses per-moment \(N_j\) scaling and pairwise overlap.
+- =estimate()= returns =OptimizationResult=. Statistical interpretation is on =result.asymptotic()= (=AsymptoticLaw=); the working example =examples/run_euler.py= uses this split.
+- The project gate is =make check=; =make quick-check= is required before commits. JAX runs must respect the allocated affinity (CPUs 32-43 here), and full suites should use a separate appropriately sized Slurm job.
+- #209 requires every non-converged bootstrap refit to be stored as a NaN row with a convergence flag. That contract must survive a CI fix.
+- PR #228 is under an explicit human merge hold recorded in the prior handoff. Green CI does not lift it.
+
+* Live dispositions and evidence
+
+#+name: tab:backlog-dispositions-2026-10-23
+| Item     | Disposition              | Evidence and next check                             |
+|----------+--------------------------+-----------------------------------------------------|
+| CI       | Needs diagnosis          | Main and two PRs fail the same bootstrap assertion. |
+| #145     | Needs statistical design | Center sampling/cross blocks under stratum effects. |
+| #232     | Needs API design         | Both LM and inference have K-times Jacobian memory. |
+| #219     | Decision in design pass  | Opt-in rank policy; default remains count-only.     |
+| #191     | Partially addressed      | Residual robustness/persistence/docs umbrella.      |
+| #185     | Needs derivation         | Null-recentred refit J remains unimplemented.       |
+| #180     | Ready for scoping        | RandomSetLaw has a concrete empty-set consumer.     |
+| #220-225 | In progress              | PR #228 covers them; merge held by owner.           |
+| #226     | In progress              | PR #230 open; CI red on baseline bootstrap test.    |
+| #229     | In progress              | PR #231 open; CI red on baseline bootstrap test.    |
+| ten IDs  | Unexamined today         | Metadata/prior triage only; see coverage above.     |
+
+** CI failure is present on main
+
+The [[https://github.com/ligon/Emu-GMM/actions/runs/39952311719/job/120409502948][scheduled main inference job]] at =9da0985= fails =TestPenaltyForwarding.test_penalty_changes_refit_and_is_forwarded=, as do [[https://github.com/ligon/Emu-GMM/actions/runs/39881042961/job/120178213714][PR #230]] and [[https://github.com/ligon/Emu-GMM/actions/runs/39881929067/job/120181057777][PR #231]].
+Each compares bootstrap =[nan, nan]= with a finite reconstructed estimate =[0.927516, 0.094032]=.
+The warning says one of one refits did not converge, with neither zero support nor ridge saturation.
+=tests/inference/test_cluster_bootstrap.py:785-803= reads the reconstructed =theta_hat= without checking its =converged= flag; =src/emu_gmm/inference/cluster_bootstrap.py:604-623= deliberately stores a NaN row for any non-converged refit.
+The PR diffs do not touch this test or bootstrap/estimator/optimizer code, and main independently fails, so neither PR is necessary for the failure.
+The CI logs do not expose the reconstructed optimizer status; the exact convergence difference and its sensitivity to CI conditions remain to be measured.
+The next bounded check is the exact test on main with CI-like CPU/thread limits and diagnostic output for both refits' convergence/status, followed by a fixture/assertion correction that preserves #209's NaN policy.
+The last main push workflow ran only quick-check; it does not establish a recent green full inference shard.
+
+** Statistical and interface queue
+
+- [[https://github.com/ligon/Emu-GMM/issues/145][#145]] :: Current =DesignAwareCovariance= combines within-cell-centered \(V_{TT}\) with uncentered clustered \(V_{SS}\) and =_cross_corners= \(V_{TS}\) (=src/emu_gmm/covariance/stratified.py:533-621=). The #130 report (=docs/validation/ladder-mc-2026-06-10.org:200-217=) reports contrast coverage 0.663 coupled versus 0.946 for pure stratified and 0.930 for the zero-profile control. It explicitly says the fixture's true cross-arm covariance is zero, so the fix needs a genuine cross-arm-shock fixture as well as unequal pairwise support. Derive the stratum-conditioned estimand before editing; preserve #119 per-pair dof, #109 decomposition, and all-design identity. #141 should follow settled covariance semantics; #155's pure-stratified bootstrap can proceed independently. High impact and high mathematical risk; several focused days plus validation.
+- [[https://github.com/ligon/Emu-GMM/issues/232][#232]] :: The new CerealDemand report gives specific OOM allocations. The owner adds an inference-path allocation after LM. =src/emu_gmm/optimizer.py:212-214= constructs LM without a solver option; =src/emu_gmm/estimator.py:844-867= and measure Jacobians use =jacfwd=. One opt-in strategy must cover both solve and inference; a solver-only knob is incomplete. The consumer has reduced its own footprint, so this is a broad memory risk rather than its current blocker. Specify API, per-measure behavior, and a bounded-memory verification before implementation. Medium/high effort.
+- [[https://github.com/ligon/Emu-GMM/issues/219][#219]] :: Owner and consumer agreed on a separate API/design pass for opt-in numerical rank truncation, native ambient coordinates, retained-subspace SEs separate from sensitivity diagnostics, whole excluded projector persistence, and unchanged count-only default. Boundary-valid inference is separate. Design must precede coding; high risk.
+- [[https://github.com/ligon/Emu-GMM/issues/185][#185]] :: The unsafe ordinary refit J recipe was removed. Residual work is a derived null-recentring convention, unequal observability/cluster-resampling treatment, and a discriminating calibration study. High statistical effort; no quick documentation-only closure.
+- [[https://github.com/ligon/Emu-GMM/issues/180][#180]] :: A set-valued consumer now exists. Scope the random-set carrier, empty-set event and capacity/coverage queries, then calibrate on a known DGP. This is substantial additive work, with no demonstrated blocker for the current point-law surface.
+- [[https://github.com/ligon/Emu-GMM/issues/191][#191]] :: Residual umbrella remains open. Recheck each historical source pointer before fixing; PR #228 covers the coupled-statistics and typed-key persistence bullets only when merged.
+
+** Documentation drift observed today
+
+=README.org:49-50,61= and =docs/howto.org:207-227,235= still teach =result.J_stat=, =result.J_dof=, =result.J_pvalue=, =result.standard_errors=, =result.coef_table= and result-side =Sigma_theta=.
+The current result type in =src/emu_gmm/types.py:664-807= uses =objective_value=, =n_overid=, and =result.asymptotic()= for statistical readouts; =examples/run_euler.py:58-61= demonstrates it correctly.
+The README status line also says =v2 (v0.2.0)= while =pyproject.toml= is 0.5.0.
+This is a public quickstart/HOWTO break, broader than #191's existing =to_pandas= wording bullet. Propose a focused documentation correction, with executable examples or an existing example-based check. No tracker item was created in this review.
+
+* Ordered next actions
+
+1. Diagnose and repair the main-branch bootstrap test/fixture under CI-like limits, preserving NaN/event accounting; confirm the exact test and CI inference shard green. This restores a useful PR gate.
+2. Draft #145's centering estimand and two discriminating fixtures (fixed stratum profile and genuine cross-arm shock), then implement and rerun the recorded validation study. This is the highest-priority statistical defect.
+3. Correct the public quickstart/HOWTO result API and version claim; verify the examples against the current result/law split.
+4. Review PR #230 and #231 after the baseline gate is stable, and reconcile #231's =law.py= overlap with held PR #228. Keep PR #228 on hold until the owner explicitly lifts it.
+5. Run an API/design pass for #219, then #232's shared memory-bounded Jacobian path. Their consumer evidence is strong, but both need a contract before coding.
+6. Schedule #185 and #180 as separate statistical/design projects; do not let either silently expand a smaller fix. Carry forward the ten metadata-only items for refreshed triage before implementation.
+
+No issue was closed or reprioritized in GitHub. These are recommendations, not applied tracker changes.
+
+* Execution update -- 2026-10-23, 14:20 UTC
+
+The preceding sections record the initial read-only snapshot; the owner then authorized merges and backlog execution.
+A project =.venv= was built on the local clone, and local computational checks run at nice level 19 within the allocated CPU affinity.
+PRs [[https://github.com/ligon/Emu-GMM/pull/228][#228]], [[https://github.com/ligon/Emu-GMM/pull/231][#231]], [[https://github.com/ligon/Emu-GMM/pull/230][#230]], [[https://github.com/ligon/Emu-GMM/pull/233][#233]], [[https://github.com/ligon/Emu-GMM/pull/234][#234]], and [[https://github.com/ligon/Emu-GMM/pull/235][#235]] merged in that order; =main= now includes commit =8f93c0e=.
+They close #220-#226 and #229, repair the baseline bootstrap CI fixture while preserving non-converged NaN draws, add the finite-draw wild-bootstrap p-value correction, and update README/HOWTO to the result/law API.
+The latest =main= quick-check [[https://github.com/ligon/Emu-GMM/actions/runs/39967780946][run 39967780946]] is pending at this writing.
+
+Tracker reconciliation updated [[https://github.com/ligon/Emu-GMM/issues/40][#40]] to withdraw its false overlap-only quotient-PD conjecture, [[https://github.com/ligon/Emu-GMM/issues/113][#113]] with the second-consumer trigger and traced-kernel constraint, [[https://github.com/ligon/Emu-GMM/issues/232][#232]] with source evidence for both solve and postfit memory allocations, and [[https://github.com/ligon/Emu-GMM/issues/191][#191]] with the newly resolved bullets.
+The [[https://github.com/ligon/Emu-GMM/issues/180#issuecomment-6367070119][#180 design audit]] records grid-limited membership and the point-law interface mismatch for the forthcoming set-law work.
+The [[https://github.com/ligon/Emu-GMM/issues/185#issuecomment-6367197615][#185 derivation note]] gives an exact two-cluster counterexample: random per-coordinate bootstrap denominators make the conditional mean of the resampled fitted ratio differ from the original fitted ratio, so a null-recentring contract must pin its denominator convention before coding.
+The #232 source audit and proposed falsification gates are recorded in =.coder/design-232-jacobian-memory.org= and ledger Section 10; no implementation or solver parity claim follows from that design.
+
+The active work queue is: #145 opt-in fixed-stratum covariance mode with paired calibration; #219 opt-in numerical-rank policy design; and #191 clustered K-statistic finite-cluster scaling plus raw-event shares.
+The owner selected an opt-in fixed-stratum mode for #145, retaining the current random-stratum mixed mode as default.
+Review and numerical validation still gate #145; #219 and #232 remain open until their proposed contracts and validation are complete.
+The 16 currently open issues are #18, #40, #77, #113, #127, #132, #141, #145, #155, #166, #173, #180, #185, #191, #219, and #232.
+
+-- Sue
