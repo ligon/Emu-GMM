@@ -479,6 +479,11 @@ def crn_pair(
             "monte_carlo_study(..., coupling_id=...), or pass assert_coupled=True "
             "to assert same-DGP on your own authority."
         )
+    if a.key is None or b.key is None:
+        raise ValueError(
+            "crn_pair(): master PRNG key missing; keyless records cannot "
+            "verify CRN alignment."
+        )
     if not _keys_equal(a.key, b.key):
         raise ValueError(
             "crn_pair(): master PRNG keys differ; the arms cannot be CRN-aligned."

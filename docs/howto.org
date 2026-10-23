@@ -145,10 +145,28 @@ these without changing your =psi= or data.
 | =DesignAwareCovariance.from_design_mask(...)= | Design-based and sampled moments mixed in one vector |
 | /(planned)/ =ReplicateWeightCovariance= | Replicate-weight designs (BRR / jackknife)               |
 
-Caveat for the design-aware pair: under fixed stratum-mean heterogeneity
-the coupled =DesignAwareCovariance= assembly is known to under-cover
-(issue #145); prefer plain =StratifiedCovariance=, or pass
-=couple=False=, until the v2.1 centering pass.
+The default coupled =DesignAwareCovariance= uses uncentered sampling and
+cross blocks, so fixed stratum-mean heterogeneity can make it under-cover
+the randomized contrast (issue #145).
+When the profile is a fixed cell mean and sampling clusters are nested in
+strata with repeated clusters supporting the relevant moment pairs, set
+=fixed_strata=True= in =from_design_mask= and supply
+=ClusteredCovariance(..., dof_correction=False)=.
+This opt-in centers the sampling and cross terms by stratum-by-arm cell
+pair, retaining cross-arm covariance when a sampling cluster spans arms.
+It requires finite integer-valued group IDs and refuses one sampling
+cluster per stratum everywhere; that design cannot separate a fixed
+profile from a random stratum shock.
+Use the default mode for a random-stratum target, or plain
+=StratifiedCovariance= when its design-only covariance is the intended
+target.
+On the unchanged #130 fixed-profile study, opt-in b1 coverage was
+279/295 = 0.946 (MCSE 0.013), versus 281/297 = 0.946 for pure
+=StratifiedCovariance=; the paired-cluster check validates the cross
+covariance but does not establish general estimator coverage.
+Use =fixed_cell_pair_diagnostics(measure)= for each cell-pair count,
+projection trace, and usability flag; =fixed_stratum_pair_diagnostics=
+summarizes by stratum, with =usable= meaning any cell-pair term contributes.
 
 #+begin_src python
 from emu_gmm import IIDCovariance, ClusteredCovariance

@@ -935,7 +935,6 @@ Implementation must test unchanged-default fidelity, gauge rotations, weak posit
 4. Invariants :: Use the common finite strictly increasing grid and common inversion level/statistic for repeated sets. Preserve invalid and nonconverged as separate event counts; an unknown verdict cannot enter a coverage denominator as a rejection. Empty conditional selections remain queryable with zero counts and NaN rate. Set artifacts contain only inert data, not estimator closures or pickled objects.
 5. Reuse decision :: Reuse =KConfidenceSet= and its per-point acceptance/event masks; add a sibling =RandomSetLaw= rather than coerce sets into =EstimatorLaw='s point summaries or =FitRecord=. Use structured set-query counts and a separate versioned NPZ codec, leaving numeric-law persistence untouched.
 6. Open questions :: Finite scanned-grid capacity is the first slice. Membership between grid points, a certified global empty set, and compact-set capacity beyond finite grid subsets require separate semantics and calibration.
-
 * Section 13 -- Pure stratified refit bootstrap (#155)
 
 1. Task :: Add a pure =StratifiedCovariance= refit parameter bootstrap with independent PSU draws inside each fixed =(stratum, arm)= cell, preserving its PSU count, with =fpc=False=.
@@ -944,6 +943,122 @@ Implementation must test unchanged-default fidelity, gauge rotations, weak posit
 4. Invariants :: Preserve every populated cell's PSU count on every draw; validate that each PSU belongs to one cell and stratum and each cell to one stratum. Rebuild the covariance metadata on the resampled row order. Preserve =cluster_bootstrap='s existing random stream, result labels, NaN rows for nonconverged refits, diagnostics and warning behavior. Do not claim without-replacement/FPC calibration; reject =fpc=True= in this first slice.
 5. Reuse decision :: Extend the existing refit/result helper in =cluster_bootstrap.py= and call it from the new stratified entry point; add only the cell-aware draw-index and covariance-rebuild helpers. Do not reimplement statistical covariance formulas or mix =DesignAwareCovariance= into the resampler.
 6. Open questions :: Mixed design/sampling resampling and FPC-adjusted bootstrap calibration remain separate work; the first acceptance checks an unbalanced two-stratum/two-arm count fixture, one-cell draw-index reduction, and a known-DGP bootstrap SE against the package's analytic stratified SE.
+
+* Section 14 -- DesignAware fixed-stratum centering (issue 145; design pass)
+
+** 14.1 -- Task
+
+Repair fixed-stratum-profile contamination of the mixed \(V_{TT}+V_{SS}+V_{TS}\) covariance while retaining the design-exact \(TT\) block, pair-specific missingness, the cross-block decomposition, and a meaningful cross-arm sampling term.
+The proposed estimand and its identification limit are in =.coder/design-145-centering.org=.
+
+** 14.2 -- Existing machinery (ripgrep + git; tested)
+
+- =StratifiedCovariance.covariance= :: =src/emu_gmm/covariance/stratified.py:171-291=; pair-overlap, within-cell centering and local Bessel correction. Independent NumPy guards: =tests/covariance/test_stratified.py:46-124= and its F1-F6 fixtures.
+- =DesignAwareCovariance.covariance= / =_cross_corners= / =cross_block= :: =src/emu_gmm/covariance/stratified.py:490-661=; \(TT\) delegates to the shared design engine, \(SS\) to the uncentered sampling engine, \(TS\) to an inline cluster-total pass. Guards: =tests/covariance/test_stratified.py:900-1177,1253-1344=.
+- =ClusteredCovariance= / =_finite_cluster_correction= :: =src/emu_gmm/covariance/clustered.py:89-159=; uncentered cluster totals and optional global per-pair \(G_{jk}/(G_{jk}-1)\). Its =centered=True= uses a global moment, not a stratum-specific one. Guards: =tests/covariance/test_clustered.py= and the mixed-block tests above.
+- =_safe_outer_divide= :: =src/emu_gmm/covariance/_outer_product.py:52-65=; the shared zero-support-safe \(1/(N_jN_k)\) normalization.
+- #130 fixture :: =scripts/validation/ladder_mc.py:219-365= and =docs/validation/ladder-mc-2026-06-10.org:200-247=; fixed demeaned profile with PSU-level randomness, no genuine cross-arm shock.
+
+** 14.3 -- Definitions
+
+For every covariance entry \((j,k)\), the denominator is \(N_jN_k\), with \(N_j=\sum_i d_{ij}w_i\) (=docs/design.org:204-224=).
+The design cell is stratum by arm, whereas the caller chooses the sampling cluster unit; they need not coincide (=src/emu_gmm/covariance/stratified.py:244-259,419-429=).
+The #119 cross correction inherits the sampling engine's per-pair global \(G_{jk}/(G_{jk}-1)\) when its flag is true (=src/emu_gmm/covariance/stratified.py:604-615=).
+
+** 14.4 -- Invariants and assumptions
+
+The all-design case is bit-for-bit the shared =StratifiedCovariance=; \(V_{\mathrm{coupled}}=V_{\mathrm{uncoupled}}+V_{TS}\) is the #109 identity; design FPC touches \(TT\) only (=src/emu_gmm/covariance/stratified.py:533-553,638-661=).
+Pair overlap is counted at the sampling cluster unit for \(SS/TS\), and unequal masks or weights must not be replaced by a common \(N\).
+A fixed shift of /cluster totals/ differs from a fixed conditional /per-observation moment mean/ when observed weighted exposure varies; #130's ragged moments require the distinction.
+A fixed outcome profile times a varying instrument still has within-stratum sampling variation.
+One sampling cluster per stratum supplies no within-stratum replication for estimating an arbitrary fixed mean and a random stratum shock separately.
+
+** 14.5 -- Reuse decision
+
+- Reuse :: =StratifiedCovariance= without modification for \(TT\), =_safe_outer_divide= for scaling, and the caller's sampling IDs/support rule.
+- Extend :: A common within-stratum, pair-overlap, exposure-projected sampling kernel should feed \(SS\) and \(TS\); =ClusteredCovariance.centered=True= is global and does not fit. The balanced-exposure special case reduces to ordinary centered cluster totals.
+- New only if approved :: A nested-cluster/stratum validation rule and a surfaced unsupported-cross-pair event; current interfaces do not expose either.
+
+** 14.6 -- Open decisions
+
+The fixed-strata versus random-stratum estimand, exposure-adjusted nuisance
+profile, and one-cluster support rule are resolved by the opt-in slice below.
+The global #119 factor is retained only in the default random-stratum mode.
+
+** 14.7 -- Opt-in slice and falsification
+
+The approved choice is a conditional-on-fixed-strata mode, selected by
+=from_design_mask(..., fixed_strata=True)=; the default uncentered
+random-stratum assembly and #119 correction remain unchanged.
+The first published branch commit =dec68ca= projected cluster totals on
+one exposure per bare stratum.
+The unchanged #130 300-rep ladder falsified its estimator calibration:
+b1 coverage 266/298 = 0.893 versus pure Stratified's 281/297 = 0.946.
+An independent within-cell NumPy projection matched pure Stratified to
+\(3.47\cdot10^{-18}\) on ten seed-20260610 draws at the true parameter;
+the bare-stratum implementation differed in its \(SS/TS\) blocks.
+
+The revision decomposes each sampling cluster's moments into
+stratum-by-arm cell components.
+For each ordered cell pair \((c,d)\) and moment pair \((j,k)\), it selects
+sampling clusters supporting both components, projects each component on
+its own observed weighted exposure, and uses the local
+\(H_{cd,jk}/\operatorname{tr}(M_{c,j}M_{d,k})\) factor.
+Summing the ordered cell-pair terms recovers the variance of the sum of
+cell components: one-cell-per-cluster data recover the existing Neyman
+within-cell assembly, while cross-cell paired clusters retain their
+shared-shock covariance.
+The local factor uses a homogeneous-cluster-covariance working assumption.
+A mixed =fixed_strata=True= covariance rejects
+=sampling.dof_correction=True= rather than multiply by the extra global
+#119 factor; the all-design reduction ignores sampling and remains bitwise
+=StratifiedCovariance= even when that flag is true.
+The #109 identity and \(1/(N_jN_k)\) scaling are retained.
+
+The factory rejects sampling clusters crossing strata, cells crossing
+strata, and designs with fewer than two sampling clusters in /every/
+observed stratum.
+It checks that fixed-mode cluster, stratum, and cell IDs are finite and
+exactly integer-valued before casting; silent rounding could change the
+nesting relation and invalidate this projection.
+Sparse individual cell pairs still contribute zero when \(H<2\), either
+exposure norm is zero, or the projection trace is at or below
+\(\sqrt{\epsilon_{\mathrm{mach}}}H\).
+=fixed_cell_pair_diagnostics(measure)= exposes exact \(C\times C\times M\times M\)
+count, trace, and usability arrays from the same geometry as the kernel.
+=fixed_stratum_pair_diagnostics(measure)= summarizes distinct cluster
+counts, sums usable cell-pair traces, and reports whether any cell pair is
+usable; its summed trace is not one projection trace.
+The hot path stores \(G\times C\times M\) components and
+\(P\times M\times M\) geometry for \(P=\sum_s C_s^2\) within-stratum
+cell pairs, avoiding a global \(C^2\) geometry array.
+
+The independent NumPy pair-cell test covers ragged masks, unequal weights,
+fixed cell profiles, paired cross-arm sign and zero shocks, trace guard,
+and the #109 identity.
+A coincident-PSU deterministic test recovers the full Stratified covariance;
+the unchanged #130 ten-draw pointwise check differs from Stratified by at
+most \(8.67\cdot10^{-18}\) in the revised kernel.
+The 4096-draw paired-cluster cross estimate is 0.053405 (MCSE 0.000370)
+for \(\rho=0.8\) versus the analytic 0.053333; the extra global factor
+overestimates it at 0.057219.
+Exact commands and output are in
+=.coder/design-145-cell-pointwise-2026-10-23.log= and
+=.coder/design-145-cell-paired-4096-2026-10-23.log=.
+The revised 300-rep seed-20260610 #130 ladder gives b1 Wald coverage
+279/295 = 0.946 (MCSE 0.0132; Wilson 95% [0.914, 0.966]) for fixed local,
+versus 281/297 = 0.946 for pure Stratified and reported coverage 0.661
+for the unchanged default coupled mode (its b1 denominator was not logged).
+Its b1 SE/SD ratio is 0.935 versus pure Stratified's 0.936, and neither
+arm binds the ridge.
+The extra-global ablation covers 278/295 = 0.942, too close to fixed local
+to distinguish by this coverage count; the paired covariance target
+identifies its systematic inflation.
+The b0 coverage of 273/295 = 0.925 is similar to the pure-design
+comparator's 273/297 = 0.919, so the result supports the stated b1
+fixed-profile use case without a general coverage guarantee.
+The SHA-pinned Slurm job 40409988 completed exit zero in 1:56:15; its
+clean output is =.coder/design-145-cell-coverage-300-2026-10-23.log=.
 
 * Section 16 -- Exact null-recentred cluster-refit J law (#185)
 

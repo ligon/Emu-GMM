@@ -257,6 +257,10 @@ class LawState:
     events: dict[str, np.ndarray] | None = None
     coupling_id: Any = None
     key: np.ndarray | None = None
+    # Distinguish an MCRecords carrier with key=None from a bare FitRecord.
+    # Old artifacts lacked this marker; their has_key flag identifies the
+    # previously reconstructible MCRecords cases.
+    records_are_mc: bool = False
     # Typed keys require their implementation as well as raw key data.
     key_impl: str | None = None
     # Absent on legacy artifacts, whose MC stream starts at zero.
@@ -355,6 +359,28 @@ def _jsonable(value: Any, *, what: str) -> Any:
     return value
 
 
+def _coupling_id_from_json(value: Any) -> Any:
+    """Recover hashable tuple tokens, including pre-marker JSON artifacts.
+
+    JSON writes a tuple as an array. An MCRecords coupling token is required
+    to be hashable, so arrays within a valid tuple token can only have been
+    nested tuples, not lists.
+    """
+    if isinstance(value, list):
+        return tuple(_coupling_id_from_json(item) for item in value)
+    return value
+
+
+def _coupling_id_to_json(value: Any) -> Any:
+    """Accept only hashable JSON tokens, as MCRecords.coupling_id promises."""
+    if value is not None:
+        try:
+            hash(value)
+        except TypeError as exc:
+            raise TypeError("save_law: coupling_id must be hashable.") from exc
+    return _jsonable(value, what="coupling_id")
+
+
 def _empirical_state(law: EmpiricalLaw) -> LawState:
     """Build a :class:`LawState` from an empirical law (records- or draws-backed)."""
     if law._conditioned:
@@ -397,7 +423,7 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
                 if jax.dtypes.issubdtype(law._records.key.dtype, jax.dtypes.prng_key):
                     key_impl = str(jax.random.key_impl(law._records.key))
             rep_indices = law._records._validated_rep_indices()
-            coupling_id = _jsonable(law._records.coupling_id, what="coupling_id")
+            coupling_id = _coupling_id_to_json(law._records.coupling_id)
             n_reps = int(law._records.n_reps)
             if law._records.extra is not None:
                 # The #183 per-draw statistics channel: every column carries
@@ -429,6 +455,7 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
             key_impl=key_impl,
             rep_indices=rep_indices,
             coupling_id=coupling_id,
+            records_are_mc=isinstance(law._records, MCRecords),
         )
 
     # Draws-backed: persist the raw draws + {0,1}^E event flags.
@@ -580,6 +607,7 @@ def _write_state(state: LawState, target: Any) -> None:
             j_dof=state.j_dof,
             n_reps=state.n_reps,
             coupling_id=state.coupling_id,
+            records_are_mc=state.records_are_mc,
             has_key=state.key is not None,
             key_impl=state.key_impl,
             extra_names=extra_names,
@@ -708,7 +736,10 @@ def _read_state(target: Any) -> LawState:
                 ),
                 j_dof=int(manifest["j_dof"]),
                 n_reps=int(manifest["n_reps"]),
-                coupling_id=manifest.get("coupling_id"),
+                coupling_id=_coupling_id_from_json(manifest.get("coupling_id")),
+                records_are_mc=manifest.get(
+                    "records_are_mc", bool(manifest.get("has_key", False))
+                ),
                 key=np.asarray(data["key"]) if manifest.get("has_key") else None,
                 key_impl=manifest.get("key_impl"),
                 rep_indices=(
@@ -782,7 +813,7 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
             J_dof=int(state.j_dof),  # type: ignore[arg-type]
             param_names=tuple(state.param_names),
         )
-        if state.key is not None:
+        if state.records_are_mc:
             extra = (
                 None
                 if state.extra_arrays is None
@@ -791,10 +822,14 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
             mc = MCRecords(
                 records=record,
                 key=(
-                    jnp.asarray(state.key)
-                    if state.key_impl is None
-                    else jax.random.wrap_key_data(
-                        jnp.asarray(state.key), impl=state.key_impl
+                    None
+                    if state.key is None
+                    else (
+                        jnp.asarray(state.key)
+                        if state.key_impl is None
+                        else jax.random.wrap_key_data(
+                            jnp.asarray(state.key), impl=state.key_impl
+                        )
                     )
                 ),
                 n_reps=int(state.n_reps),  # type: ignore[arg-type]

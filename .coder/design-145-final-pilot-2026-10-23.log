@@ -1,0 +1,19 @@
+/local/job40401644/worktrees/emu-gmm-145/src/emu_gmm/estimator.py:1550: UserWarning: Sigma_theta has negative diagonal entries: the raw V(theta_hat) used as the sandwich meat is indefinite (the binding-ridge regime; #111/#133/#138). The affected standard errors are NaN by design -- use cluster_bootstrap / moment_wild_bootstrap for inference here, and treat the analytic SEs as unavailable rather than zero.
+  return run(resolved_theta, measure)
+/local/job40401644/worktrees/emu-gmm-145/src/emu_gmm/estimator.py:1550: UserWarning: Sigma_theta has negative diagonal entries: the raw V(theta_hat) used as the sandwich meat is indefinite (the binding-ridge regime; #111/#133/#138). The affected standard errors are NaN by design -- use cluster_bootstrap / moment_wild_bootstrap for inference here, and treat the analytic SEs as unavailable rather than zero.
+  return run(resolved_theta, measure)
+fit_pilot seed=20260610 reps=6 profile=0.7 per_rep_anchor=True
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| design_aware | 6/6 | 4se/6J ! | 0.000 | 0.000 | 0.533 | 1.000 / 0.750 | -0.0145 / +0.0408 | 1.648 / 0.820 | 0.333 | 27s |
+validity design_aware: {"n_excluded": 0, "n_used": 6, "n_valid_J_adjusted": 6, "n_valid_J_nominal": 6, "n_valid_se_min": 4}
+| fixed_local | 6/6 | 6se/6J | 0.000 | 0.000 | 0.467 | 1.000 / 1.000 | -0.0114 / +0.0359 | 1.267 / 1.194 | 0.000 | 28s |
+validity fixed_local: {"n_excluded": 0, "n_used": 6, "n_valid_J_adjusted": 6, "n_valid_J_nominal": 6, "n_valid_se_min": 6}
+| fixed_plus_global | 6/6 | 6se/6J | 0.000 | 0.000 | 0.433 | 1.000 / 1.000 | -0.0116 / +0.0362 | 1.268 / 1.189 | 0.000 | 28s |
+validity fixed_plus_global: {"n_excluded": 0, "n_used": 6, "n_valid_J_adjusted": 6, "n_valid_J_nominal": 6, "n_valid_se_min": 6}
+| stratified | 6/6 | 6se/6J | 0.000 | 0.000 | 0.533 | 1.000 / 1.000 | -0.0104 / +0.0286 | 1.292 / 1.050 | 0.000 | 17s |
+validity stratified: {"n_excluded": 0, "n_used": 6, "n_valid_J_adjusted": 6, "n_valid_J_nominal": 6, "n_valid_se_min": 6}
+paired_cluster seed=20260610 reps=256 strata=3 pairs_per_stratum=5
+{"analytic_cross": 0.05333333333333334, "empirical_cross": 0.062255844671703364, "estimated_local": 0.05071189229923369, "estimated_plus_global": 0.05433417032060753, "local_mcse": 0.0014306295571700081, "plus_global_mcse": 0.0015328173826821515, "rho": 0.8}
+{"analytic_cross": -0.05333333333333334, "empirical_cross": -0.059409451530224526, "estimated_local": -0.050356102163719454, "estimated_plus_global": -0.05395296660398513, "local_mcse": 0.0014264351749214707, "plus_global_mcse": 0.0015283234017015757, "rho": -0.8}
+{"analytic_cross": 0.0, "empirical_cross": 0.0014231965707393872, "estimated_local": 0.00017789506775711648, "estimated_plus_global": 0.00019060185831119627, "local_mcse": 0.0005279491893214899, "plus_global_mcse": 0.0005656598457015962, "rho": 0.0}
