@@ -694,6 +694,29 @@ def psd_result():
     return result
 
 
+def test_empirical_gamma_functional_uses_each_draw_before_reduction():
+    """A cheap gauge probe keeps the per-draw path in quick-check (#191)."""
+    factors = np.array([[1.0, 2.0], [-1.0, -2.0], [2.0, 0.0], [-2.0, 0.0]])
+    rotated = factors.copy()
+    rotated[0] *= -1.0  # same Gamma draw, different ambient factor coordinate
+    law = EmpiricalLaw.from_draws(factors, component_shapes=((2, 1),))
+    rotated_law = EmpiricalLaw.from_draws(rotated, component_shapes=((2, 1),))
+
+    gamma = factors[:, :, None] * factors[:, None, :]
+    expected_gamma_se = np.std(
+        gamma[:, np.triu_indices(2)[0], np.triu_indices(2)[1]], axis=0, ddof=1
+    )
+    np.testing.assert_allclose(law.se(gamma_functional()), expected_gamma_se)
+    np.testing.assert_allclose(
+        law.se(eigenvalue_functional(1)),
+        np.std(np.sum(factors**2, axis=1), ddof=1, keepdims=True),
+    )
+    np.testing.assert_array_equal(
+        law.se(gamma_functional()), rotated_law.se(gamma_functional())
+    )
+    assert not np.allclose(law.se(), rotated_law.se())
+
+
 @pytest.mark.slow
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")  # exercises deprecated shims
 class TestGaugeAwareCodomain:
