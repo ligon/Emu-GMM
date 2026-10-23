@@ -3,7 +3,7 @@
 
 * Scope and prior art
 
-This is a design proposal, not an implementation.
+This section records the design audit preceding implementation.
 The installed environment has Optimistix 0.1.0 and Lineax 0.1.1.
 Its =optimistix.LevenbergMarquardt= defaults to =lx.QR()=; the Emu adapter constructs that default at =src/emu_gmm/optimizer.py:212=.
 Optimistix first calls =jax.linearize= and retains a =FunctionLinearOperator= for the residual Jacobian (=optimistix/_solver/gauss_newton.py:160-169=).
@@ -77,8 +77,31 @@ Compare =compiled.memory_analysis().temp_size_in_bytes= or isolated subprocess p
 A flat or much slower-growing temporary with \(K\), plus parity tests, is evidence; a single tiny fixture's absolute RSS is not.
 Also verify the LM HLO contains no QR/as-matrix materialization in bounded mode; a matrix-free solver may trade memory for runtime.
 
-* Open decisions
+* Design-time open decisions
 
 - Choose LSMR tolerance and =max_steps= after a small ill-conditioned parity grid; bounded mode may be slower and may converge differently from QR.
 - Decide whether to expose the setting as =jacobian_memory= or a strategy object before coding; the key contract is one estimator-level opt-in covering solve and \(G\).
 - Confirm exact handling of custom measures/optimizers: reject unsupported objects early or define a narrow explicit capability protocol.
+
+* Branch validation -- 2026-10-23
+
+The =feat/232-bounded-jacobian= branch implements the single opt-in on =estimate= and =build_estimator=, and exposes the solver-only setting on =optimistix_lm=.
+The estimator mode uses LSMR for native Optimistix LM, sequential column JVPs for postfit \(G\), and sequential Jacobian construction in RiemannianLM and the linear fast path.
+The existing SciPy LM and Riemannian TR solvers already use sequential differences or Hessian-vector products; the mode changes their postfit \(G\) only.
+Unknown modes, custom measures, and opaque custom optimizers are rejected at factory construction.
+Lineax is now a direct runtime dependency because the adapter imports its LSMR solver.
+
+The first numerical checks pass on nonlinear analytical moments, a supplied analytical Jacobian, a fresh same-structure factory call without retracing, a ragged-mask CU fit with a penalty, a synthetic CRN fit, a Positive-manifold fit, a rank-poor direct solve, and a JIT/vmap solve with traced arguments; the final branch =make quick-check= passed ruff, Black, mypy, and pytest (1657 passed, 13 skipped, 123 deselected).
+The following compile-time probe is reproducible with =PYTHONPATH=src XLA_FLAGS=--xla_force_host_platform_device_count=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 nice -n 19 taskset -c 40 .venv/bin/python scripts/validation/jacobian_memory_232.py --k 4 8 16 --n 32768=.
+It uses CPU x64, a primal intermediate of shape =(32768,K)=, and XLA =compiled.memory_analysis().temp_size_in_bytes=; these are estimated temporary buffers, not observed peak RSS or a GPU guarantee.
+
+#+name: tab:jacobian-memory-232-cpu
+| K  | Postfit jacfwd | Postfit columnwise | LM QR     | LM LSMR  |
+|----+----------------+--------------------+-----------+----------|
+|  4 |        8519680 |            3179944 |  13239416 |  9997752 |
+|  8 |       34078720 |            6360232 |  42992952 | 19467832 |
+| 16 |      136314880 |           12724392 | 153618232 | 38408184 |
+
+The postfit default grows approximately as \(K^2\) in this fixture, while the columnwise estimate grows approximately as \(K\).
+The matrix-free LM estimate also grows much more slowly than QR, though both retain the primal tape and other buffers.
+This falsifies the claim that the opt-in simply moves the same \(K\)-lane temporary to another step; it does not establish CerealDemand's device-memory fit or numerical parity in its large model.

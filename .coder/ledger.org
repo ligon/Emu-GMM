@@ -860,9 +860,9 @@ Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replica
 The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
 No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
 
-* Section 10 -- #232 Jacobian-memory design (read-only)
+* Section 10 -- #232 Jacobian-memory design and opt-in implementation
 
-1. Task :: Propose one opt-in bounded-memory route across both the LM solve and postfit moment Jacobian \(G\), preserving default behavior.
+1. Task :: Add one opt-in bounded-memory route across both the LM solve and postfit moment Jacobian \(G\), preserving default behavior.
 2. Existing machinery :: =optimizer.py:212-214= creates Optimistix LM with default QR; the installed Optimistix 0.1.0 builds a =FunctionLinearOperator= from =jax.linearize= before damping, and installed Lineax 0.1.1 QR materializes it through =as_matrix()=.
    =estimator.py:855-868= computes postfit \(G\), delegating scalar trees to =measure.jacobian=; =measures/empirical.py:589-606= constructs =(N,M,K)= with =vmap(jacfwd)=.
    =manifolds/riemannian_lm.py:493,512,725= and =optimizer.py:537,551,560= have separate native =jacfwd= sites.
@@ -871,10 +871,11 @@ No statistical estimator or reduction was reimplemented; concatenation extends t
    The empirical \(m_j\) uses masked, weighted per-coordinate means with \(N_j\), and differentiates only observed cells after safe-x preprocessing.
 4. Invariants :: Keep the default QR and existing measure/parameter dispatch bitwise; keep the complete whitened residual derivative for CU weighting and penalties; preserve analytical user-supplied =jacobian_fn= on its existing scalar path; keep the final \(G\) and gauge projection.
    A bounded mode cannot promise memory independent of \(K\): \(G\), its \(K\times K\) information matrix, and JAX's primal tape remain.
-5. Reuse decision :: An opt-in factory-static estimator setting could select matrix-free =lx.LSMR= for built-in Optimistix LM and a shared =lax.map= columnwise JVP helper for Emu's internal dense-Jacobian sites and postfit \(G\).
+5. Reuse decision :: The factory-static estimator setting selects matrix-free =lx.LSMR= for built-in Optimistix LM and a shared =lax.map= columnwise JVP helper for Emu's internal dense-Jacobian sites and postfit \(G\).
    =lx.Normal(lx.CG(...))= is matrix-free but squares condition number; =NormalCG= spelling is deprecated in installed Lineax.
    Custom opaque optimizers/measures require an explicit bounded capability or a clear early rejection.
-6. Open questions :: LSMR tolerance/iteration policy and conditioning parity; exact custom-capability surface; whether a retained =jax.linearize= tape or repeated =jax.jvp= yields lower peak for the consumer-size model.
+6. Open questions :: Consumer-size GPU peak memory and difficult weak-identification behavior still need external validation; the opt-in rejects opaque custom solvers and measures rather than claiming a capability it cannot inspect.
 
-Verification against ledger: design only; no code or numerical claim yet.
-See =.coder/design-232-jacobian-memory.org= for source paths, falsification fixtures, and a static-HLO/peak-memory gate.
+Verification against ledger: targeted nonlinear analytical, supplied analytical Jacobian, ragged-mask CU+penalty, synthetic CRN, manifold, factory no-retrace, rank-poor LSMR, and JIT/vmap-with-traced-args checks pass; the final branch =make quick-check= passed ruff, Black, mypy, and pytest (1657 passed, 13 skipped, 123 deselected).
+The reproducible CPU x64 compiled-buffer probe at \(N=32768\) and \(K=4,8,16\) shows postfit temporary bytes =8.5/34.1/136.3 MB= with =jacfwd= versus =3.2/6.4/12.7 MB= columnwise, and LM temporary bytes =13.2/43.0/153.6 MB= with QR versus =10.0/19.5/38.4 MB= with LSMR.
+This is estimated XLA temporary memory, not a GPU peak claim; =.coder/design-232-jacobian-memory.org= records the method and remaining limits.
