@@ -147,6 +147,7 @@ from emu_gmm.measures.empirical import EmpiricalMeasure
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
+    CovarianceStrategy,
     Emu_GMM_DimensionError,
     OptimizationResult,
     ParamsLike,
@@ -600,41 +601,10 @@ def cluster_bootstrap(
     if n_boot <= 0:
         raise ValueError(f"cluster_bootstrap: n_boot must be positive, got {n_boot}")
 
-    # Probe the parameter tree with the manifold-aware flatten (#150).
-    # ``flatten_params_for_ad`` dispatches exactly like ``estimate()``:
-    # an all-scalar (v1) tree returns ``spec=None`` and the bitwise-v1
-    # flat layout; a tree carrying a non-scalar / manifold leaf (e.g. a
-    # ``PSDFixedRank`` factor) returns the ambient flatten plus its
-    # ``ManifoldSpec``. ``K`` is the ambient flatten length in both cases
-    # (== ``total_ambient_dim`` == ``total_dimension``), matching the
-    # ``parameters`` axis ``Sigma_theta`` is sized along.
-    theta_init_flat, _treedef, init_spec = params_mod.flatten_params_for_ad(theta_init)
-    K = int(theta_init_flat.shape[0])
-    if init_spec is None:
-        # v1 / all-scalar: dataclass field names, bitwise unchanged.
-        param_names = tuple(params_mod.param_names(theta_init))
-    else:
-        # Manifold: positional ambient-coordinate labels (e.g. ``A[0,0]``),
-        # identical to the gauge-arbitrary labelling ``Sigma_theta`` /
-        # ``eigenvalue_se`` use. See the function docstring's manifold note
-        # on why the raw entries are not cross-replicate comparable.
-        param_names = tuple(labels_mod.tangent_basis_names(init_spec))
-
-    # Resolve defaults to the same values used by :func:`estimate`. The
-    # optimiser default is *deferred*: we forward ``optimizer=None`` so
-    # :func:`estimate` auto-dispatches per replicate (``optimistix_lm`` for
-    # an all-Euclidean tree, ``riemannian_lm`` for a manifold tree) rather
-    # than pinning the v1 Euclidean solver here, which cannot retract on a
-    # manifold leaf (#150).
-    if weighting is None:
-        weighting = ContinuouslyUpdated()
-    if regularization is None:
-        regularization = DiagonalTikhonov()
-
     # Pre-compute the cluster -> row-indices lookup once. Pulled to
     # NumPy here so the per-replicate assembly stays cheap.
     cluster_ids_raw = np.asarray(covariance.cluster_ids)
-    cluster_ids_np = np.rint(cluster_ids_raw).astype(np.int64)
+    cluster_ids_np = cluster_ids_raw.astype(np.int64)
     n_clusters = int(covariance.n_clusters)
     rows_by_cluster = _cluster_row_indices(cluster_ids_np, n_clusters)
 
@@ -663,6 +633,7 @@ def cluster_bootstrap(
         if (
             cluster_ids_np.shape != (weights.size,)
             or not np.all(np.isfinite(cluster_ids_raw))
+            or not np.all(cluster_ids_raw == cluster_ids_np)
             or np.any(cluster_ids_np < 0)
             or np.any(cluster_ids_np >= n_clusters)
         ):
@@ -710,6 +681,71 @@ def cluster_bootstrap(
             )
         )
 
+    return _refit_bootstrap_worlds(
+        refit_model,
+        theta_init,
+        n_boot=n_boot,
+        key=key,
+        resample_one=lambda b: _resample_one(
+            measure, rows_by_cluster, drawn_all[b], source_covariance=covariance
+        ),
+        weighting=weighting,
+        regularization=regularization,
+        optimizer=optimizer,
+        penalty=penalty,
+        name="cluster_bootstrap",
+        null_offset=null_offset,
+        observed_J=observed_J,
+    )
+
+
+def _refit_bootstrap_worlds(
+    model: StructuralModel,
+    theta_init: ParamsLike,
+    *,
+    n_boot: int,
+    key: jax.Array,
+    resample_one: Callable[[int], tuple[EmpiricalMeasure, CovarianceStrategy]],
+    weighting: WeightingStrategy | None,
+    regularization: RegularizationStrategy | None,
+    optimizer: _OptimizerLike | None,
+    penalty: PenaltyStrategy | None,
+    name: str,
+    null_offset: np.ndarray | None = None,
+    observed_J: float | None = None,
+) -> ClusterBootstrapResult:
+    """Shared refit, validity, and labelled-result path for PSU bootstraps."""
+    # Probe the parameter tree with the manifold-aware flatten (#150).
+    # ``flatten_params_for_ad`` dispatches exactly like ``estimate()``:
+    # an all-scalar (v1) tree returns ``spec=None`` and the bitwise-v1
+    # flat layout; a tree carrying a non-scalar / manifold leaf (e.g. a
+    # ``PSDFixedRank`` factor) returns the ambient flatten plus its
+    # ``ManifoldSpec``. ``K`` is the ambient flatten length in both cases
+    # (== ``total_ambient_dim`` == ``total_dimension``), matching the
+    # ``parameters`` axis ``Sigma_theta`` is sized along.
+    theta_init_flat, _treedef, init_spec = params_mod.flatten_params_for_ad(theta_init)
+    K = int(theta_init_flat.shape[0])
+    if init_spec is None:
+        # v1 / all-scalar: dataclass field names, bitwise unchanged.
+        param_names = tuple(params_mod.param_names(theta_init))
+    else:
+        # Manifold: positional ambient-coordinate labels (e.g. ``A[0,0]``),
+        # identical to the gauge-arbitrary labelling ``Sigma_theta`` /
+        # ``eigenvalue_se`` use. See the function docstring's manifold note
+        # on why the raw entries are not cross-replicate comparable.
+        param_names = tuple(labels_mod.tangent_basis_names(init_spec))
+
+    # Resolve defaults to the same values used by :func:`estimate`. The
+    # optimiser default is *deferred*: we forward ``optimizer=None`` so
+    # :func:`estimate` auto-dispatches per replicate (``optimistix_lm`` for
+    # an all-Euclidean tree, ``riemannian_lm`` for a manifold tree) rather
+    # than pinning the v1 Euclidean solver here, which cannot retract on a
+    # manifold leaf (#150).
+    if weighting is None:
+        weighting = ContinuouslyUpdated()
+    if regularization is None:
+        regularization = DiagonalTikhonov()
+
     theta_boot = np.empty((n_boot, K), dtype=np.float64)
     J_boot = np.empty(n_boot, dtype=np.float64)
     convergence = np.empty(n_boot, dtype=bool)
@@ -731,12 +767,7 @@ def cluster_bootstrap(
         # ``continue`` below cannot skip it.
         if b > 0 and b % 25 == 0:
             jax.clear_caches()
-        boot_measure, boot_cov = _resample_one(
-            measure,
-            rows_by_cluster,
-            drawn_all[b],
-            source_covariance=covariance,
-        )
+        boot_measure, boot_cov = resample_one(b)
         # NB: do *not* wrap this call in a broad ``except Exception``.
         # The framework's optimisers (``optimistix_lm`` with
         # ``throw=False``, ``scipy_lm``) report non-convergence via
@@ -748,7 +779,7 @@ def cluster_bootstrap(
         # the real bug instead of a silent NaN row.
         try:
             result = estimate(
-                model=refit_model,
+                model=model,
                 measure=boot_measure,
                 covariance=boot_cov,
                 weighting=weighting,
@@ -816,7 +847,7 @@ def cluster_bootstrap(
         # warning already fires per zero-support refit). Loud, per #140:
         # the rows are excluded, and here is how many and why.
         warnings.warn(
-            f"cluster_bootstrap: {n_nonconverged} of {n_boot} replicate "
+            f"{name}: {n_nonconverged} of {n_boot} replicate "
             f"refits did not converge ({int(zero_support.sum())} with a "
             "zero-support moment in the resampled world; "
             f"{int(tau_saturated.sum())} ridge-saturated); their theta_boot "
@@ -825,7 +856,7 @@ def cluster_bootstrap(
             "columns to adaptive_bootstrap, which excludes and counts NaN "
             "draws.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
 
     # Label the (n_boot, K) array along the canonical parameters axis;

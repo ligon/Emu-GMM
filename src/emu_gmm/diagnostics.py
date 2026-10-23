@@ -183,11 +183,12 @@ def regularization_adjusted_pvalue(
     - :math:`\\tilde G = L_\\star^{-1} G` is the whitened Jacobian;
     - :math:`\\tilde V = L_\\star^{-1} V L_\\star^{-\\top}` is the
       whitened variance under the unregularised limit;
-    - :math:`P = I - \\tilde G (\\tilde G^\\top \\tilde G)^{-1}
+    - :math:`P = I - \\tilde G (\\tilde G^\\top \\tilde G)^{+}
       \\tilde G^\\top` projects onto the orthogonal complement of the
-      column space of :math:`\\tilde G`;
-    - the weights are the (M-K) non-zero eigenvalues of
-      :math:`P \\tilde V P`.
+      column space of :math:`\\tilde G` when the only null directions are
+      the declared gauge directions;
+    - the weights are the up to :math:`M-K+g` non-zero eigenvalues of
+      :math:`P \\tilde V P`, where :math:`g` is ``gauge_nullspace_dim``.
 
     Parameters
     ----------
@@ -202,10 +203,10 @@ def regularization_adjusted_pvalue(
         Moment Jacobian :math:`E_\\mu[\\nabla_\\theta \\psi]` at
         :math:`\\hat\\theta`. For manifold parameters this is the
         AMBIENT Jacobian; gauge invariance of the moment makes the
-        gauge directions an exact nullspace of ``G``, accounted for via
-        ``gauge_nullspace_dim``.
+        gauge directions a nullspace of ``G`` at a regular fixed-rank
+        point, accounted for via ``gauge_nullspace_dim``.
     gauge_nullspace_dim : static int, optional
-        Exact dimension of ``G``'s gauge nullspace
+        Nominal dimension of ``G``'s gauge nullspace at a regular point
         (``manifold_spec.total_gauge_dim``); ``0`` for v1 / scalar
         parameters. #137: the projector formerly used a plain
         ``inv(G~'G~)``, which is SINGULAR for gauge-bearing manifolds
@@ -213,8 +214,8 @@ def regularization_adjusted_pvalue(
         p-values. The Gram inverse now drops exactly this many smallest
         eigenvalues BY COUNT (:func:`pinv_eigvalrule`, the same rule the
         Sigma_theta bread uses); ``P = I - G~ (G~'G~)^+ G~'`` is the
-        correct orthogonal projector onto ``col(G~)``'s complement at
-        any rank.
+        correct orthogonal projector onto ``col(G~)``'s complement when
+        the declared gauge directions are its only null directions.
 
     Returns
     -------
@@ -263,14 +264,15 @@ def regularization_adjusted_pvalue(
     # rule as the Sigma_theta bread three call sites away; for
     # gauge_nullspace_dim == 0 this is bitwise inv() (the v1 path).
     # P = I - G~ (G~'G~)^+ G~' is the orthogonal projector onto
-    # col(G~)'s complement at any rank (Moore-Penrose property).
+    # col(G~)'s complement when the declared gauge directions are
+    # the only null directions.
     GtG_inv = pinv_eigvalrule(GtG, drop_smallest=int(gauge_nullspace_dim))
     P = jnp.eye(M) - G_tilde @ GtG_inv @ G_tilde.T
 
-    # Eigenvalues of P ~V P. Of the M eigenvalues, K are exactly zero
-    # (projector kills the col(~G) directions); the remaining M-K are
-    # the weights for the weighted-chi^2 limit. We keep all of them and
-    # sum: zeros contribute nothing.
+    # Eigenvalues of P ~V P. Under regular quotient rank, K-gauge_dim
+    # are zero (projector kills col(~G)); up to M-K+gauge_dim remain as
+    # weights for the weighted-chi^2 limit. Keep all M eigenvalues;
+    # zeros contribute nothing.
     PVP = P @ V_tilde @ P
     PVP = 0.5 * (PVP + PVP.T)
     weights = jnp.linalg.eigvalsh(PVP)
@@ -280,8 +282,8 @@ def regularization_adjusted_pvalue(
 
     # Welch-Satterthwaite: ~ c * chi^2_v, with c = sum w^2 / sum w,
     # v = (sum w)^2 / sum w^2. Guard against the degenerate
-    # all-weights-zero case (would only happen with M=K, which the
-    # dimension guard already prevents from reaching here in practice).
+    # all-weights-zero case (e.g. a just-identified quotient, where
+    # M=K-gauge_dim, or a degenerate projected meat).
     s1 = jnp.sum(weights)
     s2 = jnp.sum(weights**2)
     safe = s1 > 0.0

@@ -336,14 +336,16 @@ manifold example see =tests/test_law.py= (=TestGaugeAwareCodomain=) and
 * Conditioning: =given(E)= and the exclude-but-count discipline
 
 An empirical law over MC records carries the per-rep diagnostic event
-flags (=converged=, =binding_ridge=, =sigma_meat_indefinite= --- the
-=FLAG_FIELDS=), so the *joint* law of \((\hat\theta, \text{events})\) is
-queryable. =given(event)= returns another =EstimatorLaw= on the
+flags (=converged=, =binding_ridge=, =sigma_meat_indefinite=,
+=tau_saturated= --- the =FLAG_FIELDS=), so the *joint* law of
+\((\hat\theta, \text{events})\) is queryable.
+=given(event)= returns an =EmpiricalLaw= on the
 sub-population where the event holds; =event_share= reports the
 selection's size with *both* denominators (all reps, and converged
 reps), so a conditional answer is never silently dressed as a marginal
-one. =event= is a flag name or any predicate
-=FitRecord -> (n_reps,) bool=.
+one. The string form accepts only those four named flags. For any other
+condition, pass a predicate =FitRecord -> (n_reps,) bool=; a predicate
+does not turn the selected condition into an estimator-internal flag.
 
 #+begin_src python
 share = emp.event_share("converged")

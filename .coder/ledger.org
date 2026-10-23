@@ -860,32 +860,6 @@ Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replica
 The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
 No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
 
-* Section 14 -- Exact null-recentred cluster-refit J law (#185)
-
-1. Task :: Add an opt-in, finite-draw J reference law to the existing whole-cluster refit bootstrap only when every original cluster has positive exposure for every moment.
-   Section 13 is reserved for #155's stratified bootstrap.
-2. Existing machinery :: Search tier: ripgrep, source/tests, issue #185 discussion, and ledger history.
-   =inference/cluster_bootstrap.py:168= owns the PyTree result and NaN/event accounting; =:358= assembles resampled measures and covariance; =:505= owns the refit loop.
-   =measures/empirical.py:368= supplies mask-safe residuals and =weight_mask=; =covariance/clustered.py:42= defines =centered= and =dof_correction=; =inference/adaptive.py:215= owns finite-draw p-value correction and =:325= owns precision-targeted batches.
-   =tests/inference/test_cluster_bootstrap.py= covers the existing refit, NaN/event and PyTree contracts; =tests/inference/test_cluster_bootstrap_recentered.py= covers the new offset/domain/calibration.
-3. Definitions :: For cluster =g= and moment =j=, =n_gj=sum(mask_ij*weight_i)= and =u_gj=sum(mask_ij*weight_i*psi_j(x_i,theta_hat))=.
-   The null offset is =E*[sum_b u_Cbj / sum_b n_Cbj]= over all =G^G= uniform with-replacement worlds, not the original-sample ratio of totals.
-   Positive =n_gj= for all =g,j= makes every world jointly supported; the scalar integral equals the joint-support conditional expectation in this domain.
-   The observed J is the original unshifted =OptimizationResult.objective_value=; refit J uses the frozen =psi-c= model.
-4. Invariants :: Keep the default ordinary pairs path and its parameter draw stream; preserve source covariance centering and finite-cluster correction in each refit.
-   Apply the shift before moment/covariance/weighting/gradient/J construction; do not post-adjust J.
-   Compare the original fit's stored moment residual and =N_j= against the supplied model/measure at =theta_hat= before using its J.
-   A nonconverged refit remains a NaN =theta_boot= /=J_boot= row with named event flags and is excluded from =n_valid=.
-   The p-value is =(1+# valid J_boot >= observed_J)/(1+n_valid)=; no finite valid draws must raise.
-5. Reuse decision :: Extend =cluster_bootstrap= and its PyTree result with optional dynamic null metadata; reuse =expectation_and_contributions= for mask-safe totals, =estimate= for all refit internals, and =BootstrapPValue= for the plus-one correction.
-   New: one-coordinate Laplace-integral coefficients for the exact random-ratio offset, since no existing routine computes that expectation; bound the coefficient vector's quadrature error by Cauchy against the cluster totals and reject failed checks.
-6. Open questions :: Sparse-support inclusion-exclusion, signed weights, and partial joint-support conditioning are outside the first slice.
-   The fixed-G Gaussian null calibration is a discriminating check, not a general finite-sample validity theorem; independent review remains required before a ready PR.
-
-Verification against Section 14 :: *OK*: the 27-world unequal-exposure example matches the integral to maximum absolute error =2.22e-16=; a real package refit agrees with the centered-covariance J contrast.
-Seed 185, 500 Gaussian-null samples with 500 worlds each at nominal 5% reject 30/500 with recentring and 0/500 with ordinary pairs J.
-The targeted tests check both covariance flags on the ordinary path, frozen shifted residual, positive-domain refusal, NaN/valid denominator, and PyTree stacking.
-
 * Section 10 -- #232 Jacobian-memory design and opt-in implementation
 
 1. Task :: Add one opt-in bounded-memory route across both the LM solve and postfit moment Jacobian \(G\), preserving default behavior.
@@ -906,6 +880,53 @@ Verification against ledger: targeted nonlinear analytical, supplied analytical 
 The reproducible CPU x64 compiled-buffer probe at \(N=32768\) and \(K=4,8,16\) shows postfit temporary bytes =8.5/34.1/136.3 MB= with =jacfwd= versus =3.2/6.4/12.7 MB= columnwise, and LM temporary bytes =13.2/43.0/153.6 MB= with QR versus =10.0/19.5/38.4 MB= with LSMR.
 This is estimated XLA temporary memory, not a GPU peak claim; =.coder/design-232-jacobian-memory.org= records the method and remaining limits.
 
+* Section 11 -- Opt-in numerical bread rank (#219)
+
+** 11.1 -- Task and search
+
+Specify a law-side, explicitly selected relative cutoff for the fitted bread, with the count-only default unchanged.
+The target is a numerical retained-subspace covariance plus a separate functional-sensitivity report, not a population-identification or boundary-inference claim.
+Search tier: ripgrep plus direct source/test reads and git history; no gitnexus tool is exposed in this session.
+
+** 11.2 -- Existing machinery
+
+- Bread inverse :: =src/emu_gmm/_internal/pinv_eigvalrule.py:53= drops exactly =gauge_dim= smallest eigenvalues; =:116= returns =jnp.linalg.inv= bitwise for zero gauge.
+  =tests/test_pinv_eigvalrule.py:34=, =:46=, =:85=, and =:117= guard the count, jit/vmap, and bounds.
+- Sandwich :: =src/emu_gmm/_internal/asymptotic.py:35= forms \(B=G'\Lambda G\), \(M=G'\Lambda V\Lambda G\), and \(B^+ M B^+\).
+  =src/emu_gmm/law.py:1208= calls it from the live =AsymptoticLaw=; =tests/test_result_law_fidelity.py:275= pins a hand-built weighting-aware example.
+- Fit ingredients :: =src/emu_gmm/types.py:704= / =:711= / =:716= retain =G=, realised =Lambda=, and raw =V= on =OptimizationResult=.
+  =n_overid= is separate (=:721=).
+- Functional queries :: =src/emu_gmm/inference/functional_se.py:120= takes the ambient Jacobian of =f(components)=; =src/emu_gmm/law.py:1436= and =:1490= reuse the law covariance for SEs and sampling.
+  =tests/manifolds/test_manifold_acceptance_phase7.py:204= guards gauge rotations.
+- Geometry :: =src/emu_gmm/manifolds/spec.py:53= holds flat ambient order and nominal gauge count; =src/emu_gmm/manifolds/psd_fixed_rank.py:152= uses the Frobenius metric.
+  =src/emu_gmm/law.py:398= routes named leaf queries through the same law.
+- Persistence :: =src/emu_gmm/persistence.py:261= saves either a live or reloaded =AsymptoticLaw=, storing components and assembled covariance but not =G/Lambda/V= (=:281=); =:469= writes an inert NPZ, =:528= loads it.
+  =tests/test_persistence.py:168= guards re-save and =:246= guards moments-backed reconstruction.
+
+** 11.3 -- Definitions and invariants
+
+- The default =pinv_eigvalrule= is count-only to avoid conflating weak positive bread directions with gauge zeros (=pinv_eigvalrule.py:19=); #219 adds an opt-in policy, never a new default.
+- The raw-meat sandwich uses the realised, possibly ridged =Lambda= and unregularised =V=, not =B^{-1}= alone (=asymptotic.py:13=; =docs/optimization-result-law-split.org=, "Why the Hessian alone is not enough").
+- Flat ambient coordinates and the Euclidean metric determine eigenvalues, projectors, derivative norms, and the relative cutoff; rescaling a parameter changes the policy.
+  This agrees with the Frobenius metric on =PSDFixedRank= (=psd_fixed_rank.py:152=) but differs from the point-dependent metrics on =Positive= and =Interval= (=positive.py:82=, =interval.py:115=).
+- =PSDFixedRank(n,k)= has nominal gauge count =k(k-1)/2= only on the regular rank-=k= stratum (=psd_fixed_rank.py:45=); neither the count nor eigenvector order proves a geometric gauge direction at singular =A=.
+- Numerical singularity of the ambient bread and nominal gauge dimension are different objects; =extra_excluded= is arithmetic and cannot certify nongauge identification failure.
+- An assembled =Sigma= alone cannot recover a new bread cutoff after reload; the current persistence path discards the sandwich ingredients (=persistence.py:281=).
+- A numerical-rank option must leave optimization diagnostics, =n_overid=, and J-test calibration unchanged (=types.py:721=; =law.py:1309=).
+
+** 11.4 -- Reuse decisions
+
+- *Reuse* the existing =G/Lambda/V= sandwich and =AsymptoticLaw= functional/leaf query algebra.
+- *Extend* law-side bread inversion with an opt-in report; do not alter =pinv_eigvalrule='s default or the estimator's optimization fields.
+- *Extend* typed =LawState= persistence with policy, signed spectrum, retained mask, and the whole excluded projector; do not derive them from saved =Sigma=.
+- *New* second-order sensitivity query: the current =functional_se= computes only \(J_f\Sigma J_f'\), so it cannot detect =f(A)=AA'= at =A=0=.
+
+** 11.5 -- Design resolution and implementation checks
+
+=docs/numerical-rank-policy.org= specifies the opt-in API, native ambient/Frobenius convention, signed-spectrum rule, invalid-bread statuses, full excluded projector, first/mixed-second derivative sensitivity, singular-geometry status, and versioned load/re-save behavior.
+The plan refuses post-load tolerance changes without =G/Lambda/V= and makes no boundary-valid inference claim.
+=functional_se(f)= remains a conditional retained-subspace SE even when excluded-direction sensitivity is nonzero; a separate query reports that sensitivity, and versioned persistence preserves both meanings across load/re-save.
+Implementation must test unchanged-default fidelity, gauge rotations, weak positive directions, zero-gradient quadratic and higher-order counterexamples, projector validation, schema-1 compatibility, and every law query using the same policy.
 * Section 12 -- Grid-limited random-set law (#180)
 
 1. Task :: Carry repeated =KConfidenceSet= inversions as a set-valued law with explicit scanned-grid events and capacity/coverage counts. Section 11 is reserved for #219's numerical-rank policy.
@@ -914,3 +935,38 @@ This is estimated XLA temporary memory, not a GPU peak claim; =.coder/design-232
 4. Invariants :: Use the common finite strictly increasing grid and common inversion level/statistic for repeated sets. Preserve invalid and nonconverged as separate event counts; an unknown verdict cannot enter a coverage denominator as a rejection. Empty conditional selections remain queryable with zero counts and NaN rate. Set artifacts contain only inert data, not estimator closures or pickled objects.
 5. Reuse decision :: Reuse =KConfidenceSet= and its per-point acceptance/event masks; add a sibling =RandomSetLaw= rather than coerce sets into =EstimatorLaw='s point summaries or =FitRecord=. Use structured set-query counts and a separate versioned NPZ codec, leaving numeric-law persistence untouched.
 6. Open questions :: Finite scanned-grid capacity is the first slice. Membership between grid points, a certified global empty set, and compact-set capacity beyond finite grid subsets require separate semantics and calibration.
+
+* Section 13 -- Pure stratified refit bootstrap (#155)
+
+1. Task :: Add a pure =StratifiedCovariance= refit parameter bootstrap with independent PSU draws inside each fixed =(stratum, arm)= cell, preserving its PSU count, with =fpc=False=.
+2. Existing machinery :: Search tier: ripgrep and git history. =inference/cluster_bootstrap.py:313,329= maps cluster IDs to rows and assembles a resampled measure; =:400= owns the refit, NaN-on-nonconvergence, diagnostics, labels, and =ClusterBootstrapResult= output (tested by =tests/inference/test_cluster_bootstrap.py=). =covariance/stratified.py:87= defines PSU, cell, stratum, and static count metadata and centers moment totals within cells (tested by =tests/covariance/test_stratified.py=).
+3. Definitions :: The design cell is =(stratum x arm)=, not the bare stratum; centering and resampling at the stratum level would pool arms. A repeated original PSU is a distinct bootstrap PSU with a new contiguous ID. With one *cell* and =fpc=False=, the drawn PSU-index distribution and refit plumbing can match =cluster_bootstrap= under one key, but the two covariance estimators are not bitwise aliases (owner comment on issue #155).
+4. Invariants :: Preserve every populated cell's PSU count on every draw; validate that each PSU belongs to one cell and stratum and each cell to one stratum. Rebuild the covariance metadata on the resampled row order. Preserve =cluster_bootstrap='s existing random stream, result labels, NaN rows for nonconverged refits, diagnostics and warning behavior. Do not claim without-replacement/FPC calibration; reject =fpc=True= in this first slice.
+5. Reuse decision :: Extend the existing refit/result helper in =cluster_bootstrap.py= and call it from the new stratified entry point; add only the cell-aware draw-index and covariance-rebuild helpers. Do not reimplement statistical covariance formulas or mix =DesignAwareCovariance= into the resampler.
+6. Open questions :: Mixed design/sampling resampling and FPC-adjusted bootstrap calibration remain separate work; the first acceptance checks an unbalanced two-stratum/two-arm count fixture, one-cell draw-index reduction, and a known-DGP bootstrap SE against the package's analytic stratified SE.
+
+* Section 16 -- Exact null-recentred cluster-refit J law (#185)
+
+1. Task :: Add an opt-in, finite-draw J reference law to the existing whole-cluster refit bootstrap only when every original cluster has positive exposure for every moment.
+   Section 13 covers #155; Sections 14 and 15 are reserved for #145 and #141.
+2. Existing machinery :: Search tier: ripgrep, source/tests, issue #185 discussion, and ledger history.
+   =inference/cluster_bootstrap.py:168= owns the PyTree result and NaN/event accounting; =:358= assembles resampled measures and covariance; =:505= owns the refit loop.
+   =measures/empirical.py:368= supplies mask-safe residuals and =weight_mask=; =covariance/clustered.py:42= defines =centered= and =dof_correction=; =inference/adaptive.py:215= owns finite-draw p-value correction and =:325= owns precision-targeted batches.
+   =tests/inference/test_cluster_bootstrap.py= covers the existing refit, NaN/event and PyTree contracts; =tests/inference/test_cluster_bootstrap_recentered.py= covers the new offset/domain/calibration.
+3. Definitions :: For cluster =g= and moment =j=, =n_gj=sum(mask_ij*weight_i)= and =u_gj=sum(mask_ij*weight_i*psi_j(x_i,theta_hat))=.
+   The null offset is =E*[sum_b u_Cbj / sum_b n_Cbj]= over all =G^G= uniform with-replacement worlds, not the original-sample ratio of totals.
+   Positive =n_gj= for all =g,j= makes every world jointly supported; the scalar integral equals the joint-support conditional expectation in this domain.
+   The observed J is the original unshifted =OptimizationResult.objective_value=; refit J uses the frozen =psi-c= model.
+4. Invariants :: Keep the default ordinary pairs path and its parameter draw stream; preserve source covariance centering and finite-cluster correction in each refit.
+   Apply the shift before moment/covariance/weighting/gradient/J construction; do not post-adjust J.
+   Compare the original fit's stored moment residual and =N_j= against the supplied model/measure at =theta_hat= before using its J.
+   A nonconverged refit remains a NaN =theta_boot= /=J_boot= row with named event flags and is excluded from =n_valid=.
+   The p-value is =(1+# valid J_boot >= observed_J)/(1+n_valid)=; no finite valid draws must raise.
+5. Reuse decision :: Extend =cluster_bootstrap= and its PyTree result with optional dynamic null metadata; reuse =expectation_and_contributions= for mask-safe totals, =estimate= for all refit internals, and =BootstrapPValue= for the plus-one correction.
+   New: one-coordinate Laplace-integral coefficients for the exact random-ratio offset, since no existing routine computes that expectation; bound the coefficient vector's quadrature error by Cauchy against the cluster totals and reject failed checks.
+6. Open questions :: Sparse-support inclusion-exclusion, signed weights, and partial joint-support conditioning are outside the first slice.
+   The fixed-G Gaussian null calibration is a discriminating check, not a general finite-sample validity theorem; independent review remains required before a ready PR.
+
+Verification against Section 16 :: *OK*: the 27-world unequal-exposure example matches the integral to maximum absolute error =2.22e-16=; a real package refit agrees with the centered-covariance J contrast.
+Seed 185, 500 Gaussian-null samples with 500 worlds each at nominal 5% reject 30/500 with recentring and 0/500 with ordinary pairs J.
+The targeted tests check both covariance flags on the ordinary path, frozen shifted residual, positive-domain refusal, NaN/valid denominator, and PyTree stacking.

@@ -65,10 +65,15 @@ from emu_gmm.inference import (
     BootstrapQuantile,
     BootstrapSE,
     ClusterBootstrapResult,
+    FunctionalSensitivity,
     IdentificationStrength,
     JTestResult,
     KConfidenceSet,
     KStatisticResult,
+    NumericalRankPolicy,
+    NumericalRankReport,
+    PSDFactorGeometry,
+    StratifiedBootstrapResult,
     WildBootstrapResult,
     adaptive_bootstrap,
     cluster_bootstrap,
@@ -79,6 +84,7 @@ from emu_gmm.inference import (
     k_statistic_from_arrays,
     moment_wild_bootstrap,
     profiled_k_confidence_set,
+    stratified_bootstrap,
 )
 from emu_gmm.law import (
     AsymptoticLaw,
@@ -158,6 +164,10 @@ __all__ = [
     "k_statistic_from_arrays",
     "KConfidenceSet",
     "KStatisticResult",
+    "FunctionalSensitivity",
+    "NumericalRankPolicy",
+    "NumericalRankReport",
+    "PSDFactorGeometry",
     # Measures
     "SyntheticMeasure",
     "AnalyticalMeasure",
@@ -191,6 +201,8 @@ __all__ = [
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
+    "stratified_bootstrap",
+    "StratifiedBootstrapResult",
     "j_test",
     "JTestResult",
     # Per-block identification-strength diagnostic (#177)

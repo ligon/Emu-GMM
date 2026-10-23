@@ -256,6 +256,19 @@ def test_recentring_refuses_unusable_domain():
             null_result=original,
         )
 
+    measure, covariance = _law_fixture(y, cluster_ids=[0.0, 1.5])
+    original = _original_result(measure, objective=1.0)
+    with pytest.raises(ValueError, match="invalid cluster IDs"):
+        cluster_bootstrap(
+            _psi,
+            _Mean(theta=0.0),
+            measure,
+            covariance,
+            n_boot=1,
+            key=jax.random.PRNGKey(1),
+            null_result=original,
+        )
+
 
 @pytest.mark.parametrize("field", ["moment_residual", "N_j"])
 def test_recentring_refuses_mismatched_original_fit(field):
