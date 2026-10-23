@@ -64,6 +64,7 @@ from emu_gmm.studies import (
     size_power,
     tau_binding,
 )
+from emu_gmm.types import FitRecord
 
 # ---------------------------------------------------------------------------
 # Scalar location model with a poison covariance (the het/degenerate DGP).
@@ -269,6 +270,7 @@ class TestBootstrapRetrofit:
         law, finite = self._law_and_col()
         assert law.n_used == finite.size
         assert law.n_draws == finite.size + 1  # the NaN row is kept in the denom
+        assert law.records is None
 
 
 # ---------------------------------------------------------------------------
@@ -866,9 +868,11 @@ class TestHarness130ExercisesCarrier:
             warnings.simplefilter("ignore")
             cond = law.given("binding_ridge")
         share = law.event_share("binding_ridge")
-        bconv = np.asarray(cond._records.converged) > 0.5
-        pnb_new = np.asarray(cond._records.J_pvalue)[bconv]
-        pab_new = np.asarray(cond._records.J_pvalue_adjusted)[bconv]
+        records = cond.records
+        assert isinstance(records, FitRecord)
+        bconv = np.asarray(records.converged) > 0.5
+        pnb_new = np.asarray(records.J_pvalue)[bconv]
+        pab_new = np.asarray(records.J_pvalue_adjusted)[bconv]
         assert share.n_selected_converged == int(binding_old.sum())
         np.testing.assert_array_equal(pnb_new, pnb_old)
         np.testing.assert_array_equal(pab_new, pab_old)
