@@ -926,11 +926,13 @@ class EmpiricalLaw(EstimatorLaw):
         """Verify a shared CRN probability space, then couple with ``other``.
 
         Reuses :func:`emu_gmm.studies.crn_pair` verbatim: the joint constructor
-        checks ``n_reps`` / ``param_names`` / master ``key`` / ``coupling_id``
-        and RAISES on a mismatch (master-key equality is necessary but not
-        sufficient; the ``coupling_id`` witnesses the DGP's split scheme). Both
+        checks ``n_reps`` / ordered global rep indices / master ``key`` /
+        ``coupling_id`` and RAISES on a mismatch (master-key equality is necessary
+        but not sufficient; the ``coupling_id`` witnesses the DGP's split scheme). Both
         laws must be whole-sweep records-backed --- a conditioned/masked or
         raw-draws law cannot be paired (masking destroys rep alignment).
+        Different parameter labels and J degrees of freedom are allowed: the
+        coupling verifies identical draws, not identical estimands.
         """
         if not isinstance(self._records, MCRecords) or not isinstance(
             other._records, MCRecords

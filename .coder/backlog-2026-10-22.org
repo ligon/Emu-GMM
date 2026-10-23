@@ -1,0 +1,80 @@
+#+TITLE: Emu-GMM backlog triage -- 2026-10-22
+#+AUTHOR: Sue
+#+OPTIONS: toc:nil
+
+* Scope and workflow
+
+The owner authorized implementing reasonable feature requests and posting pushback on requests that do not fit the statistical contract.
+The backlog-workflow skill was found in =LSMS_Library/.claude/skills/backlog-workflow/SKILL.md=.
+Its isolated-worktree, verification, independent-review, and human-merge rules apply; the owner's explicit instruction authorizes enhancements.
+The starting point was clean =main= at =69298c2= (v0.5.0).
+No runtime dependency or default inference policy changes are part of this batch.
+
+* Inventory and dispositions
+
+The inventory contained 25 open issues and no open PRs.
+The table records the first batch and the remaining work; pending PRs do not count as merged fixes.
+
+| Issue | Disposition                  | Remaining scope / rationale                                      |
+|-------+------------------------------+------------------------------------------------------------------|
+|   220 | Implemented; PR review   | Arbitrary datasets/results and authoritative record extractors   |
+|   221 | Implemented; PR review   | Forward custom statistics through every coupled arm              |
+|   222 | Implemented; PR review   | Global rep indices, concat, alignment, and persistence            |
+|   223 | Implemented; PR review   | Fixed-shape extras and collision-safe indexed pandas columns      |
+|   224 | Implemented; PR review   | Fit-time functionals using the full joint asymptotic covariance   |
+|   225 | Implemented; PR review   | Pair nested models without conflating their parameter axes       |
+|   215 | PR #227                      | Published pip/uv installation instructions                        |
+|   179 | Closed, already completed    | PR #183 dofs/study; PR #193 validity guards and explicit caveats   |
+|   198 | Closed, duplicate of #180    | Consolidated the random-set grade and preserved its broader scope|
+|   185 | Narrowed to residual         | Null-recentred refit J; unsafe adaptive recipe already removed    |
+|   145 | Narrowed to residual         | Center sampling/cross blocks; heterogeneity caveat already shipped|
+|   191 | Reconciled residual tracker  | Removed proved fixes; retained unverified statistical/hygiene work|
+|   219 | Pushback comment             | Numerical rank policy is distinct from valid boundary inference  |
+|   226 | Pushback comment             | Array K also needs matched score covariance or D-tilde            |
+|    40 | Counterexample comment       | Quotient identification is an additional assumption              |
+|   180 | Canonical random-set tracker | Concrete membership/empty-set semantics and calibration           |
+|   173 | Later design work            | Mask-field queries; avoid replaying or duplicating the draw stream|
+|   166 | Later optimizer work         | tCG preconditioning; requires convergence/performance evidence    |
+|   155 | Later inference work         | Stratified refit bootstrap with within-stratum PSU resampling     |
+|   141 | Later inference work         | Design-matched Jacobian/moment cross-covariance for K              |
+|   132 | Later boundary work          | Label fidelity and optional backend adapters                     |
+|   127 | Consumer-gated               | Combined empirical/synthetic SMM; no new consumer in this batch   |
+|   113 | Later architecture work      | Sample-level model reductions without closure/retrace regressions|
+|    77 | Later AD work                | Reverse-mode through manifold solves, with gauge-aware derivation|
+|    18 | Later validation work        | Historical cross-package estimator/covariance comparison          |
+
+* Non-obvious decisions
+
+- CRN provenance :: A master key alone cannot identify the DGP; preserve an explicit shared token and exact ordered global rep indices.
+- Shard completeness :: Without an expected range, concatenation can only prove contiguous inferred coverage, not detect an absent terminal shard.
+- Nested models :: Sharing draws does not require sharing parameter names or J degrees of freedom; a paired J difference is descriptive, not automatically a calibrated nested-model test.
+- Functional records :: Marginal SEs cannot reconstruct a functional SE; evaluate the functional and the existing joint-covariance delta method at fit time.
+- Numerical rank :: Spectral truncation is an opt-in numerical policy; zero derivative at a rank-loss boundary is a separate nonregular-inference problem.
+- Quotient identification :: Full observability and gauge invariance do not imply that the moment Jacobian is injective on the horizontal space.
+
+* Verification and continuation
+
+The source-identical baseline passed =make par-quick-check NPROC=20= on CPUs 0-19.
+The merged studies branch also passed the full lint/format/mypy/pytest gate, including slow tests, and the combined custom/sharded/persisted CRN regression.
+PR #227 was independently reviewed and validated with disposable pip/uv resolution experiments plus Org/source checks.
+The studies batch passed integration, independent review, and the full =make par-check NPROC=16= gate (including slow tests), with imports verified against the isolated worktree.
+All PRs are for human review and merge.
+The whole-node Savio job is =40386059= (40 CPUs); starting FCA usage was 73755.6 of 1500000 SUs.
+Release the billed allocation with =sucoder release= once this session has no remaining work.
+
+* Follow-up priorities
+
+- Covariance correctness :: #145 is the next statistical defect to address; centering must preserve the pair-specific support, cross-arm coupling, and dof conventions.
+- Identification-robust interfaces :: #141 and #226 require dependence-matched Jacobian/moment cross-covariance; a raw-Jacobian projection is not an interchangeable weak-ID test.
+- Rank loss :: #219 needs an explicit numerical policy and a separate treatment of nonregular boundary inference; the current studies extension supports examining the proposed Wald procedure.
+- Shared tooling :: The owner requested and Sue filed [[https://github.com/ligon/sucoder-skills/issues/8][sucoder-skills #8]] for the missing shared backlog-workflow skill and catalog entry.
+
+* Published branch
+
+- Branch :: =backlog/studies-records-statistics=.
+- Last code commit :: =e352721a3cc4c0b7d276f7391ad763d20ef74af0=.
+- Review entry point :: =gh pr list --repo ligon/Emu-GMM --head backlog/studies-records-statistics=.
+- Installation PR :: [[https://github.com/ligon/Emu-GMM/pull/227][PR #227]].
+- Next action :: Human review and merge; the main checkout remains clean at =69298c2=.
+
+-- Sue

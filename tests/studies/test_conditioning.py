@@ -272,18 +272,52 @@ class TestCrnPair:
         with pytest.raises(ValueError, match="different n_reps"):
             crn_pair(a, b)
 
-    def test_param_names_mismatch_refuses(self):
+    def test_nested_parameterizations_pair_j_and_flags(self):
+        from dataclasses import replace
+
         a, _ = _pair_fixture()
         other = _rec(
-            theta=[[1.0, 2.0], [1.0, 3.0], [1.0, 4.0]],
-            se=[[1.0, 1.0]] * 3,
-            converged=[1, 1, 1],
+            theta=[[1.0], [1.0], [1.0]],
+            se=[[1.0]] * 3,
+            converged=[1, 0, 1],
             binding=[0, 0, 0],
-            param_names=("x", "y"),
+            param_names=("x",),
         )
-        b = _mc(other, coupling_id="X")
+        b = _mc(
+            replace(other, J_dof=2, J_stat=jnp.asarray([2.0, 3.0, 4.0])),
+            coupling_id="X",
+        )
+        cp = crn_pair(a, b)
+        assert cp.param_names_a == ("b0", "b1") and cp.param_names_b == ("x",)
+        assert cp.a.J_dof == 1 and cp.b.J_dof == 2
         with pytest.raises(ValueError, match="different param_names"):
-            crn_pair(a, b)
+            _ = cp.param_names
+        np.testing.assert_array_equal(
+            cp.paired_diff(cp.a.J_stat, cp.b.J_stat, where=np.ones(3, dtype=bool)),
+            [1.0, 2.0, 3.0],
+        )
+        flips = cp.flips(cp.a.converged, cp.b.converged)
+        assert (flips.gain, flips.lose, flips.n_both) == (0, 1, 3)
+
+    @pytest.mark.parametrize("other_indices", [[3, 4, 5], [2, 1, 0]])
+    @pytest.mark.parametrize("assert_coupled", [False, True])
+    def test_global_index_mismatch_refuses(self, other_indices, assert_coupled):
+        from dataclasses import replace
+
+        a, b = _pair_fixture()
+        b = replace(b, rep_indices=jnp.asarray(other_indices))
+        with pytest.raises(ValueError, match="rep indices differ"):
+            crn_pair(a, b, assert_coupled=assert_coupled)
+
+    def test_matching_nonzero_indices_and_typed_key(self):
+        from dataclasses import replace
+
+        a, b = _pair_fixture()
+        a = replace(a, rep_indices=jnp.asarray([7, 8, 9]), key=jax.random.key(0))
+        b = replace(b, rep_indices=jnp.asarray([7, 8, 9]))
+        cp = crn_pair(a, b)
+        assert cp.param_names == ("b0", "b1")
+        np.testing.assert_array_equal(cp.rep_indices, [7, 8, 9])
 
     def test_rejects_non_mcrecords(self):
         a, _ = _pair_fixture()
@@ -478,3 +512,95 @@ class TestSelectionConditionalGate:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             event_share(self._rec3(), "binding_ridge")
+
+
+def test_coupled_records_legacy_constructor_order_and_keywords():
+    a, b = _pair_fixture()
+    positional = CoupledRecords(
+        a.records, b.records, a.key, a.n_reps, a.param_names, a.coupling_id
+    )
+    keyword = CoupledRecords(
+        a=a.records,
+        b=b.records,
+        key=a.key,
+        n_reps=a.n_reps,
+        param_names=a.param_names,
+        coupling_id=a.coupling_id,
+    )
+    assert positional.param_names == keyword.param_names == ("b0", "b1")
+    assert positional.coupling_id == keyword.coupling_id == "X"
+    np.testing.assert_array_equal(positional.rep_indices, [0, 1, 2])
+    with pytest.raises(ValueError, match="match both"):
+        CoupledRecords(a.records, b.records, a.key, a.n_reps, ("wrong",), "X")
+
+
+class TestPairedArrayGuards:
+    @pytest.mark.parametrize(
+        "method", ["both_finite", "paired_diff", "mean_paired_diff", "flips"]
+    )
+    @pytest.mark.parametrize(
+        "left_shape,right_shape", [((3, 1), (3, 2)), ((3,), (3, 1))]
+    )
+    def test_broadcast_shapes_refused(self, method, left_shape, right_shape):
+        cp = crn_pair(*_pair_fixture())
+        kwargs = {} if method == "both_finite" else {"where": np.ones(3, dtype=bool)}
+        with pytest.raises(ValueError, match="same shape"):
+            getattr(cp, method)(np.ones(left_shape), np.ones(right_shape), **kwargs)
+
+    @pytest.mark.parametrize("method", ["both_finite", "paired_diff", "flips"])
+    @pytest.mark.parametrize("shape", [(), (2,), (4, 2)])
+    def test_replication_length_required(self, method, shape):
+        cp = crn_pair(*_pair_fixture())
+        kwargs = {} if method == "both_finite" else {"where": np.ones(3, dtype=bool)}
+        with pytest.raises(ValueError, match="leading dimension n_reps"):
+            getattr(cp, method)(np.ones(shape), np.ones(shape), **kwargs)
+
+    @pytest.mark.parametrize("method", ["paired_diff", "mean_paired_diff", "flips"])
+    @pytest.mark.parametrize(
+        "where",
+        [
+            [1, 0, 1],
+            [1.0, 0.0, 1.0],
+            True,
+            np.ones((3, 1), dtype=bool),
+            np.ones((3, 3), dtype=bool),
+            [True, False],
+        ],
+    )
+    def test_boolean_row_mask_required(self, method, where):
+        cp = crn_pair(*_pair_fixture())
+        with pytest.raises(ValueError, match="Boolean row mask"):
+            getattr(cp, method)(np.ones(3), np.ones(3), where=where)
+
+    def test_flips_refuses_matching_column_vectors(self):
+        cp = crn_pair(*_pair_fixture())
+        with pytest.raises(ValueError, match="indicator vectors"):
+            cp.flips(np.ones((3, 1)), np.zeros((3, 1)))
+
+    def test_matching_vector_differences_and_scalar_selection_work(self):
+        from dataclasses import replace
+
+        a, b = _pair_fixture()
+        b = replace(
+            b,
+            records=replace(
+                b.records,
+                theta_flat=b.records.theta_flat[:, :1],
+                se=b.records.se[:, :1],
+                param_names=("nested",),
+            ),
+        )
+        cp = crn_pair(a, b)
+        mask = np.asarray([True, False, True])
+        # Comparable scalar functionals require explicit selection from each arm.
+        np.testing.assert_array_equal(
+            cp.paired_diff(cp.a.theta_flat[:, 0], cp.b.theta_flat[:, 0], where=mask),
+            [0.0, 0.0],
+        )
+        x = np.arange(6).reshape(3, 2)
+        np.testing.assert_array_equal(
+            cp.paired_diff(x, x + 1, where=mask), np.ones((2, 2))
+        )
+        np.testing.assert_array_equal(
+            cp.both_finite(x, x + 1), np.ones((3, 2), dtype=bool)
+        )

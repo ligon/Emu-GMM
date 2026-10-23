@@ -4,6 +4,8 @@ per-replicate ridge-anchoring mode (#142)."""
 
 from __future__ import annotations
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
@@ -19,7 +21,14 @@ from emu_gmm.examples.euler import (
 )
 from emu_gmm.measures import EmpiricalMeasure
 from emu_gmm.optimizer import optimistix_lm
-from emu_gmm.studies import MCRecords, crn_pair, replicate, replicate_coupled
+from emu_gmm.studies import (
+    MCRecords,
+    crn_pair,
+    fit_record,
+    replicate,
+    replicate_coupled,
+)
+from emu_gmm.types import FitRecord
 
 N = 400
 THETA_TRUE = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
@@ -624,3 +633,552 @@ class TestReplicateCoupled:
                 key=jax.random.PRNGKey(0),
                 theta_init=_theta0(),
             )
+
+
+def _procedure_dgp(key):
+    return {"draw": jax.random.normal(key, ())}
+
+
+def _procedure_run(theta_init, dataset):
+    # A procedure's reported quantities need not be an OptimizationResult.
+    point = dataset["draw"] + theta_init
+    return {"point": point, "reported_J": point**2 + 11.0}
+
+
+def _procedure_record(result, dataset):
+    return FitRecord(
+        theta_flat=jnp.atleast_1d(result["point"]),
+        se=jnp.array([2.0]),
+        J_stat=result["reported_J"],
+        J_pvalue=jnp.asarray(0.2),
+        J_pvalue_adjusted=jnp.asarray(0.3),
+        converged=jnp.asarray(dataset["draw"] > 0, dtype=jnp.float64),
+        tau_realised=jnp.asarray(0.0),
+        binding_ridge=jnp.asarray(0.0),
+        sigma_meat_indefinite=jnp.asarray(0.0),
+        tau_saturated=jnp.asarray(0.0),
+        J_dof=2,
+        param_names=("reported",),
+    )
+
+
+class TestCustomRecords:
+    def test_exact_dataset_and_reported_inference_are_preserved(self):
+        seen = []
+
+        def run(theta_init, dataset):
+            result = _procedure_run(theta_init, dataset)
+            seen.append((result, dataset))
+            return result
+
+        def record(result, dataset):
+            assert (result is seen[-1][0]) and (dataset is seen[-1][1])
+            return _procedure_record(result, dataset)
+
+        def statistic(result, dataset):
+            assert (result is seen[-1][0]) and (dataset is seen[-1][1])
+            return result["point"] - dataset["draw"]
+
+        key = jax.random.PRNGKey(17)
+        out = replicate(
+            run,
+            _procedure_dgp,
+            n_reps=4,
+            key=key,
+            theta_init=1.5,
+            record=record,
+            statistics={"initial": statistic},
+        )
+        draws = np.array(
+            [float(jax.random.normal(jax.random.fold_in(key, r), ())) for r in range(4)]
+        )
+        np.testing.assert_array_equal(out.records.theta_flat[:, 0], draws + 1.5)
+        np.testing.assert_array_equal(out.records.se, np.full((4, 1), 2.0))
+        np.testing.assert_array_equal(out.records.J_stat, (draws + 1.5) ** 2 + 11.0)
+        np.testing.assert_array_equal(out.records.J_pvalue, np.full(4, 0.2))
+        np.testing.assert_array_equal(out.records.J_pvalue_adjusted, np.full(4, 0.3))
+        np.testing.assert_allclose(out.extra["initial"], 1.5, rtol=0, atol=1e-15)
+        assert len(seen) == 4
+        assert out.records.J_dof == 2
+        assert out.param_names == ("reported",)
+        assert out.n_converged == int((draws > 0).sum())
+        assert out.n_excluded == int((draws <= 0).sum())
+
+    def test_bad_record_extractor_raises_at_the_rep(self):
+        with pytest.raises(TypeError, match="FitRecord.*dict.*replicate 0"):
+            replicate(
+                _procedure_run,
+                _procedure_dgp,
+                n_reps=2,
+                key=jax.random.PRNGKey(0),
+                theta_init=0.0,
+                record=lambda result, dataset: result,
+            )
+
+    def test_custom_record_does_not_bypass_anchor_factory_guard(self):
+        def dgp(key):
+            pytest.fail("factory guard must run before drawing data")
+
+        with pytest.raises(ValueError, match="build_estimator"):
+            replicate(
+                _procedure_run,
+                dgp,
+                n_reps=1,
+                key=jax.random.PRNGKey(0),
+                theta_init=0.0,
+                record=_procedure_record,
+                anchor_per_rep=True,
+            )
+
+    def test_coupled_forwards_both_extractors_per_arm(self):
+        key = jax.random.PRNGKey(9)
+        seen = []
+
+        def dgp(rep_key):
+            dataset = _procedure_dgp(rep_key)
+            seen.append(dataset)
+            return dataset
+
+        def record(result, dataset):
+            assert dataset is seen[-1]
+            return _procedure_record(result, dataset)
+
+        out = replicate_coupled(
+            {
+                "a": _procedure_run,
+                "b": lambda theta, dataset: _procedure_run(theta + 3.0, dataset),
+            },
+            dgp,
+            n_reps=3,
+            key=key,
+            theta_init=1.0,
+            record=record,
+            statistics={
+                "draw": lambda result, dataset: dataset["draw"],
+                "reported_J": lambda result, dataset: result["reported_J"],
+            },
+        )
+        assert len(seen) == 6
+        np.testing.assert_array_equal(out["a"].extra["draw"], out["b"].extra["draw"])
+        np.testing.assert_allclose(
+            out["b"].records.theta_flat - out["a"].records.theta_flat, 3.0
+        )
+        for arm in out.values():
+            np.testing.assert_array_equal(arm.extra["reported_J"], arm.records.J_stat)
+        assert crn_pair(out["a"], out["b"]).n_reps == 3
+
+    def test_anchor_path_uses_custom_record_and_statistics(self):
+        def record(result, dataset):
+            return dataclasses.replace(fit_record(result), J_stat=jnp.asarray(123.0))
+
+        out = replicate(
+            _make_loc_run(template_flag=0.0),
+            _clean_dgp(),
+            n_reps=1,
+            key=jax.random.PRNGKey(0),
+            theta_init=_loc_theta0(),
+            anchor_per_rep=True,
+            record=record,
+            statistics={"n_obs": lambda result, dataset: dataset.x.shape[0]},
+        )
+        assert float(out.records.J_stat[0]) == 123.0
+        assert int(out.extra["n_obs"][0]) == N_LOC
+
+
+class TestArrayStatistics:
+    def _replicate(self, statistics):
+        return replicate(
+            _procedure_run,
+            _procedure_dgp,
+            n_reps=2,
+            key=jax.random.PRNGKey(5),
+            theta_init=0.0,
+            record=_procedure_record,
+            statistics=statistics,
+        )
+
+    def test_shapes_indexed_export_nan_and_pytree(self):
+        out = self._replicate(
+            {
+                "scalar": lambda result, dataset: dataset["draw"],
+                "gbar": lambda result, dataset: jnp.array([dataset["draw"], jnp.nan]),
+                "matrix": lambda result, dataset: jnp.array([[1, 2], [3, 4]]),
+            }
+        )
+        assert out.extra["gbar"].shape == (2, 2)
+        assert out.extra["matrix"].shape == (2, 2, 2)
+        leaves, treedef = jax.tree_util.tree_flatten(out)
+        rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+        np.testing.assert_array_equal(rebuilt.extra["gbar"], out.extra["gbar"])
+        frame = out.to_pandas()
+        assert frame.index.name == "rep"
+        assert list(frame.columns[-7:]) == [
+            "scalar",
+            "gbar[0]",
+            "gbar[1]",
+            "matrix[0,0]",
+            "matrix[0,1]",
+            "matrix[1,0]",
+            "matrix[1,1]",
+        ]
+        np.testing.assert_array_equal(frame["gbar[0]"], out.extra["gbar"][:, 0])
+        assert frame["gbar[1]"].isna().all()
+        for i, j in np.ndindex(2, 2):
+            np.testing.assert_array_equal(
+                frame[f"matrix[{i},{j}]"], out.extra["matrix"][:, i, j]
+            )
+
+    def test_changing_shape_names_statistic_and_replicate(self):
+        calls = []
+
+        def changing(result, dataset):
+            calls.append(None)
+            return jnp.zeros(len(calls))
+
+        with pytest.raises(
+            ValueError,
+            match="statistic 'gbar' changed shape at replicate 1.*fixed shape",
+        ):
+            self._replicate({"gbar": changing})
+
+    @pytest.mark.parametrize(
+        "statistics",
+        [
+            {"J_stat": lambda result, dataset: 0.0},
+            {"theta_reported": lambda result, dataset: 0.0},
+            {
+                "x": lambda result, dataset: jnp.ones(1),
+                "x[0]": lambda result, dataset: 0.0,
+            },
+            {
+                "x[0]": lambda result, dataset: 0.0,
+                "x": lambda result, dataset: jnp.ones(1),
+            },
+        ],
+    )
+    def test_extra_column_collisions_raise(self, statistics):
+        out = self._replicate(statistics)
+        with pytest.raises(ValueError, match="duplicate output column"):
+            out.to_pandas()
+
+    def test_duplicate_parameter_columns_raise(self):
+        out = self._replicate(None)
+        duplicated = dataclasses.replace(
+            out.records,
+            theta_flat=jnp.ones((2, 2)),
+            se=jnp.ones((2, 2)),
+            param_names=("x", "x"),
+        )
+        with pytest.raises(ValueError, match="duplicate output column 'theta_x'"):
+            dataclasses.replace(out, records=duplicated).to_pandas()
+
+    def test_extra_requires_leading_rep_axis(self):
+        out = self._replicate(None)
+        malformed = dataclasses.replace(out, extra={"gbar": jnp.zeros((3, 2))})
+        with pytest.raises(ValueError, match="statistic 'gbar'.*leading rep axis 2"):
+            malformed.to_pandas()
+
+
+def _indexed_shard(indices, *, key=None, coupling_id="sharded-study", extra=True):
+    """Distinct row markers make accidental leaf/extra reordering visible."""
+    from emu_gmm.types import FitRecord
+
+    r = jnp.asarray(indices, dtype=jnp.float64)
+    n = len(indices)
+    flags = (r % 2).astype(jnp.float64)
+    rec = FitRecord(
+        theta_flat=jnp.stack([r, -r], axis=1),
+        se=jnp.stack([r + 1, jnp.where(flags > 0, jnp.nan, r + 2)], axis=1),
+        J_stat=r + 3,
+        J_pvalue=r / 100,
+        J_pvalue_adjusted=r / 200,
+        converged=1 - flags,
+        tau_realised=r / 1000,
+        binding_ridge=flags,
+        sigma_meat_indefinite=flags,
+        tau_saturated=flags,
+        J_dof=1,
+        param_names=("a", "b"),
+    )
+    return MCRecords(
+        records=rec,
+        key=jax.random.PRNGKey(4) if key is None else key,
+        n_reps=n,
+        coupling_id=coupling_id,
+        extra={"marker": r * 10} if extra else None,
+        rep_indices=jnp.asarray(indices, dtype=jnp.uint32),
+    )
+
+
+class TestShardedReplication:
+    def test_shards_match_unsharded_every_leaf_and_extra(self):
+        run, dgp = _make_run(n=40), _make_dgp(n=40)
+        kwargs = dict(
+            key=jax.random.PRNGKey(11),
+            theta_init=_theta0(),
+            coupling_id="study",
+            statistics={"data_mean": lambda result, measure: jnp.mean(measure.x)},
+        )
+        whole = replicate(run, dgp, n_reps=4, **kwargs)
+        joined = MCRecords.concat(
+            [
+                replicate(run, dgp, reps=range(2, 4), **kwargs),
+                replicate(run, dgp, reps=range(0, 2), **kwargs),
+            ],
+            reps=range(4),
+        )
+        for got, expected in zip(
+            jax.tree_util.tree_leaves(joined.records),
+            jax.tree_util.tree_leaves(whole.records),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(got, expected)
+        np.testing.assert_array_equal(
+            joined.extra["data_mean"], whole.extra["data_mean"]
+        )
+        np.testing.assert_array_equal(joined.effective_rep_indices, np.arange(4))
+
+    def test_coupled_global_key_schedule(self):
+        base = _make_dgp(n=40)
+        seen = []
+        key = jax.random.PRNGKey(8)
+
+        def dgp(k):
+            seen.append(np.asarray(jax.random.key_data(k)))
+            return base(k)
+
+        arms = replicate_coupled(
+            {"a": _make_run(n=40), "b": _make_run(n=40)},
+            dgp,
+            reps=range(10, 12),
+            key=key,
+            theta_init=_theta0(),
+            coupling_id="distributed",
+        )
+        expected = [np.asarray(jax.random.fold_in(key, r)) for r in range(10, 12)]
+        np.testing.assert_array_equal(seen, expected + expected)
+        np.testing.assert_array_equal(
+            crn_pair(arms["a"], arms["b"]).rep_indices, [10, 11]
+        )
+        np.testing.assert_array_equal(arms["a"].to_pandas().index, [10, 11])
+
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            {},
+            {"n_reps": 2, "reps": range(2)},
+            {"n_reps": 0},
+            {"n_reps": True},
+            {"n_reps": 1.5},
+            {"reps": [0, 1]},
+            {"reps": range(0)},
+            {"reps": range(0, 4, 2)},
+            {"reps": range(2, 0, -1)},
+            {"reps": range(-1, 1)},
+            {"reps": range(2**32, 2**32 + 1)},
+        ],
+    )
+    def test_invalid_selection_fails_before_dgp(self, selection):
+        def unexpected(*args):
+            raise AssertionError("invalid selection reached drawing/fitting")
+
+        with pytest.raises(ValueError):
+            replicate(
+                unexpected,
+                unexpected,
+                key=jax.random.PRNGKey(0),
+                theta_init=None,
+                **selection,
+            )
+        with pytest.raises(ValueError):
+            replicate_coupled(
+                {"arm": unexpected},
+                unexpected,
+                key=jax.random.PRNGKey(0),
+                theta_init=None,
+                **selection,
+            )
+
+    def test_uint32_upper_boundary_is_accepted(self):
+        from emu_gmm.studies.driver import _rep_range
+
+        assert _rep_range(None, range(2**32 - 1, 2**32))[-1] == 2**32 - 1
+
+
+class TestConcat:
+    def test_sorted_rows_keep_flags_nan_and_extras(self):
+        joined = MCRecords.concat([_indexed_shard([4, 5]), _indexed_shard([2, 3])])
+        expected = _indexed_shard([2, 3, 4, 5])
+        for got, want in zip(
+            jax.tree_util.tree_leaves(joined.records),
+            jax.tree_util.tree_leaves(expected.records),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(got, want)
+        np.testing.assert_array_equal(joined.extra["marker"], expected.extra["marker"])
+        np.testing.assert_array_equal(joined.to_pandas().index, [2, 3, 4, 5])
+        assert joined.n_reps == 4 and joined.n_excluded == 2
+
+    @pytest.mark.parametrize(
+        "indices, expected, message",
+        [
+            ([1, 2], None, "overlapping"),
+            ([3, 4], None, "gaps"),
+            ([2, 3], range(5), "coverage"),
+            ([2, 3], range(1, 4), "coverage"),
+        ],
+    )
+    def test_invalid_coverage(self, indices, expected, message):
+        with pytest.raises(ValueError, match=message):
+            MCRecords.concat(
+                [_indexed_shard([0, 1]), _indexed_shard(indices)], reps=expected
+            )
+
+    def test_empty_shards_refused(self):
+        with pytest.raises(ValueError, match="no shards"):
+            MCRecords.concat([])
+
+    def test_legacy_zero_based_single_shard(self):
+        from dataclasses import replace
+
+        legacy = replace(
+            _indexed_shard([0, 1], coupling_id=None, extra=False), rep_indices=None
+        )
+        joined = MCRecords.concat([legacy], reps=range(2))
+        np.testing.assert_array_equal(joined.effective_rep_indices, [0, 1])
+        assert joined.extra is None
+
+    @pytest.mark.parametrize(
+        "mutation, message",
+        [
+            (lambda s: {"key": jax.random.PRNGKey(9)}, "keys"),
+            (lambda s: {"coupling_id": "different"}, "coupling_id"),
+            (lambda s: {"coupling_id": None}, "coupling_id"),
+            (lambda s: {"n_reps": 3}, "rep_indices"),
+            (lambda s: {"rep_indices": jnp.asarray([2.0, 3.0])}, "integer"),
+            (lambda s: {"rep_indices": jnp.asarray([2, 2])}, "duplicate"),
+            (lambda s: {"rep_indices": jnp.asarray([-1, 2])}, "uint32"),
+            (lambda s: {"rep_indices": jnp.asarray([2, 2**32])}, "uint32"),
+            (lambda s: {"extra": {"other": jnp.ones(2)}}, "names"),
+            (lambda s: {"extra": {"marker": jnp.ones(3)}}, "shapes"),
+            (lambda s: {"extra": {"marker": jnp.ones(2, dtype=jnp.float32)}}, "dtypes"),
+        ],
+    )
+    def test_metadata_mismatch(self, mutation, message):
+        from dataclasses import replace
+
+        second = _indexed_shard([2, 3])
+        with pytest.raises(ValueError, match=message):
+            MCRecords.concat(
+                [_indexed_shard([0, 1]), replace(second, **mutation(second))]
+            )
+
+    @pytest.mark.parametrize(
+        "updates, message",
+        [
+            ({"param_names": ("x", "y")}, "param_names"),
+            ({"J_dof": 2}, "J_dof"),
+            ({"J_stat": jnp.ones(3)}, "shapes"),
+            ({"J_stat": jnp.ones(2, dtype=jnp.float32)}, "dtypes"),
+            ({"theta_flat": jnp.ones((2, 3))}, "shapes"),
+        ],
+    )
+    def test_record_mismatch(self, updates, message):
+        from dataclasses import replace
+
+        second = _indexed_shard([2, 3])
+        bad = replace(second, records=replace(second.records, **updates))
+        with pytest.raises(ValueError, match=message):
+            MCRecords.concat([_indexed_shard([0, 1]), bad])
+
+    def test_single_malformed_record_shape_refused(self):
+        from dataclasses import replace
+
+        shard = _indexed_shard([0, 1])
+        bad = replace(shard, records=replace(shard.records, J_stat=jnp.ones((2, 1))))
+        with pytest.raises(ValueError, match="shape"):
+            MCRecords.concat([bad])
+
+    def test_multiple_unknown_tokens_refused(self):
+        with pytest.raises(ValueError, match="coupling_id"):
+            MCRecords.concat(
+                [
+                    _indexed_shard([0], coupling_id=None),
+                    _indexed_shard([1], coupling_id=None),
+                ]
+            )
+
+    def test_typed_and_legacy_keys_compare_by_data(self):
+        joined = MCRecords.concat(
+            [
+                _indexed_shard([0], key=jax.random.key(4)),
+                _indexed_shard([1], key=jax.random.PRNGKey(4)),
+            ]
+        )
+        np.testing.assert_array_equal(joined.effective_rep_indices, [0, 1])
+
+    def test_different_prng_implementation_refused(self):
+        first = jax.random.key(4, impl="rbg")
+        second = jax.random.wrap_key_data(jax.random.key_data(first), impl="unsafe_rbg")
+        with pytest.raises(ValueError, match="keys"):
+            MCRecords.concat(
+                [_indexed_shard([0], key=first), _indexed_shard([1], key=second)]
+            )
+
+
+def test_sharded_anchor_cache_clear_uses_local_counter(monkeypatch):
+    import emu_gmm.estimator as estimator_module
+    import emu_gmm.studies.driver as driver_module
+
+    record = jax.tree_util.tree_map(lambda x: x[0], _indexed_shard([0]).records)
+    draws = []
+    cleared_at = []
+
+    def run(*args):
+        raise AssertionError("per-rep anchor must use estimate")
+
+    run._emu_gmm_factory_spec = dict.fromkeys(
+        [
+            "model",
+            "covariance",
+            "weighting",
+            "regularization",
+            "optimizer",
+            "moment_names",
+            "penalty",
+        ]
+    )
+
+    def dgp(key):
+        draws.append(key)
+        return None
+
+    monkeypatch.setattr(estimator_module, "estimate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(driver_module, "fit_record", lambda result: record)
+    monkeypatch.setattr(jax, "clear_caches", lambda: cleared_at.append(len(draws)))
+    result = replicate(
+        run,
+        dgp,
+        reps=range(10, 36),
+        key=jax.random.PRNGKey(0),
+        theta_init=None,
+        anchor_per_rep=True,
+    )
+    assert cleared_at == [25]
+    assert result.n_reps == 26
+
+
+def test_concat_preserves_first_shard_extra_column_order():
+    from dataclasses import replace
+
+    first, second = _indexed_shard([0]), _indexed_shard([1])
+    first = replace(
+        first, extra={"z_last": jnp.asarray([0.0]), "a_first": jnp.asarray([1.0])}
+    )
+    second = replace(
+        second, extra={"a_first": jnp.asarray([2.0]), "z_last": jnp.asarray([3.0])}
+    )
+    result = MCRecords.concat([first, second])
+    assert list(result.extra) == ["z_last", "a_first"]
+    np.testing.assert_array_equal(result.extra["z_last"], [0.0, 3.0])
+    np.testing.assert_array_equal(result.extra["a_first"], [1.0, 2.0])

@@ -48,6 +48,7 @@ import dataclasses
 import json
 from typing import Any
 
+import jax
 import numpy as np
 
 from emu_gmm._internal.law_state import (
@@ -250,6 +251,10 @@ class LawState:
     events: dict[str, np.ndarray] | None = None
     coupling_id: Any = None
     key: np.ndarray | None = None
+    # Typed keys require their implementation as well as raw key data.
+    key_impl: str | None = None
+    # Absent on legacy artifacts, whose MC stream starts at zero.
+    rep_indices: np.ndarray | None = None
     conditioned: bool = False
 
 
@@ -373,11 +378,17 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
             if hasattr(rec, f)
         }
         key = None
+        key_impl = None
+        rep_indices = None
         coupling_id = None
         extra_arrays = None
         n_reps = int(np.asarray(rec.theta_flat).shape[0])
         if isinstance(law._records, MCRecords):
-            key = None if law._records.key is None else np.asarray(law._records.key)
+            if law._records.key is not None:
+                key = np.asarray(jax.random.key_data(law._records.key))
+                if jax.dtypes.issubdtype(law._records.key.dtype, jax.dtypes.prng_key):
+                    key_impl = str(jax.random.key_impl(law._records.key))
+            rep_indices = law._records._validated_rep_indices()
             coupling_id = _jsonable(law._records.coupling_id, what="coupling_id")
             n_reps = int(law._records.n_reps)
             if law._records.extra is not None:
@@ -407,6 +418,8 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
             j_dof=int(rec.J_dof),
             n_reps=n_reps,
             key=key,
+            key_impl=key_impl,
+            rep_indices=rep_indices,
             coupling_id=coupling_id,
         )
 
@@ -473,6 +486,7 @@ def _write_state(state: LawState, target: Any) -> None:
             n_reps=state.n_reps,
             coupling_id=state.coupling_id,
             has_key=state.key is not None,
+            key_impl=state.key_impl,
             extra_names=extra_names,
         )
         for f, a in state.record_arrays.items():
@@ -484,6 +498,8 @@ def _write_state(state: LawState, target: Any) -> None:
             arrays[f"rec_extra__{nm}"] = np.asarray(state.extra_arrays[nm])  # type: ignore[index]
         if state.key is not None:
             arrays["key"] = np.asarray(state.key)
+        if state.rep_indices is not None:
+            arrays["rep_indices"] = np.asarray(state.rep_indices)
     else:  # draws-backed
         assert state.draws is not None and state.used is not None
         ev_names = [] if state.events is None else sorted(state.events)
@@ -584,6 +600,10 @@ def _read_state(target: Any) -> LawState:
                 n_reps=int(manifest["n_reps"]),
                 coupling_id=manifest.get("coupling_id"),
                 key=np.asarray(data["key"]) if manifest.get("has_key") else None,
+                key_impl=manifest.get("key_impl"),
+                rep_indices=(
+                    np.asarray(data["rep_indices"]) if "rep_indices" in data else None
+                ),
             )
         ev_names = manifest.get("event_names") or []
         return LawState(
@@ -658,11 +678,23 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
             )
             mc = MCRecords(
                 records=record,
-                key=jnp.asarray(state.key),
+                key=(
+                    jnp.asarray(state.key)
+                    if state.key_impl is None
+                    else jax.random.wrap_key_data(
+                        jnp.asarray(state.key), impl=state.key_impl
+                    )
+                ),
                 n_reps=int(state.n_reps),  # type: ignore[arg-type]
                 coupling_id=state.coupling_id,
                 extra=extra,
+                rep_indices=(
+                    None
+                    if state.rep_indices is None
+                    else jnp.asarray(state.rep_indices)
+                ),
             )
+            mc._validated_rep_indices()
             return EmpiricalLaw.from_records(
                 mc, component_shapes=state.component_shapes, label="empirical(loaded)"
             )
