@@ -766,3 +766,86 @@ Verification must exercise shard equivalence, reordered shards, gaps/overlaps, m
 Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replicate/conditioning/persistence suites and a fresh-process concat/persistence/constructor check pass, as do ruff, black, and mypy on the changed Python files.
 The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
 No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
+
+* Section 12 -- DesignAware fixed-stratum centering (issue 145; design pass)
+
+** 12.1 -- Task
+
+Repair fixed-stratum-profile contamination of the mixed \(V_{TT}+V_{SS}+V_{TS}\) covariance while retaining the design-exact \(TT\) block, pair-specific missingness, the cross-block decomposition, and a meaningful cross-arm sampling term.
+The proposed estimand and its identification limit are in =.coder/design-145-centering.org=.
+
+** 12.2 -- Existing machinery (ripgrep + git; tested)
+
+- =StratifiedCovariance.covariance= :: =src/emu_gmm/covariance/stratified.py:171-291=; pair-overlap, within-cell centering and local Bessel correction. Independent NumPy guards: =tests/covariance/test_stratified.py:46-124= and its F1-F6 fixtures.
+- =DesignAwareCovariance.covariance= / =_cross_corners= / =cross_block= :: =src/emu_gmm/covariance/stratified.py:490-661=; \(TT\) delegates to the shared design engine, \(SS\) to the uncentered sampling engine, \(TS\) to an inline cluster-total pass. Guards: =tests/covariance/test_stratified.py:900-1177,1253-1344=.
+- =ClusteredCovariance= / =_finite_cluster_correction= :: =src/emu_gmm/covariance/clustered.py:89-159=; uncentered cluster totals and optional global per-pair \(G_{jk}/(G_{jk}-1)\). Its =centered=True= uses a global moment, not a stratum-specific one. Guards: =tests/covariance/test_clustered.py= and the mixed-block tests above.
+- =_safe_outer_divide= :: =src/emu_gmm/covariance/_outer_product.py:52-65=; the shared zero-support-safe \(1/(N_jN_k)\) normalization.
+- #130 fixture :: =scripts/validation/ladder_mc.py:219-365= and =docs/validation/ladder-mc-2026-06-10.org:200-247=; fixed demeaned profile with PSU-level randomness, no genuine cross-arm shock.
+
+** 12.3 -- Definitions
+
+For every covariance entry \((j,k)\), the denominator is \(N_jN_k\), with \(N_j=\sum_i d_{ij}w_i\) (=docs/design.org:204-224=).
+The design cell is stratum by arm, whereas the caller chooses the sampling cluster unit; they need not coincide (=src/emu_gmm/covariance/stratified.py:244-259,419-429=).
+The #119 cross correction inherits the sampling engine's per-pair global \(G_{jk}/(G_{jk}-1)\) when its flag is true (=src/emu_gmm/covariance/stratified.py:604-615=).
+
+** 12.4 -- Invariants and assumptions
+
+The all-design case is bit-for-bit the shared =StratifiedCovariance=; \(V_{\mathrm{coupled}}=V_{\mathrm{uncoupled}}+V_{TS}\) is the #109 identity; design FPC touches \(TT\) only (=src/emu_gmm/covariance/stratified.py:533-553,638-661=).
+Pair overlap is counted at the sampling cluster unit for \(SS/TS\), and unequal masks or weights must not be replaced by a common \(N\).
+A fixed shift of /cluster totals/ differs from a fixed conditional /per-observation moment mean/ when observed weighted exposure varies; #130's ragged moments require the distinction.
+A fixed outcome profile times a varying instrument still has within-stratum sampling variation.
+One sampling cluster per stratum supplies no within-stratum replication for estimating an arbitrary fixed mean and a random stratum shock separately.
+
+** 12.5 -- Reuse decision
+
+- Reuse :: =StratifiedCovariance= without modification for \(TT\), =_safe_outer_divide= for scaling, and the caller's sampling IDs/support rule.
+- Extend :: A common within-stratum, pair-overlap, exposure-projected sampling kernel should feed \(SS\) and \(TS\); =ClusteredCovariance.centered=True= is global and does not fit. The balanced-exposure special case reduces to ordinary centered cluster totals.
+- New only if approved :: A nested-cluster/stratum validation rule and a surfaced unsupported-cross-pair event; current interfaces do not expose either.
+
+** 12.6 -- Open decisions
+
+The fixed-strata versus random-stratum estimand, exposure-adjusted nuisance
+profile, and one-cluster support rule are resolved by the opt-in slice below.
+The global #119 factor is retained only in the default random-stratum mode.
+
+** 12.7 -- First opt-in slice after review
+
+The approved choice is a conditional-on-fixed-strata mode, selected by
+=from_design_mask(..., fixed_strata=True)=; the default uncentered
+random-stratum assembly remains unchanged.
+The new kernel reuses the pair-supported sampling IDs for both \(SS\) and
+\(TS\), projects the cluster totals off each coordinate's observed weighted
+exposure, and applies the local \(H/\operatorname{tr}(M_jM_k)\) factor under
+a homogeneous-cluster-covariance working assumption.
+The local factor is the finite-cluster correction under the stated working
+model; a mixed =fixed_strata=True= covariance rejects
+=sampling.dof_correction=True= rather than multiply by the extra global #119
+factor. The all-design reduction ignores sampling and keeps its exact
+=StratifiedCovariance= output even when that flag is true.
+The default random-stratum mode retains #119 unchanged.
+The #109 identity and \(1/(N_jN_k)\) scaling are retained.
+Unsupported \(H<2\) stratum/pairs contribute zero and their counts are
+available from =fixed_stratum_pair_support(measure)=.
+Pairs with nearly orthogonal exposure projections are also set to zero
+when the trace is at or below \(\sqrt{\epsilon_{\mathrm{mach}}}H\), avoiding
+unstable local inflation; =fixed_stratum_pair_diagnostics(measure)= exposes
+the per-stratum pair count, projection trace, and the exact usability flag.
+The diagnostic and sampling kernel share =_fixed_pair_geometry=, so the
+reported flag cannot drift from the cutoff applied to the covariance.
+The factory rejects sampling clusters crossing strata; one sampling
+cluster per stratum yields zero \(SS/TS\) and a visible support count of one.
+No result-type diagnostic was added.
+
+Verification against the ledger: the new deterministic test file compares
+against an independent NumPy pair-projection reference with ragged masks
+and unequal weights, profiles, paired cross-arm shock signs, zero shock,
+one-cluster support, and a nearly orthogonal exposure pair.
+The existing =tests/covariance/test_stratified.py= suite remains green
+alongside the new tests; the full =make quick-check= gate passed on the
+final source and test tree before commit, with =nice -n 19 taskset -c 32-35=.
+A six-rep #130 pilot checks feasibility only; its rates do not establish
+coverage.
+The separate paired-cluster covariance check with seed 20260610 and 4096
+draws compares the local estimator with the analytic cross target and
+shows the extra global factor overestimates it; exact commands and output
+are in =.coder/design-145-final-paired-4096-2026-10-23.log=.
