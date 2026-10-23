@@ -351,12 +351,12 @@ class Diagnostics:
     # explicit split.
     #
     # ``final_gradient_norm`` is :math:`\\|\\nabla_\\theta
-    # \\tfrac{1}{2} \\|r(\\hat\\theta)\\|^2\\|` where ``r`` is the
-    # *residual the optimiser saw*. When ``penalty`` is supplied this
-    # includes the penalty contribution from the appended
-    # :math:`\\sqrt{p(\\theta)}` row (so the reported norm matches the
-    # convergence criterion the LM solver actually used); when
-    # ``penalty=None`` it is the unpenalised data-only gradient norm.
+    # \\tfrac{1}{2} \\|r(\\hat\\theta)\\|^2\\|` for the reported
+    # residual. With IteratedWeighting, ``r`` is the CU fallback at the
+    # returned point, not the fixed-weight inner solver's residual;
+    # a large norm alone does not say the inner solve failed. A supplied
+    # penalty contributes its appended :math:`\\sqrt{p(\\theta)}` row;
+    # without a penalty this is the data-only gradient norm.
     final_objective: Float[Array, ""]
     final_gradient_norm: Float[Array, ""]
 
@@ -807,7 +807,8 @@ class OptimizationResult:
         - ``"moment_residual"``: :class:`pandas.Series` indexed by moment names.
         - ``"summary"``: :class:`pandas.Series` of scalar optimization fields
           (``objective_value``, ``n_overid``, ``converged``, ``iterations``,
-          ``tau_realised``, ``kappa_V``, ``final_objective``).
+          ``tau_realised``, ``kappa_V``, ``final_objective``,
+          ``final_objective_data``, ``final_objective_full``).
         """
         labels = self.labels
         assert labels is not None
