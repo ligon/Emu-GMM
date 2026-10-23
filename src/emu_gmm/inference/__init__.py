@@ -37,6 +37,9 @@ Currently exposed:
 - :func:`cluster_bootstrap` and :class:`ClusterBootstrapResult` ---
   refit-based cluster bootstrap helper for
   :class:`~emu_gmm.covariance.clustered.ClusteredCovariance`.
+- :func:`stratified_bootstrap` and :class:`StratifiedBootstrapResult` ---
+  refit-based PSU bootstrap within each stratum-by-arm cell for pure
+  :class:`~emu_gmm.covariance.stratified.StratifiedCovariance` with ``fpc=False``.
 - :func:`adaptive_bootstrap` and :class:`AdaptiveBootstrapResult` ---
   a precision-targeted (Andrews-Buchinsky) *stopping rule* wrapping any
   batched bootstrap: draw batches until the reported functional
@@ -84,6 +87,10 @@ from emu_gmm.inference.k_statistic import (
     k_statistic,
     k_statistic_from_arrays,
 )
+from emu_gmm.inference.stratified_bootstrap import (
+    StratifiedBootstrapResult,
+    stratified_bootstrap,
+)
 from emu_gmm.inference.wild_bootstrap import (
     WildBootstrapResult,
     moment_wild_bootstrap,
@@ -101,6 +108,7 @@ __all__ = [
     "JTestResult",
     "KConfidenceSet",
     "KStatisticResult",
+    "StratifiedBootstrapResult",
     "WildBootstrapResult",
     "adaptive_bootstrap",
     "cluster_bootstrap",
@@ -116,5 +124,6 @@ __all__ = [
     "k_statistic_from_arrays",
     "moment_wild_bootstrap",
     "profiled_k_confidence_set",
+    "stratified_bootstrap",
     "vech_indices",
 ]

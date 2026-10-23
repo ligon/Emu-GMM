@@ -145,6 +145,7 @@ from emu_gmm.measures.empirical import EmpiricalMeasure
 from emu_gmm.penalty import PenaltyStrategy
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
+    CovarianceStrategy,
     Emu_GMM_DimensionError,
     ParamsLike,
     RegularizationStrategy,
@@ -482,6 +483,51 @@ def cluster_bootstrap(
     if n_boot <= 0:
         raise ValueError(f"cluster_bootstrap: n_boot must be positive, got {n_boot}")
 
+    # Pre-compute the cluster -> row-indices lookup once. Pulled to
+    # NumPy here so the per-replicate assembly stays cheap.
+    cluster_ids_np = np.asarray(covariance.cluster_ids).astype(np.int64)
+    n_clusters = int(covariance.n_clusters)
+    rows_by_cluster = _cluster_row_indices(cluster_ids_np, n_clusters)
+
+    # Draw the cluster indices for all replicates from a single key
+    # via split: B splits give B independent (n_clusters,) draws.
+    keys = jax.random.split(key, n_boot)
+    drawn_all = np.empty((n_boot, n_clusters), dtype=np.int64)
+    for b in range(n_boot):
+        drawn_all[b] = np.asarray(
+            jax.random.randint(
+                keys[b], shape=(n_clusters,), minval=0, maxval=n_clusters
+            )
+        )
+
+    return _refit_bootstrap_worlds(
+        model,
+        theta_init,
+        n_boot=n_boot,
+        key=key,
+        resample_one=lambda b: _resample_one(measure, rows_by_cluster, drawn_all[b]),
+        weighting=weighting,
+        regularization=regularization,
+        optimizer=optimizer,
+        penalty=penalty,
+        name="cluster_bootstrap",
+    )
+
+
+def _refit_bootstrap_worlds(
+    model: StructuralModel,
+    theta_init: ParamsLike,
+    *,
+    n_boot: int,
+    key: jax.Array,
+    resample_one: Callable[[int], tuple[EmpiricalMeasure, CovarianceStrategy]],
+    weighting: WeightingStrategy | None,
+    regularization: RegularizationStrategy | None,
+    optimizer: _OptimizerLike | None,
+    penalty: PenaltyStrategy | None,
+    name: str,
+) -> ClusterBootstrapResult:
+    """Shared refit, validity, and labelled-result path for PSU bootstraps."""
     # Probe the parameter tree with the manifold-aware flatten (#150).
     # ``flatten_params_for_ad`` dispatches exactly like ``estimate()``:
     # an all-scalar (v1) tree returns ``spec=None`` and the bitwise-v1
@@ -513,23 +559,6 @@ def cluster_bootstrap(
     if regularization is None:
         regularization = DiagonalTikhonov()
 
-    # Pre-compute the cluster -> row-indices lookup once. Pulled to
-    # NumPy here so the per-replicate assembly stays cheap.
-    cluster_ids_np = np.asarray(covariance.cluster_ids).astype(np.int64)
-    n_clusters = int(covariance.n_clusters)
-    rows_by_cluster = _cluster_row_indices(cluster_ids_np, n_clusters)
-
-    # Draw the cluster indices for all replicates from a single key
-    # via split: B splits give B independent (n_clusters,) draws.
-    keys = jax.random.split(key, n_boot)
-    drawn_all = np.empty((n_boot, n_clusters), dtype=np.int64)
-    for b in range(n_boot):
-        drawn_all[b] = np.asarray(
-            jax.random.randint(
-                keys[b], shape=(n_clusters,), minval=0, maxval=n_clusters
-            )
-        )
-
     theta_boot = np.empty((n_boot, K), dtype=np.float64)
     J_boot = np.empty(n_boot, dtype=np.float64)
     convergence = np.empty(n_boot, dtype=bool)
@@ -551,7 +580,7 @@ def cluster_bootstrap(
         # ``continue`` below cannot skip it.
         if b > 0 and b % 25 == 0:
             jax.clear_caches()
-        boot_measure, boot_cov = _resample_one(measure, rows_by_cluster, drawn_all[b])
+        boot_measure, boot_cov = resample_one(b)
         # NB: do *not* wrap this call in a broad ``except Exception``.
         # The framework's optimisers (``optimistix_lm`` with
         # ``throw=False``, ``scipy_lm``) report non-convergence via
@@ -631,7 +660,7 @@ def cluster_bootstrap(
         # warning already fires per zero-support refit). Loud, per #140:
         # the rows are excluded, and here is how many and why.
         warnings.warn(
-            f"cluster_bootstrap: {n_nonconverged} of {n_boot} replicate "
+            f"{name}: {n_nonconverged} of {n_boot} replicate "
             f"refits did not converge ({int(zero_support.sum())} with a "
             "zero-support moment in the resampled world; "
             f"{int(tau_saturated.sum())} ridge-saturated); their theta_boot "
@@ -640,7 +669,7 @@ def cluster_bootstrap(
             "columns to adaptive_bootstrap, which excludes and counts NaN "
             "draws.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
 
     # Label the (n_boot, K) array along the canonical parameters axis;

@@ -69,6 +69,7 @@ from emu_gmm.inference import (
     JTestResult,
     KConfidenceSet,
     KStatisticResult,
+    StratifiedBootstrapResult,
     WildBootstrapResult,
     adaptive_bootstrap,
     cluster_bootstrap,
@@ -79,6 +80,7 @@ from emu_gmm.inference import (
     k_statistic_from_arrays,
     moment_wild_bootstrap,
     profiled_k_confidence_set,
+    stratified_bootstrap,
 )
 from emu_gmm.law import (
     AsymptoticLaw,
@@ -190,6 +192,8 @@ __all__ = [
     # Inference helpers
     "cluster_bootstrap",
     "ClusterBootstrapResult",
+    "stratified_bootstrap",
+    "StratifiedBootstrapResult",
     "j_test",
     "JTestResult",
     # Per-block identification-strength diagnostic (#177)
