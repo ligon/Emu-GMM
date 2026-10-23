@@ -108,6 +108,14 @@ def test_rejects_traced_drop_smallest():
         pinv_eigvalrule(M, drop_smallest=jnp.asarray(1))
 
 
+@pytest.mark.parametrize("drop_smallest", [False, True])
+def test_rejects_bool_drop_smallest(drop_smallest):
+    """A bool is an int subclass but cannot specify a gauge dimension."""
+    M, _, _ = _spd(7, 5)
+    with pytest.raises(TypeError, match="static Python int"):
+        pinv_eigvalrule(M, drop_smallest=drop_smallest)
+
+
 def test_rejects_negative_drop():
     M, _, _ = _spd(8, 5)
     with pytest.raises(ValueError):

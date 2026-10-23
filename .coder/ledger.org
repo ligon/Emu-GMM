@@ -880,6 +880,62 @@ Verification against ledger: targeted nonlinear analytical, supplied analytical 
 The reproducible CPU x64 compiled-buffer probe at \(N=32768\) and \(K=4,8,16\) shows postfit temporary bytes =8.5/34.1/136.3 MB= with =jacfwd= versus =3.2/6.4/12.7 MB= columnwise, and LM temporary bytes =13.2/43.0/153.6 MB= with QR versus =10.0/19.5/38.4 MB= with LSMR.
 This is estimated XLA temporary memory, not a GPU peak claim; =.coder/design-232-jacobian-memory.org= records the method and remaining limits.
 
+* Section 11 -- Opt-in numerical bread rank (#219)
+
+** 11.1 -- Task and search
+
+Specify a law-side, explicitly selected relative cutoff for the fitted bread, with the count-only default unchanged.
+The target is a numerical retained-subspace covariance plus a separate functional-sensitivity report, not a population-identification or boundary-inference claim.
+Search tier: ripgrep plus direct source/test reads and git history; no gitnexus tool is exposed in this session.
+
+** 11.2 -- Existing machinery
+
+- Bread inverse :: =src/emu_gmm/_internal/pinv_eigvalrule.py:53= drops exactly =gauge_dim= smallest eigenvalues; =:116= returns =jnp.linalg.inv= bitwise for zero gauge.
+  =tests/test_pinv_eigvalrule.py:34=, =:46=, =:85=, and =:117= guard the count, jit/vmap, and bounds.
+- Sandwich :: =src/emu_gmm/_internal/asymptotic.py:35= forms \(B=G'\Lambda G\), \(M=G'\Lambda V\Lambda G\), and \(B^+ M B^+\).
+  =src/emu_gmm/law.py:1208= calls it from the live =AsymptoticLaw=; =tests/test_result_law_fidelity.py:275= pins a hand-built weighting-aware example.
+- Fit ingredients :: =src/emu_gmm/types.py:704= / =:711= / =:716= retain =G=, realised =Lambda=, and raw =V= on =OptimizationResult=.
+  =n_overid= is separate (=:721=).
+- Functional queries :: =src/emu_gmm/inference/functional_se.py:120= takes the ambient Jacobian of =f(components)=; =src/emu_gmm/law.py:1436= and =:1490= reuse the law covariance for SEs and sampling.
+  =tests/manifolds/test_manifold_acceptance_phase7.py:204= guards gauge rotations.
+- Geometry :: =src/emu_gmm/manifolds/spec.py:53= holds flat ambient order and nominal gauge count; =src/emu_gmm/manifolds/psd_fixed_rank.py:152= uses the Frobenius metric.
+  =src/emu_gmm/law.py:398= routes named leaf queries through the same law.
+- Persistence :: =src/emu_gmm/persistence.py:261= saves either a live or reloaded =AsymptoticLaw=, storing components and assembled covariance but not =G/Lambda/V= (=:281=); =:469= writes an inert NPZ, =:528= loads it.
+  =tests/test_persistence.py:168= guards re-save and =:246= guards moments-backed reconstruction.
+
+** 11.3 -- Definitions and invariants
+
+- The default =pinv_eigvalrule= is count-only to avoid conflating weak positive bread directions with gauge zeros (=pinv_eigvalrule.py:19=); #219 adds an opt-in policy, never a new default.
+- The raw-meat sandwich uses the realised, possibly ridged =Lambda= and unregularised =V=, not =B^{-1}= alone (=asymptotic.py:13=; =docs/optimization-result-law-split.org=, "Why the Hessian alone is not enough").
+- Flat ambient coordinates and the Euclidean metric determine eigenvalues, projectors, derivative norms, and the relative cutoff; rescaling a parameter changes the policy.
+  This agrees with the Frobenius metric on =PSDFixedRank= (=psd_fixed_rank.py:152=) but differs from the point-dependent metrics on =Positive= and =Interval= (=positive.py:82=, =interval.py:115=).
+- =PSDFixedRank(n,k)= has nominal gauge count =k(k-1)/2= only on the regular rank-=k= stratum (=psd_fixed_rank.py:45=); neither the count nor eigenvector order proves a geometric gauge direction at singular =A=.
+- Numerical singularity of the ambient bread and nominal gauge dimension are different objects; =extra_excluded= is arithmetic and cannot certify nongauge identification failure.
+- An assembled =Sigma= alone cannot recover a new bread cutoff after reload; the current persistence path discards the sandwich ingredients (=persistence.py:281=).
+- A numerical-rank option must leave optimization diagnostics, =n_overid=, and J-test calibration unchanged (=types.py:721=; =law.py:1309=).
+
+** 11.4 -- Reuse decisions
+
+- *Reuse* the existing =G/Lambda/V= sandwich and =AsymptoticLaw= functional/leaf query algebra.
+- *Extend* law-side bread inversion with an opt-in report; do not alter =pinv_eigvalrule='s default or the estimator's optimization fields.
+- *Extend* typed =LawState= persistence with policy, signed spectrum, retained mask, and the whole excluded projector; do not derive them from saved =Sigma=.
+- *New* second-order sensitivity query: the current =functional_se= computes only \(J_f\Sigma J_f'\), so it cannot detect =f(A)=AA'= at =A=0=.
+
+** 11.5 -- Design resolution and implementation checks
+
+=docs/numerical-rank-policy.org= specifies the opt-in API, native ambient/Frobenius convention, signed-spectrum rule, invalid-bread statuses, full excluded projector, first/mixed-second derivative sensitivity, singular-geometry status, and versioned load/re-save behavior.
+The plan refuses post-load tolerance changes without =G/Lambda/V= and makes no boundary-valid inference claim.
+=functional_se(f)= remains a conditional retained-subspace SE even when excluded-direction sensitivity is nonzero; a separate query reports that sensitivity, and versioned persistence preserves both meanings across load/re-save.
+Implementation must test unchanged-default fidelity, gauge rotations, weak positive directions, zero-gradient quadratic and higher-order counterexamples, projector validation, schema-1 compatibility, and every law query using the same policy.
+* Section 12 -- Grid-limited random-set law (#180)
+
+1. Task :: Carry repeated =KConfidenceSet= inversions as a set-valued law with explicit scanned-grid events and capacity/coverage counts. Section 11 is reserved for #219's numerical-rank policy.
+2. Existing machinery :: Search tier: ripgrep and git history. =inference/confidence_set.py:115,472= defines the grid, acceptance mask, topology, interpolated intervals, and invalid/nonconverged point indices; =tests/inference/test_k_confidence_set.py= and =test_profiled_confidence_set.py= cover fixed-curve and profiled inversion. =law.py:307= defines the point-valued =EstimatorLaw= interface; =studies/conditioning.py:219= counts selected numeric records; =types.py:564= and =persistence.py:187= store fixed-shape numeric records and inert law artifacts.
+3. Definitions :: =topology='empty'= means no *scanned* grid point was accepted, not that the set is globally empty. =in_set[j]= is false at invalid or nonconverged points even when the test result is not a valid rejection; membership there is unknown. Interpolated intervals and open edges do not establish off-grid membership.
+4. Invariants :: Use the common finite strictly increasing grid and common inversion level/statistic for repeated sets. Preserve invalid and nonconverged as separate event counts; an unknown verdict cannot enter a coverage denominator as a rejection. Empty conditional selections remain queryable with zero counts and NaN rate. Set artifacts contain only inert data, not estimator closures or pickled objects.
+5. Reuse decision :: Reuse =KConfidenceSet= and its per-point acceptance/event masks; add a sibling =RandomSetLaw= rather than coerce sets into =EstimatorLaw='s point summaries or =FitRecord=. Use structured set-query counts and a separate versioned NPZ codec, leaving numeric-law persistence untouched.
+6. Open questions :: Finite scanned-grid capacity is the first slice. Membership between grid points, a certified global empty set, and compact-set capacity beyond finite grid subsets require separate semantics and calibration.
+
 * Section 13 -- Pure stratified refit bootstrap (#155)
 
 1. Task :: Add a pure =StratifiedCovariance= refit parameter bootstrap with independent PSU draws inside each fixed =(stratum, arm)= cell, preserving its PSU count, with =fpc=False=.
