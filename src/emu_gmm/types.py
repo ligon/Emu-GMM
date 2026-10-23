@@ -175,7 +175,10 @@ class RegularizationStrategy(Protocol):
     ridge magnitude (for diagnostics). ``tau`` may be a Python float or
     a JAX scalar; the inference engine converts to a Python float when
     building the :class:`Diagnostics` record. Implementations live in
-    :mod:`emu_gmm.regularization`.
+    :mod:`emu_gmm.regularization`. ``estimate`` and ``build_estimator`` also
+    require ``apply_fixed_tau(V, tau)`` to apply the anchor at later parameter
+    values; callers that use only ``apply`` (such as moment wild bootstrap)
+    can still use this smaller protocol.
     """
 
     def apply(

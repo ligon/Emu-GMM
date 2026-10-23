@@ -33,6 +33,7 @@ from emu_gmm import (
     ContinuouslyUpdated,
     DiagonalTikhonov,
     Identity,
+    build_estimator,
     estimate,
 )
 from emu_gmm.optimizer import scipy_lm
@@ -214,6 +215,22 @@ class TestAnchorTauSmoothness:
 
 class TestApplyFixedTau:
     """Direct unit tests for ``DiagonalTikhonov.apply_fixed_tau``."""
+
+    def test_custom_apply_only_regularizer_is_rejected_before_estimation(self):
+        class ApplyOnlyRegularizer:
+            def apply(self, V):
+                return V + 0.1 * jnp.eye(V.shape[0]), jnp.asarray(0.1)
+
+        with pytest.raises(TypeError, match="requires regularization.apply_fixed_tau"):
+            build_estimator(
+                _dummy_model,
+                measure=AnalyticalMeasure(expectation_fn=_moment_fn),
+                covariance=AnalyticalCovariance(
+                    covariance_fn=lambda model, theta: jnp.eye(2)
+                ),
+                regularization=ApplyOnlyRegularizer(),
+                parameters=_Params1D(a=0.0),
+            )
 
     def test_returns_v_plus_tau_diag(self):
         reg = DiagonalTikhonov()
