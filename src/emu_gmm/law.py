@@ -638,6 +638,17 @@ class EmpiricalLaw(EstimatorLaw):
 
     # -- properties ---------------------------------------------------------
     @property
+    def records(self) -> MCRecords | FitRecord | None:
+        """The backing record carrier, or ``None`` for a raw-draws law.
+
+        Returns the stored ``MCRecords`` or stacked ``FitRecord`` without
+        copying or removing non-converged rows. ``MCRecords.extra`` exposes
+        per-rep statistics, including after save/load. A conditioned law
+        carries its selected ``FitRecord`` instead.
+        """
+        return self._records
+
+    @property
     def param_names(self) -> tuple[str, ...]:
         return self._names
 

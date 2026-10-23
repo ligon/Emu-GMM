@@ -420,7 +420,7 @@ class TestEmpiricalRoundTrip:
         save_law(law, p)
         r = load_law(p)
 
-        rec = r._records  # the reconstructed MCRecords provenance
+        rec = r.records  # the reconstructed MCRecords provenance, publicly exposed
         assert isinstance(rec, MCRecords)
         assert rec.extra is not None
         assert set(rec.extra) == {"k_pvalue", "id_strength"}
