@@ -367,6 +367,86 @@ class TestEmpiricalRoundTrip:
         coupled = ra.couple(rb)  # raises if the CRN provenance was lost
         assert coupled is not None
 
+    def test_tuple_coupling_id_round_trips_and_still_couples(self, tmp_path):
+        from dataclasses import replace
+
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import crn_pair
+
+        token = ("shared-dgp", ("fold-in", 5))
+        mc = replace(_fake_mcrecords(seed=5), coupling_id=token)
+        path = tmp_path / "tuple-coupling.npz"
+        save_law(EmpiricalLaw.from_records(mc), path)
+        reloaded = load_law(path).records
+        assert reloaded.coupling_id == token
+        assert isinstance(reloaded.coupling_id, tuple)
+        assert isinstance(reloaded.coupling_id[1], tuple)
+        crn_pair(mc, reloaded)
+
+        # Earlier artifacts already stored tuples as JSON arrays without a
+        # type marker. Their coupling witness must also recover on reload.
+        with np.load(path, allow_pickle=False) as data:
+            arrays = {name: data[name] for name in data.files}
+        manifest = json.loads(str(arrays["__manifest__"]))
+        manifest.pop("records_are_mc", None)
+        arrays["__manifest__"] = np.asarray(json.dumps(manifest))
+        np.savez(path, **arrays)
+        crn_pair(mc, load_law(path).records)
+
+    def test_keyless_mcrecords_stays_mcrecords_on_reload(self, tmp_path):
+        from dataclasses import replace
+
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.studies import MCRecords, crn_pair
+
+        mc = replace(
+            _fake_mcrecords(seed=5, n=3),
+            key=None,
+            coupling_id=("known-stream", 5),
+            extra={"marker": jnp.asarray([1.0, 2.0, 3.0])},
+            rep_indices=jnp.asarray([3, 4, 5]),
+        )
+        path = tmp_path / "keyless-mc.npz"
+        save_law(EmpiricalLaw.from_records(mc), path)
+        state = load_law_state(path)
+        assert state.records_are_mc is True
+        reloaded = load_law(path).records
+        assert isinstance(reloaded, MCRecords)
+        assert reloaded.key is None
+        assert reloaded.coupling_id == mc.coupling_id
+        np.testing.assert_array_equal(reloaded.extra["marker"], mc.extra["marker"])
+        np.testing.assert_array_equal(reloaded.effective_rep_indices, [3, 4, 5])
+        with pytest.raises(ValueError, match="master PRNG key missing"):
+            crn_pair(mc, reloaded, assert_coupled=True)
+
+    def test_bare_fit_record_remains_bare_on_reload(self, tmp_path):
+        from emu_gmm import EmpiricalLaw
+        from emu_gmm.types import FitRecord
+
+        path = tmp_path / "bare-records.npz"
+        save_law(EmpiricalLaw.from_records(_fake_mcrecords(n=3).records), path)
+        assert load_law_state(path).records_are_mc is False
+        assert isinstance(load_law(path).records, FitRecord)
+
+        # Old keyless artifacts had no explicit carrier marker. They retain
+        # the legacy bare-record interpretation; no provenance is invented.
+        with np.load(path, allow_pickle=False) as data:
+            arrays = {name: data[name] for name in data.files}
+        manifest = json.loads(str(arrays["__manifest__"]))
+        del manifest["records_are_mc"]
+        arrays["__manifest__"] = np.asarray(json.dumps(manifest))
+        np.savez(path, **arrays)
+        assert isinstance(load_law(path).records, FitRecord)
+
+    def test_unhashable_coupling_id_refused(self, tmp_path):
+        from dataclasses import replace
+
+        from emu_gmm import EmpiricalLaw
+
+        mc = replace(_fake_mcrecords(n=3), coupling_id=["not", "hashable"])
+        with pytest.raises(TypeError, match="coupling_id must be hashable"):
+            save_law(EmpiricalLaw.from_records(mc), tmp_path / "bad-token.npz")
+
     def test_records_tau_saturated_round_trips(self, tmp_path):
         # #205: the per-rep tau_saturated column survives persistence.
         from emu_gmm import EmpiricalLaw
