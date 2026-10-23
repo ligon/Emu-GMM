@@ -398,6 +398,18 @@ The new array tests and independent adversarial checks pass, including nonzero n
 Pair-specific symmetry checks reject the mixed-unit counterexample while accepting roundoff at tiny and huge scales without overflowing the tolerance.
 Ruff, black, mypy and diff checks pass; no =REINVENTION= or =CONTRADICTION= with this section's definitions and invariants.
 
+** 7.7 -- Clustered K cross-covariance finite-cluster factor (#191)
+
+Grounded 2026-10-23 on =main= =adc4264= before editing the K implementation.
+=ClusteredCovariance.covariance= multiplies each moment pair by the supported-cluster factor =G_jk/(G_jk-1)= when =dof_correction=True=; its private =_finite_cluster_correction(mask)= is the one tested definition (=src/emu_gmm/covariance/clustered.py:137-166=).
+=k_statistic= dispatches the same covariance strategy to =_sigma_jm_clustered_from_contributions= (=src/emu_gmm/inference/k_statistic.py:270-309, 425-435=), but that tensor currently omits the factor.
+The correction =D_tilde[:,j] = G[:,j] - Sigma[j] @ solve(V,m)= therefore mixes scales at a finite cluster count.
+
+Reuse the strategy's existing pair-supported factor for every parameter slice of =Sigma=, after cluster-total aggregation and before the shared =N_j N_k= normalization.
+Keep the default =dof_correction=False= path bitwise unchanged and leave caller-supplied =score_cov_fn= and =k_statistic_from_arrays= to the caller's matched-covariance contract.
+Test unequal moment support with an offset null so =m= and the cross-covariance correction are nonzero, and compare with a supplied matched =score_cov_fn= oracle.
+This is a scale-consistency repair, not a new K-statistic estimator.
+
 * Section 8 -- =EstimatorLaw= CORE (#144): the empirical-law carrier umbrella
 
 The carrier-class generalisation of the #167 point/tuple slice (Sec. 1-6):
