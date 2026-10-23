@@ -209,14 +209,26 @@ been through four reviewer iterations; the abstractions are deliberate.
     reduces **bit-for-bit** to `StratifiedCovariance` via a *shared* (not
     copied) engine. The design-exact-$V_{TT}$ **glue is NOT PSD-by-construction**
     (it can be indefinite like `StratifiedCovariance`; `DiagonalTikhonov`
-    repairs it — don't over-claim PSD). **Known caveat (#145, #130 MC
-    evidence): fixed stratum-mean heterogeneity contaminates the coupled
-    assembly** — $V_{TT}$ centers within cells but $V_{SS}$/$V_{TS}$ are
-    uncentered, so the composed `couple=True` V under-covers the randomized
-    contrast (b1 coverage 0.66, binding 39% in the validation fixture)
-    while plain `StratifiedCovariance` stays calibrated; prefer it (or
-    `couple=False`) under stratum heterogeneity until the v2.1 centering
-    pass. Stratified reduces to
+    repairs it — don't over-claim PSD). **Default-mode caveat (#145, #130
+    MC evidence): fixed stratum-mean heterogeneity contaminates the
+    uncentered coupled assembly** — $V_{TT}$ centers within cells but
+    $V_{SS}$/$V_{TS}$ do not. The default `couple=True` under-covers the
+    randomized contrast (reported b1 coverage 0.661, binding 39% in the
+    validation fixture). Under fixed cell profiles, use plain
+    `StratifiedCovariance` when its design covariance is the target, or opt into
+    `from_design_mask(..., fixed_strata=True)` for mixed moments when
+    sampling clusters are nested in strata and replicated within them.
+    The opt-in projects sampling and cross blocks by stratum-by-arm cell
+    pair, retains paired cross-arm shocks, and uses a local projection-trace
+    correction; mixed mode requires `sampling.dof_correction=False` to avoid
+    extra global inflation. It rejects an all-singleton-stratum cluster
+    design and fractional or nonfinite group IDs. On the unchanged #130
+    fixed-profile 300-rep ladder, opt-in b1 coverage was 279/295 = 0.946
+    (MCSE 0.013), versus pure Stratified's 281/297 = 0.946. This supports
+    that fixed-profile use case; paired-cluster covariance checks preserve
+    its cross-arm term, but general paired-cluster estimator coverage is
+    unmeasured. The default random-stratum mode and its #119 correction
+    remain unchanged. Stratified reduces to
     `ClusteredCovariance` only *in expectation* (centered vs uncentered), not
     bit-for-bit. The $V_{TS}$ cross block is **ablatable in-framework** (#109):
     `from_design_mask(..., couple=False)` returns the block-diagonal

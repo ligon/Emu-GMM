@@ -379,6 +379,51 @@ class TestGivenConditional:
         with pytest.raises(TypeError, match="event flags"):
             law.given("binding_ridge")
 
+    def test_event_share_on_raw_draws_counts_selected_and_used(self):
+        law = EmpiricalLaw.from_draws(
+            np.array([1.0, np.nan, 3.0, 4.0, np.inf]),
+            events={"hit": [1, 1, 0, 0, 1], "none": [0, 0, 0, 0, 0]},
+        )
+        share = law.event_share("hit")
+        assert share.event == "hit"
+        assert (share.n_selected, share.n_total) == (3, 5)
+        assert (share.n_selected_converged, share.n_total_converged) == (1, 3)
+        assert share.fraction_all == 3 / 5
+        assert share.fraction_converged == 1 / 3
+        selected = law.given("hit")
+        assert (selected.n_draws, selected.n_used) == (3, 1)
+
+        complement = law.event_share("hit", negate=True)
+        assert complement.event == "~hit"
+        assert complement.negate is True
+        assert (complement.n_selected, complement.n_total) == (2, 5)
+        assert (
+            complement.n_selected_converged,
+            complement.n_total_converged,
+        ) == (2, 3)
+        assert complement.fraction_all == 2 / 5
+        assert complement.fraction_converged == 2 / 3
+        assert law.given("hit", negate=True).n_used == 2
+
+        empty = law.event_share("none")
+        assert (empty.n_selected, empty.n_selected_converged) == (0, 0)
+        assert (empty.fraction_all, empty.fraction_converged) == (0.0, 0.0)
+
+    def test_event_share_on_empty_raw_law_has_no_denominator(self):
+        law = EmpiricalLaw.from_draws(np.array([]), events={"hit": []})
+        share = law.event_share("hit")
+        assert (share.n_selected, share.n_total) == (0, 0)
+        assert (share.n_selected_converged, share.n_total_converged) == (0, 0)
+        assert np.isnan(share.fraction_all)
+        assert np.isnan(share.fraction_converged)
+
+    def test_event_share_on_raw_draws_requires_matching_event(self):
+        law = EmpiricalLaw.from_draws(np.arange(3.0), events={"hit": [1, 0, 1]})
+        with pytest.raises(TypeError, match="matching events="):
+            law.event_share("missing")
+        with pytest.raises(TypeError, match="matching events="):
+            law.event_share(lambda _: np.array([True, False, True]))
+
     def test_asymptotic_given_refuses(self, clean_scalar_result):
         """§2.3: the conditional has no closed form at the Gaussian grade ---
         the implementation refuses rather than approximates."""
@@ -647,6 +692,29 @@ def psd_result():
     )
     assert bool(result.converged)
     return result
+
+
+def test_empirical_gamma_functional_uses_each_draw_before_reduction():
+    """A cheap gauge probe keeps the per-draw path in quick-check (#191)."""
+    factors = np.array([[1.0, 2.0], [-1.0, -2.0], [2.0, 0.0], [-2.0, 0.0]])
+    rotated = factors.copy()
+    rotated[0] *= -1.0  # same Gamma draw, different ambient factor coordinate
+    law = EmpiricalLaw.from_draws(factors, component_shapes=((2, 1),))
+    rotated_law = EmpiricalLaw.from_draws(rotated, component_shapes=((2, 1),))
+
+    gamma = factors[:, :, None] * factors[:, None, :]
+    expected_gamma_se = np.std(
+        gamma[:, np.triu_indices(2)[0], np.triu_indices(2)[1]], axis=0, ddof=1
+    )
+    np.testing.assert_allclose(law.se(gamma_functional()), expected_gamma_se)
+    np.testing.assert_allclose(
+        law.se(eigenvalue_functional(1)),
+        np.std(np.sum(factors**2, axis=1), ddof=1, keepdims=True),
+    )
+    np.testing.assert_array_equal(
+        law.se(gamma_functional()), rotated_law.se(gamma_functional())
+    )
+    assert not np.allclose(law.se(), rotated_law.se())
 
 
 @pytest.mark.slow

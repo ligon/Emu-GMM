@@ -320,6 +320,20 @@ def test_fixed_strata_requires_cells_nested_in_strata():
         _objects(fx)
 
 
+@pytest.mark.parametrize("field", ["cluster", "strata", "cell"])
+@pytest.mark.parametrize("value", [0.49, np.nan, np.inf])
+def test_fixed_strata_rejects_nonintegral_or_nonfinite_group_ids(field, value):
+    fx = _fixture()
+    fx[field] = fx[field].astype(float)
+    fx[field][0] = value
+    with pytest.raises(ValueError, match="finite integer-valued"):
+        _objects(fx)
+    if value == 0.49:
+        # The pre-existing random-stratum path keeps its rounding convention.
+        default, _, _ = _objects(fx, fixed=False)
+        assert not default.fixed_strata
+
+
 def test_one_sampling_cluster_per_stratum_is_rejected():
     fx = _fixture()
     _, design, _measure = _objects(fx)

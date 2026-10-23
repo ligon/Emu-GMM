@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import haliax as ha
 import jax
@@ -51,6 +51,9 @@ from emu_gmm._internal.labels import tangent_basis_names
 # manifold epic #12) and falls back to the former for v1 / all-scalar trees so
 # the v1 output is bitwise unchanged.
 from emu_gmm._internal.params import flatten_params, flatten_params_with_spec
+
+if TYPE_CHECKING:
+    from emu_gmm.inference.numerical_rank import NumericalRankPolicy
 
 # A user's parameter PyTree: typically a @jdc.pytree_dataclass. We use
 # Any in the protocol signatures because users define their own types;
@@ -175,7 +178,10 @@ class RegularizationStrategy(Protocol):
     ridge magnitude (for diagnostics). ``tau`` may be a Python float or
     a JAX scalar; the inference engine converts to a Python float when
     building the :class:`Diagnostics` record. Implementations live in
-    :mod:`emu_gmm.regularization`.
+    :mod:`emu_gmm.regularization`. ``estimate`` and ``build_estimator`` also
+    require ``apply_fixed_tau(V, tau)`` to apply the anchor at later parameter
+    values; callers that use only ``apply`` (such as moment wild bootstrap)
+    can still use this smaller protocol.
     """
 
     def apply(
@@ -348,12 +354,12 @@ class Diagnostics:
     # explicit split.
     #
     # ``final_gradient_norm`` is :math:`\\|\\nabla_\\theta
-    # \\tfrac{1}{2} \\|r(\\hat\\theta)\\|^2\\|` where ``r`` is the
-    # *residual the optimiser saw*. When ``penalty`` is supplied this
-    # includes the penalty contribution from the appended
-    # :math:`\\sqrt{p(\\theta)}` row (so the reported norm matches the
-    # convergence criterion the LM solver actually used); when
-    # ``penalty=None`` it is the unpenalised data-only gradient norm.
+    # \\tfrac{1}{2} \\|r(\\hat\\theta)\\|^2\\|` for the reported
+    # residual. With IteratedWeighting, ``r`` is the CU fallback at the
+    # returned point, not the fixed-weight inner solver's residual;
+    # a large norm alone does not say the inner solve failed. A supplied
+    # penalty contributes its appended :math:`\\sqrt{p(\\theta)}` row;
+    # without a penalty this is the data-only gradient norm.
     final_objective: Float[Array, ""]
     final_gradient_norm: Float[Array, ""]
 
@@ -751,7 +757,7 @@ class OptimizationResult:
     # and the positional tangent labels (INT-12/R5).
     manifold_spec: Any = None
 
-    def asymptotic(self) -> Any:
+    def asymptotic(self, *, rank_policy: NumericalRankPolicy | None = None) -> Any:
         """The asymptotic :class:`~emu_gmm.law.EstimatorLaw` for this fit.
 
         Adds the asymptotic *assumption* (a CLT / exact limiting behaviour) to
@@ -765,7 +771,7 @@ class OptimizationResult:
         """
         from emu_gmm.law import AsymptoticLaw
 
-        return AsymptoticLaw(self)
+        return AsymptoticLaw(self, rank_policy=rank_policy)
 
     @property
     def theta(self) -> ManifoldPoint:
@@ -804,7 +810,8 @@ class OptimizationResult:
         - ``"moment_residual"``: :class:`pandas.Series` indexed by moment names.
         - ``"summary"``: :class:`pandas.Series` of scalar optimization fields
           (``objective_value``, ``n_overid``, ``converged``, ``iterations``,
-          ``tau_realised``, ``kappa_V``, ``final_objective``).
+          ``tau_realised``, ``kappa_V``, ``final_objective``,
+          ``final_objective_data``, ``final_objective_full``).
         """
         labels = self.labels
         assert labels is not None

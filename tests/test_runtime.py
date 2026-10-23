@@ -102,6 +102,18 @@ class TestConfigure:
         assert env["JAX_NUM_CPU_DEVICES"] == "1"
         assert os.environ["JAX_NUM_CPU_DEVICES"] == "1"
 
+    def test_failed_backend_probe_does_not_mutate_environment(self, monkeypatch):
+        from jax._src import xla_bridge
+
+        def failed_probe():
+            raise RuntimeError("probe failed")
+
+        monkeypatch.setattr(xla_bridge, "backends_are_initialized", failed_probe)
+        before = {key: os.environ.get(key) for key in _ENV_KEYS}
+        with pytest.raises(RuntimeError, match="could not determine"):
+            emu_gmm.configure()
+        assert {key: os.environ.get(key) for key in _ENV_KEYS} == before
+
     def test_thread_caps_false(self, monkeypatch):
         monkeypatch.setattr(runtime, "_backend_initialized", lambda: False)
         for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):

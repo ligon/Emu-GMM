@@ -84,6 +84,20 @@ def _safe_outer_divide(
     return jnp.where(denom == 0.0, jnp.zeros_like(out), out)
 
 
+def _fixed_group_ids(
+    values: Any, *, name: str, upper: int, range_error: str
+) -> np.ndarray:
+    """Validate eager fixed-stratum group IDs before integer conversion."""
+    raw = np.asarray(values)
+    if raw.ndim != 1 or raw.dtype.kind not in "biuf":
+        raise ValueError(f"fixed_strata=True requires 1-D numeric {name}")
+    if not np.all(np.isfinite(raw)) or not np.all(raw == np.rint(raw)):
+        raise ValueError(f"fixed_strata=True requires finite integer-valued {name}")
+    if np.any((raw < 0) | (raw >= upper)):
+        raise ValueError(range_error)
+    return raw.astype(np.int64)
+
+
 @jdc.pytree_dataclass
 class StratifiedCovariance:
     r"""Design-based between-PSU Neyman stratified variance (emu-gmm #79).
@@ -454,6 +468,9 @@ class DesignAwareCovariance:
         for both SS and TS. TT remains the design engine output. Each
         ordered pair of cells within a stratum contributes separately, so
         paired sampling clusters can retain cross-arm covariance.
+        Cluster, stratum, and cell IDs must be finite and exactly
+        integer-valued in this opt-in mode; rounding a fractional ID could
+        change the nesting relation.
         fixed_cell_pair_diagnostics exposes the exact local count,
         projection trace, and usability; fixed_stratum_pair_diagnostics
         summarizes them by stratum. The local H/tr(M_j M_k) factor assumes
@@ -513,14 +530,20 @@ class DesignAwareCovariance:
                     "the local projection trace already corrects the "
                     "within-stratum degrees of freedom"
                 )
-            clusters = np.rint(np.asarray(sampling.cluster_ids)).astype(np.int64)
-            strata = np.rint(np.asarray(design.stratum_ids)).astype(np.int64)
+            clusters = _fixed_group_ids(
+                sampling.cluster_ids,
+                name="sampling cluster IDs",
+                upper=sampling.n_clusters,
+                range_error="sampling cluster ID is outside n_clusters",
+            )
+            strata = _fixed_group_ids(
+                design.stratum_ids,
+                name="design stratum IDs",
+                upper=design.n_strata,
+                range_error="design stratum ID is outside n_strata",
+            )
             if clusters.shape != strata.shape:
                 raise ValueError("sampling clusters and design strata must align")
-            if np.any((clusters < 0) | (clusters >= sampling.n_clusters)):
-                raise ValueError("sampling cluster ID is outside n_clusters")
-            if np.any((strata < 0) | (strata >= design.n_strata)):
-                raise ValueError("design stratum ID is outside n_strata")
             order = np.argsort(clusters, kind="stable")
             if np.any(
                 (clusters[order][1:] == clusters[order][:-1])
@@ -536,11 +559,14 @@ class DesignAwareCovariance:
                     "fixed_strata=True requires at least two sampling "
                     "clusters in an observed stratum"
                 )
-            cells = np.rint(np.asarray(design.cell_ids)).astype(np.int64)
+            cells = _fixed_group_ids(
+                design.cell_ids,
+                name="design cell IDs",
+                upper=design.n_cells,
+                range_error="design cell ID is outside n_cells",
+            )
             if cells.shape != strata.shape:
                 raise ValueError("design cells and strata must align")
-            if np.any((cells < 0) | (cells >= design.n_cells)):
-                raise ValueError("design cell ID is outside n_cells")
             cell_order = np.argsort(cells, kind="stable")
             if np.any(
                 (cells[cell_order][1:] == cells[cell_order][:-1])

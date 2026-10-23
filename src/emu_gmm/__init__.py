@@ -65,10 +65,14 @@ from emu_gmm.inference import (
     BootstrapQuantile,
     BootstrapSE,
     ClusterBootstrapResult,
+    FunctionalSensitivity,
     IdentificationStrength,
     JTestResult,
     KConfidenceSet,
     KStatisticResult,
+    NumericalRankPolicy,
+    NumericalRankReport,
+    PSDFactorGeometry,
     WildBootstrapResult,
     adaptive_bootstrap,
     cluster_bootstrap,
@@ -76,6 +80,7 @@ from emu_gmm.inference import (
     j_test,
     k_confidence_set,
     k_statistic,
+    k_statistic_from_arrays,
     moment_wild_bootstrap,
     profiled_k_confidence_set,
 )
@@ -112,6 +117,7 @@ from emu_gmm.persistence import (
     load_law_state,
     save_law,
 )
+from emu_gmm.random_set_law import RandomSetLaw, SetEventShare, SetQueryReport
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.runtime import configure, recommended_env
 from emu_gmm.types import (
@@ -153,8 +159,13 @@ __all__ = [
     "k_confidence_set",
     "profiled_k_confidence_set",
     "k_statistic",
+    "k_statistic_from_arrays",
     "KConfidenceSet",
     "KStatisticResult",
+    "FunctionalSensitivity",
+    "NumericalRankPolicy",
+    "NumericalRankReport",
+    "PSDFactorGeometry",
     # Measures
     "SyntheticMeasure",
     "AnalyticalMeasure",
@@ -242,6 +253,9 @@ __all__ = [
     "EstimatorLaw",
     "EmpiricalLaw",
     "AsymptoticLaw",
+    "RandomSetLaw",
+    "SetEventShare",
+    "SetQueryReport",
     "couple",
     # Typed, versioned law persistence (#181): inert, cross-version artifact
     # (LawState schema + save_law/load_law), NOT pickle. Both grades.

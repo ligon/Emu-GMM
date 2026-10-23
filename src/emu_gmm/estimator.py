@@ -60,6 +60,7 @@ See ``docs/api-sketch.org`` Section 4 and
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from collections.abc import Callable
 from typing import Any, cast
@@ -75,6 +76,7 @@ from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
+from emu_gmm._internal.jacobian import columnwise_jacobian
 from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.diagnostics import (
     build_diagnostics,
@@ -84,10 +86,16 @@ from emu_gmm.diagnostics import (
 )
 from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.optimizer import RiemannianOptimizer
-from emu_gmm.manifolds.riemannian_lm import riemannian_lm
+from emu_gmm.manifolds.riemannian_lm import _RiemannianLM, riemannian_lm
+from emu_gmm.manifolds.riemannian_tr import _RiemannianTR
 from emu_gmm.manifolds.spec import ManifoldSpec
+from emu_gmm.measures.analytical import AnalyticalMeasure
+from emu_gmm.measures.empirical import EmpiricalMeasure
+from emu_gmm.measures.synthetic import SyntheticMeasure
 from emu_gmm.optimizer import (
     _LinearSolver,
+    _OptimistixLM,
+    _ScipyLM,
     _supports_args,
     _takes_manifold_spec,
     linear_solver,
@@ -237,6 +245,34 @@ def _resolve_optimizer(
     )
 
 
+def _bounded_measure_supported(measure: Measure) -> bool:
+    """Only built-in expectation implementations have a checked memory path."""
+    return type(measure) in (EmpiricalMeasure, SyntheticMeasure, AnalyticalMeasure)
+
+
+def _with_bounded_jacobian(optimizer: Any) -> Any:
+    """Copy a native solver with bounded Jacobian work, including fallback."""
+    if isinstance(optimizer, _LinearSolver):
+        fallback = (
+            _with_bounded_jacobian(optimizer.fallback)
+            if optimizer.fallback is not None
+            else None
+        )
+        return dataclasses.replace(
+            optimizer, fallback=fallback, jacobian_memory="bounded"
+        )
+    if isinstance(optimizer, _OptimistixLM | _RiemannianLM):
+        return dataclasses.replace(optimizer, jacobian_memory="bounded")
+    if isinstance(optimizer, _ScipyLM | _RiemannianTR):
+        # Their solves already use sequential finite differences or HVPs.
+        return optimizer
+    raise TypeError(
+        "jacobian_memory='bounded' requires optimistix_lm(), "
+        "riemannian_lm(), riemannian_tr(), scipy_lm(), or linear_solver() "
+        "with a supported fallback"
+    )
+
+
 def _apply_linear_fast_path(
     optimizer: Any,
     dispatch_mode: str,
@@ -370,6 +406,7 @@ def build_estimator(
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
     linear: bool = False,
+    jacobian_memory: str = "default",
 ) -> Callable[[ParamsLike, Measure], OptimizationResult]:
     """Build a re-usable estimator callable.
 
@@ -409,6 +446,10 @@ def build_estimator(
         returned callable.
     weighting, regularization, optimizer, parameters, theta_init, moment_names, penalty, linear
         See :func:`estimate`.
+    jacobian_memory : {"default", "bounded"}
+        Opt into one-tangent-at-a-time Jacobian work in both the solve and
+        postfit moment Jacobian. The default retains the existing QR and
+        forward-mode paths.
 
     Returns
     -------
@@ -430,12 +471,26 @@ def build_estimator(
     # pytree; anything else used directly. theta_init= is a deprecated alias
     # for parameters= (#107).
     theta_init = _resolve_parameters(parameters, theta_init)
+    if jacobian_memory not in ("default", "bounded"):
+        raise ValueError("jacobian_memory must be 'default' or 'bounded'")
+    if jacobian_memory == "bounded" and not _bounded_measure_supported(measure):
+        raise TypeError(
+            "jacobian_memory='bounded' requires a built-in Measure with "
+            "a known bounded expectation path"
+        )
 
     # Defaults.
     if weighting is None:
         weighting = ContinuouslyUpdated()
     if regularization is None:
         regularization = DiagonalTikhonov()
+    apply_fixed_tau = getattr(regularization, "apply_fixed_tau", None)
+    if not callable(apply_fixed_tau):
+        raise TypeError(
+            "estimate/build_estimator requires regularization.apply_fixed_tau(V, tau) "
+            "to reapply the anchored ridge; a custom regularizer cannot use "
+            "DiagonalTikhonov's formula implicitly"
+        )
 
     # Manifold spec + optimiser dispatch (plan §2.6 / §7). For v1-style
     # all-Euclidean trees this resolves to optimistix_lm() and mode
@@ -450,6 +505,8 @@ def build_estimator(
     # assertion cannot hold; see _apply_linear_fast_path).
     if linear:
         optimizer = _apply_linear_fast_path(optimizer, dispatch_mode, weighting)
+    if jacobian_memory == "bounded":
+        optimizer = _with_bounded_jacobian(optimizer)
 
     # #124 kernel-path gate (factory-static). The traced-argument path
     # serves the ported surface: v1 scalar parameters, a standard
@@ -622,9 +679,7 @@ def build_estimator(
 
     def _apply_anchored(V: Float[Array, "M M"]) -> Float[Array, "M M"]:
         """Apply the ridge at the anchored ``tau_anchor`` deterministically."""
-        if hasattr(regularization, "apply_fixed_tau"):
-            return regularization.apply_fixed_tau(V, tau_anchor)
-        return V + tau_anchor * jnp.diag(jnp.diag(V))
+        return apply_fixed_tau(V, tau_anchor)
 
     # Detect whether the measure / covariance combination supports the
     # shared ``expectation_and_contributions`` primitive.
@@ -852,7 +907,20 @@ def build_estimator(
         # result is the same (M, total_dimension) ambient Jacobian.
         # Keyed on ``all_scalar`` (not ``dispatch_mode``) so a non-scalar
         # Euclidean tree takes the inline AD path too (#110).
-        if not all_scalar:
+        if jacobian_memory == "bounded" and not (
+            all_scalar
+            and isinstance(measure_arg, AnalyticalMeasure)
+            and measure_arg.jacobian_fn is not None
+        ):
+
+            def _moment_of_flat(tf: Float[Array, " K"]) -> Float[Array, " M"]:
+                th = params_mod.unflatten_params(
+                    tf, treedef, manifold_spec=unflatten_spec
+                )
+                return jnp.asarray(measure_arg.expectation(model, th))
+
+            G_local = columnwise_jacobian(_moment_of_flat, theta_flat)
+        elif not all_scalar:
 
             def _moment_of_flat(tf: Float[Array, " K"]) -> Float[Array, " M"]:
                 th = params_mod.unflatten_params(
@@ -1075,6 +1143,13 @@ def build_estimator(
         # selects the parameters channel; a plain theta PyTree falls straight
         # through unchanged (bitwise the prior run() path).
         theta_init_call = _resolve_parameters(theta_init_call, _THETA_INIT_UNSET)
+        if jacobian_memory == "bounded" and not _bounded_measure_supported(
+            measure_call
+        ):
+            raise TypeError(
+                "jacobian_memory='bounded' requires a built-in Measure with "
+                "a known bounded expectation path"
+            )
         if not all_scalar:
             # Manifold-aware flatten: the v1 2-tuple raises on non-scalar
             # ManifoldLeaf blocks (R19). A RiemannianOptimizer ignores
@@ -1416,6 +1491,7 @@ def build_estimator(
         "optimizer": optimizer,
         "penalty": penalty,
         "moment_names": moment_names,
+        "jacobian_memory": jacobian_memory,
     }
     return _run
 
@@ -1433,6 +1509,7 @@ def estimate(
     moment_names: tuple[str, ...] | None = None,
     penalty: PenaltyStrategy | None = None,
     linear: bool = False,
+    jacobian_memory: str = "default",
 ) -> OptimizationResult:
     """Estimate :math:`\\hat\\theta` by minimising
     :math:`Q_\\mu(\\theta) = \\| L_\\mu(\\theta)^{-1}\\, \\mathbb{E}_\\mu[\\psi(\\cdot,\\theta)] \\|^2`.
@@ -1524,6 +1601,9 @@ def estimate(
         is). If you want the step *verified* --- taken only when a first-order
         certificate holds, with a fall-back iterative solve otherwise --- pass
         ``optimizer=linear_solver(verify=True)`` instead of ``linear=True``.
+    jacobian_memory : {"default", "bounded"}
+        Opt into bounded-tangent Jacobian work in the solve and inference.
+        The default remains the existing QR / forward-mode behavior.
 
     Returns
     -------
@@ -1546,6 +1626,7 @@ def estimate(
         moment_names=moment_names,
         penalty=penalty,
         linear=linear,
+        jacobian_memory=jacobian_memory,
     )
     return run(resolved_theta, measure)
 

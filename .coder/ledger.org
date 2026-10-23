@@ -317,6 +317,99 @@ and gauge both route through the shared =information_matrix= / =pinv_eigvalrule=
 and no =CONTRADICTION= (the #178 review closed the one drift: the diagnostic now
 honors the frozen-=V*= / anchor-once convention rather than re-anchoring).
 
+** 7.6 -- Array-level Kleibergen statistic (#226)
+
+Grounded 2026-10-22 on main =9da0985= using ripgrep, git history, and the source/tests below.
+The existing-machinery line references describe that pre-refactor snapshot.
+The consumer supplies already-matched mean moments, their Jacobian, covariance,
+and Jacobian--moment cross-covariance without a framework covariance strategy.
+
+*** Task and existing machinery
+
+Expose =k_statistic_from_arrays(m, G, V, *, score_covariance,
+gauge_nullspace_dim=0)= as a full-vector entry point returning the existing
+=KStatisticResult=.
+The cross-covariance is required; no implicit raw-=G= fallback is permitted.
+
+- =inference/k_statistic.py:325=, =_compute_d_tilde= :: existing dispatch for
+  empirical/synthetic contributions and explicit =score_cov_fn=, ending in
+  =D_tilde[:,j] = G[:,j] - Sigma[j] @ solve(V,m)=.
+  Tested by =TestScoreCovFnPath= and =TestStrongIdFallbackIsLoud= in
+  =tests/inference/test_k_statistic.py=.
+- =inference/k_statistic.py:476=, =_stats_from_whitened= :: top-=p_id= left
+  singular projection, residual-norm S, and J = K + S.
+  Tested by =tests/inference/test_k_statistic_gauge.py=.
+- =inference/k_statistic.py:531=, =_k_statistic_arrays= :: current whitening
+  and decomposition kernel; share this algebra rather than duplicate it.
+- =inference/k_statistic.py:158=, =KStatisticResult=, and =:463=,
+  =_kappa_chi2_sf= :: existing traceable result and tail probabilities.
+  Tested by =TestJitVmapCompatibility= and =TestJustIdentified=.
+- =_internal/cholesky.py:34= :: PD Cholesky/solve helpers; numeric failures
+  return NaNs under tracing rather than Python exceptions.
+
+*** Definitions and invariants
+
+- =m= is the vector of moment means and =G= differentiates those same means.
+  =V= is their covariance in mean units; =score_covariance[j]= is
+  =Cov(G[:,j],m)=, with shape =(p,M,M)= and no symmetry assumption.
+- The supplied symmetric PD =V= is used for both correction and whitening,
+  matching the high-level =V== override.
+  This entry point does not recompute a ridge or change the supplied metric.
+- Common-N long-run covariance inputs must first be converted to mean
+  covariance units on BOTH covariance tensors.
+  Unequal observability uses the existing pair-specific normalisation
+  (Section 3), never a scalar-N criterion multiplier.
+- =p_id = p - gauge_nullspace_dim= controls both the SVD projection and dofs:
+  =(p_id, M-p_id, M)=.
+  Keep the count rule; numerical rank thresholding is a separate policy.
+- Shape and static-integer errors refuse before tracing arithmetic.
+  Invalid numerical inputs must propagate with a named event flag (#140);
+  the expected =p_S= NaN when its dof is zero is not an input failure.
+  The additive =KStatisticResult.invalid_input= is a Boolean array on the
+  validated array path and defaults to =None= on the unchanged legacy path.
+  Traced predicates check finiteness, pair-scale-relative symmetry and PD;
+  invalid inputs/intermediates are excluded from the SVD and flagged.
+  The symmetry tolerance uses the product of marginal standard deviations
+  for each moment pair: a global maximum can hide order-one correlation
+  asymmetry under unequal units.
+  Apply machine epsilon before multiplying the scales to avoid overflow.
+- Preserve high-level dispatch, =V=/=L= overrides, the explicit legacy
+  strong-ID fallback, and the concentrated-nuisance subvector reference.
+
+*** Reuse decisions and verification
+
+- *Extend* the existing correction and whitening helpers into a shared array
+  kernel; retain measure/covariance dispatch in the high-level wrapper.
+- *Reuse* the singular projection, p-value helper, and result container.
+- *New* public wrapper: existing entry points require model/measure objects,
+  which cannot represent this consumer's externally constructed covariance.
+- Check nonzero-correction parity with the high-level =score_cov_fn=/=V= path,
+  a case differing from raw-=G=, unequal moment rescaling of every tensor,
+  quotient dimensions with =p_id <= M < p=, jit/vmap, structural refusal,
+  and numerical failure events.
+  Rescaling invariance alone cannot detect an omitted correction.
+- No unresolved statistical design question in this slice.
+  Contribution aggregation, design/FPC/dof construction, and subvector array
+  tests remain outside it; callers supply the matched covariance tensors.
+
+Verification against 7.6 :: *OK*.
+The array wrapper shares the existing correction, whitening, projection, tails and result assembly; the legacy dispatch and subvector reference are preserved.
+The new array tests and independent adversarial checks pass, including nonzero nonsymmetric cross-covariance, unequal moment units, quotient dimensions, jit/vmap, and named numerical-failure events.
+Pair-specific symmetry checks reject the mixed-unit counterexample while accepting roundoff at tiny and huge scales without overflowing the tolerance.
+Ruff, black, mypy and diff checks pass; no =REINVENTION= or =CONTRADICTION= with this section's definitions and invariants.
+
+** 7.7 -- Clustered K cross-covariance finite-cluster factor (#191)
+
+Grounded 2026-10-23 on =main= =adc4264= before editing the K implementation.
+=ClusteredCovariance.covariance= multiplies each moment pair by the supported-cluster factor =G_jk/(G_jk-1)= when =dof_correction=True=; its private =_finite_cluster_correction(mask)= is the one tested definition (=src/emu_gmm/covariance/clustered.py:137-166=).
+=k_statistic= dispatches the same covariance strategy to =_sigma_jm_clustered_from_contributions= (=src/emu_gmm/inference/k_statistic.py:270-309, 425-435=), but that tensor currently omits the factor.
+The correction =D_tilde[:,j] = G[:,j] - Sigma[j] @ solve(V,m)= therefore mixes scales at a finite cluster count.
+
+Reuse the strategy's existing pair-supported factor for every parameter slice of =Sigma=, after cluster-total aggregation and before the shared =N_j N_k= normalization.
+Keep the default =dof_correction=False= path bitwise unchanged and leave caller-supplied =score_cov_fn= and =k_statistic_from_arrays= to the caller's matched-covariance contract.
+Test unequal moment support with an offset null so =m= and the cross-covariance correction are nonzero, and compare with a supplied matched =score_cov_fn= oracle.
+This is a scale-consistency repair, not a new K-statistic estimator.
+
 * Section 8 -- =EstimatorLaw= CORE (#144): the empirical-law carrier umbrella
 
 The carrier-class generalisation of the #167 point/tuple slice (Sec. 1-6):
@@ -767,14 +860,89 @@ Verify-against-ledger result: *OK (anchored on 9.2/9.3)* -- the targeted replica
 The independent review's broadcasting reproduction is now guarded; conditioning tests and their law consumers pass with matching-vector contrasts and explicit scalar selections preserved.
 No statistical estimator or reduction was reimplemented; concatenation extends the existing pytree record carrier, coupling retains its provenance guards, and persistence retains legacy key values and zero-based indices.
 
-* Section 12 -- DesignAware fixed-stratum centering (issue 145; design pass)
+* Section 10 -- #232 Jacobian-memory design and opt-in implementation
 
-** 12.1 -- Task
+1. Task :: Add one opt-in bounded-memory route across both the LM solve and postfit moment Jacobian \(G\), preserving default behavior.
+2. Existing machinery :: =optimizer.py:212-214= creates Optimistix LM with default QR; the installed Optimistix 0.1.0 builds a =FunctionLinearOperator= from =jax.linearize= before damping, and installed Lineax 0.1.1 QR materializes it through =as_matrix()=.
+   =estimator.py:855-868= computes postfit \(G\), delegating scalar trees to =measure.jacobian=; =measures/empirical.py:589-606= constructs =(N,M,K)= with =vmap(jacfwd)=.
+   =manifolds/riemannian_lm.py:493,512,725= and =optimizer.py:537,551,560= have separate native =jacfwd= sites.
+   =optimizer.py:39-98= and =tests/test_estimator_traced_measure.py:117-160= establish stable residual/args identity and no-retrace behavior.
+3. Definitions :: \(G=\partial m(\theta)/\partial\theta_{\mathrm{flat}}\) is an ambient =(M,K)= matrix, projected horizontally for gauge-bearing leaves; =G' Lambda G= is the information matrix.
+   The empirical \(m_j\) uses masked, weighted per-coordinate means with \(N_j\), and differentiates only observed cells after safe-x preprocessing.
+4. Invariants :: Keep the default QR and existing measure/parameter dispatch bitwise; keep the complete whitened residual derivative for CU weighting and penalties; preserve analytical user-supplied =jacobian_fn= on its existing scalar path; keep the final \(G\) and gauge projection.
+   A bounded mode cannot promise memory independent of \(K\): \(G\), its \(K\times K\) information matrix, and JAX's primal tape remain.
+5. Reuse decision :: The factory-static estimator setting selects matrix-free =lx.LSMR= for built-in Optimistix LM and a shared =lax.map= columnwise JVP helper for Emu's internal dense-Jacobian sites and postfit \(G\).
+   =lx.Normal(lx.CG(...))= is matrix-free but squares condition number; =NormalCG= spelling is deprecated in installed Lineax.
+   Custom opaque optimizers/measures require an explicit bounded capability or a clear early rejection.
+6. Open questions :: Consumer-size GPU peak memory and difficult weak-identification behavior still need external validation; the opt-in rejects opaque custom solvers and measures rather than claiming a capability it cannot inspect.
+
+Verification against ledger: targeted nonlinear analytical, supplied analytical Jacobian, ragged-mask CU+penalty, synthetic CRN, manifold, factory no-retrace, rank-poor LSMR, and JIT/vmap-with-traced-args checks pass; the final branch =make quick-check= passed ruff, Black, mypy, and pytest (1657 passed, 13 skipped, 123 deselected).
+The reproducible CPU x64 compiled-buffer probe at \(N=32768\) and \(K=4,8,16\) shows postfit temporary bytes =8.5/34.1/136.3 MB= with =jacfwd= versus =3.2/6.4/12.7 MB= columnwise, and LM temporary bytes =13.2/43.0/153.6 MB= with QR versus =10.0/19.5/38.4 MB= with LSMR.
+This is estimated XLA temporary memory, not a GPU peak claim; =.coder/design-232-jacobian-memory.org= records the method and remaining limits.
+
+* Section 11 -- Opt-in numerical bread rank (#219)
+
+** 11.1 -- Task and search
+
+Specify a law-side, explicitly selected relative cutoff for the fitted bread, with the count-only default unchanged.
+The target is a numerical retained-subspace covariance plus a separate functional-sensitivity report, not a population-identification or boundary-inference claim.
+Search tier: ripgrep plus direct source/test reads and git history; no gitnexus tool is exposed in this session.
+
+** 11.2 -- Existing machinery
+
+- Bread inverse :: =src/emu_gmm/_internal/pinv_eigvalrule.py:53= drops exactly =gauge_dim= smallest eigenvalues; =:116= returns =jnp.linalg.inv= bitwise for zero gauge.
+  =tests/test_pinv_eigvalrule.py:34=, =:46=, =:85=, and =:117= guard the count, jit/vmap, and bounds.
+- Sandwich :: =src/emu_gmm/_internal/asymptotic.py:35= forms \(B=G'\Lambda G\), \(M=G'\Lambda V\Lambda G\), and \(B^+ M B^+\).
+  =src/emu_gmm/law.py:1208= calls it from the live =AsymptoticLaw=; =tests/test_result_law_fidelity.py:275= pins a hand-built weighting-aware example.
+- Fit ingredients :: =src/emu_gmm/types.py:704= / =:711= / =:716= retain =G=, realised =Lambda=, and raw =V= on =OptimizationResult=.
+  =n_overid= is separate (=:721=).
+- Functional queries :: =src/emu_gmm/inference/functional_se.py:120= takes the ambient Jacobian of =f(components)=; =src/emu_gmm/law.py:1436= and =:1490= reuse the law covariance for SEs and sampling.
+  =tests/manifolds/test_manifold_acceptance_phase7.py:204= guards gauge rotations.
+- Geometry :: =src/emu_gmm/manifolds/spec.py:53= holds flat ambient order and nominal gauge count; =src/emu_gmm/manifolds/psd_fixed_rank.py:152= uses the Frobenius metric.
+  =src/emu_gmm/law.py:398= routes named leaf queries through the same law.
+- Persistence :: =src/emu_gmm/persistence.py:261= saves either a live or reloaded =AsymptoticLaw=, storing components and assembled covariance but not =G/Lambda/V= (=:281=); =:469= writes an inert NPZ, =:528= loads it.
+  =tests/test_persistence.py:168= guards re-save and =:246= guards moments-backed reconstruction.
+
+** 11.3 -- Definitions and invariants
+
+- The default =pinv_eigvalrule= is count-only to avoid conflating weak positive bread directions with gauge zeros (=pinv_eigvalrule.py:19=); #219 adds an opt-in policy, never a new default.
+- The raw-meat sandwich uses the realised, possibly ridged =Lambda= and unregularised =V=, not =B^{-1}= alone (=asymptotic.py:13=; =docs/optimization-result-law-split.org=, "Why the Hessian alone is not enough").
+- Flat ambient coordinates and the Euclidean metric determine eigenvalues, projectors, derivative norms, and the relative cutoff; rescaling a parameter changes the policy.
+  This agrees with the Frobenius metric on =PSDFixedRank= (=psd_fixed_rank.py:152=) but differs from the point-dependent metrics on =Positive= and =Interval= (=positive.py:82=, =interval.py:115=).
+- =PSDFixedRank(n,k)= has nominal gauge count =k(k-1)/2= only on the regular rank-=k= stratum (=psd_fixed_rank.py:45=); neither the count nor eigenvector order proves a geometric gauge direction at singular =A=.
+- Numerical singularity of the ambient bread and nominal gauge dimension are different objects; =extra_excluded= is arithmetic and cannot certify nongauge identification failure.
+- An assembled =Sigma= alone cannot recover a new bread cutoff after reload; the current persistence path discards the sandwich ingredients (=persistence.py:281=).
+- A numerical-rank option must leave optimization diagnostics, =n_overid=, and J-test calibration unchanged (=types.py:721=; =law.py:1309=).
+
+** 11.4 -- Reuse decisions
+
+- *Reuse* the existing =G/Lambda/V= sandwich and =AsymptoticLaw= functional/leaf query algebra.
+- *Extend* law-side bread inversion with an opt-in report; do not alter =pinv_eigvalrule='s default or the estimator's optimization fields.
+- *Extend* typed =LawState= persistence with policy, signed spectrum, retained mask, and the whole excluded projector; do not derive them from saved =Sigma=.
+- *New* second-order sensitivity query: the current =functional_se= computes only \(J_f\Sigma J_f'\), so it cannot detect =f(A)=AA'= at =A=0=.
+
+** 11.5 -- Design resolution and implementation checks
+
+=docs/numerical-rank-policy.org= specifies the opt-in API, native ambient/Frobenius convention, signed-spectrum rule, invalid-bread statuses, full excluded projector, first/mixed-second derivative sensitivity, singular-geometry status, and versioned load/re-save behavior.
+The plan refuses post-load tolerance changes without =G/Lambda/V= and makes no boundary-valid inference claim.
+=functional_se(f)= remains a conditional retained-subspace SE even when excluded-direction sensitivity is nonzero; a separate query reports that sensitivity, and versioned persistence preserves both meanings across load/re-save.
+Implementation must test unchanged-default fidelity, gauge rotations, weak positive directions, zero-gradient quadratic and higher-order counterexamples, projector validation, schema-1 compatibility, and every law query using the same policy.
+* Section 12 -- Grid-limited random-set law (#180)
+
+1. Task :: Carry repeated =KConfidenceSet= inversions as a set-valued law with explicit scanned-grid events and capacity/coverage counts. Section 11 is reserved for #219's numerical-rank policy.
+2. Existing machinery :: Search tier: ripgrep and git history. =inference/confidence_set.py:115,472= defines the grid, acceptance mask, topology, interpolated intervals, and invalid/nonconverged point indices; =tests/inference/test_k_confidence_set.py= and =test_profiled_confidence_set.py= cover fixed-curve and profiled inversion. =law.py:307= defines the point-valued =EstimatorLaw= interface; =studies/conditioning.py:219= counts selected numeric records; =types.py:564= and =persistence.py:187= store fixed-shape numeric records and inert law artifacts.
+3. Definitions :: =topology='empty'= means no *scanned* grid point was accepted, not that the set is globally empty. =in_set[j]= is false at invalid or nonconverged points even when the test result is not a valid rejection; membership there is unknown. Interpolated intervals and open edges do not establish off-grid membership.
+4. Invariants :: Use the common finite strictly increasing grid and common inversion level/statistic for repeated sets. Preserve invalid and nonconverged as separate event counts; an unknown verdict cannot enter a coverage denominator as a rejection. Empty conditional selections remain queryable with zero counts and NaN rate. Set artifacts contain only inert data, not estimator closures or pickled objects.
+5. Reuse decision :: Reuse =KConfidenceSet= and its per-point acceptance/event masks; add a sibling =RandomSetLaw= rather than coerce sets into =EstimatorLaw='s point summaries or =FitRecord=. Use structured set-query counts and a separate versioned NPZ codec, leaving numeric-law persistence untouched.
+6. Open questions :: Finite scanned-grid capacity is the first slice. Membership between grid points, a certified global empty set, and compact-set capacity beyond finite grid subsets require separate semantics and calibration.
+* Section 14 -- DesignAware fixed-stratum centering (issue 145; design pass)
+
+** 14.1 -- Task
 
 Repair fixed-stratum-profile contamination of the mixed \(V_{TT}+V_{SS}+V_{TS}\) covariance while retaining the design-exact \(TT\) block, pair-specific missingness, the cross-block decomposition, and a meaningful cross-arm sampling term.
 The proposed estimand and its identification limit are in =.coder/design-145-centering.org=.
 
-** 12.2 -- Existing machinery (ripgrep + git; tested)
+** 14.2 -- Existing machinery (ripgrep + git; tested)
 
 - =StratifiedCovariance.covariance= :: =src/emu_gmm/covariance/stratified.py:171-291=; pair-overlap, within-cell centering and local Bessel correction. Independent NumPy guards: =tests/covariance/test_stratified.py:46-124= and its F1-F6 fixtures.
 - =DesignAwareCovariance.covariance= / =_cross_corners= / =cross_block= :: =src/emu_gmm/covariance/stratified.py:490-661=; \(TT\) delegates to the shared design engine, \(SS\) to the uncentered sampling engine, \(TS\) to an inline cluster-total pass. Guards: =tests/covariance/test_stratified.py:900-1177,1253-1344=.
@@ -782,13 +950,13 @@ The proposed estimand and its identification limit are in =.coder/design-145-cen
 - =_safe_outer_divide= :: =src/emu_gmm/covariance/_outer_product.py:52-65=; the shared zero-support-safe \(1/(N_jN_k)\) normalization.
 - #130 fixture :: =scripts/validation/ladder_mc.py:219-365= and =docs/validation/ladder-mc-2026-06-10.org:200-247=; fixed demeaned profile with PSU-level randomness, no genuine cross-arm shock.
 
-** 12.3 -- Definitions
+** 14.3 -- Definitions
 
 For every covariance entry \((j,k)\), the denominator is \(N_jN_k\), with \(N_j=\sum_i d_{ij}w_i\) (=docs/design.org:204-224=).
 The design cell is stratum by arm, whereas the caller chooses the sampling cluster unit; they need not coincide (=src/emu_gmm/covariance/stratified.py:244-259,419-429=).
 The #119 cross correction inherits the sampling engine's per-pair global \(G_{jk}/(G_{jk}-1)\) when its flag is true (=src/emu_gmm/covariance/stratified.py:604-615=).
 
-** 12.4 -- Invariants and assumptions
+** 14.4 -- Invariants and assumptions
 
 The all-design case is bit-for-bit the shared =StratifiedCovariance=; \(V_{\mathrm{coupled}}=V_{\mathrm{uncoupled}}+V_{TS}\) is the #109 identity; design FPC touches \(TT\) only (=src/emu_gmm/covariance/stratified.py:533-553,638-661=).
 Pair overlap is counted at the sampling cluster unit for \(SS/TS\), and unequal masks or weights must not be replaced by a common \(N\).
@@ -796,19 +964,19 @@ A fixed shift of /cluster totals/ differs from a fixed conditional /per-observat
 A fixed outcome profile times a varying instrument still has within-stratum sampling variation.
 One sampling cluster per stratum supplies no within-stratum replication for estimating an arbitrary fixed mean and a random stratum shock separately.
 
-** 12.5 -- Reuse decision
+** 14.5 -- Reuse decision
 
 - Reuse :: =StratifiedCovariance= without modification for \(TT\), =_safe_outer_divide= for scaling, and the caller's sampling IDs/support rule.
 - Extend :: A common within-stratum, pair-overlap, exposure-projected sampling kernel should feed \(SS\) and \(TS\); =ClusteredCovariance.centered=True= is global and does not fit. The balanced-exposure special case reduces to ordinary centered cluster totals.
 - New only if approved :: A nested-cluster/stratum validation rule and a surfaced unsupported-cross-pair event; current interfaces do not expose either.
 
-** 12.6 -- Open decisions
+** 14.6 -- Open decisions
 
 The fixed-strata versus random-stratum estimand, exposure-adjusted nuisance
 profile, and one-cluster support rule are resolved by the opt-in slice below.
 The global #119 factor is retained only in the default random-stratum mode.
 
-** 12.7 -- Opt-in slice and falsification
+** 14.7 -- Opt-in slice and falsification
 
 The approved choice is a conditional-on-fixed-strata mode, selected by
 =from_design_mask(..., fixed_strata=True)=; the default uncentered
@@ -841,6 +1009,9 @@ The #109 identity and \(1/(N_jN_k)\) scaling are retained.
 The factory rejects sampling clusters crossing strata, cells crossing
 strata, and designs with fewer than two sampling clusters in /every/
 observed stratum.
+It checks that fixed-mode cluster, stratum, and cell IDs are finite and
+exactly integer-valued before casting; silent rounding could change the
+nesting relation and invalidate this projection.
 Sparse individual cell pairs still contribute zero when \(H<2\), either
 exposure norm is zero, or the projection trace is at or below
 \(\sqrt{\epsilon_{\mathrm{mach}}}H\).
@@ -865,4 +1036,17 @@ overestimates it at 0.057219.
 Exact commands and output are in
 =.coder/design-145-cell-pointwise-2026-10-23.log= and
 =.coder/design-145-cell-paired-4096-2026-10-23.log=.
-The revised estimator's full coverage calibration remains to be measured.
+The revised 300-rep seed-20260610 #130 ladder gives b1 Wald coverage
+279/295 = 0.946 (MCSE 0.0132; Wilson 95% [0.914, 0.966]) for fixed local,
+versus 281/297 = 0.946 for pure Stratified and reported coverage 0.661
+for the unchanged default coupled mode (its b1 denominator was not logged).
+Its b1 SE/SD ratio is 0.935 versus pure Stratified's 0.936, and neither
+arm binds the ridge.
+The extra-global ablation covers 278/295 = 0.942, too close to fixed local
+to distinguish by this coverage count; the paired covariance target
+identifies its systematic inflation.
+The b0 coverage of 273/295 = 0.925 is similar to the pure-design
+comparator's 273/297 = 0.919, so the result supports the stated b1
+fixed-profile use case without a general coverage guarantee.
+The SHA-pinned Slurm job 40409988 completed exit zero in 1:56:15; its
+clean output is =.coder/design-145-cell-coverage-300-2026-10-23.log=.

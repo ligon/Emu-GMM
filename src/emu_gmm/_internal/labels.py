@@ -112,10 +112,7 @@ def normalise_x(
                 f"{[a.name for a in x_in.axes]}"
             )
         # First axis presumed to be observations; second to be variables.
-        cols = (
-            (x_in.axes[1].name,) if False else tuple([x_in.axes[1].name])
-        )  # placeholder
-        # Actually a NamedArray's axes are AXIS-LEVEL names (one per dim),
+        # A NamedArray's axes are AXIS-LEVEL names (one per dim),
         # not per-coordinate names. For per-coordinate names we'd need
         # a different mechanism. For v1, treat the axis name as the
         # collective label and use positional names for the columns.

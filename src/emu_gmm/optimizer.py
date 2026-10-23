@@ -33,12 +33,14 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import lineax as lx
 import numpy as np
 import optimistix as optx
 import scipy.optimize as so
 from jaxtyping import Array, Float
 
 from emu_gmm._internal.fn_cache import FunctionKeyedCache
+from emu_gmm._internal.jacobian import columnwise_jacobian
 from emu_gmm.types import OptimizerInfo
 
 # Per-function cache mapping a user ``residual_fn`` to its optimistix
@@ -115,7 +117,12 @@ def _supports_args(optimizer: Any) -> bool:
         return False
     p = sig.parameters.get("args")
     if p is None:
-        return False
+        # A third-party optimiser can accept args=... through **kwargs
+        # without declaring a named parameter.
+        return any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in sig.parameters.values()
+        )
     # Audit L3: a name-only check misroutes a v1-valid
     # ``def __call__(self, residual_fn, theta_init, *args)`` onto the
     # kernel path (VAR_POSITIONAL "args" cannot receive a keyword) and
@@ -167,6 +174,7 @@ class _OptimistixLM:
     rtol: float
     atol: float
     max_steps: int
+    jacobian_memory: str = "default"
 
     def __call__(
         self,
@@ -209,9 +217,14 @@ class _OptimistixLM:
             backend; previously ``None`` here, forcing the status-string
             fallback that is unreliable under jit).
         """
-        solver: optx.LevenbergMarquardt = optx.LevenbergMarquardt(
-            rtol=self.rtol, atol=self.atol
-        )
+        if self.jacobian_memory == "bounded":
+            solver: optx.LevenbergMarquardt = optx.LevenbergMarquardt(
+                rtol=self.rtol,
+                atol=self.atol,
+                linear_solver=lx.LSMR(rtol=self.rtol, atol=self.atol),
+            )
+        else:
+            solver = optx.LevenbergMarquardt(rtol=self.rtol, atol=self.atol)
 
         if args is None:
             # v1 path: ``fn`` is a memoised wrapper around the one-arg
@@ -273,6 +286,8 @@ def optimistix_lm(
     rtol: float = 1e-8,
     atol: float = 1e-8,
     max_steps: int = 200,
+    *,
+    jacobian_memory: str = "default",
 ) -> _OptimistixLM:
     """Build an optimistix Levenberg--Marquardt optimiser.
 
@@ -285,6 +300,11 @@ def optimistix_lm(
         Maximum number of LM iterations. If reached without convergence
         the returned :class:`~emu_gmm.types.OptimizerInfo` has
         ``status="max_iterations"``.
+    jacobian_memory : {"default", "bounded"}
+        ``"bounded"`` uses a matrix-free LSMR solve instead of QR. This
+        avoids materializing all residual tangents together at each step.
+        For an :func:`emu_gmm.estimate` call, set its ``jacobian_memory``
+        argument too so the postfit moment Jacobian uses bounded work.
 
     Returns
     -------
@@ -292,7 +312,14 @@ def optimistix_lm(
         A callable satisfying the :class:`~emu_gmm.types.Optimizer`
         protocol. ``jit`` / ``vmap`` compatible.
     """
-    return _OptimistixLM(rtol=rtol, atol=atol, max_steps=max_steps)
+    if jacobian_memory not in ("default", "bounded"):
+        raise ValueError("jacobian_memory must be 'default' or 'bounded'")
+    return _OptimistixLM(
+        rtol=rtol,
+        atol=atol,
+        max_steps=max_steps,
+        jacobian_memory=jacobian_memory,
+    )
 
 
 def _optimistix_status(result: Any) -> str:
@@ -484,6 +511,7 @@ class _LinearSolver:
     fallback: Any  # an Optimizer; constructed in :func:`linear_solver`.
     tol: float
     verify: bool
+    jacobian_memory: str = "default"
 
     def __call__(
         self,
@@ -534,7 +562,11 @@ class _LinearSolver:
             # path cannot speed up under vmap). The caller owns correctness;
             # ``final_objective`` still surfaces a misuse (it is not ~0 when
             # the residual was in fact nonlinear).
-            j0 = jax.jacfwd(rf)(theta_init)  # (M, K)
+            j0 = (
+                columnwise_jacobian(rf, theta_init)
+                if self.jacobian_memory == "bounded"
+                else jax.jacfwd(rf)(theta_init)
+            )  # (M, K)
             r0 = rf(theta_init)  # (M,)
             theta_hat = theta_init - jnp.linalg.lstsq(j0, r0, rcond=None)[0]
             r1 = rf(theta_hat)
@@ -548,7 +580,11 @@ class _LinearSolver:
         # The Gauss--Newton candidate and its first-order optimality
         # certificate. All of this traces cleanly (jacfwd / lstsq / norms);
         # only the concrete accept/reject is eager-only.
-        j0 = jax.jacfwd(rf)(theta_init)  # (M, K)
+        j0 = (
+            columnwise_jacobian(rf, theta_init)
+            if self.jacobian_memory == "bounded"
+            else jax.jacfwd(rf)(theta_init)
+        )  # (M, K)
         r0 = rf(theta_init)  # (M,)
         # One Gauss--Newton / linear least-squares step. Exact for an affine
         # residual in both the just-identified (M == K) and over-identified
@@ -557,7 +593,11 @@ class _LinearSolver:
         theta_hat = theta_init + delta
         # Certify: g1 = J1' r1 vanishes for an affine residual; a single
         # Gauss--Newton step leaves it at O(||g0||) for a nonlinear one.
-        j1 = jax.jacfwd(rf)(theta_hat)
+        j1 = (
+            columnwise_jacobian(rf, theta_hat)
+            if self.jacobian_memory == "bounded"
+            else jax.jacfwd(rf)(theta_hat)
+        )
         r1 = rf(theta_hat)
         g1_norm = jnp.linalg.norm(j1.T @ r1)
         g0_norm = jnp.linalg.norm(j0.T @ r0)

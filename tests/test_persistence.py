@@ -510,6 +510,7 @@ class TestEmpiricalRoundTrip:
         assert r.grade == "empirical"
         assert r.param_names == ("x", "y")
         assert r.event_names == ("binding_ridge",)
+        assert r.event_share("binding_ridge") == law.event_share("binding_ridge")
         np.testing.assert_array_equal(np.asarray(r.se()), np.asarray(law.se()))
         assert np.isclose(r.pvalue(0.0), law.pvalue(0.0))
         with warnings.catch_warnings():

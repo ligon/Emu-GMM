@@ -20,6 +20,7 @@ dependencies = [
   "haliax>=1.4.dev452,<1.5",
   "jax_dataclasses>=1.6.1",
   "optimistix>=0.0.7",
+  "lineax>=0.1.1,<0.2",
   "numpy>=1.26",
   "scipy>=1.11",
   "pandas>=2.0"
@@ -46,6 +47,7 @@ jaxtyping = ">=0.2.30"
 haliax = { version = ">=1.4.dev452,<1.5", allow-prereleases = true }
 jax_dataclasses = ">=1.6.1"
 optimistix = ">=0.0.7"
+lineax = ">=0.1.1,<0.2"
 numpy = ">=1.26"
 scipy = ">=1.11"
 pandas = ">=2.0"
@@ -87,7 +89,7 @@ select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501", "F722", "F821", "UP037"]
 
 [tool.ruff.lint.isort]
-known-third-party = ["jax", "jaxtyping", "haliax", "jax_dataclasses", "optimistix", "numpy", "scipy"]
+known-third-party = ["jax", "jaxtyping", "haliax", "jax_dataclasses", "optimistix", "lineax", "numpy", "scipy"]
 
 [tool.mypy]
 python_version = "3.11"

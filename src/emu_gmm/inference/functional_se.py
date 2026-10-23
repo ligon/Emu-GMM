@@ -117,6 +117,35 @@ def _unflatten_to_components(
     return tuple(out)
 
 
+def _functional_jacobian(
+    f: Callable[[tuple[Any, ...]], Any], components: Sequence[Any]
+) -> Float[Array, "p D"]:
+    """Ambient Jacobian of a functional at fixed component values."""
+    shapes = _component_shapes(components)
+    theta_flat = _flatten_components(components)
+    D = int(theta_flat.shape[0])
+
+    def g(tf: Float[Array, " D"]) -> Float[Array, " p"]:
+        comps = _unflatten_to_components(tf, shapes)
+        y = jnp.atleast_1d(jnp.asarray(f(tuple(comps))))
+        if y.ndim != 1:
+            raise ValueError(
+                "functional_se: f must return a scalar or a 1-D array; got "
+                f"output of ndim {y.ndim} (shape {tuple(y.shape)}). Flatten "
+                "the output inside f (e.g. ravel a matrix to vech)."
+            )
+        return y
+
+    J_f = jnp.asarray(jax.jacrev(g)(theta_flat))
+    p = int(J_f.shape[0])
+    if J_f.shape != (p, D):
+        raise ValueError(
+            f"functional_se: Jacobian has shape {tuple(J_f.shape)}, expected "
+            f"(p, D) with D={D}"
+        )
+    return J_f
+
+
 def functional_se(
     f: Callable[[tuple[Any, ...]], Any],
     components: Sequence[Any],
@@ -159,7 +188,6 @@ def functional_se(
     R16). Eager-only: call outside any ``jax.jit`` boundary (R36).
     """
     sigma = jnp.asarray(getattr(sigma_theta, "array", sigma_theta))
-    shapes = _component_shapes(components)
     theta_flat = _flatten_components(components)
     D = int(theta_flat.shape[0])
     if sigma.shape != (D, D):
@@ -169,25 +197,7 @@ def functional_se(
             "match (this indicates a manifold-spec / components routing bug)"
         )
 
-    def g(tf: Float[Array, " D"]) -> Float[Array, " p"]:
-        comps = _unflatten_to_components(tf, shapes)
-        y = jnp.asarray(f(tuple(comps)))
-        y = jnp.atleast_1d(y)
-        if y.ndim != 1:
-            raise ValueError(
-                "functional_se: f must return a scalar or a 1-D array; got "
-                f"output of ndim {y.ndim} (shape {tuple(y.shape)}). Flatten "
-                "the output inside f (e.g. ravel a matrix to vech)."
-            )
-        return y
-
-    J_f = jnp.asarray(jax.jacrev(g)(theta_flat))  # (p, D)
-    p = int(J_f.shape[0])
-    if J_f.shape != (p, D):
-        raise ValueError(
-            f"functional_se: Jacobian has shape {tuple(J_f.shape)}, expected "
-            f"(p, D) with D={D}"
-        )
+    J_f = _functional_jacobian(f, components)
     cov = J_f @ sigma @ J_f.T
     cov = 0.5 * (cov + cov.T)  # neutralise rounding asymmetry (R33)
     diag = jnp.diag(cov)

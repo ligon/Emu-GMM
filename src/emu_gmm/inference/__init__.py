@@ -79,7 +79,17 @@ from emu_gmm.inference.identification import (
     identification_strength,
 )
 from emu_gmm.inference.j_test import JTestResult, j_test
-from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
+from emu_gmm.inference.k_statistic import (
+    KStatisticResult,
+    k_statistic,
+    k_statistic_from_arrays,
+)
+from emu_gmm.inference.numerical_rank import (
+    FunctionalSensitivity,
+    NumericalRankPolicy,
+    NumericalRankReport,
+    PSDFactorGeometry,
+)
 from emu_gmm.inference.wild_bootstrap import (
     WildBootstrapResult,
     moment_wild_bootstrap,
@@ -97,6 +107,10 @@ __all__ = [
     "JTestResult",
     "KConfidenceSet",
     "KStatisticResult",
+    "FunctionalSensitivity",
+    "NumericalRankPolicy",
+    "NumericalRankReport",
+    "PSDFactorGeometry",
     "WildBootstrapResult",
     "adaptive_bootstrap",
     "cluster_bootstrap",
@@ -109,6 +123,7 @@ __all__ = [
     "j_test",
     "k_confidence_set",
     "k_statistic",
+    "k_statistic_from_arrays",
     "moment_wild_bootstrap",
     "profiled_k_confidence_set",
     "vech_indices",

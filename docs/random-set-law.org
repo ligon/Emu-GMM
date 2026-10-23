@@ -1,0 +1,28 @@
+#+TITLE: Finite-grid random-set law (#180)
+
+=RandomSetLaw.from_k_confidence_sets(sets)= carries repeated =KConfidenceSet= results on one strictly increasing grid, at one =alpha= and with one inverted statistic.
+It is a sibling of the point-valued =EstimatorLaw=, since a set realization has no parameter mean, covariance, standard error, or quantile.
+The carrier rejects those point summaries explicitly.
+
+* Membership and events
+
+=coverage(theta0)= queries an *exact scanned grid point*.
+At that point a draw has one of three verdicts: accepted, rejected, or unknown because its p-value was invalid or its profiled nuisance fit did not converge.
+The reported estimate divides accepted draws by draws with a valid verdict; =n_invalid= and =n_nonconverged= explain unknown verdicts.
+=capacity(points)= applies the same rule to a nonempty finite subset of the grid: any valid accepted point establishes a hit, all valid rejected points establish a miss, and otherwise the draw is unknown.
+Both queries return =SetQueryReport= with original =n_total=, selected =n_used=, decidable count, hit count, event counts, and an estimate (NaN when no draw is decidable).
+=prob(theta0)= is an alias of the structured point-coverage query, so its denominator remains visible.
+
+=grid_empty= means that no *scanned* grid point was accepted.
+=given("grid_empty")= selects these draws; =event_share("grid_empty")= counts them within the current selection, including a zero-draw selection.
+An all-invalid scan also has =grid_empty=True=, but its queried membership is unknown.
+Neither =grid_empty= nor the interpolated intervals establish that the set is empty over the full parameter space.
+Open edge flags do not establish membership outside the grid, and off-grid queries raise =ValueError=.
+
+* Persistence and limits
+
+=law.save(path)= and =RandomSetLaw.load(path)= round-trip a versioned NPZ of the common grid, per-draw p-values/acceptance/event masks, interval display data, and original draw indices.
+The artifact contains no estimator code or pickle.
+Conditioned laws retain their original total and indices, including when the selection is empty.
+This first carrier does not estimate coverage from a single realized set; a one-draw =grid_empty= result is only that realization's event.
+Continuous-domain membership, certified global emptiness, and capacity for a general compact set need a separate contract and validation.

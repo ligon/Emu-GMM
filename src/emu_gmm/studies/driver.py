@@ -600,6 +600,7 @@ def replicate(
                 parameters=theta_init,
                 moment_names=spec["moment_names"],
                 penalty=spec["penalty"],
+                jacobian_memory=spec.get("jacobian_memory", "default"),
             )
 
         fit_per_rep = _fit_fresh_anchor

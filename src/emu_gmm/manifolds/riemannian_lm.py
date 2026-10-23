@@ -171,6 +171,7 @@ from jaxtyping import Array, Float
 
 from emu_gmm._internal import params as params_mod
 from emu_gmm._internal.fn_cache import FunctionKeyedCache
+from emu_gmm._internal.jacobian import columnwise_jacobian
 from emu_gmm.manifolds.euclidean import Euclidean
 from emu_gmm.manifolds.positive import Positive
 from emu_gmm.manifolds.spec import LeafSpec, ManifoldSpec
@@ -275,6 +276,7 @@ class _RiemannianLM:
     # never fires under the vmapped/replicate MC path). Set ``False`` to silence
     # both the warning and the probe.
     advise_nonconvex: bool = True
+    jacobian_memory: str = "default"
 
     def __call__(
         self,
@@ -490,7 +492,11 @@ class _RiemannianLM:
 
             # Initial Jacobian + lambda anchor (horizontal Gram scale).
             r0 = residuals(theta0_flat)
-            J0 = jax.jacfwd(residuals)(theta0_flat)  # (M, K)
+            J0 = (
+                columnwise_jacobian(residuals, theta0_flat)
+                if self.jacobian_memory == "bounded"
+                else jax.jacfwd(residuals)(theta0_flat)
+            )  # (M, K)
             Jh0 = project_jacobian(theta0_flat, J0)
             lam0 = 1e-3 * jnp.sqrt(jnp.sum((Jh0.T @ Jh0) ** 2))
             lam0 = jnp.maximum(lam0, 1e-12)
@@ -509,7 +515,11 @@ class _RiemannianLM:
                 del done, stagnated
                 r = residuals(x)
                 cost = jnp.sum(r * r)
-                J = jax.jacfwd(residuals)(x)  # (M, K) ambient
+                J = (
+                    columnwise_jacobian(residuals, x)
+                    if self.jacobian_memory == "bounded"
+                    else jax.jacfwd(residuals)(x)
+                )  # (M, K) ambient
                 Jh = project_jacobian(x, J)  # (M, K) horizontal
                 g_tan = Jh.T @ r  # (K,) horizontal gradient
                 A = Jh.T @ Jh  # (K, K) horizontal Gram
@@ -722,7 +732,14 @@ class _RiemannianLM:
             # Genuine-stationarity gate: the exact ``grad_ok`` test the solve
             # loop uses, recomputed at the returned iterate (horizontal gradient).
             r_fin = _residuals_eager(x_final)
-            Jh_fin = project_jacobian(x_final, jax.jacfwd(_residuals_eager)(x_final))
+            Jh_fin = project_jacobian(
+                x_final,
+                (
+                    columnwise_jacobian(_residuals_eager, x_final)
+                    if self.jacobian_memory == "bounded"
+                    else jax.jacfwd(_residuals_eager)(x_final)
+                ),
+            )
             g_norm_fin = riem_norm(x_final, Jh_fin.T @ r_fin)
             r_norm_fin = jnp.sqrt(jnp.sum(r_fin * r_fin))
             is_stationary = bool(g_norm_fin < (self.atol + self.rtol * r_norm_fin))

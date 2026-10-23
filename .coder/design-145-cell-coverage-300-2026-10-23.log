@@ -1,0 +1,22 @@
+job_id=40409988 sha=9dc20464cbc23c203f85f3a3c0e0b1558befb97d cpus=4
+allowed_cpus=4,6,37,39
+command=poetry run python scripts/validation/design_aware_fixed_strata_pilot.py --fit-reps 300 --paired-reps 4096 --seed 20260610
+fit_pilot seed=20260610 reps=300 profile=0.7 per_rep_anchor=True
+| arm | used | valid | J rej@5% | Jadj rej@5% | J-KS | cover b0/b1 | bias b0/b1 | SE/SD b0/b1 | tau-bind | time |
+|-
+| design_aware | 269/300 | 177se/269J ! | 0.097 | 0.100 | 0.034 | 0.877 / 0.661 | -0.0086 / -0.0006 | 14228.732 / 7061.010 | 0.390 | 1784s |
+validity design_aware: {"n_excluded": 31, "n_used": 269, "n_valid_J_adjusted": 269, "n_valid_J_nominal": 269, "n_valid_se_min": 177}
+| fixed_local | 295/300 | 295se/295J | 0.054 | 0.054 | 0.019 | 0.925 / 0.946 | +0.0020 / -0.0081 | 0.913 / 0.935 | 0.000 | 1956s |
+validity fixed_local: {"n_excluded": 5, "n_used": 295, "n_valid_J_adjusted": 295, "n_valid_J_nominal": 295, "n_valid_se_min": 295}
+| fixed_plus_global | 295/300 | 295se/295J | 0.054 | 0.054 | 0.017 | 0.922 / 0.942 | +0.0040 / -0.0088 | 0.913 / 0.929 | 0.000 | 1758s |
+validity fixed_plus_global: {"n_excluded": 5, "n_used": 295, "n_valid_J_adjusted": 295, "n_valid_J_nominal": 295, "n_valid_se_min": 295}
+| stratified | 297/300 | 297se/297J | 0.057 | 0.057 | 0.021 | 0.919 / 0.946 | +0.0049 / -0.0109 | 0.913 / 0.936 | 0.000 | 1364s |
+validity stratified: {"n_excluded": 3, "n_used": 297, "n_valid_J_adjusted": 297, "n_valid_J_nominal": 297, "n_valid_se_min": 297}
+paired_cluster seed=20260610 reps=4096 strata=3 pairs_per_stratum=5
+{"analytic_cross": 0.05333333333333334, "empirical_cross": 0.05374870616111149, "estimated_local": 0.053404531198388935, "estimated_plus_global": 0.057219140569702426, "local_mcse": 0.00036954065188123054, "plus_global_mcse": 0.00039593641272988987, "rho": 0.8}
+{"analytic_cross": -0.05333333333333334, "empirical_cross": -0.054285567382478306, "estimated_local": -0.05349458461703957, "estimated_plus_global": -0.05731562637539953, "local_mcse": 0.0003772168001821812, "plus_global_mcse": 0.0004041608573380513, "rho": -0.8}
+{"analytic_cross": 0.0, "empirical_cross": -0.0002684306106834201, "estimated_local": -4.5026709325316785e-05, "estimated_plus_global": -4.8242902848553735e-05, "local_mcse": 0.00013109705140738017, "plus_global_mcse": 0.0001404611265079073, "rho": 0.0}
+JobID|State|Elapsed|ExitCode|MaxRSS
+40409988|COMPLETED|01:56:15|0:0|
+40409988.batch|COMPLETED|01:56:15|0:0|3202736K
+40409988.extern|COMPLETED|01:56:16|0:0|

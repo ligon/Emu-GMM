@@ -72,6 +72,9 @@ Callers can inspect losses from both low support and the trace guard before
 inference.
 The constructor refuses sampling clusters crossing strata and a design with
 at most one sampling cluster in every observed stratum.
+It requires finite, exactly integer-valued cluster, stratum, and cell IDs
+in this opt-in mode before casting them; otherwise rounding could silently
+change their nesting relation.
 One sampling cluster per stratum cannot identify a random stratum shock
 separately from an arbitrary fixed profile; the opt-in does not estimate
 that unconditional random-stratum component.
@@ -80,7 +83,8 @@ No general finite-sample guarantee is claimed for heteroskedastic clusters,
 stochastic observability, or ratios with random \(N_j\).
 The deterministic tests in
 =tests/covariance/test_design_aware_fixed_strata.py= establish algebra and
-compatibility, not coverage; a separate Monte Carlo validation remains.
+compatibility, not coverage; the separate Monte Carlo evidence below is
+specific to the stated fixed-profile and paired-shock designs.
 
 * 300-rep falsification and cell correction
 
@@ -91,8 +95,8 @@ The published implementation =dec68caeb8bff67735a58919056613b47d1d11dd=
 centered on the bare stratum and was *not calibrated* for that ladder:
 the randomized coefficient's coverage was 266/298 = 0.893 (MCSE 0.018),
 below 0.95, while pure =StratifiedCovariance= gave 281/297 = 0.946
-(MCSE 0.013) and the default coupled path gave 117/177 = 0.661
-(MCSE 0.036).
+(MCSE 0.013) and the default coupled path gave reported b1 coverage
+0.661, with at least 177 finite-SE rows across coordinates.
 The fixed-local b1 mean-SE/empirical-SD ratio was 0.872 versus 0.936
 for pure Stratified; b1 biases were -0.0118 and -0.0109, respectively.
 Extra global dof inflation gave coverage 262/295 = 0.888, so it did not
@@ -123,7 +127,49 @@ covariance at 0.053405 (MCSE 0.000370) for \(\rho=0.8\) against the analytic
 and at -0.000045 (MCSE 0.000131) for \(\rho=0\) against zero.
 The extra-global ablation remains high at 0.057219 for \(\rho=0.8\).
 The output is saved in =.coder/design-145-cell-paired-4096-2026-10-23.log=.
-The revised estimator's 300-rep coverage remains to be measured.
+The revised estimator's 300-rep result is reported in the next section.
+
+* Revised 300-rep calibration (2026-10-23)
+
+The SHA-pinned =co_carleton= job 40409988 completed with exit status zero
+in 1:56:15, using commit =9dc20464cbc23c203f85f3a3c0e0b1558befb97d=,
+seed 20260610, 300 common-random-number replications, and the unchanged
+#130 fixed profile with per-rep ridge anchoring.
+The clean output and job accounting are in
+=.coder/design-145-cell-coverage-300-2026-10-23.log=; the complete stderr
+and stdout are in
+=/global/scratch/users/ligon/emu-gmm-145-40409988.log=.
+For b1 Wald coverage, the denominator counts finite standard errors among
+converged fits; Wilson intervals and Monte Carlo standard errors use that
+denominator, not all 300 attempted fits.
+
+| arm | b1 coverage | MCSE | Wilson 95% | b1 SE/SD | ridge binding |
+|-----+-------------+------+------------+----------+---------------|
+| Default coupled | 0.661 | <= 0.0356 | not identified | not comparable | 0.390 |
+| Fixed local | 279/295 = 0.946 | 0.0132 | [0.914, 0.966] | 0.935 | 0.000 |
+| Fixed plus global (ablation) | 278/295 = 0.942 | 0.0136 | [0.910, 0.964] | 0.929 | 0.000 |
+| Pure Stratified | 281/297 = 0.946 | 0.0131 | [0.914, 0.967] | 0.936 | 0.000 |
+
+The revised fixed-local b1 result matches the pure-design comparator
+within Monte Carlo error; its b1 bias is -0.0081 versus -0.0109 for
+pure Stratified, and nominal J rejection is 0.054 versus 0.057.
+The default coupled arm still has 31 excluded fits and a minimum of 177
+finite standard errors across its two coordinates among 269 converged
+fits; its b1-specific denominator was not printed by the study, so its
+binomial interval is not identified from this log.
+Fixed local has five excluded
+fits and 295 valid standard errors.
+The b0 coverage is 273/295 = 0.925 for fixed local and 273/297 = 0.919
+for pure Stratified, so this study does not establish nominal coverage
+for that coordinate under either method.
+The fixed-plus-global arm differs by only one b1 coverage event from
+fixed local; the separate 4096-draw paired-shock covariance check, not
+that one-event difference, identifies its systematic extra inflation.
+That paired check estimates a cross covariance of 0.053405
+(MCSE 0.000370) against the analytic 0.053333 for \(\rho=0.8\), while
+the extra-global ablation estimates 0.057219 (MCSE 0.000396).
+The paired check measures covariance calibration, not estimator coverage
+under every nested-cluster design.
 
 * Recommendation and limit
 
@@ -225,7 +271,7 @@ reported above; it falsified estimator calibration in that ladder.
 =scripts/validation/design_aware_fixed_strata_burst.sh= pins a branch SHA
 in a separate four-CPU =co_carleton= job and writes its log to durable
 scratch.
-The revised cell-pair implementation still requires a fresh coverage run.
+The revised cell-pair coverage run and its limits are reported above.
 
 * Discriminating fixtures and falsification
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import haliax as ha
 import jax
 import jax.numpy as jnp
@@ -24,7 +26,7 @@ from emu_gmm.inference.cluster_bootstrap import (
 )
 from emu_gmm.manifolds import Euclidean, ManifoldLeaf, PSDFixedRank
 from emu_gmm.measures import EmpiricalMeasure
-from emu_gmm.optimizer import optimistix_lm
+from emu_gmm.optimizer import optimistix_lm, scipy_lm
 from emu_gmm.penalty import TikhonovPenalty
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.weighting import ContinuouslyUpdated
@@ -734,8 +736,7 @@ def _reconstruct_replicate0(
     ``split(key, n_boot=1)`` then a uniform ``randint`` over clusters --
     so the package's ``theta_boot[0]`` can be compared against an
     independently-computed refit. That is the rigorous check that the
-    refit actually used the forwarded ``penalty`` (and the deferred
-    optimiser auto-dispatch), not a behavioural proxy.
+    refit actually used the forwarded ``penalty``, not a behavioural proxy.
     """
     cluster_ids_np = np.asarray(covariance.cluster_ids).astype(np.int64)
     n_clusters = int(covariance.n_clusters)
@@ -760,6 +761,43 @@ def _reconstruct_replicate0(
 class TestPenaltyForwarding:
     """``penalty=`` reaches each refit (#150, second blocker)."""
 
+    def test_penalty_keeps_default_optimizer_dispatch(self, monkeypatch):
+        """A penalized refit leaves optimizer choice to ``estimate()``."""
+        bootstrap_module = importlib.import_module(
+            "emu_gmm.inference.cluster_bootstrap"
+        )
+        real_estimate = bootstrap_module.estimate
+        forwarded = []
+
+        def observe_estimate(**kwargs):
+            forwarded.append((kwargs["optimizer"], kwargs["penalty"]))
+            return real_estimate(**kwargs)
+
+        monkeypatch.setattr(bootstrap_module, "estimate", observe_estimate)
+        measure, covariance = _euler_cluster_setup(
+            n_clusters=10, obs_per_cluster=20, seed=0
+        )
+        penalty = TikhonovPenalty(c=jnp.asarray(2.0))
+        boot = cluster_bootstrap(
+            model=euler_residual,
+            theta_init=EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE),
+            measure=measure,
+            covariance=covariance,
+            n_boot=1,
+            key=jax.random.PRNGKey(20240617),
+            penalty=penalty,
+        )
+
+        assert len(forwarded) == 1
+        assert forwarded[0][0] is None
+        assert forwarded[0][1] is penalty
+        theta_row = np.asarray(boot.theta_boot.array)[0]
+        J_row = float(boot.J_boot[0])
+        if bool(boot.convergence[0]):
+            assert np.all(np.isfinite(theta_row)) and np.isfinite(J_row)
+        else:
+            assert np.all(np.isnan(theta_row)) and np.isnan(J_row)
+
     def test_penalty_changes_refit_and_is_forwarded(self):
         """The refit re-solves the *penalized* objective, not the
         unpenalized one. Proven by exact reconstruction of replicate 0.
@@ -770,6 +808,10 @@ class TestPenaltyForwarding:
         theta_init = EulerParams(beta=BETA_TRUE, gamma=GAMMA_TRUE)
         penalty = TikhonovPenalty(c=jnp.asarray(2.0))
         key = jax.random.PRNGKey(20240617)
+        # Use a stable refit backend for the exact-draw forwarding check.
+        # Optimistix LM can reach the same finite iterate while reporting
+        # non-convergence on CI, which correctly becomes a NaN bootstrap row.
+        optimizer = scipy_lm()
 
         boot = cluster_bootstrap(
             model=euler_residual,
@@ -779,23 +821,37 @@ class TestPenaltyForwarding:
             n_boot=1,
             key=key,
             penalty=penalty,
+            optimizer=optimizer,
         )
         boot0 = np.asarray(boot.theta_boot.array)[0]
 
         res_pen = _reconstruct_replicate0(
-            measure, covariance, theta_init, euler_residual, key=key, penalty=penalty
+            measure,
+            covariance,
+            theta_init,
+            euler_residual,
+            key=key,
+            penalty=penalty,
+            optimizer=optimizer,
         )
         recon_pen = np.array(
             [float(res_pen.theta_hat.beta), float(res_pen.theta_hat.gamma)]
         )
         res_nopen = _reconstruct_replicate0(
-            measure, covariance, theta_init, euler_residual, key=key, penalty=None
+            measure,
+            covariance,
+            theta_init,
+            euler_residual,
+            key=key,
+            penalty=None,
+            optimizer=optimizer,
         )
         recon_nopen = np.array(
             [float(res_nopen.theta_hat.beta), float(res_nopen.theta_hat.gamma)]
         )
 
         # The penalty is non-trivial: it moves the optimum.
+        assert bool(boot.convergence[0]) and res_pen.converged and res_nopen.converged
         assert np.max(np.abs(recon_pen - recon_nopen)) > 1e-3
         # The bootstrap refit matched the *penalized* reconstruction ...
         np.testing.assert_allclose(boot0, recon_pen, rtol=1e-6, atol=1e-8)

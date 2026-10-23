@@ -11,7 +11,7 @@ The most important architectural commitment is that variance construction is ort
 
 * Status
 
-v2 (v0.2.0): the v1 pipeline plus Riemannian-manifold parameter geometry and the stratified / design-aware covariance ladder. The implemented menu --- everything importable and composable today --- is tabulated in =docs/design.org= under "Contract surface (implemented)", the single source of truth for status claims; the green gate is =make check= (ruff + black + mypy + the full pytest suite). The three measure paths (synthetic, analytical, empirical) all run end-to-end against the bundled multi-asset Euler example, and the empirical path additionally has a real-data acceptance test (=tests/test_estimator_realdata.py=). The architecture and theoretical scope are pinned in =docs/=.
+v2: the v1 pipeline plus Riemannian-manifold parameter geometry and the stratified / design-aware covariance ladder. The implemented menu --- everything importable and composable today --- is tabulated in =docs/design.org= under "Contract surface (implemented)", the single source of truth for status claims; the green gate is =make check= (ruff + black + mypy + the full pytest suite). The three measure paths (synthetic, analytical, empirical) all run end-to-end against the bundled multi-asset Euler example, and the empirical path additionally has a real-data acceptance test (=tests/test_estimator_realdata.py=). The architecture and theoretical scope are pinned in =docs/=.
 
 * Quickstart
 
@@ -46,8 +46,9 @@ result = estimate(
 
 print(f"beta = {result.theta_hat.beta:.4f}  (truth 0.96)")
 print(f"gamma = {result.theta_hat.gamma:.4f}  (truth 2.00)")
-print(f"J-stat = {result.J_stat:.3f}  dof={result.J_dof}  p={result.J_pvalue:.3f}")
-print(result.to_pandas()["Sigma_theta"])
+law = result.asymptotic()
+print(f"J-stat = {result.objective_value:.3f}  dof={result.n_overid}  p={law.J_pvalue:.3f}")
+print(law.cov())  # asymptotic parameter covariance
 #+end_src
 
 The same =euler_residual= drives the analytical and empirical variants of the demo; only the =Measure= / =CovarianceStrategy= change. See =docs/api-sketch.org= Section 5 for the three side-by-side, and =examples/run_euler.py= for the runnable script.
@@ -58,30 +59,50 @@ Estimation gives you =theta_hat=; inference gives you the uncertainty around it.
 
 | You want                              | Use                                       | Kind                         |
 |---------------------------------------+-------------------------------------------+------------------------------|
-| parameter SEs, fast                   | =result.standard_errors= / =Sigma_theta= | analytic sandwich            |
+| parameter SEs, fast                   | =result.asymptotic().se()= / =.cov()=     | analytic sandwich            |
 | parameter SEs / CIs, robust           | =cluster_bootstrap= \(\to\) =theta_boot=  | refit: resample + re-solve   |
 | the overidentification test \(J\)     | =moment_wild_bootstrap=                    | refit-free: perturb moments  |
 | identification-robust inference       | =k_statistic= / =k_confidence_set=        | weak-id-robust               |
-| gauge-invariant functionals of \(AA'\) | =functional_se= / =gamma_se=             | analytic                     |
+| gauge-invariant functionals of \(AA'\) | =result.asymptotic().functional_se(f)=   | analytic                     |
 | =n_boot= chosen to a precision target | =adaptive_bootstrap=                      | wrapper over the above       |
 
 *Two bootstraps, deliberately distinct.* =moment_wild_bootstrap= perturbs the moments and never re-solves --- cheap, and the right tool for the \(J\) distribution. =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap people usually mean: it resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns the bootstrap distribution =theta_boot= of =theta_hat= (Cameron, Gelbach & Miller 2008). Reach for it when the analytic sandwich is suspect --- few clusters, a boundary optimum, or a functional whose nonlinearity the first-order delta method can't capture.
 
 The capability is easy to miss, so it's worth naming why it exists: a refit bootstrap is just =estimate()= on a resampled =Measure=. Because variance construction is orthogonal to integration (the commitment at the top of this README), resampling is a measure-construction concern, and the bootstrap is a thin re-run of the ordinary pipeline rather than a bespoke variance routine. That's also why there's no monolithic =bootstrap_se=: the capability falls out of the architecture.
 
+This example groups ten synthetic observations per cluster to show the interface; use the actual sampling-cluster IDs for real data.
+
 #+begin_src python
 import numpy as np
+import jax.numpy as jnp
+from emu_gmm import ClusteredCovariance, EmpiricalMeasure
+from emu_gmm.examples.euler import N_ASSETS, euler_data
 from emu_gmm.inference import cluster_bootstrap
 
+n_clusters, rows_per_cluster = 30, 10
+n = n_clusters * rows_per_cluster
+empirical = EmpiricalMeasure(
+    x=euler_data(seed=0, n=n),
+    mask=jnp.ones((n, N_ASSETS)),
+    weights=jnp.ones(n),
+)
+clustered = ClusteredCovariance(
+    cluster_ids=jnp.repeat(jnp.arange(n_clusters), rows_per_cluster),
+    n_clusters=n_clusters,
+)
+empirical_result = estimate(
+    model=euler_residual, measure=empirical, covariance=clustered,
+    theta_init=result.theta_hat,
+)
 boot = cluster_bootstrap(
-    model=euler_residual, theta_init=result.theta_hat, measure=measure,
-    covariance=cov, n_boot=999, key=jax.random.PRNGKey(1),
+    model=euler_residual, theta_init=empirical_result.theta_hat, measure=empirical,
+    covariance=clustered, n_boot=99, key=jax.random.PRNGKey(1),
 )
 ok = np.asarray(boot.convergence)        # non-converged refits are NaN rows (#209)
-se = boot.theta_boot.array[ok].std(axis=0)   # bootstrap SE, per parameter
+se = np.asarray(boot.theta_boot.array)[ok].std(axis=0, ddof=1) if ok.sum() > 1 else None
 #+end_src
 
-A refit that does not converge --- a resampled world can extinguish a rare moment's support entirely --- is stored as a =NaN= row, flagged in =boot.convergence= and explained by =boot.zero_support= / =boot.tau_saturated=; =boot.n_nonconverged= counts them. Reduce over the converged rows as above, or hand raw columns to =adaptive_bootstrap=, which excludes and counts =NaN= draws.
+A refit that does not converge --- a resampled world can extinguish a rare moment's support entirely --- is stored as a =NaN= row, flagged in =boot.convergence= and explained by =boot.zero_support= / =boot.tau_saturated=; =boot.n_nonconverged= counts them. Reduce over the converged rows as above; =se= is =None= with fewer than two valid draws. Alternatively, hand raw columns to =adaptive_bootstrap=, which excludes and counts =NaN= draws.
 
 =docs/howto.org= has the expanded menu and the refit-vs-refit-free decision in full. Design-aware note: =cluster_bootstrap= resamples flat clusters; the /stratified/ refit bootstrap (resample PSUs within strata) is tracked in issue #155.
 
@@ -166,7 +187,8 @@ publish=, token-based) remains the manual fallback.
 docs/                      design specs and theoretical notes
 src/emu_gmm/
     __init__.py            public API re-exports
-    types.py               protocols + EstimationResult / Diagnostics
+    types.py               protocols + OptimizationResult / Diagnostics
+    law.py                 AsymptoticLaw and inference readouts
     estimator.py           estimate() / build_estimator() entry points
     measures/              SyntheticMeasure, AnalyticalMeasure, EmpiricalMeasure
     covariance/            the CovarianceStrategy ladder (iid, clustered,
@@ -213,8 +235,9 @@ the package owns the moment expectation, the design-aware covariance
 \(p\)-values. Two rules keep estimation correct:
 
 1. *Read results off the package, never recompute them by hand.* Take the
-   criterion, =J_stat=, =standard_errors=, and \(p\)-values from
-   =EstimationResult= / =k_statistic= / the inference helpers. A
+   criterion and \(J\)-statistic from =result.objective_value=, then
+   standard errors and \(p\)-values from =result.asymptotic()= and the
+   inference helpers. A
    hand-rolled criterion is how subtle scaling bugs get reintroduced ---
    notably the textbook habit of scaling moments by \(\sqrt{N}\) and
    weighting by \(V_X\), which is correct only when every moment has the
