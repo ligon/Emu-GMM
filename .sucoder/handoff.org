@@ -1,37 +1,28 @@
-#+TITLE: Handoff -- Emu-GMM
-#+DATE: [2026-10-22 Thu]
+#+TITLE: Handoff -- Emu-GMM backlog
+#+DATE: [2026-10-23 Fri]
 
-* Current session -- backlog follow-ups (Sue, GPT-6)
+* Current backlog session -- 2026-10-23 (Sue, GPT-6)
 
-- Branch :: =backlog/k-statistic-arrays=, based on =9da0985=.
-  Worktree: =.claude/worktrees/backlog-k-arrays=.
-- PR 227 :: merged as =9da09859e4deef8696c4857aa0922b669d9a26d4=;
-  the issue 215 installation docs and post-merge CI are green.
-  Local and durable shared =main= are synchronized at that commit.
-- PR 228 :: *MERGE ON HOLD at the human's explicit request*.
-  All eleven CI jobs passed for =9b2b2b0b421f9a51388f6c472fd986d131aa8aec=.
-  Do not merge or enable auto-merge without a later instruction.
-  Its source/worktree is untouched by this follow-up.
-- Issue 226 :: additive =k_statistic_from_arrays= with mandatory matched
-  Jacobian--moment cross-covariance; mean scaling and quotient semantics
-  reuse the existing implementation (ledger Section 7.6).
-  Invalid numerical inputs carry a named event; the legacy path is preserved.
-  Targeted tests, independent adversarial review, and the final full gate
-  passed: =taskset -c 0-19 make par-check NPROC=20= (ruff, Black, mypy,
-  and the full pytest suite including slow tests).
-  Log: =/local/job40386059/tmp/emu-gmm-k-arrays-final-gate.log=.
-- Issue 219 :: follow-up acknowledged; numerical truncation is a policy,
-  not a population-identification finding or boundary-valid inference.
-  Coordinate metric, geometric gauge separation, persistence, and
-  higher-order-unassessed functional sensitivity need their own design pass.
-  See issue comment =6354280553=; no inference policy was implemented here.
-- Next action :: review the PR for issue 226; its source is ready.
-  Keep PR 228 on hold even if every check is green.
-- Resources :: working clone is node-local in job 40386059;
-  commits publish to the shared mirror through the post-commit hook.
-  Leave other sessions' jobs and worktrees alone.
+- Branch :: =integration/k-statistic-arrays= integrates the reviewed PR #230
+  head with =main=; this merge resolution preserves the studies documentation
+  and ledger from PR #228 alongside the array-level K-statistic API.
+- Main :: PR #228 merged as =ad143ef= (issues #220-#225 closed) and PR #231
+  merged as =00e0d6a= (issue #229 closed). GitHub, node-local main, and the
+  durable shared mirror were synchronized after each merge.
+- CI :: the scheduled main inference shard at =9da0985= fails the same
+  non-converged bootstrap fixture assertion as PRs #230/#231. The #209 NaN
+  validity policy must remain intact. An isolated worker is diagnosing/fixing
+  the baseline test on this job.
+- Review :: =.coder/backlog-2026-10-23.org= in the root clone is the fresh
+  triage snapshot (currently untracked); prior detailed studies triage is
+  =.coder/backlog-2026-10-22.org=.
+- Venv :: =/local/job40401644/mirrors/Emu-GMM/.venv= was rebuilt with Poetry.
+  Compute on this slice must use =nice -n 19= and bounded CPU affinity.
+- Next :: finish and verify PR #230 integration, push its existing GitHub
+  branch without force, merge after review, then land the baseline CI repair.
+  The public result/law docs repair is in a separate worktree.
 
-The historical evolution notes below predate this backlog session.
+The July evolution notes below are historical.
 
 * Status (written by Sue, Claude Fable 5 session, 2026-07-11)
 

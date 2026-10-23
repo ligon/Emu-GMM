@@ -319,6 +319,74 @@ For large =n_boot=, build on the =build_estimator= factory rather than bare =est
    number of scalar parameters, =D= = observation width. =M= and =D= are
    independent (you can have more/fewer moments than data columns).
 
+* Repeated sampling: custom procedures and parameter functionals
+
+=emu_gmm.studies.replicate= owns the draw-and-fit loop, using =jax.random.fold_in(key, r)= for replicate =r=.
+Its =dgp(rep_key)= can return any dataset type accepted by =run(theta_init, dataset)=.
+The default recorder, =fit_record(result)=, reads an =OptimizationResult= through its asymptotic law.
+For a multi-call procedure, supply =record(result, dataset) -> FitRecord= to retain the procedure's reported estimates, SEs, J quantities, and event flags.
+The driver passes the same dataset object to the fit, record extractor, and extra-statistic extractors; it does not regenerate data for diagnostics.
+Records must share their array shapes and static =param_names= / =J_dof= across replicates.
+Custom procedures own their refitting and anchoring policy; =anchor_per_rep=True= remains the existing =build_estimator= / =Measure= path.
+
+For a functional of an ordinary fit, extend the record at fit time with =fit_record(result, f=f, names=names)=.
+The callable =f= takes the tuple returned by =result.components()= and returns a scalar or a one-dimensional array.
+Its SE comes from the same =result.asymptotic().functional_se(f)= delta method, including all cross-covariances.
+The original fit's J quantities, degrees of freedom, convergence, and named events remain in the record.
+Without explicit =names=, functional coordinates are labelled =f_0=, =f_1=, and so on; explicit names must be distinct and match the output length.
+
+For example, suppose =run= estimates a =PSDFixedRank(n, 2)= factor and a one-dimensional Euclidean leaf, and =truth_components= contains their population values:
+
+#+begin_src python
+import jax
+import jax.numpy as jnp
+from emu_gmm.studies import bias_sd, coverage, fit_record, replicate
+
+def functional(components):
+    A, phi = components
+    gamma = A @ A.T
+    return jnp.concatenate([
+        jnp.linalg.eigvalsh(gamma)[-2:],
+        jnp.atleast_1d(phi[0]),
+    ])
+
+records = replicate(
+    run, dgp,
+    n_reps=200,
+    key=jax.random.PRNGKey(0),
+    theta_init=parameters,
+    record=lambda result, dataset: fit_record(
+        result, f=functional, names=("lambda_small", "lambda_large", "phi")
+    ),
+)
+truth = functional(truth_components)
+bias = bias_sd(records, theta0=truth)
+wald_coverage = coverage(records, theta0=truth, level=0.95)
+#+end_src
+
+The truth must be on the functional axis in the same order as the records.
+The callable must be JAX-differentiable and gauge-invariant: a PSD factor enters through =A @ A.T=, rather than through its arbitrary rotation.
+These summaries measure the coverage of the supplied Wald procedure; they do not establish validity at a rank boundary or at repeated eigenvalues, where the usual differentiability assumptions can fail.
+A historical stack containing only ambient parameter estimates and marginal SEs cannot recover a functional's SE: the joint covariance is needed while the live fit is available.
+
+=replicate_coupled(runs, dgp, ...)= forwards the same =record= and =statistics= extractors to every arm while retaining its shared =coupling_id= and fold-in schedule.
+Each =statistics={name: extractor}= callable receives =(result, dataset)= and can return a scalar, vector, or tensor, provided its shape stays fixed across replicates.
+For example, =statistics={"omega_eigenvalues": lambda result, dataset: jnp.linalg.eigvalsh(jnp.asarray(result.moment_covariance))}= records the eigenvalues of the fit's moment covariance.
+The resulting =MCRecords.extra[name]= retains shape =(n_reps, *statistic_shape)= through pytree traversal and law persistence.
+=records.to_pandas()= keeps scalar names, expands a vector to =name[0]=, =name[1]=, and a matrix to =name[0,0]=, =name[0,1]=, and so on in row-major order.
+NaNs are preserved, and colliding output column names raise an error.
+
+For separate shard jobs, pass =reps=range(start, stop)= instead of =n_reps=; exactly one selection is required.
+The range must be nonempty, increasing by one, and within the uint32 fold-in domain.
+Use the same DGP, master key, and explicit =coupling_id= across jobs, so each global index identifies the same draw.
+=MCRecords.concat(shards, reps=range(full_start, full_stop))= validates metadata and exact coverage, sorts records and extras together, and preserves the global indices as the pandas index.
+Without the expected =reps= range, concatenation checks the inferred contiguous interval and cannot detect a missing first or last shard.
+
+=crn_pair= also accepts coupled arms with different parameter labels or J degrees of freedom, as in nested models.
+Read their separate =param_names_a= / =param_names_b=; a common =param_names= query refuses ambiguity.
+=paired_diff= requires arrays with identical shapes and an explicit Boolean =where= row selection, so different parameter dimensions require explicitly comparable coordinates or functionals.
+Paired J differences describe the two procedures on identical draws; coupling alone does not provide a calibrated likelihood-ratio reference distribution.
+
 * Performance: estimating many times
 
 =estimate(...)= JIT-compiles on first call. If you estimate the *same*
