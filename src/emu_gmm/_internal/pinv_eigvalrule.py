@@ -86,7 +86,7 @@ def pinv_eigvalrule(
 
         Sigma = pinv_eigvalrule(G_T_Lambda_G, drop_smallest=1)
     """
-    if not isinstance(drop_smallest, int):
+    if not isinstance(drop_smallest, int) or isinstance(drop_smallest, bool):
         raise TypeError(
             "pinv_eigvalrule: drop_smallest must be a static Python int "
             f"(vmap/jit-safe), got {type(drop_smallest).__name__}. Pass "
