@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import haliax as ha
 import jax
@@ -51,6 +51,9 @@ from emu_gmm._internal.labels import tangent_basis_names
 # manifold epic #12) and falls back to the former for v1 / all-scalar trees so
 # the v1 output is bitwise unchanged.
 from emu_gmm._internal.params import flatten_params, flatten_params_with_spec
+
+if TYPE_CHECKING:
+    from emu_gmm.inference.numerical_rank import NumericalRankPolicy
 
 # A user's parameter PyTree: typically a @jdc.pytree_dataclass. We use
 # Any in the protocol signatures because users define their own types;
@@ -751,7 +754,7 @@ class OptimizationResult:
     # and the positional tangent labels (INT-12/R5).
     manifold_spec: Any = None
 
-    def asymptotic(self) -> Any:
+    def asymptotic(self, *, rank_policy: NumericalRankPolicy | None = None) -> Any:
         """The asymptotic :class:`~emu_gmm.law.EstimatorLaw` for this fit.
 
         Adds the asymptotic *assumption* (a CLT / exact limiting behaviour) to
@@ -765,7 +768,7 @@ class OptimizationResult:
         """
         from emu_gmm.law import AsymptoticLaw
 
-        return AsymptoticLaw(self)
+        return AsymptoticLaw(self, rank_policy=rank_policy)
 
     @property
     def theta(self) -> ManifoldPoint:

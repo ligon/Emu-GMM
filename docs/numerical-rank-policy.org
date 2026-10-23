@@ -1,0 +1,105 @@
+#+TITLE: Opt-in numerical bread rank policy (issue 219)
+#+OPTIONS: toc:2
+
+* Status and boundary
+
+Design adopted for the opt-in implementation, 2026-10-23.
+This reconciles [[https://github.com/ligon/Emu-GMM/issues/219][issue 219]] with the tested machinery in [[file:../.coder/ledger.org][the prior-art ledger]], Section 11.
+A small eigenvalue of the bread at a fitted point indicates numerical weakness, not population nonidentification.
+The policy below computes a retained-subspace approximation to the asymptotic law; it makes no boundary-valid inference or coverage claim.
+The existing count-only result remains the default, including its bitwise =inv= path when the nominal gauge count is zero (=src/emu_gmm/_internal/pinv_eigvalrule.py:116=).
+
+* Construction and coordinates
+
+Proposed public entry points:
+
+#+begin_src python
+law = result.asymptotic(rank_policy=NumericalRankPolicy(relative_tol=1e-10))
+# Equivalently: AsymptoticLaw(result, rank_policy=NumericalRankPolicy(...))
+report = law.rank_report
+cov = law.cov()                         # retained-subspace covariance
+se = law.leaf("phi").se()               # same policy through a leaf view
+sensitivity = law.functional_sensitivity(f)
+#+end_src
+
+=rank_policy=None= retains the present count-only path, with no eigenspectrum scan added to scalar fits.
+=rank_report= is then =None= and =functional_sensitivity= requires an opted-in policy.
+=NumericalRankPolicy= accepts a finite =0 < relative_tol < 1= and records =coordinates="native_ambient_flat"= and =metric="euclidean_frobenius"=; other conventions require a later design.
+The flat order is the component/leaf order of =ManifoldSpec=, with row-major entries within each leaf (=src/emu_gmm/manifolds/spec.py:23= and =src/emu_gmm/inference/functional_se.py:161=).
+The metric is the Euclidean norm on that vector, matching the embedded Frobenius metric on =PSDFixedRank= (=src/emu_gmm/manifolds/psd_fixed_rank.py:152=).
+It does not use the point-dependent affine-invariant =Positive= or pullback =Interval= manifold metrics (=src/emu_gmm/manifolds/positive.py:82=, =src/emu_gmm/manifolds/interval.py:115=).
+A relative cutoff is parameter-scale dependent: changing units or rescaling a leaf can change the retained rank.
+The report therefore exposes coordinate labels, leaf shapes, metric, and tolerance rather than describing rank as invariant.
+
+* Spectral rule and invalid bread
+
+Reuse the law's realised weighting-aware ingredients \(B=G'\Lambda G\) and \(M=G'\Lambda V\Lambda G\), where \(V\) is raw meat and \(\Lambda\) is the frozen realised weight (=src/emu_gmm/_internal/asymptotic.py:35=).
+The opted-in branch belongs in that shared internal assembly and returns both covariance and rank report; the existing count-only call keeps its matrix return and exact computation.
+Symmetrise \(B\), then obtain its signed ascending eigenspectrum \(\lambda_i\) and orthonormal eigenvectors \(q_i\).
+Index the ascending eigenvalues from \(i=0\) to \(D-1\), let \(g\) be the nominal gauge count, and set \(\lambda_{\max}=\lambda_{D-1}\) and \(c=t\lambda_{\max}\) for =relative_tol= \(t\).
+For a valid positive top eigenvalue, exclude every \(i<g\) by count and every \(\lambda_i\leq c\) by tolerance; retain the others.
+This uses the union of the mandatory count and cutoff, so it can drop weak positive directions beyond \(g\) without changing the default rule.
+Set \(P_E=\sum_{i\in E}q_iq_i'\) and \(B_t^+=\sum_{i\notin E}q_iq_i'/\lambda_i\), then report \(\Sigma_t=B_t^+MB_t^+\), symmetrised.
+The effective numerical rank is \(D-|E|\); =extra_excluded= is \(|E|-g\), a count only, not a classification of particular eigenvectors as nongauge.
+Here rank deficiency belongs to the ambient bread \(B\), whereas \(g\) is the nominal dimension of a geometric gauge orbit on the regular manifold stratum; neither number identifies the other, especially at a singular factor.
+
+The =rank_report= is an immutable readout containing the selected policy, signed \(\lambda_i\), \(c\), sorted retained mask, \(P_E\), effective rank, \(g\), =extra_excluded=, largest excluded and smallest retained eigenvalues, and both distances from the cutoff.
+Store the whole projector, not an ordered subset of eigenvectors: a basis within a degenerate nullspace is arbitrary.
+If the retained/excluded spectral gap is at machine precision, mark =projector_boundary_ambiguous=; rotation invariance of that particular split is not asserted.
+Record the numerical negative-eigenvalue allowance \(\delta=64D\epsilon_{64}\lambda_{\max}\), separately from the user cutoff.
+An identically zero spectrum has status =all_zero_bread=; any other \(\lambda_{\max}\leq0\) has status =no_positive_bread=.
+When \(\lambda_{\max}>0\) and \(\lambda_{\min}<-\delta\), the status is =materially_negative_bread=.
+Any invalid status yields NaN covariance and SEs paired with that named status; =sample()= and =quantile()= refuse rather than presenting a degenerate zero-variance law.
+For invalid bread, retain the signed spectrum and diagnostic projector (the full identity when no positive direction exists), but do not invert it for inference.
+Tiny negative eigenvalues within \(\delta\) remain visible in the signed spectrum and are excluded by the positive cutoff.
+This invalid-bread rule is opt-in only; it does not change count-only behavior.
+
+* Covariance, functionals, and geometry
+
+On a valid opted-in law, =cov()=, =se()=, =coef_table=, =functional_se(f)=, named leaf queries, =quantile()=, and =sample()= all use \(\Sigma_t\).
+The numbers are conditional on fixing the excluded ambient coordinates in the numerical linearization; =sample()= draws the corresponding degenerate Gaussian.
+They are not sampling uncertainty for those excluded coordinates and do not certify an identified quotient law.
+The report labels this interpretation as =retained_subspace=; the sensitivity query below is separate and cannot silently rewrite an SE as zero or NaN.
+=functional_se(f)= may be finite even when \(J_fP_E\) or \(H_fP_E\) is nonzero: it is a conditional retained-subspace readout, and callers must query =functional_sensitivity(f)= before interpreting it as uncertainty for =f=.
+An excluded raw coordinate can have a zero conditional SE, so an opted-in =coef_table= must label the policy and excluded-coordinate loading and suppress its t-statistic and p-value where loading is nonzero.
+=J_pvalue=, =J_pvalue_adjusted=, =n_overid=, identification diagnostics, optimization, and the empirical-law grade stay unchanged.
+
+For a scalar or one-dimensional twice JAX-differentiable =f(components)=, =functional_sensitivity(f)= returns per-output first-order \(\|J_fP_E\|_2\) and second-order \(\|H_fP_E\|_F\), plus the projected arrays and derivative orders checked.
+Here \(H_f\) is the full ambient Hessian at the fitted point, so \(H_fP_E\) includes mixed retained/excluded curvature; \(P_EH_fP_E\) alone would miss it.
+No finite-perturbation radius or Boolean "invariant" certificate is inferred from these derivatives.
+At \(A=0\), =f(A)=vech(AA')= has \(J_f=0\) but nonzero \(H_fP_E\), so the report exposes the zero-gradient counterexample.
+A cubic functional at zero can have both reported norms equal to zero; the report states that higher orders remain unassessed.
+The raw derivative norms use the declared ambient metric and have the units of their respective derivatives.
+Nondifferentiable functionals, including an individual eigenvalue at a repeated eigenvalue, cannot acquire a valid sensitivity report from this API.
+
+The excluded projector contains nominal gauge and numerically weak directions together.
+The first slice reports sensitivity to this *whole* excluded subspace and does not label a particular eigenvector "gauge" or report a nongauge-only score.
+A future nongauge decomposition must construct geometric orbit directions \(A\Omega\) for skew \(\Omega\) under the declared metric, then test their inclusion in \(P_E\); sorting eigenvectors is insufficient.
+For each =PSDFixedRank(n,k)= leaf, persist singular values of the fitted factor and a =geometry_status=.
+The first-slice machine rule calls it singular when \(s_{\max}=0\) or \(s_{\min}\leq64\max(n,k)\epsilon_{64}s_{\max}\); this is a numerical geometry flag, not a population-rank test.
+If the factor is singular, retain algebraic numerical readouts for other identified leaves but label the regular-quotient interpretation unavailable.
+Near-rank-loss singular values remain visible even when that machine rule calls the factor full rank; no fixed scale threshold is promoted to a boundary-inference claim.
+
+* Persistence and compatibility
+
+Version the inert law format when policy semantics are added: new artifacts carry a typed policy/report and projector in the NPZ payload, while the new loader accepts schema-1 artifacts as count-only.
+An older loader must refuse the new schema rather than load a truncated covariance without its interpretation.
+Persist the policy, coordinate/metric convention, leaf layout, signed spectrum, cutoff, mask, effective rank, nominal gauge count, extra count, margins, negative allowance, geometry status/singular values, \(P_E\), and assembled \(\Sigma_t\).
+Validate dimensions, finite policy scalars, mask count, projector symmetry/idempotence, and covariance shape on load.
+Copy the report unchanged through live save, load, and re-save; rebuild sensitivity from persisted components and \(P_E\) with the same ambient derivative rule.
+Loaded opted-in laws retain the same conditional =cov()= / =functional_se(f)= behavior, separate sensitivity query, and coefficient-table suppression; schema-1 laws retain their original count-only query behavior.
+The current format retains components and assembled covariance but omits \(G,\Lambda,V\) (=src/emu_gmm/persistence.py:281=); changing =relative_tol= after reload must therefore raise a clear error.
+Post-load re-ranking is deferred until an artifact also persists the original sandwich ingredients.
+=AsymptoticLaw.from_moments(components, sigma)= cannot invent a numerical-rank report from \(\Sigma\) and remains count-only.
+
+* Validation gate for implementation
+
+- Default fidelity :: =rank_policy=None= is bitwise identical to the current scalar and manifold paths; existing golden sandwich and count-only tests remain green (=tests/test_result_law_fidelity.py=, =tests/test_pinv_eigvalrule.py=).
+- Spectral cases :: a weak positive direction below/above the cutoff, multiple exact zeros beyond \(g\), a tied nullspace or ambiguous boundary, all-zero bread, and a materially negative signed eigenvalue give the stated masks, projectors, ranks, and status.
+- Gauge rotation :: for full-rank \(A\) and orthogonal \(Q\), the excluded projector and covariance transform with the ambient rotation; gauge-invariant functional SEs and sensitivity norms agree, while raw \(A\)-coordinate SEs may differ.
+- Functional cases :: a retained-only \(\phi\), an excluded-linear functional, =vech(AA')= at exact zero, a mixed-curvature quadratic, and a cubic at zero distinguish SEs from derivative sensitivity; the opted-in coefficient table flags excluded loading and suppresses its t/p columns.
+- Persistence :: live/load/re-save preserves covariance, policy, projector, labels, leaf queries, sensitivity, and J quantities; a schema-1 fixture defaults to count-only; a tampered projector is rejected; retuning a loaded law refuses.
+- Compatibility :: no change to =OptimizationResult='s criterion, =n_overid=, J tests, =compute_cond_info=, or the empirical-law grade; =make quick-check= and =make check= are the implementation gates.
+
+No Monte Carlo coverage target follows from this numerical-policy slice.
+Boundary-valid inference and its calibration require a separate specification.

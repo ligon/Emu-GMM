@@ -29,9 +29,11 @@ from typing import Any
 
 import numpy as np
 
+from emu_gmm.inference.numerical_rank import NumericalRankReport
+
 #: Bumped when the persisted layout changes; ``load_law`` validates it and
 #: routes through an upgrader table (trivial at v1) rather than guessing.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def euclidean_tag(arr: Any) -> dict[str, Any]:
@@ -148,6 +150,7 @@ class MomentsBacking:
     # artifacts that did not persist them (leaves stay unaddressable by name; the
     # type-located gamma conveniences still work).
     field_names: tuple[str | None, ...] | None = None
+    rank_report: NumericalRankReport | None = None
 
     @classmethod
     def build(
@@ -160,8 +163,9 @@ class MomentsBacking:
         psd_index: int | None,
         psd_rank: int | None,
         diagnostics: dict[str, Any] | None = None,
-        factory_spec: dict[str, Any] | None = None,
+        factory_spec: Any = None,
         field_names: tuple[str | None, ...] | None = None,
+        rank_report: NumericalRankReport | None = None,
     ) -> MomentsBacking:
         """Validate + normalise the moments state (shapes, names length, D)."""
         comps = tuple(np.asarray(c, dtype=float) for c in components)
@@ -183,6 +187,13 @@ class MomentsBacking:
                     f"MomentsBacking: names length {len(nm)} != ambient "
                     f"dimension D={flat_dim}."
                 )
+        if rank_report is not None and (
+            rank_report.param_names != nm or rank_report.leaf_shapes != shapes
+        ):
+            raise ValueError(
+                "MomentsBacking: numerical rank labels or leaf shapes disagree "
+                "with the persisted components"
+            )
         fns: tuple[str | None, ...] | None
         if field_names is None:
             fns = None
@@ -204,6 +215,7 @@ class MomentsBacking:
             diagnostics=dict(diagnostics or {}),
             factory_spec=factory_spec,
             field_names=fns,
+            rank_report=rank_report,
         )
 
 
