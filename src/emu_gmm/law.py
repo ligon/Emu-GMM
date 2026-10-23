@@ -98,7 +98,14 @@ from emu_gmm.inference.functional_se import (
     gamma_eigenvalues,
     gamma_vech,
 )
+from emu_gmm.inference.numerical_rank import (
+    FunctionalSensitivity,
+    NumericalRankPolicy,
+    NumericalRankReport,
+    PSDFactorGeometry,
+)
 from emu_gmm.manifolds.euclidean import Euclidean
+from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
 from emu_gmm.manifolds.spec import LeafSpec
 from emu_gmm.studies import summaries as _summaries
 from emu_gmm.studies.conditioning import (
@@ -1054,6 +1061,27 @@ class EmpiricalLaw(EstimatorLaw):
 # ---------------------------------------------------------------------------
 # Asymptotic grade: the Gaussian law N(theta_hat, Sigma_theta).
 # ---------------------------------------------------------------------------
+def _clip_rank_roundoff_covariance(
+    cov: np.ndarray, sigma: np.ndarray, jac: np.ndarray
+) -> np.ndarray:
+    """Zero only diagonal signs explainable by a finite sandwich's roundoff."""
+    if not (
+        np.isfinite(cov).all() and np.isfinite(sigma).all() and np.isfinite(jac).all()
+    ):
+        return cov
+    absolute_jac = np.abs(jac)
+    bound = np.einsum("pi,ij,pj->p", absolute_jac, np.abs(sigma), absolute_jac)
+    tolerance = 64 * sigma.shape[0] * np.finfo(float).eps * bound
+    diagonal = np.diag(cov)
+    rounded_zero = (diagonal < 0.0) & np.isfinite(tolerance) & (diagonal >= -tolerance)
+    if not np.any(rounded_zero):
+        return cov
+    out = cov.copy()
+    positions = np.flatnonzero(rounded_zero)
+    out[positions, positions] = 0.0
+    return out
+
+
 class AsymptoticLaw(EstimatorLaw):
     r"""The first-order Gaussian law :math:`\mathcal N(\hat\theta, \Sigma_\theta)`.
 
@@ -1080,6 +1108,7 @@ class AsymptoticLaw(EstimatorLaw):
         result: OptimizationResult | None = None,
         *,
         label: str | None = None,
+        rank_policy: NumericalRankPolicy | None = None,
         _backing: "_MomentsBacking | None" = None,
     ) -> None:
         # Two backings (one query algebra): a LIVE OptimizationResult, or a
@@ -1089,10 +1118,19 @@ class AsymptoticLaw(EstimatorLaw):
         # path calls ``inference.functional_se`` directly, so no statistic is
         # re-implemented for the reloaded grade.
         if _backing is not None:
+            if rank_policy is not None:
+                raise ValueError(
+                    "a loaded or moments-backed law cannot change numerical rank "
+                    "policy without the original G, weighting matrix, and meat"
+                )
             self._result = None
             self._backing: _MomentsBacking | None = _backing
             self._names = _backing.names
             self._label = label or "asymptotic(from_moments)"
+            self._rank_policy = (
+                None if _backing.rank_report is None else _backing.rank_report.policy
+            )
+            self._rank_report_cache = _backing.rank_report
             return
         if not isinstance(result, OptimizationResult):
             raise TypeError(
@@ -1104,6 +1142,10 @@ class AsymptoticLaw(EstimatorLaw):
         self._backing = None
         self._label = label or "asymptotic(N(theta_hat, Sigma_theta))"
         self._names = tuple(_result_param_names(result))
+        if rank_policy is not None and not isinstance(rank_policy, NumericalRankPolicy):
+            raise TypeError("rank_policy must be a NumericalRankPolicy or None")
+        self._rank_policy = rank_policy
+        self._rank_report_cache = None
 
     # -- moments-only constructor (#181) ------------------------------------
     @classmethod
@@ -1233,6 +1275,59 @@ class AsymptoticLaw(EstimatorLaw):
             else self._backing.components  # type: ignore[union-attr]
         )
 
+    @property
+    def rank_policy(self) -> NumericalRankPolicy | None:
+        """Selected numerical bread policy, or ``None`` for count-only inference."""
+        return self._rank_policy
+
+    @property
+    def rank_report(self) -> NumericalRankReport | None:
+        """Signed-spectrum and excluded-subspace readout for the opted-in law."""
+        if self._rank_policy is None:
+            return None
+        if self._rank_report_cache is None:
+            self._sigma()
+        return self._rank_report_cache
+
+    def with_rank_policy(self, policy: NumericalRankPolicy) -> AsymptoticLaw:
+        """Reassemble a live law at another cutoff; loaded laws lack its ingredients."""
+        if self._result is None:
+            raise RuntimeError(
+                "cannot change numerical rank tolerance after reload: the "
+                "original G, weighting matrix, and raw meat were not persisted"
+            )
+        return AsymptoticLaw(self._result, rank_policy=policy)
+
+    def _factor_geometries(self) -> tuple[PSDFactorGeometry, ...]:
+        """Check regular fixed-rank geometry without assigning bread eigenvectors."""
+        r = self._result
+        if r is None or r.manifold_spec is None:
+            return ()
+        factors = []
+        for index, (leaf, component) in enumerate(
+            zip(r.manifold_spec.leaf_specs, self._components(), strict=True)
+        ):
+            if not isinstance(leaf.manifold, PSDFixedRank):
+                continue
+            factor = np.asarray(component, dtype=float)
+            n, k = factor.shape
+            singular_values = np.linalg.svd(factor, compute_uv=False)
+            top = float(singular_values[0])
+            threshold = 64 * max(n, k) * np.finfo(float).eps * top
+            status = (
+                "singular"
+                if top == 0 or float(singular_values[-1]) <= threshold
+                else "regular"
+            )
+            factors.append(
+                PSDFactorGeometry(
+                    leaf_index=index,
+                    singular_values=tuple(float(s) for s in singular_values),
+                    status=status,
+                )
+            )
+        return tuple(factors)
+
     def _sigma(self) -> np.ndarray:
         r"""The ambient ``(D, D)`` covariance :math:`\Sigma_\theta` the law asserts.
 
@@ -1253,17 +1348,33 @@ class AsymptoticLaw(EstimatorLaw):
         else:
             r = self._result
             assert r is not None
-            from emu_gmm._internal.asymptotic import asymptotic_covariance
-
             gd = 0 if r.manifold_spec is None else int(r.manifold_spec.total_gauge_dim)
-            sig = np.asarray(
-                asymptotic_covariance(
+            if self._rank_policy is None:
+                from emu_gmm._internal.asymptotic import asymptotic_covariance
+
+                sig = np.asarray(
+                    asymptotic_covariance(
+                        jnp.asarray(r.moment_jacobian),
+                        jnp.asarray(r.weighting_matrix),
+                        jnp.asarray(r.moment_covariance),
+                        gauge_dim=gd,
+                    )
+                )
+            else:
+                from emu_gmm._internal.asymptotic import ranked_asymptotic_covariance
+
+                components = self._components()
+                sig, report = ranked_asymptotic_covariance(
                     jnp.asarray(r.moment_jacobian),
                     jnp.asarray(r.weighting_matrix),
                     jnp.asarray(r.moment_covariance),
+                    policy=self._rank_policy,
                     gauge_dim=gd,
+                    param_names=self.param_names,
+                    leaf_shapes=tuple(tuple(np.shape(c)) for c in components),
+                    factor_geometries=self._factor_geometries(),
                 )
-            )
+                self._rank_report_cache = report
         self._sigma_cache = sig
         return sig
 
@@ -1272,8 +1383,21 @@ class AsymptoticLaw(EstimatorLaw):
         assert f is not None
         from emu_gmm.inference.functional_se import functional_se as _fse
 
-        _se, cov = _fse(f, self._components(), jnp.asarray(self._sigma()))
-        return np.atleast_2d(np.asarray(cov))
+        components = self._components()
+        sigma = self._sigma()
+        _se, cov = _fse(f, components, jnp.asarray(sigma))
+        out = np.atleast_2d(np.asarray(cov))
+        if self._rank_policy is not None:
+            # A retained-subspace covariance can have exact zero functional
+            # variances. Dense multiplication may turn one into a tiny
+            # negative under an orthogonal gauge rotation. Bound rounding by
+            # the absolute pre-cancellation quadratic terms for each output,
+            # including a scalar functional whose computed covariance is zero.
+            from emu_gmm.inference.functional_se import _functional_jacobian
+
+            jac = np.asarray(_functional_jacobian(f, components))
+            out = _clip_rank_roundoff_covariance(out, sigma, jac)
+        return out
 
     def mean(self, f: Functional = None) -> np.ndarray:
         comps = self._components()
@@ -1326,7 +1450,7 @@ class AsymptoticLaw(EstimatorLaw):
             safe_se = np.where((se > 0.0) & np.isfinite(se), se, np.nan)
             t_stat = estimate / safe_se
         p_value = 2.0 * scipy.stats.norm.sf(np.abs(t_stat))
-        return pd.DataFrame(
+        table = pd.DataFrame(
             {
                 "estimate": estimate,
                 "std_error": se,
@@ -1335,6 +1459,15 @@ class AsymptoticLaw(EstimatorLaw):
             },
             index=names,
         )
+        report = self.rank_report
+        if report is not None:
+            loading = np.sqrt(np.clip(np.diag(report.excluded_projector), 0.0, 1.0))
+            sensitive = loading > 64 * len(loading) * np.finfo(float).eps
+            table["rank_policy"] = "retained_subspace"
+            table["rank_status"] = report.status
+            table["excluded_loading"] = loading
+            table.loc[sensitive, ["t_stat", "p_value"]] = np.nan
+        return table
 
     def _objective_and_dof(self) -> tuple[float, int]:
         """``(J_stat, n_overid)`` from the live result or the persisted backing."""
@@ -1474,13 +1607,53 @@ class AsymptoticLaw(EstimatorLaw):
         ``cov = J_f @ Sigma_theta @ J_f.T`` and ``se = sqrt(diag(cov))``
         (negatives from round-off clip to ``nan``). Convenience bundling
         :meth:`se` / :meth:`cov` on a component functional; this is the
-        inference reading that used to live on ``EstimationResult``.
+        inference reading that used to live on ``EstimationResult``. Under an
+        opted-in numerical rank policy, this is conditional on the retained
+        subspace and can be finite even when ``f`` loads on excluded directions;
+        query :meth:`functional_sensitivity` before interpreting it.
         """
         cov = np.atleast_2d(self._functional_cov(f))
         d = np.diag(cov)
         with np.errstate(invalid="ignore"):
             se = np.sqrt(np.where(d >= 0.0, d, np.nan))
         return se, cov
+
+    def functional_sensitivity(
+        self, f: Callable[[tuple[Any, ...]], Any]
+    ) -> FunctionalSensitivity:
+        """First and mixed-second derivative loading on the excluded projector.
+
+        Zero reported loading through order two is not an invariance certificate:
+        cubic and higher-order dependence remains unassessed.
+        """
+        report = self.rank_report
+        if report is None:
+            raise ValueError(
+                "functional_sensitivity requires an opted-in NumericalRankPolicy"
+            )
+        if not callable(f):
+            raise TypeError("functional_sensitivity requires a callable f")
+        components = self._components()
+        shapes = tuple(tuple(np.shape(c)) for c in components)
+        flat = jnp.asarray(_flatten_components(components))
+
+        def projected_function(theta_flat: jax.Array) -> jax.Array:
+            value = jnp.asarray(f(_unflatten_to_components(theta_flat, shapes)))
+            if value.ndim > 1:
+                raise ValueError("functional_sensitivity requires a scalar or 1-D f")
+            return jnp.atleast_1d(value)
+
+        jacobian = np.asarray(jax.jacfwd(projected_function)(flat))
+        hessian = np.asarray(jax.jacfwd(jax.jacrev(projected_function))(flat))
+        projector = report.excluded_projector
+        projected_jacobian = jacobian @ projector
+        projected_hessian = hessian @ projector
+        return FunctionalSensitivity(
+            first_order_norm=np.linalg.norm(projected_jacobian, axis=1),
+            second_order_norm=np.linalg.norm(projected_hessian, axis=(1, 2)),
+            projected_jacobian=projected_jacobian,
+            projected_hessian=projected_hessian,
+        )
 
     def j_test(self) -> JTest:
         """The over-identification :class:`JTest` (J-stat, dof, nominal + adjusted p).
@@ -1506,6 +1679,9 @@ class AsymptoticLaw(EstimatorLaw):
         """
         if not 0.0 < q < 1.0:
             raise ValueError(f"quantile(): q must be in (0, 1), got {q}")
+        report = self.rank_report
+        if report is not None and not report.is_valid:
+            raise ValueError(f"quantile(): invalid numerical bread ({report.status})")
         z = float(scipy.stats.norm.ppf(q))
         return self.mean(f) + z * self.se(f)
 
@@ -1527,6 +1703,9 @@ class AsymptoticLaw(EstimatorLaw):
         an approximation of a conditional). The covariance can be rank-deficient
         (the gauge nullspace is pinned to zero), so the SVD method is used.
         """
+        report = self.rank_report
+        if report is not None and not report.is_valid:
+            raise ValueError(f"sample(): invalid numerical bread ({report.status})")
         mean = jnp.asarray(self.mean(f))
         cov = jnp.asarray(np.atleast_2d(self.cov(f)))
         draws = jax.random.multivariate_normal(key, mean, cov, shape=(n,), method="svd")

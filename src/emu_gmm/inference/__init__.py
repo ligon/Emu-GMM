@@ -84,6 +84,12 @@ from emu_gmm.inference.k_statistic import (
     k_statistic,
     k_statistic_from_arrays,
 )
+from emu_gmm.inference.numerical_rank import (
+    FunctionalSensitivity,
+    NumericalRankPolicy,
+    NumericalRankReport,
+    PSDFactorGeometry,
+)
 from emu_gmm.inference.wild_bootstrap import (
     WildBootstrapResult,
     moment_wild_bootstrap,
@@ -101,6 +107,10 @@ __all__ = [
     "JTestResult",
     "KConfidenceSet",
     "KStatisticResult",
+    "FunctionalSensitivity",
+    "NumericalRankPolicy",
+    "NumericalRankReport",
+    "PSDFactorGeometry",
     "WildBootstrapResult",
     "adaptive_bootstrap",
     "cluster_bootstrap",

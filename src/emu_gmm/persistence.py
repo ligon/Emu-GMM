@@ -59,6 +59,11 @@ from emu_gmm._internal.law_state import (
     manifold_to_tag,
     tag_to_manifold,
 )
+from emu_gmm.inference.numerical_rank import (
+    NumericalRankPolicy,
+    NumericalRankReport,
+    PSDFactorGeometry,
+)
 from emu_gmm.law import AsymptoticLaw, EmpiricalLaw, EstimatorLaw
 from emu_gmm.studies.driver import MCRecords
 from emu_gmm.types import FitRecord
@@ -238,6 +243,7 @@ class LawState:
     sigma_theta: np.ndarray | None = None
     psd_index: int | None = None
     psd_rank: int | None = None
+    rank_report: NumericalRankReport | None = None
     # -- empirical grade --
     backing: str | None = None  # "records" | "draws"
     record_arrays: dict[str, np.ndarray] | None = None  # the FitRecord fields
@@ -274,6 +280,7 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
             sigma_theta=b.sigma,
             psd_index=b.psd_index,
             psd_rank=b.psd_rank,
+            rank_report=b.rank_report,
             diagnostics=dict(b.diagnostics),
             factory_spec=b.factory_spec,
         )
@@ -329,6 +336,7 @@ def _asymptotic_state(law: AsymptoticLaw) -> LawState:
         sigma_theta=sigma,
         psd_index=psd_index,
         psd_rank=psd_rank,
+        rank_report=law.rank_report,
         diagnostics=diagnostics,
         factory_spec=None,
     )
@@ -443,6 +451,88 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
     )
 
 
+def _rank_report_payload(
+    report: NumericalRankReport, arrays: dict[str, np.ndarray]
+) -> dict[str, Any]:
+    """Split one numerical-rank report into inert manifest and array fields."""
+    arrays["rank_signed_eigenvalues"] = report.signed_eigenvalues
+    arrays["rank_retained_mask"] = report.retained_mask
+    arrays["rank_excluded_projector"] = report.excluded_projector
+    return {
+        "relative_tol": report.policy.relative_tol,
+        "coordinates": report.policy.coordinates,
+        "metric": report.policy.metric,
+        "cutoff": report.cutoff,
+        "effective_rank": report.effective_rank,
+        "nominal_gauge_dim": report.nominal_gauge_dim,
+        "extra_excluded": report.extra_excluded,
+        "largest_excluded_eigenvalue": report.largest_excluded_eigenvalue,
+        "smallest_retained_eigenvalue": report.smallest_retained_eigenvalue,
+        "excluded_cutoff_margin": report.excluded_cutoff_margin,
+        "retained_cutoff_margin": report.retained_cutoff_margin,
+        "negative_allowance": report.negative_allowance,
+        "status": report.status,
+        "projector_boundary_ambiguous": report.projector_boundary_ambiguous,
+        "factor_geometries": [
+            {
+                "leaf_index": f.leaf_index,
+                "singular_values": list(f.singular_values),
+                "status": f.status,
+            }
+            for f in report.factor_geometries
+        ],
+    }
+
+
+def _rank_report_from_payload(
+    payload: dict[str, Any],
+    data: Any,
+    *,
+    param_names: tuple[str, ...],
+    leaf_shapes: tuple[tuple[int, ...], ...],
+) -> NumericalRankReport:
+    """Rebuild and validate the typed report, including the whole projector."""
+    required = (
+        "rank_signed_eigenvalues",
+        "rank_retained_mask",
+        "rank_excluded_projector",
+    )
+    missing = [name for name in required if name not in data]
+    if missing:
+        raise ValueError(f"load_law: numerical rank arrays are missing: {missing}")
+    return NumericalRankReport(
+        policy=NumericalRankPolicy(
+            relative_tol=payload["relative_tol"],
+            coordinates=payload["coordinates"],
+            metric=payload["metric"],
+        ),
+        signed_eigenvalues=np.asarray(data["rank_signed_eigenvalues"]),
+        cutoff=float(payload["cutoff"]),
+        retained_mask=np.asarray(data["rank_retained_mask"]),
+        excluded_projector=np.asarray(data["rank_excluded_projector"]),
+        effective_rank=int(payload["effective_rank"]),
+        nominal_gauge_dim=int(payload["nominal_gauge_dim"]),
+        extra_excluded=int(payload["extra_excluded"]),
+        largest_excluded_eigenvalue=payload["largest_excluded_eigenvalue"],
+        smallest_retained_eigenvalue=payload["smallest_retained_eigenvalue"],
+        excluded_cutoff_margin=payload["excluded_cutoff_margin"],
+        retained_cutoff_margin=payload["retained_cutoff_margin"],
+        negative_allowance=float(payload["negative_allowance"]),
+        status=payload["status"],
+        projector_boundary_ambiguous=bool(payload["projector_boundary_ambiguous"]),
+        param_names=param_names,
+        leaf_shapes=leaf_shapes,
+        factor_geometries=tuple(
+            PSDFactorGeometry(
+                leaf_index=int(f["leaf_index"]),
+                singular_values=tuple(float(s) for s in f["singular_values"]),
+                status=f["status"],
+            )
+            for f in payload["factor_geometries"]
+        ),
+    )
+
+
 def _write_state(state: LawState, target: Any) -> None:
     """Write ``state`` to a single ``.npz`` (arrays) + embedded JSON manifest."""
     manifest: dict[str, Any] = {
@@ -478,6 +568,11 @@ def _write_state(state: LawState, target: Any) -> None:
             arrays[f"comp_{i}"] = np.asarray(c)
         if state.sigma_theta is not None:
             arrays["sigma_theta"] = np.asarray(state.sigma_theta)
+        manifest["numerical_rank"] = (
+            None
+            if state.rank_report is None
+            else _rank_report_payload(state.rank_report, arrays)
+        )
     elif state.backing == "records":
         assert state.record_arrays is not None
         extra_names = [] if state.extra_arrays is None else sorted(state.extra_arrays)
@@ -535,12 +630,11 @@ def _read_state(target: Any) -> LawState:
             )
         manifest = json.loads(str(data["__manifest__"]))
         ver = int(manifest["schema_version"])
-        if ver != SCHEMA_VERSION:
+        if ver not in (1, SCHEMA_VERSION):
             raise ValueError(
-                f"load_law: artifact schema_version {ver} != supported "
-                f"{SCHEMA_VERSION}. This file was written by a different "
-                "emu_gmm; no migration is registered for it yet. (A future "
-                "version adds an upgrader table keyed on schema_version.)"
+                f"load_law: artifact schema_version {ver} is unsupported; "
+                f"this emu_gmm reads schema 1 and {SCHEMA_VERSION}. "
+                "Upgrade emu_gmm or migrate the artifact."
             )
         shapes = (
             None
@@ -565,6 +659,21 @@ def _read_state(target: Any) -> LawState:
         )
         if manifest["grade"] == "asymptotic":
             n = int(manifest["n_components"])
+            rank_payload = manifest.get("numerical_rank")
+            if ver == 1 and rank_payload is not None:
+                raise ValueError(
+                    "load_law: schema-1 artifact cannot carry a rank policy"
+                )
+            rank_report = (
+                None
+                if rank_payload is None
+                else _rank_report_from_payload(
+                    rank_payload,
+                    data,
+                    param_names=common["param_names"],
+                    leaf_shapes=shapes or (),
+                )
+            )
             return LawState(
                 **common,
                 theta_components=tuple(np.asarray(data[f"comp_{i}"]) for i in range(n)),
@@ -575,6 +684,7 @@ def _read_state(target: Any) -> LawState:
                 ),
                 psd_index=manifest["psd_index"],
                 psd_rank=manifest["psd_rank"],
+                rank_report=rank_report,
             )
         if manifest.get("backing") == "records":
             # Absent on pre-#183 artifacts -> extra=None (fully additive).
@@ -630,17 +740,19 @@ def _state_to_asymptotic(state: LawState) -> AsymptoticLaw:
     leaf_manifolds = tuple(tag_to_manifold(t) for t in state.leaf_tags)
     psd_index, psd_rank = locate_psd_leaf(leaf_manifolds)
     assert state.theta_components is not None  # asymptotic grade invariant
-    backing = MomentsBacking(
+    if state.sigma_theta is None:
+        raise ValueError("load_law: asymptotic artifact has no sigma_theta")
+    backing = MomentsBacking.build(
         components=state.theta_components,
-        sigma=np.asarray(state.sigma_theta),
+        sigma=state.sigma_theta,
         names=state.param_names,
         leaf_tags=state.leaf_tags,
-        component_shapes=state.component_shapes or (),
         psd_index=psd_index,
         psd_rank=psd_rank,
         diagnostics=dict(state.diagnostics),
         factory_spec=state.factory_spec,
         field_names=state.leaf_field_names,
+        rank_report=state.rank_report,
     )
     return AsymptoticLaw(_backing=backing, label="asymptotic(loaded)")
 
