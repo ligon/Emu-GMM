@@ -63,7 +63,15 @@ class SyntheticMeasure:
 
     def _draws(self, theta: ParamsLike) -> Float[Array, "n_sim D"]:
         """Run the sampler once and return the (n_sim, D) draws."""
-        return self.sampler(self.key, theta)
+        if self.n_sim <= 0:
+            raise ValueError("SyntheticMeasure.n_sim must be positive")
+        draws = self.sampler(self.key, theta)
+        if draws.ndim < 1 or draws.shape[0] != self.n_sim:
+            raise ValueError(
+                "SyntheticMeasure sampler must return n_sim rows; "
+                f"got shape {draws.shape} with n_sim={self.n_sim}"
+            )
+        return draws
 
     def with_key(self, key: jax.Array) -> "SyntheticMeasure":
         """Same sampler / ``n_sim``, new frozen PRNG key (CRN re-draw; #126).

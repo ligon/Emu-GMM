@@ -1061,6 +1061,27 @@ class EmpiricalLaw(EstimatorLaw):
 # ---------------------------------------------------------------------------
 # Asymptotic grade: the Gaussian law N(theta_hat, Sigma_theta).
 # ---------------------------------------------------------------------------
+def _clip_rank_roundoff_covariance(
+    cov: np.ndarray, sigma: np.ndarray, jac: np.ndarray
+) -> np.ndarray:
+    """Zero only diagonal signs explainable by a finite sandwich's roundoff."""
+    if not (
+        np.isfinite(cov).all() and np.isfinite(sigma).all() and np.isfinite(jac).all()
+    ):
+        return cov
+    absolute_jac = np.abs(jac)
+    bound = np.einsum("pi,ij,pj->p", absolute_jac, np.abs(sigma), absolute_jac)
+    tolerance = 64 * sigma.shape[0] * np.finfo(float).eps * bound
+    diagonal = np.diag(cov)
+    rounded_zero = (diagonal < 0.0) & np.isfinite(tolerance) & (diagonal >= -tolerance)
+    if not np.any(rounded_zero):
+        return cov
+    out = cov.copy()
+    positions = np.flatnonzero(rounded_zero)
+    out[positions, positions] = 0.0
+    return out
+
+
 class AsymptoticLaw(EstimatorLaw):
     r"""The first-order Gaussian law :math:`\mathcal N(\hat\theta, \Sigma_\theta)`.
 
@@ -1362,8 +1383,21 @@ class AsymptoticLaw(EstimatorLaw):
         assert f is not None
         from emu_gmm.inference.functional_se import functional_se as _fse
 
-        _se, cov = _fse(f, self._components(), jnp.asarray(self._sigma()))
-        return np.atleast_2d(np.asarray(cov))
+        components = self._components()
+        sigma = self._sigma()
+        _se, cov = _fse(f, components, jnp.asarray(sigma))
+        out = np.atleast_2d(np.asarray(cov))
+        if self._rank_policy is not None:
+            # A retained-subspace covariance can have exact zero functional
+            # variances. Dense multiplication may turn one into a tiny
+            # negative under an orthogonal gauge rotation. Bound rounding by
+            # the absolute pre-cancellation quadratic terms for each output,
+            # including a scalar functional whose computed covariance is zero.
+            from emu_gmm.inference.functional_se import _functional_jacobian
+
+            jac = np.asarray(_functional_jacobian(f, components))
+            out = _clip_rank_roundoff_covariance(out, sigma, jac)
+        return out
 
     def mean(self, f: Functional = None) -> np.ndarray:
         comps = self._components()

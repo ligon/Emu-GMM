@@ -18,6 +18,7 @@ from emu_gmm import (
     save_law,
 )
 from emu_gmm._internal.params import manifold_spec_from_params
+from emu_gmm.law import _clip_rank_roundoff_covariance
 from emu_gmm.manifolds import ManifoldLeaf, PSDFixedRank
 
 
@@ -159,6 +160,24 @@ def test_sensitivity_includes_mixed_curvature_and_singular_psd_geometry():
     assert np.any(gamma.second_order_norm > 0.0)
 
 
+def test_ranked_functional_se_preserves_material_negative_variance():
+    result = replace(
+        _result(first_gradient=1.0),
+        moment_covariance=jnp.diag(jnp.array([-0.01, 1.0])),
+    )
+    law = result.asymptotic(rank_policy=NumericalRankPolicy(1e-10))
+    se = law.se(lambda c: jnp.stack(c))
+    assert np.isnan(se[0])
+    np.testing.assert_allclose(se[1], 1.0)
+
+
+def test_ranked_roundoff_never_clips_a_nonfinite_covariance():
+    cov = np.array([[-0.01, np.inf], [np.inf, 1.0]])
+    np.testing.assert_array_equal(
+        _clip_rank_roundoff_covariance(cov, np.eye(2), np.eye(2)), cov
+    )
+
+
 def test_tied_zeros_boundary_and_full_rank_psd_gauge_rotation(tmp_path):
     gauge = np.array([0.0, -1.0, 1.0, 0.0]) / np.sqrt(2.0)
     weak = np.array([1.0, 0.0, 0.0, 0.0])
@@ -193,6 +212,11 @@ def test_tied_zeros_boundary_and_full_rank_psd_gauge_rotation(tmp_path):
 
     np.testing.assert_allclose(
         tied.functional_se(gamma)[0], rotated.functional_se(gamma)[0], atol=1e-8
+    )
+    np.testing.assert_allclose(
+        tied.functional_se(lambda c: gamma(c)[0])[0],
+        rotated.functional_se(lambda c: gamma(c)[0])[0],
+        atol=1e-8,
     )
     np.testing.assert_allclose(
         tied.functional_sensitivity(gamma).first_order_norm,

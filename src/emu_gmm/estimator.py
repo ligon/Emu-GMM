@@ -484,6 +484,13 @@ def build_estimator(
         weighting = ContinuouslyUpdated()
     if regularization is None:
         regularization = DiagonalTikhonov()
+    apply_fixed_tau = getattr(regularization, "apply_fixed_tau", None)
+    if not callable(apply_fixed_tau):
+        raise TypeError(
+            "estimate/build_estimator requires regularization.apply_fixed_tau(V, tau) "
+            "to reapply the anchored ridge; a custom regularizer cannot use "
+            "DiagonalTikhonov's formula implicitly"
+        )
 
     # Manifold spec + optimiser dispatch (plan §2.6 / §7). For v1-style
     # all-Euclidean trees this resolves to optimistix_lm() and mode
@@ -672,9 +679,7 @@ def build_estimator(
 
     def _apply_anchored(V: Float[Array, "M M"]) -> Float[Array, "M M"]:
         """Apply the ridge at the anchored ``tau_anchor`` deterministically."""
-        if hasattr(regularization, "apply_fixed_tau"):
-            return regularization.apply_fixed_tau(V, tau_anchor)
-        return V + tau_anchor * jnp.diag(jnp.diag(V))
+        return apply_fixed_tau(V, tau_anchor)
 
     # Detect whether the measure / covariance combination supports the
     # shared ``expectation_and_contributions`` primitive.

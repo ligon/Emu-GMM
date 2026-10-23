@@ -117,7 +117,12 @@ def _supports_args(optimizer: Any) -> bool:
         return False
     p = sig.parameters.get("args")
     if p is None:
-        return False
+        # A third-party optimiser can accept args=... through **kwargs
+        # without declaring a named parameter.
+        return any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in sig.parameters.values()
+        )
     # Audit L3: a name-only check misroutes a v1-valid
     # ``def __call__(self, residual_fn, theta_init, *args)`` onto the
     # kernel path (VAR_POSITIONAL "args" cannot receive a keyword) and
