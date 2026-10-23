@@ -52,6 +52,7 @@ import haliax as ha
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 from jaxtyping import Array, Float
 
 from emu_gmm._internal.nan_safety import safe_x_for_psi
@@ -394,20 +395,17 @@ class DesignAwareCovariance:
         corner is non-zero).
 
     .. warning::
-        **Fixed stratum-mean heterogeneity contaminates the coupled
-        assembly** (#145; #130 MC evidence). :math:`V_{TT}` centers within
-        ``(stratum x arm)`` cells, but :math:`V_{SS}` and the :math:`V_{TS}`
-        cross pass are **uncentered** cluster-total forms: fixed
-        stratum-level mean shifts in the moments enter their cross-products.
-        In the validation study (fixed demeaned stratum profile, the
-        textbook reason one stratifies), ``couple=True`` under-covered the
-        randomized contrast badly (b1 coverage 0.66 at nominal 0.95;
-        tau-binding on 39% of datasets) while plain
-        :class:`StratifiedCovariance` was calibrated and ``couple=False``
-        conservative. Until the v2.1 centering pass lands, under suspected
-        stratum heterogeneity prefer :class:`StratifiedCovariance` for
-        design contrasts, or ``couple=False`` for a conservative composed
-        assembly --- and inspect the contribution via :meth:`cross_block`.
+        The default uncentered assembly with couple=True is contaminated
+        by fixed stratum-mean heterogeneity (#145; #130 MC evidence):
+        it under-covered the randomized contrast in the recorded fixture.
+        Under suspected fixed heterogeneity, prefer StratifiedCovariance
+        for design contrasts, or couple=False for the block-diagonal
+        comparison (conservative in that fixture), and inspect cross_block.
+        The fixed_strata=True opt-in instead conditions on fixed strata
+        and centers sampling and cross blocks by exposure projection.
+        It requires sampling clusters nested in strata and within-stratum
+        pair replication. One cluster per stratum cannot separate a fixed
+        profile from a random stratum shock.
 
     Parameters
     ----------
@@ -417,18 +415,22 @@ class DesignAwareCovariance:
         directly. Carries the (optional) design FPC, which enters
         :math:`V_{TT}` only --- never :math:`V_{SS}` / :math:`V_{TS}`.
     sampling : ClusteredCovariance
-        The :math:`V_{SS}` engine (uncentered cluster-total form). Its
-        ``cluster_ids`` / ``n_clusters`` are **also** the clustering unit for
+        The :math:`V_{SS}` engine in the default mode (uncentered
+        cluster-total form). Its ``cluster_ids`` / ``n_clusters`` supply
+        the clustering unit in fixed-stratum mode and are **also** used for
         the inline :math:`V_{TS}` cross pass. Because :math:`z_T` and
         :math:`z_S` live in different arms, build ``sampling`` with
         **stratum-level** clustering to capture the within-stratum cross-arm
-        term of eq:offdiag. Its ``dof_correction`` flag is likewise
+        term of eq:offdiag in the default random-stratum mode. In
+        fixed-stratum mode, use repeated sampling clusters nested within
+        each stratum; one cluster per stratum has zero within-stratum
+        support. In the default mode, its ``dof_correction`` flag is
         **inherited by the cross pass** (#119, resolved convention): with
         ``dof_correction=True`` every cross pair :math:`(j, k)` is inflated
         by the per-pair :math:`G_{jk}/(G_{jk}-1)` counted over the sampling
         clusters supporting both coordinates, exactly as inside
-        :math:`V_{SS}`. The design FPC, by contrast, stays inside
-        :math:`V_{TT}` only.
+        :math:`V_{SS}`. In fixed-stratum mode the flag must be false, as
+        described below. The design FPC stays inside :math:`V_{TT}` only.
     design_moment_mask : (M,) jax array of floats
         ``1.0`` for design-driven (:math:`z_T`) coordinates, ``0.0`` for
         sampled (:math:`z_S`) coordinates. Traced leaf.
@@ -447,6 +449,21 @@ class DesignAwareCovariance:
         block itself is also exposed directly via :meth:`cross_block`. When
         ``all_design`` there are no sampled coords, so :math:`V_{TS}\equiv 0`
         and ``couple`` has no effect.
+    fixed_strata : bool (static), default False
+        Opt into exposure-projected centering within each fixed stratum
+        for both SS and TS. TT remains the design engine output. A
+        stratum/pair with fewer than two supporting clusters contributes
+        zero; fixed_stratum_pair_diagnostics exposes counts, projection
+        traces, and usability. The local
+        H/tr(M_j M_k) factor assumes homogeneous cluster cross-covariance;
+        traces at or below sqrt(machine epsilon) times H are treated as
+        unsupported to avoid numerically unbounded inflation.
+        ``sampling.dof_correction=True`` is rejected when sampled moments
+        are present: the local H/tr(M_j M_k) factor already corrects for
+        estimating each stratum's mean under the stated working model.
+        With all moments assigned to design, the exact design-only
+        reduction has no sampling correction to apply. The default mode
+        retains the sampling strategy's #119 global correction.
     """
 
     design: StratifiedCovariance
@@ -454,6 +471,7 @@ class DesignAwareCovariance:
     design_moment_mask: Float[Array, " M"]
     all_design: bool = jdc.static_field()  # type: ignore[attr-defined]
     couple: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
+    fixed_strata: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
 
     @classmethod
     def from_design_mask(
@@ -462,6 +480,7 @@ class DesignAwareCovariance:
         sampling: ClusteredCovariance,
         design_moment_mask: Any,
         couple: bool = True,
+        fixed_strata: bool = False,
     ) -> "DesignAwareCovariance":
         """Build, computing the static ``all_design`` flag eagerly.
 
@@ -476,13 +495,190 @@ class DesignAwareCovariance:
         """
         m = jnp.asarray(design_moment_mask)
         all_design = bool(jnp.all(m > 0.0))
+        if fixed_strata and not all_design:
+            if sampling.dof_correction:
+                raise ValueError(
+                    "fixed_strata=True requires sampling.dof_correction=False: "
+                    "the local projection trace already corrects the "
+                    "within-stratum degrees of freedom"
+                )
+            clusters = np.rint(np.asarray(sampling.cluster_ids)).astype(np.int64)
+            strata = np.rint(np.asarray(design.stratum_ids)).astype(np.int64)
+            if clusters.shape != strata.shape:
+                raise ValueError("sampling clusters and design strata must align")
+            if np.any((clusters < 0) | (clusters >= sampling.n_clusters)):
+                raise ValueError("sampling cluster ID is outside n_clusters")
+            if np.any((strata < 0) | (strata >= design.n_strata)):
+                raise ValueError("design stratum ID is outside n_strata")
+            order = np.argsort(clusters, kind="stable")
+            if np.any(
+                (clusters[order][1:] == clusters[order][:-1])
+                & (strata[order][1:] != strata[order][:-1])
+            ):
+                raise ValueError(
+                    "fixed_strata=True requires sampling clusters nested in strata"
+                )
         return cls(
             design=design,
             sampling=sampling,
             design_moment_mask=m,
             all_design=all_design,
             couple=couple,
+            fixed_strata=fixed_strata,
         )
+
+    def _sampling_cluster_strata(self, seg: Any) -> Any:
+        return jnp.clip(
+            jax.ops.segment_max(
+                jnp.round(self.design.stratum_ids).astype(jnp.int32),
+                seg,
+                num_segments=self.sampling.n_clusters,
+            ),
+            0,
+            self.design.n_strata - 1,
+        )
+
+    def _fixed_pair_geometry(
+        self, support: Any, exposure: Any, strata: Any, j: Any, k: Any
+    ) -> tuple[Any, Any, Any, Any, Any]:
+        """Pair support and exposure-projection trace used by the sampling kernel."""
+        both = (support[:, j] & support[:, k]).astype(exposure.dtype)
+
+        def sum_by_stratum(values: Any) -> Any:
+            return jax.ops.segment_sum(
+                values, strata, num_segments=self.design.n_strata
+            )
+
+        ej, ek = exposure[:, j], exposure[:, k]
+        H = sum_by_stratum(both)
+        dj = sum_by_stratum(both * ej * ej)
+        dk = sum_by_stratum(both * ek * ek)
+        cross_exposure = sum_by_stratum(both * ej * ek)
+        raw_trace = (
+            H
+            - 2.0
+            + cross_exposure**2 / jnp.where((dj > 0.0) & (dk > 0.0), dj * dk, 1.0)
+        )
+        trace = jnp.where((H >= 2.0) & (dj > 0.0) & (dk > 0.0), raw_trace, 0.0)
+        min_trace = jnp.sqrt(jnp.finfo(exposure.dtype).eps) * H
+        usable = (H >= 2.0) & (dj > 0.0) & (dk > 0.0) & (trace > min_trace)
+        return H, dj, dk, trace, usable
+
+    def fixed_stratum_pair_diagnostics(
+        self, measure: Any
+    ) -> tuple[Float[Array, "S M M"], Float[Array, "S M M"], Array]:
+        r"""Return ``(count, trace, usable)`` for each stratum and moment pair.
+
+        ``count`` is the number of sampling clusters supporting both moments.
+        ``trace`` is the overlap of their exposure projections,
+        :math:`\operatorname{tr}(M_jM_k)`. ``usable`` is the exact kernel guard:
+        count at least two, positive exposure norms, and trace greater than
+        ``sqrt(machine epsilon) * count``. An unusable pair contributes zero
+        to the fixed-stratum SS/TS kernel even when its count is at least two.
+        Arrays have shape ``(n_strata, n_moments, n_moments)``.
+        """
+        if not self.fixed_strata:
+            raise ValueError("pair diagnostics are defined for fixed_strata=True")
+        seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
+        exposure = jax.ops.segment_sum(
+            measure.mask * measure.weights[:, None],
+            seg,
+            num_segments=self.sampling.n_clusters,
+        )
+        observed = jax.ops.segment_sum(
+            (measure.mask > 0.0).astype(jnp.float64),
+            seg,
+            num_segments=self.sampling.n_clusters,
+        )
+        support = observed > 0.0
+        strata = self._sampling_cluster_strata(seg)
+        M = int(support.shape[1])
+
+        def pair_geometry(index: Any) -> tuple[Any, Any, Any]:
+            j, k = index // M, index % M
+            H, _dj, _dk, trace, usable = self._fixed_pair_geometry(
+                support, exposure, strata, j, k
+            )
+            return H, trace, usable
+
+        count, trace, usable = jax.lax.map(pair_geometry, jnp.arange(M * M))
+
+        def arrange(values: Any) -> Any:
+            return jnp.transpose(values.reshape(M, M, self.design.n_strata), (2, 0, 1))
+
+        return arrange(count), arrange(trace), arrange(usable)
+
+    def fixed_stratum_pair_support(self, measure: Any) -> Float[Array, "S M M"]:
+        """Return the pair-supported cluster counts from the full diagnostics."""
+        return self.fixed_stratum_pair_diagnostics(measure)[0]
+
+    def _fixed_stratum_sampling(
+        self,
+        psi: StructuralModel,
+        theta: ParamsLike,
+        measure: Any,
+        cached_intermediates: Any,
+    ) -> Float[Array, "M M"]:
+        """Exposure-projected, pair-supported sampling kernel for SS and TS.
+
+        The local H / tr(M_j M_k) correction uses a homogeneous
+        within-stratum cluster cross-covariance working assumption.
+        """
+        mask = measure.mask
+        weights = measure.weights
+        if cached_intermediates is not None:
+            _m, psi_safe, _weight_mask, N_j = cached_intermediates
+        else:
+            x_safe = safe_x_for_psi(measure.x)
+
+            def psi_at(x: Any) -> jnp.ndarray:
+                return _to_plain(psi(x, theta))
+
+            psi_batch = jax.vmap(psi_at)(x_safe)
+            psi_safe = jnp.where(mask > 0.0, psi_batch, 0.0)
+            N_j = jnp.sum(mask * weights[:, None], axis=0)
+
+        exposure_obs = mask * weights[:, None]
+        seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
+        totals = jax.ops.segment_sum(
+            exposure_obs * psi_safe, seg, num_segments=self.sampling.n_clusters
+        )
+        exposure = jax.ops.segment_sum(
+            exposure_obs, seg, num_segments=self.sampling.n_clusters
+        )
+        observed = jax.ops.segment_sum(
+            (mask > 0.0).astype(jnp.float64),
+            seg,
+            num_segments=self.sampling.n_clusters,
+        )
+        support = observed > 0.0
+        strata = self._sampling_cluster_strata(seg)
+        M = int(totals.shape[1])
+        S = self.design.n_strata
+
+        def sum_by_stratum(values: Any) -> Any:
+            return jax.ops.segment_sum(values, strata, num_segments=S)
+
+        def pair_numerator(index: Any) -> Any:
+            j, k = index // M, index % M
+            both = (support[:, j] & support[:, k]).astype(totals.dtype)
+            tj, tk = totals[:, j], totals[:, k]
+            ej, ek = exposure[:, j], exposure[:, k]
+            H, dj, dk, trace, usable = self._fixed_pair_geometry(
+                support, exposure, strata, j, k
+            )
+            bj = sum_by_stratum(both * ej * tj) / jnp.where(dj > 0, dj, 1.0)
+            bk = sum_by_stratum(both * ek * tk) / jnp.where(dk > 0, dk, 1.0)
+            residual_j = tj - bj[strata] * ej
+            residual_k = tk - bk[strata] * ek
+            centered = sum_by_stratum(both * residual_j * residual_k)
+            # The shared geometry guard prevents near-orthogonal projections
+            # from receiving a numerically explosive local correction.
+            local = jnp.where(usable, H / jnp.where(usable, trace, 1.0), 0.0)
+            return jnp.sum(local * centered)
+
+        numer = jax.lax.map(pair_numerator, jnp.arange(M * M)).reshape(M, M)
+        return _safe_outer_divide(numer, N_j)
 
     def covariance(
         self,
@@ -500,6 +696,11 @@ class DesignAwareCovariance:
         ) = None,
     ) -> Float[Array, "M M"]:
         r"""Assemble the mixed design/sampling :math:`V_X`.
+
+        The default delegates the sampling block to the caller's
+        clustered engine. In fixed-stratum mode, one pair-supported
+        exposure-projection kernel supplies the sampling and cross
+        blocks; the design block remains delegated unchanged.
 
         Composition of the law-of-total-variance blocks
         :math:`V_X = V_{TT} + V_{SS} + V_{TS}` (+ :math:`V_{ST}`), placed into
@@ -535,7 +736,11 @@ class DesignAwareCovariance:
 
         # --- delegated diagonal blocks (compose; cached tuple threads through)
         V_TT = self.design.covariance(psi, theta, measure, cached_intermediates)
-        V_SS = self.sampling.covariance(psi, theta, measure, cached_intermediates)
+        V_SS = (
+            self._fixed_stratum_sampling(psi, theta, measure, cached_intermediates)
+            if self.fixed_strata
+            else self.sampling.covariance(psi, theta, measure, cached_intermediates)
+        )
 
         # --- assemble via design_moment_mask outer-product masks
         # (exhaustive and mutually exclusive: P_TT + P_SS + P_TS == 1) -----
@@ -550,7 +755,11 @@ class DesignAwareCovariance:
             # for couple=False -> block-diagonal V_TT (+) V_SS (#109). The
             # term is added last so couple=True is bit-identical to the
             # pre-#109 assembly V_TT*P_TT + V_SS*P_SS + V_cross*P_TS.
-            V = V + self._cross_corners(psi, theta, measure, cached_intermediates)
+            V = V + (
+                V_SS * (jnp.outer(t, s) + jnp.outer(s, t))
+                if self.fixed_strata
+                else self._cross_corners(psi, theta, measure, cached_intermediates)
+            )
         return 0.5 * (V + V.T)  # symmetrise against round-off
 
     def _cross_corners(
@@ -570,6 +779,10 @@ class DesignAwareCovariance:
     ) -> Float[Array, "M M"]:
         r"""Estimated cross block :math:`V_{TS}` placed in the (T,S)/(S,T) corners.
 
+        Fixed-stratum mode selects the same exposure-projected kernel
+        used for the sampling block before masking to these corners.
+        The following cluster-total description applies to the default.
+
         A cluster-total outer product over **all** coords at the
         :attr:`sampling` engine's cluster unit, masked to the off-diagonal
         cross corners by ``P_TS = outer(t,s) + outer(s,t)`` (the TT and SS
@@ -581,6 +794,14 @@ class DesignAwareCovariance:
         self-compute agree by construction. Used by :meth:`covariance` (when
         ``couple``) and exposed via :meth:`cross_block`.
         """
+        if self.fixed_strata:
+            V_cross = self._fixed_stratum_sampling(
+                psi, theta, measure, cached_intermediates
+            )
+            t = (self.design_moment_mask > 0.0).astype(V_cross.dtype)
+            s = 1.0 - t
+            return V_cross * (jnp.outer(t, s) + jnp.outer(s, t))
+
         mask = measure.mask  # (N, M)
         weights = measure.weights  # (N,)
         if cached_intermediates is not None:

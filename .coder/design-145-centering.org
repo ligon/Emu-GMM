@@ -1,0 +1,191 @@
+#+TITLE: Issue 145 design pass: centered sampling and cross blocks
+#+DATE: 2026-10-23
+#+OPTIONS: toc:nil
+
+* Opt-in implementation slice (2026-10-23)
+
+=DesignAwareCovariance.from_design_mask(..., fixed_strata=True)= selects a
+conditional-on-fixed-strata sampling covariance.
+The default remains =fixed_strata=False=: the original random-stratum
+uncentered =ClusteredCovariance= sampling block and cross pass are unchanged.
+Use the opt-in when the nuisance profile is a fixed conditional mean of
+observed moment contributions within each stratum, sampling clusters are
+nested in strata, and multiple clusters support the moment pairs of interest.
+In the opt-in mode, the design block \(V_{TT}\) remains the original
+=StratifiedCovariance= result, while one pair-supported exposure-projection
+kernel supplies both \(V_{SS}\) and \(V_{TS}\).
+This retains the #109 coupled/uncoupled decomposition.
+
+The implementation uses the projected numerator
+\((M_jt_j)'(M_kt_k)\) on the pair-overlap clusters of each stratum, with
+\(e_{h,j}=\sum_{i\in h}d_{ij}w_i\) and
+\(M_j=I-e_j(e_j'e_j)^{-1}e_j'\).
+It multiplies by the local factor \(H_{s,jk}/\operatorname{tr}(M_jM_k)\)
+when \(H_{s,jk}\geq2\) and both exposure norms and the trace are positive.
+This factor is justified by homogeneous cluster cross covariance within the
+stratum; it is a working correction under heterogeneity.
+For \(H=2\), nearly orthogonal exposure vectors make the trace tiny and
+the raw correction unstable.
+The implementation treats a pair as unsupported when
+\(\operatorname{tr}(M_jM_k)\leq\sqrt{\epsilon_{\mathrm{mach}}}H\), where the
+machine epsilon matches the cluster-total dtype.
+The cutoff is a numerical guard; its effect on coverage requires separate
+study.
+The local factor corrects for estimating the stratum mean under the
+homogeneous-cluster working model.
+The constructor rejects =sampling.dof_correction=True= in this mixed opt-in mode
+because the global \(G_{jk}/(G_{jk}-1)\) would add a second inflation.
+The all-design reduction remains exactly =StratifiedCovariance= and does not
+use the sampling correction, regardless of this flag.
+The default random-stratum mode retains the #119 correction unchanged.
+Scaling remains \(1/(N_jN_k)\).
+
+A stratum/pair with \(H_{s,jk}<2\), zero exposure norm, or trace below
+the numerical guard contributes exactly zero.
+The \(H<2\) part matches the design-side unsupported-pair rule.
+=fixed_stratum_pair_diagnostics(measure)= returns \(S\times M\times M\)
+arrays for pair-support count, projection trace, and the exact usability flag.
+=fixed_stratum_pair_support(measure)= remains a count-only convenience.
+Callers can inspect losses from both low support and the trace guard before
+inference.
+The constructor refuses sampling clusters crossing strata.
+One sampling cluster per stratum cannot identify a random stratum shock
+separately from an arbitrary fixed profile; the opt-in does not estimate
+that unconditional random-stratum component.
+The current default is the path for that target.
+No general finite-sample guarantee is claimed for heteroskedastic clusters,
+stochastic observability, or ratios with random \(N_j\).
+The deterministic tests in
+=tests/covariance/test_design_aware_fixed_strata.py= establish algebra and
+compatibility, not coverage; a separate Monte Carlo validation remains.
+
+* Recommendation and limit
+
+For a fixed /per-observation/ stratum profile, center the sampling contribution and its cross block by projecting each sampling-cluster total on its observed weighted exposure /within each stratum and pair-overlap set/.
+This has a well-defined target when the caller's sampling clusters are nested in strata and at least two clusters support a pair in an informative stratum.
+It cannot identify a random cross-arm stratum shock when the stratum itself is the sole sampling cluster: subtracting that stratum's estimated mean removes the shock, while leaving it uncentered confounds the shock with an arbitrary fixed stratum mean.
+That case needs either repeated cross-arm sampling clusters within strata, an externally specified mean model, or an explicit refusal/caveat.
+
+The implementation slice above is opt-in; the numerical checks below test
+its local correction under a paired-cluster working model.
+The distinction between fixed and random stratum effects and the
+heterogeneous-cluster finite-sample correction remain substantive limits.
+
+* Existing contract and evidence
+
+- The design block uses per-pair overlap within each stratum-by-arm cell, \(H_{c,jk}/(H_{c,jk}-1)\), and \(1/(N_jN_k)\); unsupported pairs contribute zero (=src/emu_gmm/covariance/stratified.py:261-291=).
+- The sampling block delegates to uncentered =ClusteredCovariance=, while the cross block makes a second uncentered cluster-total pass at =sampling.cluster_ids= (=src/emu_gmm/covariance/stratified.py:533-553,584-621=).
+  The existing =ClusteredCovariance.centered= subtracts a /global/ per-coordinate moment, which does not remove fixed stratum profiles (=src/emu_gmm/covariance/clustered.py:77-86=; =src/emu_gmm/covariance/_outer_product.py:68-79=).
+- With the fixed profile, the recorded coupled arm covered the randomized coefficient in 0.663 of the usable draws and bound the ridge on 0.393 of datasets; the no-profile control covered 0.930 with no binding (=docs/validation/ladder-mc-2026-06-10.org:221-247=).
+  The study itself says its true /cross-arm/ component is zero, so it cannot validate preservation of that component (=docs/validation/ladder-mc-2026-06-10.org:200-217=).
+- Current tests pin the sampling cluster unit, the global per-pair \(G_{jk}/(G_{jk}-1)\) cross correction when enabled, the coupled/uncoupled identity, and the bit-for-bit all-design reduction (=tests/covariance/test_stratified.py:1005-1038,1253-1344,921-943=).
+  They pin the /old/ uncentered numeric form; a corrected mode will require new references rather than relaxed tolerances.
+- The consumer appendix defines \(V_X\) for a joint sampling-plus-assignment population and derives a cross-arm term at the stratum/group sampling unit (=../Seasonality/Text/ai_neyman_covariance.org:245-310=).
+  It does not supply an estimator that separates one realized fixed stratum mean from one realized random stratum shock.
+
+* Candidate algebra for nested sampling clusters
+
+Let \(h\) index the supplied sampling clusters and \(s(h)\) their fixed stratum, with each \(h\) contained in exactly one stratum.
+For coordinate \(j\), define \(t_{h,j}=\sum_{i\in h}d_{ij}w_i\psi_j(x_i,\theta)\), \(q_{h,j}=\mathbf 1\{\sum_{i\in h}d_{ij}>0\}\), and \(N_j=\sum_i d_{ij}w_i\).
+For each pair \((j,k)\), set \(u_{h,jk}=q_{h,j}q_{h,k}\) and, within stratum \(s\),
+\[
+H_{s,jk}=\sum_{h:s(h)=s}u_{h,jk},\quad
+A_{s,jk}=\sum_{h:s(h)=s}u_{h,jk}t_{h,j},\quad
+B_{s,jk}=\sum_{h:s(h)=s}u_{h,jk}t_{h,k},\quad
+P_{s,jk}=\sum_{h:s(h)=s}u_{h,jk}t_{h,j}t_{h,k}.
+\]
+For equal exposure per overlapping sampling cluster, the centered numerator is \(C_{s,jk}=P_{s,jk}-A_{s,jk}B_{s,jk}/H_{s,jk}\) for \(H_{s,jk}\geq2\), and zero otherwise.
+In that balanced special case, a common sampling kernel gives both the \(SS\) and \(TS\) entries by block mask:
+\[
+V^{\mathrm{ctr}}_{jk}=\frac{1}{N_jN_k}\sum_{s:H_{s,jk}\geq2}
+\frac{H_{s,jk}}{H_{s,jk}-1} C_{s,jk}.
+\]
+The \(TT\) block remains the existing cell-centered =StratifiedCovariance= output, so the all-design path is untouched.
+For either centering rule, the \(TS\) corners must come from the /same/ sampling kernel as \(SS\), masked by \(P_{TS}\); =cross_block= and =couple=False= then retain the #109 identity by construction.
+The design FPC remains confined to \(TT\).
+
+Pair-specific overlap is essential: a per-coordinate stratum mean uses different cluster sets in the two factors and can create a spurious off-diagonal under missingness.
+The weights enter \(t_{h,j}\) once; \(N_jN_k\) remains the only sample-size normalization.
+With a fixed /cluster-total/ shift \(t_{h,j}=a_{s,j}+\epsilon_{h,j}\) on pair-supported clusters, \(C_{s,jk}\) is invariant to \(a_{s,j}\) and \(a_{s,k}\).
+
+A fixed /conditional mean of moment coordinate \(j\) among observed units/ shifts \(t_{h,j}\) by \(a_{s,j}e_{h,j}\), where \(e_{h,j}=\sum_{i\in h}d_{ij}w_i\).
+The displayed cluster-total centering does not remove that shift when \(e_{h,j}\) varies.
+An exposure-adjusted alternative uses a pair-specific projection onto each coordinate's exposure vector.
+On the \(H_{s,jk}\) clusters where /both/ coordinates have \(q_{h,j}=q_{h,k}=1\), let \(e_j=(e_{h,j})_h\) and \(M_j=I-e_j(e_j'e_j)^{-1}e_j'\), and likewise for \(k\).
+The cross numerator \(t_j'M_jM_k t_k=(M_jt_j)'(M_kt_k)\) removes any fixed shift proportional to \(e_j\) or \(e_k\), including unequal masks and weights.
+For independent clusters with the same cross covariance \(\sigma_{jk}\) within a stratum, its expectation is \(\sigma_{jk}\operatorname{tr}(M_jM_k)\); the corresponding correction is \(H_{s,jk}/\operatorname{tr}(M_jM_k)\).
+When exposures are constant and equal on that overlap set, this reduces to \(H_{s,jk}/(H_{s,jk}-1)\).
+With heterogeneous cluster covariances the trace factor is only a working approximation; an exact finite-sample correction needs additional assumptions or a different estimator.
+The chosen fixed-effect definition therefore matters under the package's unequal-support contract.
+This pair-supported projection is the candidate for the package's general mask/weight regime; the simpler \(P-AB/H\) formula is its equal-exposure reduction.
+For the #130 residual moments \(r z_j\), a fixed outcome profile can also multiply /random within-stratum variation/ in \(z_j\); that variation belongs in \(V_{SS}/V_{TS}\) and is not erased by projecting only their conditional moment means.
+The mask is treated as fixed in this covariance calculation; if stochastic observability changes the stratum mixture in \(N_j\), a separate unconditional ratio-estimand derivation is needed.
+
+** The #119 finite-sample choice
+
+The displayed local Bessel factor corrects the loss of one estimated mean /per stratum and pair/ under equal cluster exposure.
+The default random-stratum #119 contract makes =sampling.dof_correction=True= multiply a raw cross product by global \(G_{jk}/(G_{jk}-1)\), where \(G_{jk}=\sum_s H_{s,jk}\) (=src/emu_gmm/covariance/clustered.py:141-159=).
+Those factors are not interchangeable: with \(S>1\) fixed strata and balanced support, global \(G/(G-1)\) times the centered numerator has expectation \((G-S)/(G-1)\) of the target under independent equal-variance clusters.
+An ablation multiplied the local correction by the inherited global factor in
+/both/ \(SS\) and \(TS\).
+With 15 paired clusters, its expectation exceeds the analytic cross target by
+\(15/14\); the separate paired-cluster check measured that excess.
+With exposure projection, the local factor becomes \(H_{s,jk}/\operatorname{tr}(M_jM_k)\) only under equal cross covariance across overlapping clusters.
+The general heterogeneous-cluster normalization remains open, so the global #119 factor must not be combined with a guessed local one.
+The opt-in uses only the local factor and rejects the global flag explicitly;
+the literal #119 on/off contract remains on the default mode.
+
+* Reproducible pilot evidence
+
+The seed is 20260610.
+Run =nice -n 19 taskset -c 32-35 poetry run python scripts/validation/design_aware_fixed_strata_pilot.py --fit-reps 6 --paired-reps 256 --seed 20260610= for the small #130 feasibility comparison and paired-cluster sign check; output is saved in =.coder/design-145-final-pilot-2026-10-23.log=.
+Run =nice -n 19 taskset -c 32-35 poetry run python scripts/validation/design_aware_fixed_strata_pilot.py --fit-reps 0 --paired-reps 4096 --seed 20260610= for the covariance-only correction ablation; output is saved in =.coder/design-145-final-paired-4096-2026-10-23.log=.
+The extra-global arm is an explicitly labeled validation-only counterfactual;
+the public fixed-strata constructor rejects that flag.
+The small fit pilot shows the default coupled arm with 4 valid SE rows among 6 converged fits and two ridge-binding draws, while the local fixed-strata and pure stratified arms have 6 valid SE rows and no binding.
+These six draws cannot establish coverage.
+In the paired-cluster check, the analytic cross covariance is \(0.8/15=0.053333\), the local estimate is 0.053405 (MCSE 0.000370), and the local-plus-global ablation is 0.057219 (MCSE 0.000396).
+The negative-shock control reverses the sign, and the zero-shock control is near zero.
+The planned coverage comparison uses 300 common-random-number draws of the
+unchanged #130 fixed-profile DGP with per-rep ridge anchoring and all four
+arms above.
+=scripts/validation/design_aware_fixed_strata_burst.sh= pins the published
+branch SHA in a separate four-CPU =co_carleton= job and writes its log to
+durable scratch; it requires review before submission.
+Coverage, ridge-binding, convergence, and validity rates are pending that
+run, so the opt-in's estimator calibration is not yet established.
+
+* Discriminating fixtures and falsification
+
+1. Fixed profile :: At least three strata, several sampling clusters per stratum, two arms, \(t_{h,j}=a_{s,j}+\epsilon_{h,j}\) with an unequal fixed \(a_s\) and a no-profile control.
+   With equal cluster exposures, the centered \(SS/TS\) blocks must be invariant to adding \(a_s\) to every supported cluster in a stratum; the current uncentered blocks must move.
+   Repeat under ragged support and unequal weights, checking \(H_{s,jk}\), \(N_jN_k\), and an independent NumPy formula; then add a fixed conditional /moment mean/ per observed unit and verify that simple cluster-total centering fails while exposure-projection centering is invariant.
+2. Genuine cross-arm shock :: Within each stratum create at least two /paired/ sampling clusters, each containing distinct treatment and control PSUs.
+   Draw a new pair shock \(z_{s,h}\) each replication; put \(z_{s,h}\) in a treatment-only design moment and \(\rho z_{s,h}\) in a control-only sampled moment, plus independent arm noise and a fixed \(a_s\).
+   Give the paired PSUs one =sampling.cluster_id= but distinct =design.psu_id=; the true cross-arm covariance is \(\rho\operatorname{Var}(z)\neq0\), while PSU clustering sees zero cross-arm overlap.
+   The pair-supported exposure projection must keep the signed nonzero term after removing \(a_s\), and a sign flip of \(\rho\) must flip it.
+   A shock shared by /every/ cluster in one stratum is deliberately removed along with its fixed profile; that is the one-cluster-per-stratum identification limit.
+3. Falsifiers :: Set \(\rho=0\) (cross-arm term should approach zero); use one sampling cluster per stratum (centering cannot estimate its cross-arm term and must refuse or mark it unsupported); drop pair support in selected strata (those \(H_{s,jk}<2\) terms must be exactly zero); set all moments to design (bit-for-bit old output); check \(V_{\mathrm{coupled}}=V_{\mathrm{uncoupled}}+V_{TS}\) and cache/JIT parity.
+
+The paired-cluster fixture tests a regime that the current #130 study does not contain.
+A separate MC check on its known DGP should compare empirical cross covariance, coverage, ridge binding, and convergence, with a fixed seed and CRN arms, before changing the default.
+
+* Limits after the first slice
+
+- The opt-in estimates a conditional-on-fixed-strata covariance, while the
+  unchanged default retains the random-stratum sampling target.
+  A one-cluster-per-stratum design cannot identify both an arbitrary fixed
+  profile and a random stratum shock without more information.
+- The centered mode requires sampling clusters nested in strata and exposes
+  unsupported pairs through the count, trace, and usability diagnostic.
+  Its zeroed pairs can matter for inference and should be inspected.
+- The local correction is the opt-in finite-cluster convention under the
+  homogeneous-cluster working model; the extra global correction is rejected.
+  The covariance ablation tests its mean, while estimator coverage still
+  needs the planned larger Monte Carlo comparison.
+- Is the nuisance profile additive to each sampling /cluster total/ or to each observed /moment contribution/ before masking and weighting?
+  The #130 DGP adds a fixed outcome profile to \(r\); its effect on each moment's mean depends on the instrument \(z_j\), so the exposure-projection correction and its heterogeneous-cluster behavior require derivation before claiming a general fix.
+- Is observability conditioned on as a realized design, or part of the sampling law for \(N_j\)?
+  The latter can make changes in stratum composition random even when the stratum-specific moment means are fixed.
+
+-- Sue
