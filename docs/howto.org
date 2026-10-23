@@ -26,7 +26,8 @@ You supply the *residual function* =psi= and *where the expectation is
 taken* (a =Measure=). The framework owns everything statistical: the
 criterion, the optimiser loop, the weighting matrix, the standard
 errors, the over-identification (J) test, and the diagnostics. You read
-those off the result object; *you never recompute them by hand* (see
+the criterion and diagnostics off the =OptimizationResult= and inference
+from =result.asymptotic()=; *you never recompute them by hand* (see
 "Contracts that bite", below).
 
 * What you supply vs. what the framework owns
@@ -35,12 +36,12 @@ those off the result object; *you never recompute them by hand* (see
 |------------------------------------------------------+---------------------------------------------|
 | =psi(x, theta) -> (M,)=, the per-observation moment  | The criterion \(Q_\mu(\theta)\) and its minimisation |
 | A parameter container (a small dataclass)            | The weighting matrix \(\Lambda = V^{-1}\) and its AD |
-| A =Measure= (empirical / analytical / synthetic)     | \(\hat\theta\), =Sigma_theta=, standard errors       |
-| A =CovarianceStrategy= (iid / clustered)             | The J-statistic, =J_dof=, p-values                   |
+| A =Measure= (empirical / analytical / synthetic)     | \(\hat\theta\), asymptotic covariance and standard errors |
+| A =CovarianceStrategy= (iid / clustered)             | The J-statistic, degrees of freedom, p-values       |
 | /(optional)/ weighting, regularisation, optimiser    | Per-moment diagnostics (=N_j=, condition numbers)    |
 
-Everything in the right column comes back on a single
-=EstimationResult=.
+The fit returns an =OptimizationResult=; its =asymptotic()= law supplies
+the uncertainty estimates and p-values.
 
 * The five pieces, and the code each one needs
 
@@ -94,7 +95,7 @@ class MyParams:
 
 Contract: by default, leaves are 0-d scalars living in flat
 \(\mathbb{R}^K\). The leaf *names* become the parameter labels on
-=Sigma_theta= / standard errors. Constrained parameters (a scale
+=result.asymptotic().cov()= / =.se()=. Constrained parameters (a scale
 =sigma > 0=, a fixed-rank PSD block) are supported via the manifold
 types =Positive=, =PSDFixedRank=, =Euclidean=, and =Product= (all
 top-level exports): annotate the container with
@@ -205,26 +206,28 @@ result = estimate(
 )
 
 print(float(result.theta_hat.p))   # ~ 0.5
-print(result.coef_table)           # estimate / std_error / t_stat / p_value (pandas)
-print(float(result.J_stat), result.J_dof)
+law = result.asymptotic()
+print(law.coef_table)              # estimate / std_error / t_stat / p_value (pandas)
+print(float(result.objective_value), result.n_overid)
 #+end_src
 
 That is the entire integration surface: define =psi=, define =Params=,
 build a measure, pick a covariance, call =estimate=.
 
-* What you get back: =EstimationResult=
+* What you get back: =OptimizationResult= and =AsymptoticLaw=
 
-These fields are *authoritative*; read them, do not recompute them:
+The fit result holds optimization quantities; =result.asymptotic()= adds
+the asymptotic inference readout. Read these, rather than recomputing them:
 
 - =theta_hat= :: your =Params= type, filled with the estimates.
-- =standard_errors=, =coef_table= :: SEs / t / p, ready to report
-  (both are properties; access without parentheses).
-- =Sigma_theta= :: the \(K \times K\) parameter covariance (labelled).
-- =J_stat=, =J_dof=, =J_pvalue= :: the over-identification test.
-- =V_X= :: the \(M \times M\) moment covariance (labelled).
+- =objective_value=, =n_overid= :: the realized criterion (J-statistic) and its over-identification degrees of freedom.
+- =moment_covariance=, =weighting_matrix= :: the raw moment covariance and the realized inverse weight used by the criterion.
 - =diagnostics= :: per-moment =N_j=, condition numbers, gradient norms.
 - =converged=, =iterations= :: convergence flag and optimiser info.
-- =to_pandas()= (method) / =coef_table= (property) :: materialise for reporting.
+- =to_pandas()= :: materialise optimization diagnostics for reporting.
+- =result.asymptotic().cov()= / =.se()= :: asymptotic parameter covariance and standard errors.
+- =result.asymptotic().coef_table= :: estimate / SE / t / p table (a pandas property).
+- =result.asymptotic().J_pvalue= :: over-identification p-value when the fit is over-identified and efficiently weighted.
 
 * Inference: which uncertainty tool?
 
@@ -232,11 +235,11 @@ These fields are *authoritative*; read them, do not recompute them:
 
 | You want                                | Use                                  | Re-solves?      |
 |-----------------------------------------+--------------------------------------+-----------------|
-| parameter SEs, fast                     | =result.standard_errors=             | no (analytic)   |
+| parameter SEs, fast                     | =result.asymptotic().se()=           | no (analytic)   |
 | parameter SEs / CIs, robust             | =cluster_bootstrap= \(\to\) =theta_boot= | *yes (refit)* |
 | the \(J\) over-identification test      | =moment_wild_bootstrap=              | no              |
 | inference robust to weak identification | =k_statistic= / =k_confidence_set=   | no              |
-| SEs on functionals of \(AA'\) (gauge)   | =functional_se= / =gamma_se=         | no (analytic)   |
+| SEs on functionals of \(AA'\) (gauge)   | =result.asymptotic().functional_se(f)= | no (analytic) |
 | =n_boot= to a precision target          | =adaptive_bootstrap=                 | wraps the above |
 
 ** Two bootstraps, and why they differ
@@ -246,17 +249,27 @@ The distinction trips people up, so be explicit about it.
 - =moment_wild_bootstrap= is /refit-free/. It perturbs the empirical moments with a wild weighting and reads off the \(J\) distribution (and, via the first-order delta, an approximate parameter distribution). It never re-solves the GMM problem, so it's cheap --- and it's the right tool for the \(J\) test.
 - =cluster_bootstrap= is the /refit/ (re-estimation) parameter bootstrap. It resamples whole clusters with replacement, re-runs =estimate()= on each resample, and returns =theta_boot=, the bootstrap distribution of \(\hat\theta\) itself (Cameron, Gelbach & Miller 2008). It captures nonlinearity the delta method can't, and it's the one to reach for under few clusters, a boundary optimum, or a badly non-Gaussian sampling distribution.
 
+The coin data above are independent; the groups below illustrate the API rather than a clustered data-generating process. Supply the actual sampling-cluster IDs for a clustered application.
+
 #+begin_src python
 import jax, jax.numpy as jnp, numpy as np
+from emu_gmm import ClusteredCovariance, EmpiricalMeasure, estimate
 from emu_gmm.inference import cluster_bootstrap
 
-boot = cluster_bootstrap(
-    model=psi, theta_init=result.theta_hat, measure=measure,
-    covariance=cov, n_boot=999, key=jax.random.PRNGKey(1),
+measure = EmpiricalMeasure(x=x, mask=jnp.ones((1000, 1)), weights=jnp.ones(1000))
+cov = ClusteredCovariance(
+    cluster_ids=jnp.repeat(jnp.arange(50), 20), n_clusters=50,
 )
-tb   = boot.theta_boot.array[np.asarray(boot.convergence)]   # non-converged refits are NaN rows (#209)
-se   = tb.std(axis=0)                                        # bootstrap SE
-ci95 = jnp.quantile(tb, jnp.array([0.025, 0.975]), axis=0)
+clustered_result = estimate(
+    model=psi, measure=measure, covariance=cov, theta_init=result.theta_hat,
+)
+boot = cluster_bootstrap(
+    model=psi, theta_init=clustered_result.theta_hat, measure=measure,
+    covariance=cov, n_boot=99, key=jax.random.PRNGKey(1),
+)
+tb   = np.asarray(boot.theta_boot.array)[np.asarray(boot.convergence)]  # valid rows
+se   = tb.std(axis=0, ddof=1) if boot.n_valid > 1 else None   # bootstrap SE
+ci95 = jnp.quantile(tb, jnp.array([0.025, 0.975]), axis=0) if boot.n_valid else None
 #+end_src
 
 A refit that does not converge is stored as a =NaN= row --- not as its =theta_hat=, which on a resampled world that extinguished a rare moment's support is just =theta_init=, finite and unmoved (#209). =boot.convergence= names the event, =boot.zero_support= / =boot.tau_saturated= say why, and =boot.n_nonconverged= counts; reduce over the converged rows as above, or let =adaptive_bootstrap= exclude and count the =NaN= draws for you.
@@ -284,7 +297,7 @@ For large =n_boot=, build on the =build_estimator= factory rather than bare =est
    by the package and already carry the per-moment \(N_j\) scaling.
    Hand-rolling =J = (sqrt(N) * mean)' V^{-1} (sqrt(N) * mean)= or any
    "textbook" rescaling silently breaks under unequal \(N_j\). Read the
-   result object. (See =design.org= "Scaling convention".)
+   fit result and its =asymptotic()= law. (See =design.org= "Scaling convention".)
 4. *If an interface is missing something, file an issue; don't fork
    the statistic.* =emu-gmm= is meant to be the single correct
    implementation; a local reimplementation forfeits that for everyone
@@ -396,7 +409,7 @@ Measure/Covariance orthogonality on one =psi=).
   the Measure \(\times\) CovarianceStrategy orthogonality.
 - =docs/mcar-asymptotics.org= :: consistency, normality, the J-limit,
   and why the \(1/(N_j N_k)\) variance is right under MCAR missingness.
-- =docs/api-sketch.org= :: the full typed surface (protocols, result
-  types, the =EstimationResult= invariant).
+- =docs/api-sketch.org= :: the v1 typed surface, retained as a design record;
+  =docs/optimization-result-law-split.org= describes the current result/law split.
 - =docs/migration/manifoldgmm-to-emu-gmm.org= :: if you are porting
   from ManifoldGMM.
