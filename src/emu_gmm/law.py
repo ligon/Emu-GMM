@@ -599,9 +599,10 @@ class EmpiricalLaw(EstimatorLaw):
         Pass ``events={name: mask}`` (each ``mask`` an ``(n,)`` 0/1 or boolean
         array aligned with the draws) to let an array / CSV-backed bootstrap
         carry conditionable flags (#181): :meth:`given` on a named event then
-        returns the conditioned sub-population. Without ``events`` (and without a
-        backing :class:`FitRecord`) :meth:`given` and :meth:`couple` remain
-        unavailable, as before.
+        returns the conditioned sub-population, and :meth:`event_share` reports
+        its size over all and finite draws. Without ``events`` (and without a
+        backing :class:`FitRecord`) :meth:`given` and :meth:`event_share` remain
+        unavailable; :meth:`couple` also remains unavailable for raw draws.
         """
         arr = np.asarray(values, dtype=float)
         if arr.ndim == 1:
@@ -921,14 +922,44 @@ class EmpiricalLaw(EstimatorLaw):
     def event_share(self, event: Any, *, negate: bool = False) -> EventShare:
         """The loud size of a :meth:`given` selection (both denominators).
 
-        Reuses :func:`emu_gmm.studies.event_share`.
+        Records-backed laws delegate to :func:`emu_gmm.studies.event_share`.
+        For raw draws with ``events=``, the ``converged`` denominator in
+        :class:`EventShare` means finite, usable draws.
         """
-        if self._records is None:
+        if self._records is not None:
+            return event_share(self._records, event, negate=negate)
+        if (
+            self._events is None
+            or not isinstance(event, str)
+            or event not in self._events
+        ):
+            available = tuple(self._events) if self._events is not None else ()
             raise TypeError(
-                "EmpiricalLaw.event_share() needs a records-backed law (built via "
-                "from_records); this law carries no event flags."
+                "EmpiricalLaw.event_share() needs a records-backed law or a "
+                "raw-draws law with a matching events= entry. "
+                f"Got event {event!r}; this law's events are {available}."
             )
-        return event_share(self._records, event, negate=negate)
+        mask = self._events[event]
+        if negate:
+            mask = ~mask
+        n_selected = int(mask.sum())
+        n_total = self.n_draws
+        n_selected_converged = int((mask & self._used).sum())
+        n_total_converged = self.n_used
+        return EventShare(
+            event=f"~{event}" if negate else event,
+            negate=negate,
+            n_selected=n_selected,
+            n_total=n_total,
+            n_selected_converged=n_selected_converged,
+            n_total_converged=n_total_converged,
+            fraction_all=(n_selected / n_total) if n_total else float("nan"),
+            fraction_converged=(
+                (n_selected_converged / n_total_converged)
+                if n_total_converged
+                else float("nan")
+            ),
+        )
 
     # -- couplings (reuses crn_pair verbatim) -------------------------------
     def couple(
