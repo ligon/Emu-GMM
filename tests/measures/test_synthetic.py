@@ -32,6 +32,28 @@ def _linear_residual(x, theta):
 
 
 class TestExpectation:
+    def test_sampler_count_must_match_n_sim_eager_and_jit(self):
+        """A stale draw count must not silently enter simulated inference."""
+        meas = SyntheticMeasure(
+            key=jax.random.PRNGKey(0),
+            n_sim=2,
+            sampler=lambda key, theta: jnp.ones((3, 1)),
+        )
+        theta = _LinearParams(a=0.5, b=2.0)
+        with pytest.raises(ValueError, match="must return n_sim rows"):
+            meas.expectation(_linear_residual, theta)
+        with pytest.raises(ValueError, match="must return n_sim rows"):
+            jax.jit(lambda m: m.expectation(_linear_residual, theta))(meas)
+
+    def test_zero_n_sim_rejected_before_sampling(self):
+        meas = SyntheticMeasure(
+            key=jax.random.PRNGKey(0),
+            n_sim=0,
+            sampler=lambda key, theta: jnp.empty((0, 1)),
+        )
+        with pytest.raises(ValueError, match="n_sim must be positive"):
+            meas.expectation(_linear_residual, _LinearParams(a=0.5, b=2.0))
+
     def test_mean_of_standard_normal_residual(self):
         # E[a + b*x] = a (since E[x] = 0 under standard normal). With
         # N_SIM = 1000 the Monte Carlo error is ~ 0.03 per draw.
@@ -50,7 +72,7 @@ class TestExpectation:
         """Same key + same theta -> identical results across calls."""
         meas = SyntheticMeasure(
             key=jax.random.PRNGKey(42),
-            n_sim=500,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         )
         theta = _LinearParams(a=0.5, b=2.0)
@@ -63,12 +85,12 @@ class TestExpectation:
         theta = _LinearParams(a=0.0, b=1.0)
         m_a = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=200,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         ).expectation(_linear_residual, theta)
         m_b = SyntheticMeasure(
             key=jax.random.PRNGKey(1),
-            n_sim=200,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         ).expectation(_linear_residual, theta)
         assert not jnp.allclose(m_a, m_b)
@@ -85,7 +107,7 @@ class TestExpectation:
 
         meas = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=200,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         )
         theta = _LinearParams(a=0.5, b=2.0)
@@ -102,7 +124,7 @@ class TestJacobian:
     def test_shape(self):
         meas = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=200,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         )
         theta = _LinearParams(a=0.5, b=2.0)
@@ -114,13 +136,13 @@ class TestJacobian:
         # E[psi] = a; d E[psi]/d a = 1, d E[psi]/d b = E[x] ≈ 0.
         meas = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=5000,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         )
         theta = _LinearParams(a=0.5, b=2.0)
         G = meas.jacobian(_linear_residual, theta)
         assert float(G[0, 0]) == pytest.approx(1.0, abs=1e-5)
-        # d/db is E[x], which is ~0 under SN with N=5000 (MC error ~0.015).
+        # d/db is E[x], which is ~0 under SN with N=1000 (MC error ~0.03).
         assert float(G[0, 1]) == pytest.approx(0.0, abs=0.05)
 
     def test_theta_dependent_sampler_jacobian(self):
@@ -159,7 +181,7 @@ class TestJitCompatibility:
     def test_expectation_jits(self):
         meas = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=200,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         )
         theta = _LinearParams(a=0.5, b=2.0)
@@ -175,7 +197,7 @@ class TestJitCompatibility:
     def test_jacobian_jits(self):
         meas = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=200,
+            n_sim=1000,
             sampler=_standard_normal_sampler,
         )
         theta = _LinearParams(a=0.5, b=2.0)
@@ -253,7 +275,7 @@ class TestWithKey:
         """fold_in(master, rep) gives the same stream on reconstruction:
         the documented per-rep key discipline."""
         master = jax.random.PRNGKey(11)
-        sm = SyntheticMeasure(key=master, n_sim=500, sampler=_standard_normal_sampler)
+        sm = SyntheticMeasure(key=master, n_sim=1000, sampler=_standard_normal_sampler)
         theta = _LinearParams(a=0.3, b=2.0)
         a = sm.with_key(jax.random.fold_in(master, 3)).expectation(
             _linear_residual, theta
@@ -268,7 +290,7 @@ class TestWithKey:
         fields) is unchanged, so jit caches keyed on structure survive a
         re-key -- the property the MC drivers rely on."""
         sm = SyntheticMeasure(
-            key=jax.random.PRNGKey(0), n_sim=100, sampler=_standard_normal_sampler
+            key=jax.random.PRNGKey(0), n_sim=1000, sampler=_standard_normal_sampler
         )
         sm2 = sm.with_key(jax.random.PRNGKey(99))
         _, def_a = jax.tree_util.tree_flatten(sm)

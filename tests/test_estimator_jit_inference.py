@@ -141,7 +141,7 @@ class TestSinglePassPostOptimum:
 
         measure = SyntheticMeasure(
             key=jax.random.PRNGKey(0),
-            n_sim=128,
+            n_sim=256,
             sampler=_sampler,
         )
         # Warmup: we only care about the post-optimum count, not the
