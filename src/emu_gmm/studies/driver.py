@@ -69,8 +69,10 @@ def _rep_range(n_reps: int | None, reps: range | None) -> range:
     return reps
 
 
-def _keys_equal(a: jax.Array, b: jax.Array) -> bool:
-    """Compare typed and legacy PRNG keys through their key data."""
+def _keys_equal(a: jax.Array | None, b: jax.Array | None) -> bool:
+    """Compare typed and legacy PRNG keys; an absent key proves nothing."""
+    if a is None or b is None:
+        return False
     return bool(
         str(jax.random.key_impl(a)) == str(jax.random.key_impl(b))
         and np.array_equal(
@@ -213,8 +215,10 @@ class MCRecords:
 
     #: Stacked per-rep records; leading axis ``n_reps`` on every array.
     records: FitRecord
-    #: The master PRNG key; rep ``r`` used ``fold_in(key, r)``.
-    key: jax.Array
+    #: The master PRNG key; rep ``r`` used ``fold_in(key, r)`` when present.
+    #: A manually supplied keyless carrier can be summarized and persisted,
+    #: but cannot prove CRN coupling or concatenate with another shard.
+    key: jax.Array | None
     #: Number of replicates run (static; the leading-axis length).
     n_reps: int = jdc.static_field()  # type: ignore[attr-defined]
     #: Optional CRN-coupling token (static). Two arms are CRN-coupled iff

@@ -420,7 +420,9 @@ def _compute_d_tilde(
          Neyman cross-covariance with the same pair support, Bessel factor,
          FPC, and per-coordinate denominator as the moment covariance.
        - :class:`DesignAwareCovariance` -> **refused** (``ValueError``)
-         until its fixed/random cross-block semantics are established.
+         because matched derivative-moment cross covariance is not yet
+         implemented for either its random- or fixed-stratum mode;
+         supply an explicit matched ``score_cov_fn``.
        - Any other strategy (IID, synthetic) -> pairwise-overlap form via
          :func:`_sigma_jm_iid_from_contributions`. With cluster-of-size-one
          the cluster-totals form collapses to this, so the two routes

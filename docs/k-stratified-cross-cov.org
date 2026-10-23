@@ -3,7 +3,8 @@
 * Scope and existing definitions
 
 This note covers the pure =StratifiedCovariance= path.
-The mixed =DesignAwareCovariance= path still needs its fixed/random cross-block semantics (#145), so automatic K inference there remains refused.
+The mixed =DesignAwareCovariance= moment covariance now has default random-stratum and opt-in fixed-stratum semantics (#145).
+Its matched derivative-moment cross covariance has not been implemented for either mode, so automatic K inference there remains refused and callers must supply an explicit matched =score_cov_fn=.
 The K correction in =src/emu_gmm/inference/k_statistic.py= subtracts \(\widehat\Sigma_{G_a,m}(V^\star)^{-1}m\) from Jacobian column \(G_a\).
 The target \(\widehat\Sigma_{G_a,m}\) must use the same dependence structure and \(N_jN_k\) scale as the moment covariance \(V\); see =.coder/ledger.org= Sections 3, 4, and 7.6--7.7.
 
@@ -47,4 +48,4 @@ A public K call matches the independent =score_cov_fn= oracle.
 The seeded fixed-cell weak-identification null simulation (seed 141; 600 repetitions; 120 singleton PSUs, two fixed cells; \(\theta_0=0\)) produced matched mean \(p_K=0.4903\) and 30/600 rejections at nominal 5%.
 Using the deliberately uncentered IID derivative/moment cross term with the same stratified \(V\) gave mean \(p_K=0.4358\) and 36/600 rejections.
 This is a finite-sample regression check of the matched automatic path, not a universal calibration guarantee.
-The mixed design/sampling strategy continues to require an explicit =score_cov_fn=.
+The mixed design/sampling strategy continues to require an explicit =score_cov_fn= matched to its selected covariance mode and the package's \(N_jN_k\) scale.
