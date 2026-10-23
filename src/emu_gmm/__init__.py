@@ -113,6 +113,7 @@ from emu_gmm.persistence import (
     load_law_state,
     save_law,
 )
+from emu_gmm.random_set_law import RandomSetLaw, SetEventShare, SetQueryReport
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.runtime import configure, recommended_env
 from emu_gmm.types import (
@@ -244,6 +245,9 @@ __all__ = [
     "EstimatorLaw",
     "EmpiricalLaw",
     "AsymptoticLaw",
+    "RandomSetLaw",
+    "SetEventShare",
+    "SetQueryReport",
     "couple",
     # Typed, versioned law persistence (#181): inert, cross-version artifact
     # (LawState schema + save_law/load_law), NOT pickle. Both grades.
