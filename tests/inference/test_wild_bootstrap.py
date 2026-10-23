@@ -163,6 +163,21 @@ def _build_h0_setup(
 class TestUnderH0PValueUniformity:
     """Under H0 the bootstrap p-value should hover near uniform."""
 
+    def test_finite_draw_p_value_includes_observed_draw(self):
+        measure, covariance, theta_0 = _build_h0_setup(seed=42, N=80, n_clusters=8)
+        result = moment_wild_bootstrap(
+            _residual_psi,
+            theta_0,
+            measure,
+            covariance,
+            n_boot=7,
+            key=jax.random.PRNGKey(7),
+            project_estimation_effect=False,
+        )
+        tail_count = int(jnp.sum(result.J_boot >= result.J_observed))
+        assert float(result.p_value) == pytest.approx((tail_count + 1) / 8)
+        assert float(result.p_value) >= 1 / 8
+
     def test_p_value_near_chi_square_calibration(self):
         """One H0 draw yields a p-value in [0, 1] and the J-distribution
         looks chi-square-like in shape.
@@ -939,19 +954,19 @@ def _build_overid_setup(
 
 
 class TestEstimationEffectProjection:
-    """#184: default-on projection, False-path bit-identity, NaN, jit."""
+    """#184: default-on projection, False-path draw identity, NaN, jit."""
 
-    def test_false_path_bit_identical_to_pre_change(self):
+    def test_false_path_draws_bit_identical_to_pre_change(self):
         """``project_estimation_effect=False`` reproduces the pre-#184
-        output bit-for-bit.
+        J draws and observed J bit-for-bit.
 
         The pinned expectations below were captured by executing the
         pre-change implementation (branch state before the #184 fix,
         HEAD 495686d) on this exact fixture: seed=77, N=60, M=3,
         n_clusters=6, theta=_P(a=0.0), n_boot=64, key=PRNGKey(123),
         sign="rademacher", V=None (default DiagonalTikhonov). The False
-        path must not pay the Jacobian evaluation nor perturb a single
-        bit of the original computation.
+        path must not pay the Jacobian evaluation or perturb the J
+        quantities. The p-value now uses the finite-draw correction.
         """
         measure, covariance, theta_0 = _build_overid_setup(
             seed=77, N=60, M=3, n_clusters=6
@@ -967,7 +982,7 @@ class TestEstimationEffectProjection:
             project_estimation_effect=False,
         )
         assert float(result.J_observed) == 4.347590543339194
-        assert float(result.p_value) == 0.21875
+        assert float(result.p_value) == 15 / 65
         expected_head = np.array(
             [
                 1.1150200488505575,

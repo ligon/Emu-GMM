@@ -125,8 +125,8 @@ class WildBootstrapResult:
     J_boot : (n_boot,) jax array
         The bootstrap J-statistics, one per replicate.
     p_value : 0-d jax array
-        Empirical right-tail probability
-        ``mean(J_boot >= J_observed)``. 0-d so it traces under ``jit`` /
+        Finite-draw corrected right-tail probability
+        ``(1 + count(J_boot >= J_observed)) / (n_boot + 1)``. 0-d so it traces under ``jit`` /
         ``vmap``; cast with ``float(result.p_value)`` at the eager
         boundary if you want a Python scalar. ``nan`` when
         ``J_observed`` is non-finite (e.g. a non-PD ``V`` whose
@@ -470,7 +470,7 @@ def moment_wild_bootstrap(
     # a non-finite J_observed (non-PD V -> NaN Cholesky) would otherwise
     # collapse to p = 0.0 --- a silently fabricated hard rejection.
     # Surface the failure as a NaN p-value instead.
-    p_raw = jnp.mean((J_boot >= J_observed_arr).astype(J_boot.dtype))
+    p_raw = (1 + jnp.sum(J_boot >= J_observed_arr)) / (n_boot + 1)
     p_value_arr = jnp.where(jnp.isfinite(J_observed_arr), p_raw, jnp.nan)
 
     return WildBootstrapResult(
