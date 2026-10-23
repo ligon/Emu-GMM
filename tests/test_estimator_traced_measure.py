@@ -399,8 +399,35 @@ class TestSupportsArgsProbe:
         class _PosKw:
             def __call__(self, residual_fn, theta_init, args=None): ...
 
+        class _VarKw:
+            def __call__(self, residual_fn, theta_init, **kwargs): ...
+
         assert _supports_args(_Kw())
         assert _supports_args(_PosKw())
+        assert _supports_args(_VarKw())
+
+    def test_var_keyword_optimizer_receives_kernel_args(self):
+        """An optimiser accepting **kwargs must use the traced args path."""
+
+        class _VarKw:
+            def __init__(self):
+                self.inner = optimistix_lm()
+                self.saw_args = False
+
+            def __call__(self, residual_fn, theta_init, **kwargs):
+                self.saw_args = "args" in kwargs
+                return self.inner(residual_fn, theta_init, **kwargs)
+
+        optimizer = _VarKw()
+        res = estimate(
+            euler_residual,
+            _measure(seed=6),
+            covariance=IIDCovariance(),
+            optimizer=optimizer,
+            parameters=_theta0(),
+        )
+        assert bool(res.converged)
+        assert optimizer.saw_args
 
     def test_star_args_optimizer_estimates_via_legacy_path(self):
         """End-to-end: a v1-valid *args optimizer is served by the
