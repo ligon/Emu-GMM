@@ -102,7 +102,7 @@ class TestCovariance:
 class TestJitCompatibility:
     def test_covariance_jits(self):
         meas = SyntheticMeasure(
-            key=jax.random.PRNGKey(0), n_sim=1000, sampler=_identity_sampler
+            key=jax.random.PRNGKey(0), n_sim=5000, sampler=_identity_sampler
         )
         cov = SyntheticCovariance()
         theta = _P(0.0, 0.0)
