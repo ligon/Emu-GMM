@@ -761,6 +761,81 @@ class TestSingletonClustersMatchIID:
             )
 
 
+def test_clustered_k_cross_covariance_uses_pairwise_dof_correction():
+    """The Jacobian-moment correction uses the same pair factor as V."""
+    from emu_gmm.inference.k_statistic import (
+        _N_j_from_measure,
+        _sigma_jm_clustered_from_contributions,
+    )
+
+    base, base_cov, theta_true = _simulate_clustered_dataset(
+        seed=17, n_clusters=8, cluster_size=3, rho=0.25
+    )
+    mask = np.ones((24, 3))
+    mask[12:, 2] = 0.0  # coordinate 2 occurs in four of eight clusters
+    measure = EmpiricalMeasure(
+        x=base.x,
+        mask=jnp.asarray(mask),
+        weights=jnp.asarray(np.linspace(0.7, 1.5, 24)),
+    )
+    cov = ClusteredCovariance(
+        cluster_ids=base_cov.cluster_ids, n_clusters=8, dof_correction=True
+    )
+    theta = _OneParam(theta=theta_true + 0.3)  # nonzero m activates correction
+    g = np.asarray(measure.moment_contributions(_linear_psi, theta))
+    D = np.asarray(measure.jacobian_contributions(_linear_psi, theta))
+    Nj = np.asarray(_N_j_from_measure(measure))
+    cluster_ids = np.asarray(cov.cluster_ids).astype(int)
+
+    # Independent cluster-total and pair-support calculation. Different
+    # pairs have G=8 and G=4, so a scalar finite-cluster factor fails.
+    g_totals = np.stack([g[cluster_ids == c].sum(axis=0) for c in range(8)])
+    D_totals = np.stack([D[cluster_ids == c].sum(axis=0) for c in range(8)])
+    supported = np.stack([np.any(mask[cluster_ids == c] > 0, axis=0) for c in range(8)])
+    pair_counts = supported.astype(float).T @ supported.astype(float)
+    assert pair_counts[0, 1] == 8
+    assert pair_counts[0, 2] == 4
+    pair_factor = np.where(pair_counts >= 2, pair_counts / (pair_counts - 1), 1.0)
+    expected = np.einsum("cmp,ck->pmk", D_totals, g_totals)
+    expected *= pair_factor[None, :, :]
+    expected /= Nj[None, :, None] * Nj[None, None, :]
+
+    corrected = _sigma_jm_clustered_from_contributions(
+        jnp.asarray(g),
+        jnp.asarray(D),
+        jnp.asarray(Nj),
+        cov.cluster_ids,
+        cov.n_clusters,
+        pair_correction=cov._finite_cluster_correction(measure.mask),
+    )
+    np.testing.assert_allclose(np.asarray(corrected), expected, rtol=1e-12)
+
+    via_dispatch = k_statistic(theta, measure, cov, model=_linear_psi)
+    via_supplied = k_statistic(
+        theta,
+        measure,
+        cov,
+        model=_linear_psi,
+        score_cov_fn=lambda model, at_theta: jnp.asarray(expected),
+    )
+    for name in ("K", "S", "J"):
+        assert float(getattr(via_dispatch, name)) == pytest.approx(
+            float(getattr(via_supplied, name)), rel=1e-11, abs=1e-12
+        )
+
+    uncorrected = _sigma_jm_clustered_from_contributions(
+        jnp.asarray(g), jnp.asarray(D), jnp.asarray(Nj), cov.cluster_ids, cov.n_clusters
+    )
+    old_scale = k_statistic(
+        theta,
+        measure,
+        cov,
+        model=_linear_psi,
+        score_cov_fn=lambda model, at_theta: uncorrected,
+    )
+    assert abs(float(via_dispatch.K) - float(old_scale.K)) > 1e-6
+
+
 # ---------------------------------------------------------------------------
 # (i) Issue #41 hardening: the strong-ID fallback is loud, score_cov_fn is
 # validated and takes precedence, and the design sandwiches are refused

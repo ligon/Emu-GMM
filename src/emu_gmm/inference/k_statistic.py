@@ -283,6 +283,7 @@ def _sigma_jm_clustered_from_contributions(
     N_j: Float[Array, " M"],
     cluster_ids: Float[Array, " N"],
     n_clusters: int,
+    pair_correction: Float[Array, "M M"] | None = None,
 ) -> Float[Array, "p M M"]:
     """Cluster-totals cross-covariance :math:`\\widehat\\Sigma_{G_p, m}`.
 
@@ -302,17 +303,21 @@ def _sigma_jm_clustered_from_contributions(
         \\sum_c \\Big(\\sum_{i \\in c} D_i[m, p]\\Big)
                  \\Big(\\sum_{i \\in c} g_i[k]\\Big).
 
-    With every cluster of size one this collapses to
+    When the matching clustered covariance uses its finite-cluster
+    correction, ``pair_correction`` applies the same supported-cluster
+    factor to every parameter slice. With every cluster of size one this collapses to
     :func:`_sigma_jm_iid_from_contributions` (verified in
     ``tests/inference/test_k_statistic.py::TestSingletonClustersMatchIID``).
     """
-    segment_ids = cluster_ids.astype(jnp.int32)
+    segment_ids = jnp.round(cluster_ids).astype(jnp.int32)
     # Cluster totals on the moment side: (n_clusters, M)
     g_totals = jax.ops.segment_sum(g, segment_ids, num_segments=n_clusters)
     # Cluster totals on the Jacobian side: (n_clusters, M, p)
     D_totals = jax.ops.segment_sum(D, segment_ids, num_segments=n_clusters)
     # numer[p, m, k] = sum_c D_totals[c, m, p] * g_totals[c, k]
     numer = jnp.einsum("cmp,ck->pmk", D_totals, g_totals)  # (p, M, M)
+    if pair_correction is not None:
+        numer = numer * pair_correction[None, :, :]
     return _safe_outer_divide_jm(numer, N_j)
 
 
@@ -438,6 +443,13 @@ def _compute_d_tilde(
                 N_j,
                 cluster_ids=jnp.asarray(covariance.cluster_ids),
                 n_clusters=covariance.n_clusters,
+                pair_correction=(
+                    covariance._finite_cluster_correction(
+                        jnp.asarray(measure.mask)  # type: ignore[attr-defined]
+                    )
+                    if covariance.dof_correction
+                    else None
+                ),
             )
         else:
             sigma_jm = _sigma_jm_iid_from_contributions(g, D, N_j)
