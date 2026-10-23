@@ -1059,3 +1059,48 @@ comparator's 273/297 = 0.919, so the result supports the stated b1
 fixed-profile use case without a general coverage guarantee.
 The SHA-pinned Slurm job 40409988 completed exit zero in 1:56:15; its
 clean output is =.coder/design-145-cell-coverage-300-2026-10-23.log=.
+
+* Section 18 -- Paired fixed-stratum mixed refit bootstrap (#251)
+
+1. Task :: Refit a mixed =DesignAwareCovariance= model under the approved
+   =fixed_strata=True= estimand by drawing whole paired sampling bundles
+   with replacement within each stratum. This first slice requires complete,
+   balanced bundles, =design.fpc=False=, and
+   =sampling.dof_correction=False= (issue #251 owner comment, 2026-10-23).
+2. Existing machinery :: Search tier: ripgrep and git. The shared
+   =inference/cluster_bootstrap.py::_refit_bootstrap_worlds= owns refits,
+   labels, nonconvergence NaN rows, and validity events, tested by
+   =tests/inference/test_cluster_bootstrap.py=.
+   =stratified_bootstrap.py::_cell_layout= validates PSU-cell-stratum
+   nesting and =_resample_one= clones observation rows, masks, and weights;
+   =tests/inference/test_stratified_bootstrap.py= tests them.
+   =DesignAwareCovariance.from_design_mask= in
+   =covariance/stratified.py= validates fixed-stratum sampling-cluster
+   nesting, preserves =couple=, and builds the exposure-projected SS/TS
+   geometry; =tests/covariance/test_stratified.py= tests its cross block.
+3. Definitions :: A design cell is one stratum-by-arm assignment cell
+   (Section 13). A sampling bundle is one =sampling.cluster_ids= group;
+   it can contain multiple PSUs in each cell, but it belongs to one stratum.
+   Distinct draws of the same original bundle become distinct sampling
+   clusters and distinct copies of every PSU. The original number of
+   bundles is drawn independently within each stratum. The same copied
+   rows carry their =x=, =mask=, =weights=, cell, and stratum metadata.
+4. Invariants :: Every original PSU is nested in exactly one cell and one
+   bundle; every bundle is nested in exactly one stratum and has the same
+   positive PSU-count vector across cells as its stratum peers. Fresh
+   contiguous bundle/PSU IDs must preserve these relationships after
+   repeated draws, and each original cell's PSU count stays fixed.
+   Rebuild both child strategies and call =from_design_mask= with the
+   original moment mask, =couple=, and =fixed_strata=True=. Reject the
+   default random-stratum mode, FPC, extra sampling dof correction, bad
+   IDs, and incomplete/unbalanced bundles. Sparse per-moment support is
+   left to covariance diagnostics and the shared refit validity path.
+5. Reuse decision :: Reuse =_refit_bootstrap_worlds=, the pure-design
+   =_cell_layout= grouping check, =_cluster_row_indices= and the
+   resampled-measure construction convention. New code only maps nested
+   PSU/bundle layouts to fixed-stratum draws and matching child strategies;
+   it does not calculate covariance or inference statistics itself.
+6. Open questions :: The random-stratum resampler and FPC calibration
+   remain separate future slices. Fixed-profile Monte Carlo coverage
+   needs a frozen design and valid-draw denominator before this first
+   mixed slice can claim calibration.
