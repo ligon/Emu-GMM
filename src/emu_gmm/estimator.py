@@ -659,10 +659,14 @@ def build_estimator(
     # bitwise unchanged. Keyed on ``all_scalar`` (not ``dispatch_mode``) so a
     # non-scalar Euclidean tree takes the ambient flatten too (#110).
     if not all_scalar:
-        _, treedef, _ = params_mod.flatten_params_with_spec(theta_init)
+        _, treedef, flat_layout_spec = params_mod.flatten_params_with_spec(theta_init)
+        flat_leaf_shapes = tuple(
+            leaf.ambient_shape for leaf in flat_layout_spec.leaf_specs
+        )
         unflatten_spec: ManifoldSpec | None = manifold_spec
     else:
         _, treedef = params_mod.flatten_params(theta_init)
+        flat_leaf_shapes = ()
         unflatten_spec = None
     # Anchor-once-then-freeze tau policy (design.org §5; CLAUDE.md
     # commitment 3).
@@ -1157,9 +1161,20 @@ def build_estimator(
             # non-scalar Euclidean tree on the v1 optimiser path the ambient
             # buffer below IS what optimistix consumes -- either way it must
             # flatten without raising. Keyed on ``all_scalar`` (#110).
-            theta_init_flat, _, _ = params_mod.flatten_params_with_spec(theta_init_call)
+            theta_init_flat, call_treedef, call_spec = (
+                params_mod.flatten_params_with_spec(theta_init_call)
+            )
+            call_leaf_shapes = tuple(
+                leaf.ambient_shape for leaf in call_spec.leaf_specs
+            )
         else:
-            theta_init_flat, _ = params_mod.flatten_params(theta_init_call)
+            theta_init_flat, call_treedef = params_mod.flatten_params(theta_init_call)
+            call_leaf_shapes = ()
+        if call_treedef != treedef or call_leaf_shapes != flat_leaf_shapes:
+            raise ValueError(
+                "build_estimator: call-time parameters must match the "
+                "template parameter tree and leaf shapes"
+            )
         # #124 dispatch: the traced-argument kernel path serves any
         # measure of the template's class (same-class is what the
         # factory-time cache/label/anchor decisions assumed) -- fresh
