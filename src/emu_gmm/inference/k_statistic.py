@@ -64,6 +64,11 @@ scale as :math:`G`, and (ii) collapses to the pairwise-overlap IID form
 when every cluster is a singleton — the same reduction used by
 :class:`IIDCovariance` vs :class:`ClusteredCovariance`.
 
+For :class:`StratifiedCovariance`, the derivative/moment cross-covariance
+instead uses the same pair-supported PSU totals, within-cell centering,
+finite-PSU correction, and optional FPC as the Neyman moment covariance.
+The exact per-cell expression is in ``docs/k-stratified-cross-cov.org``.
+
 The pre-issue-#52 form divided the raw cross product by :math:`N`
 (observation count) rather than :math:`N_m\\, N_k`, which made
 :math:`\\widehat\\Sigma` :math:`O(1)` instead of :math:`O(1/N)` and left
@@ -121,6 +126,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from numbers import Integral
+from types import SimpleNamespace
 from typing import Any
 
 import haliax as ha
@@ -321,6 +327,55 @@ def _sigma_jm_clustered_from_contributions(
     return _safe_outer_divide_jm(numer, N_j)
 
 
+def _sigma_jm_stratified_from_contributions(
+    g: Float[Array, "N M"],
+    D: Float[Array, "N M p"],
+    N_j: Float[Array, " M"],
+    mask: Float[Array, "N M"],
+    covariance: StratifiedCovariance,
+    model: StructuralModel,
+    theta_0: ParamsLike,
+) -> Float[Array, "p M M"]:
+    """Matched derivative/moment cross block of the stratified sandwich.
+
+    ``g`` and ``D`` already include the observation mask and weight. Feed
+    their columns to the tested Neyman engine as pseudo residuals, with a
+    *binary support* mask and unit weights, so those factors enter only once.
+    The cached fourth value supplies the original weighted ``N_j`` rather
+    than the binary support count. All pairwise PSU overlap, within-cell
+    centering, Bessel corrections, FPC, and zero-denominator rules are then
+    exactly those used to construct the moment covariance ``V``.
+    """
+    n_obs, n_moments = g.shape
+    n_params = D.shape[2]
+    if D.shape[:2] != (n_obs, n_moments) or mask.shape != g.shape:
+        raise ValueError("k_statistic: incompatible stratified contribution shapes")
+    support = (mask > 0.0).astype(g.dtype)
+    augmented = jnp.concatenate(
+        [jnp.transpose(D, (0, 2, 1)).reshape(n_obs, n_params * n_moments), g],
+        axis=1,
+    )
+    augmented_support = jnp.tile(support, (1, n_params + 1))
+    augmented_N_j = jnp.tile(N_j, n_params + 1)
+    pseudo_measure = SimpleNamespace(
+        mask=augmented_support,
+        weights=jnp.ones((n_obs,), dtype=g.dtype),
+    )
+    augmented_covariance = covariance.covariance(
+        model,
+        theta_0,
+        pseudo_measure,
+        cached_intermediates=(
+            jnp.zeros_like(augmented_N_j),
+            augmented,
+            augmented_support,
+            augmented_N_j,
+        ),
+    )
+    cross = augmented_covariance[: n_params * n_moments, n_params * n_moments :]
+    return cross.reshape(n_params, n_moments, n_moments)
+
+
 def _N_j_from_measure(measure: Measure) -> Float[Array, " M"]:
     """Effective per-moment sample size ``N_j = sum_i d_ij w_i`` from a measure.
 
@@ -361,15 +416,11 @@ def _compute_d_tilde(
        - :class:`ClusteredCovariance` -> cluster-totals form via
          :func:`_sigma_jm_clustered_from_contributions` using the
          strategy's ``cluster_ids`` and ``n_clusters``.
-       - :class:`StratifiedCovariance` / :class:`DesignAwareCovariance`
-         -> **refused** (``ValueError``). The pairwise-overlap IID form
-         does not share the design sandwich's dependence structure, so
-         the :math:`\\widehat\\Sigma\\, V^{-1} m` correction would be
-         mis-scaled — not the strong-ID fallback, but not the Kleibergen
-         statistic either (surfaced by the Seasonality consumer; #41).
-         Callers must supply ``score_cov_fn`` or evaluate the K-statistic
-         under a :class:`ClusteredCovariance` (e.g. at the PSU level).
-         A design-matched cross-covariance form is follow-up work.
+       - :class:`StratifiedCovariance` -> matched between-PSU, within-cell
+         Neyman cross-covariance with the same pair support, Bessel factor,
+         FPC, and per-coordinate denominator as the moment covariance.
+       - :class:`DesignAwareCovariance` -> **refused** (``ValueError``)
+         until its fixed/random cross-block semantics are established.
        - Any other strategy (IID, synthetic) -> pairwise-overlap form via
          :func:`_sigma_jm_iid_from_contributions`. With cluster-of-size-one
          the cluster-totals form collapses to this, so the two routes
@@ -377,8 +428,9 @@ def _compute_d_tilde(
          ``TestSingletonClustersMatchIID``).
 
     3. Else — no ``score_cov_fn`` and no per-observation contributions —
-       **raise** unless the caller passed ``strong_id_fallback=True``, in
-       which case ``Sigma_jm = 0`` so :math:`\\widetilde D \\equiv G`.
+       **raise** for design strategies; for other strategies, raise unless
+       the caller passed ``strong_id_fallback=True``, in which case
+       ``Sigma_jm = 0`` so :math:`\\widetilde D \\equiv G`.
        This recovers the strong-identification limit and is
        asymptotically equivalent to D-tilde when :math:`m(\\theta_0) = 0`;
        it is *not* weak-identification-robust, which is why landing in it
@@ -386,14 +438,11 @@ def _compute_d_tilde(
        :class:`AnalyticalMeasure` through ``k_statistic`` would quietly
        get a non-robust statistic. Opting in is the diagnosis.
 
-    The ``isinstance(covariance, ClusteredCovariance)`` dispatch here is
-    deliberate: cluster IDs live on the strategy, not the measure (the
-    framework's commitment 1 keeps ``Measure`` and ``CovarianceStrategy``
-    orthogonal), and the Kleibergen orthogonalisation has to use the
-    *same* dependence structure as :math:`V` for the
-    :math:`\\widehat\\Sigma\\, V^{-1} m` correction to have the right
-    scale. Future cluster-aware strategies (``ReplicateWeightCovariance``)
-    extend this dispatch the same way.
+    Covariance dispatch here is deliberate: design IDs live on the
+    strategy, not the measure (the framework's commitment 1 keeps
+    ``Measure`` and ``CovarianceStrategy`` orthogonal). The
+    orthogonalisation must use the same dependence structure as the
+    moment covariance.
 
     Once ``Sigma_jm`` is in hand,
     :math:`\\widetilde D_j = G_j - \\Sigma_{G_j, m} V^{-1} m`, computed
@@ -409,21 +458,22 @@ def _compute_d_tilde(
                 f"k_statistic: score_cov_fn returned shape {sigma_jm.shape}; "
                 f"expected (p={p}, M={M}, M={M})."
             )
+    elif isinstance(covariance, DesignAwareCovariance):
+        raise ValueError(
+            "k_statistic: no matched cross-covariance form is implemented "
+            "for DesignAwareCovariance. Supply score_cov_fn=... with the "
+            "matched (p, M, M) cross-covariance."
+        )
     elif hasattr(measure, "moment_contributions") and hasattr(
         measure, "jacobian_contributions"
     ):
-        if isinstance(covariance, StratifiedCovariance | DesignAwareCovariance):
+        if isinstance(covariance, StratifiedCovariance) and not (
+            hasattr(measure, "mask") and hasattr(measure, "weights")
+        ):
             raise ValueError(
-                f"k_statistic: no matched cross-covariance form is "
-                f"implemented for {type(covariance).__name__}. The IID "
-                f"pairwise-overlap Sigma_{{G,m}} does not share the design "
-                f"sandwich's dependence structure, so using it would "
-                f"mis-scale the Kleibergen orthogonalisation (neither "
-                f"robust nor strong-ID; emu-gmm #41). Either supply "
-                f"score_cov_fn=... with the matched (p, M, M) "
-                f"cross-covariance, or evaluate the K-statistic under a "
-                f"ClusteredCovariance at the design's resampling unit "
-                f"(e.g. the PSU level)."
+                "k_statistic: StratifiedCovariance requires empirical mask "
+                "and weights for matched cross-covariance; supply "
+                "score_cov_fn=... for a different measure."
             )
         g = _to_plain(measure.moment_contributions(model, theta_0))
         D = _to_plain(measure.jacobian_contributions(model, theta_0))
@@ -436,7 +486,17 @@ def _compute_d_tilde(
             n_obs = g.shape[0]
             N_j = jnp.full((M,), float(n_obs), dtype=g.dtype)
 
-        if isinstance(covariance, ClusteredCovariance):
+        if isinstance(covariance, StratifiedCovariance):
+            sigma_jm = _sigma_jm_stratified_from_contributions(
+                g,
+                D,
+                N_j,
+                jnp.asarray(measure.mask),  # type: ignore[attr-defined]
+                covariance,
+                model,
+                theta_0,
+            )
+        elif isinstance(covariance, ClusteredCovariance):
             sigma_jm = _sigma_jm_clustered_from_contributions(
                 g,
                 D,
@@ -453,6 +513,12 @@ def _compute_d_tilde(
             )
         else:
             sigma_jm = _sigma_jm_iid_from_contributions(g, D, N_j)
+    elif isinstance(covariance, StratifiedCovariance):
+        raise ValueError(
+            "k_statistic: StratifiedCovariance requires empirical moment "
+            "and Jacobian contributions for automatic cross-covariance. "
+            "Supply score_cov_fn=... for a different measure."
+        )
     elif strong_id_fallback:
         # Strong-identification fallback: zero correction. Explicit
         # opt-in only (#41) — see the dispatch docstring above.
@@ -885,12 +951,10 @@ def k_statistic(
         guard compared against the ambient ``p``, wrongly refusing
         gauge-bearing models with ``p_id <= M < p``.)
         Also raised when no robust :math:`\\Sigma_{G,m}` route is
-        available and ``strong_id_fallback`` was not set, and when the
-        covariance strategy is a design sandwich
-        (:class:`StratifiedCovariance` / :class:`DesignAwareCovariance`)
-        for which no matched cross-covariance form exists yet — supply
-        ``score_cov_fn`` or evaluate under a :class:`ClusteredCovariance`
-        at the design's resampling unit.
+        available and ``strong_id_fallback`` was not set. Automatic
+        ``StratifiedCovariance`` requires empirical contributions and
+        mask/weights; ``DesignAwareCovariance`` still requires an
+        explicit matched ``score_cov_fn``.
 
     Notes
     -----
