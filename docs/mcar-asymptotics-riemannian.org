@@ -1,0 +1,108 @@
+#+TITLE: Horizontal Information Under MCAR for Fixed-Rank PSD Parameters
+#+SUBTITLE: A companion to docs/mcar-asymptotics.org
+#+OPTIONS: toc:nil num:t todo:nil
+
+* Scope
+
+The Euclidean MCAR note establishes a positive-definite limit covariance under its stated covariance assumptions, then separately assumes a full-column-rank moment Jacobian for asymptotic normality.
+The same division is needed for a fixed-rank PSD parameter: overlap concerns the covariance of observed moments, whereas identification concerns how those moments change along the quotient manifold.
+Neither property supplies the other.
+
+We give a local statement about information at a full-column-rank factor \(A_0\), not a general consistency or central limit theorem on manifolds.
+The result also applies to a product with Euclidean leaves by adding their tangent coordinates to the horizontal space.
+All covariance claims below use the unregularised population limit; a finite-sample ridge can make a matrix invertible without establishing identification.
+
+* The quotient and the two assumptions
+
+Write \(\Gamma=AA^\top\), with \(A\in\mathbb{R}^{n\times k}\) of column rank \(k\), and identify \(A\) with \(AQ\) for \(Q\in O(k)\).
+At \(A_0\), the vertical and horizontal spaces under the Frobenius metric are
+\[
+\mathcal{V}_{A_0}=\{A_0\Omega:\Omega^\top=-\Omega\},\qquad
+\mathcal{H}_{A_0}=\{Z:A_0^\top Z=Z^\top A_0\}=\mathcal{V}_{A_0}^{\perp}.
+\]
+The horizontal dimension is \(q=nk-k(k-1)/2\).
+For a product parameter, \(\mathcal{H}\) is the direct sum of the horizontal spaces of its fixed-rank factors and the ordinary tangent spaces of its ungauged leaves; \(q\) is the sum of their dimensions.
+This matches the repository's ambient-shape storage and gauge count in =PSDFixedRank= and =ManifoldSpec= ([[file:implementation-plan-v2-manifold.org][v2 manifold plan]], Section 2.1).
+
+Let \(m(A)=E[\psi(X,A)]\in\mathbb{R}^M\) be differentiable at \(A_0\), with \(m(A_0)=0\) and \(m(AQ)=m(A)\).
+Write \(G=Dm_{A_0}:\mathbb{R}^{n\times k}\to\mathbb{R}^M\) for its derivative in ambient factor coordinates.
+Gauge invariance gives \(G[A_0\Omega]=0\) for every skew-symmetric \(\Omega\); it says nothing about \(G\) on \(\mathcal{H}_{A_0}\).
+For a product parameter \(\theta=(A,\phi)\), read \(G\) below as the full derivative \(Dm_{\theta_0}\), including its ungauged leaves.
+
+- Covariance assumption (COV) :: The limiting covariance \(V^{\mathrm{lim}}\) of \(\sqrt{N}\,\bar m_X(A_0)\) exists and is positive definite.
+  Under the iid MCAR and regularity conditions of [[file:mcar-asymptotics.org][the Euclidean companion]], its Theorem 2 gives \(V^{\mathrm{lim}}=R\circ V\), and its Proposition 1 supplies the sufficient condition \(R\succ0\) and \(V\succ0\).
+  Positive pairwise overlap alone doesn't imply COV; the proposition's sufficient condition isn't necessary either, since complete observation has \(R=\boldsymbol{1}\boldsymbol{1}^\top\) and can still have \(V^{\mathrm{lim}}=V\succ0\).
+- Quotient identification assumption (HID) :: The restriction \(G|_{\mathcal{H}_{A_0}}\) is injective, equivalently \(\operatorname{rank}(GB)=q\) for any matrix \(B\) whose columns form a basis of \(\mathcal{H}_{A_0}\) in ambient coordinates.
+  In particular, \(M\geq q\) is necessary.
+  HID is a local rank condition; a separate global identification condition is needed to select the intended equivalence class consistently.
+
+* Restricted information
+
+The covariance assumption lets us distinguish true weak identification from an ill-defined inverse weight.
+Define the data information quadratic form on the horizontal space by
+\[
+\mathcal{I}_{\mathcal{H}}(Z_1,Z_2)
+=\langle G[Z_1],(V^{\mathrm{lim}})^{-1}G[Z_2]\rangle,
+\qquad Z_1,Z_2\in\mathcal{H}_{A_0}.
+\]
+With an orthonormal horizontal basis \(B\), its matrix is \(I_B=(GB)^\top(V^{\mathrm{lim}})^{-1}(GB)\).
+Changing the orthonormal basis changes \(I_B\) by orthogonal congruence, so positive definiteness is intrinsic to the quotient point.
+
+** Proposition (horizontal information and identification)
+
+Under COV, \(\mathcal{I}_{\mathcal{H}}\) is positive definite if and only if HID holds.
+Equivalently, the only null directions of the ambient information \(G^\top(V^{\mathrm{lim}})^{-1}G\) are the vertical gauge directions if and only if HID holds.
+
+/Proof./ For every horizontal \(Z\),
+\[
+\mathcal{I}_{\mathcal{H}}(Z,Z)
+=\bigl\|(V^{\mathrm{lim}})^{-1/2}G[Z]\bigr\|^2.
+\]
+COV makes \((V^{\mathrm{lim}})^{-1/2}\) invertible, hence this expression vanishes exactly when \(G[Z]=0\).
+It is strictly positive for every nonzero horizontal \(Z\) exactly when \(G|_{\mathcal{H}_{A_0}}\) is injective.
+Gauge invariance puts \(\mathcal{V}_{A_0}\) in \(\ker G\), while the full-column-rank factor gives the orthogonal decomposition \(\mathbb{R}^{n\times k}=\mathcal{V}_{A_0}\oplus\mathcal{H}_{A_0}\).
+Thus the ambient kernel equals \(\mathcal{V}_{A_0}\) exactly when the horizontal kernel is trivial. \(\square\)
+
+For an all-Euclidean parameter, the vertical space is zero and the horizontal space is the whole parameter space.
+HID then reduces to the full-column-rank \(G\) condition explicitly added in Theorem 5 of [[file:mcar-asymptotics.org][the Euclidean companion]].
+With the companion's separate consistency and differentiability assumptions, the inverse of \(I_B\) is the usual local efficient covariance in horizontal coordinates; this proposition alone does not prove those asymptotic claims.
+
+* Complete overlap does not identify a quotient parameter
+
+Take =PSDFixedRank(2,1)=, so \(A=a=(a_1,a_2)^\top\neq0\), \(\Gamma=aa^\top\), and the gauge action is the discrete sign change \(a\mapsto-a\).
+There is no continuous vertical direction: \(\mathcal{H}_a=\mathbb{R}^2\) and \(q=2\).
+Observe both moments for every unit, and let the iid residual vector be
+\[
+\psi_i(a)=
+\begin{pmatrix} \|a\|^2-1 \\ 2(\|a\|^2-1) \end{pmatrix}+\varepsilon_i,
+\qquad E[\varepsilon_i]=0,\qquad
+\operatorname{Cov}(\varepsilon_i)=I_2.
+\]
+For example, \(\varepsilon_i\) may be standard bivariate normal and independent across units.
+The moment map is gauge-invariant, the observation indicators equal one, and at \(a_0=(1,0)^\top\) the moment covariance is \(V^{\mathrm{lim}}=I_2\succ0\).
+Nevertheless,
+\[
+G=\begin{pmatrix}2&0\\4&0\end{pmatrix},\qquad
+I_B=G^\top G=\begin{pmatrix}20&0\\0&0\end{pmatrix}.
+\]
+The angular direction \((0,1)^\top\) is horizontal and unidentified.
+All nearby points on the unit circle have the same zero population moment vector, although their \(aa^\top\) matrices differ.
+Thus even complete overlap, COV, and gauge invariance together don't imply HID.
+
+* Scope and diagnostic reading
+
+The full-column-rank condition on \(A_0\) matters.
+At a factor with rank below \(k\), the point lies outside =PSDFixedRank(n,k)=; the quotient's fixed-dimensional horizontal decomposition and the projection's Lyapunov solve need not apply.
+The proposition also doesn't identify a particular model's quotient parameter: that requires proving HID, and global identification if a consistent estimator is claimed, for that model's moment map.
+
+The implementation stores ambient-shape tangents and drops the known \(k(k-1)/2\) gauge eigenvalues by count for its pseudoinverse ([[file:../src/emu_gmm/_internal/pinv_eigvalrule.py][pinv rule]]).
+The diagnostic =result.diagnostics.cond_info["exclude_gauge"]= applies the same gauge count and reports the condition number of the remaining spectrum ([[file:../src/emu_gmm/diagnostics.py][diagnostics]]; [[file:../tests/manifolds/test_cond_info_gauge.py][tests]]).
+When no objective penalty contributes, an additional small retained eigenvalue warns of near failure of HID, as in the counterexample.
+The diagnostic uses the regularised sample covariance and includes an objective penalty if present, so it is a numerical warning rather than a proof of population identification; a penalty may conceal a data-only rank defect.
+When a penalty is present, =cond_info["data_only"]= removes its curvature but still uses the sample \(V^\star\) and retains the gauge eigenvalues; no member of this diagnostic trio is both data-only and gauge-excluded.
+With zero gauge dimension, =exclude_gauge= aliases =raw=, so the counterexample's singularity remains visible.
+
+* Related references
+
+The quotient-geometric setting is discussed by [[https://doi.org/10.1093/imaiai/iat006][Boumal, Singer, Absil, and Blondel (2014)]] and [[https://doi.org/10.1109/TSP.2013.2242068][Boumal (2013)]]; [[https://doi.org/10.1109/TSP.2005.845428][Smith (2005)]] treats intrinsic covariance on manifolds.
+The proposition here is the displayed finite-dimensional quadratic-form argument, rather than an appeal to an information-bound theorem from those papers.
