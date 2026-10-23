@@ -317,6 +317,87 @@ and gauge both route through the shared =information_matrix= / =pinv_eigvalrule=
 and no =CONTRADICTION= (the #178 review closed the one drift: the diagnostic now
 honors the frozen-=V*= / anchor-once convention rather than re-anchoring).
 
+** 7.6 -- Array-level Kleibergen statistic (#226)
+
+Grounded 2026-10-22 on main =9da0985= using ripgrep, git history, and the source/tests below.
+The existing-machinery line references describe that pre-refactor snapshot.
+The consumer supplies already-matched mean moments, their Jacobian, covariance,
+and Jacobian--moment cross-covariance without a framework covariance strategy.
+
+*** Task and existing machinery
+
+Expose =k_statistic_from_arrays(m, G, V, *, score_covariance,
+gauge_nullspace_dim=0)= as a full-vector entry point returning the existing
+=KStatisticResult=.
+The cross-covariance is required; no implicit raw-=G= fallback is permitted.
+
+- =inference/k_statistic.py:325=, =_compute_d_tilde= :: existing dispatch for
+  empirical/synthetic contributions and explicit =score_cov_fn=, ending in
+  =D_tilde[:,j] = G[:,j] - Sigma[j] @ solve(V,m)=.
+  Tested by =TestScoreCovFnPath= and =TestStrongIdFallbackIsLoud= in
+  =tests/inference/test_k_statistic.py=.
+- =inference/k_statistic.py:476=, =_stats_from_whitened= :: top-=p_id= left
+  singular projection, residual-norm S, and J = K + S.
+  Tested by =tests/inference/test_k_statistic_gauge.py=.
+- =inference/k_statistic.py:531=, =_k_statistic_arrays= :: current whitening
+  and decomposition kernel; share this algebra rather than duplicate it.
+- =inference/k_statistic.py:158=, =KStatisticResult=, and =:463=,
+  =_kappa_chi2_sf= :: existing traceable result and tail probabilities.
+  Tested by =TestJitVmapCompatibility= and =TestJustIdentified=.
+- =_internal/cholesky.py:34= :: PD Cholesky/solve helpers; numeric failures
+  return NaNs under tracing rather than Python exceptions.
+
+*** Definitions and invariants
+
+- =m= is the vector of moment means and =G= differentiates those same means.
+  =V= is their covariance in mean units; =score_covariance[j]= is
+  =Cov(G[:,j],m)=, with shape =(p,M,M)= and no symmetry assumption.
+- The supplied symmetric PD =V= is used for both correction and whitening,
+  matching the high-level =V== override.
+  This entry point does not recompute a ridge or change the supplied metric.
+- Common-N long-run covariance inputs must first be converted to mean
+  covariance units on BOTH covariance tensors.
+  Unequal observability uses the existing pair-specific normalisation
+  (Section 3), never a scalar-N criterion multiplier.
+- =p_id = p - gauge_nullspace_dim= controls both the SVD projection and dofs:
+  =(p_id, M-p_id, M)=.
+  Keep the count rule; numerical rank thresholding is a separate policy.
+- Shape and static-integer errors refuse before tracing arithmetic.
+  Invalid numerical inputs must propagate with a named event flag (#140);
+  the expected =p_S= NaN when its dof is zero is not an input failure.
+  The additive =KStatisticResult.invalid_input= is a Boolean array on the
+  validated array path and defaults to =None= on the unchanged legacy path.
+  Traced predicates check finiteness, pair-scale-relative symmetry and PD;
+  invalid inputs/intermediates are excluded from the SVD and flagged.
+  The symmetry tolerance uses the product of marginal standard deviations
+  for each moment pair: a global maximum can hide order-one correlation
+  asymmetry under unequal units.
+  Apply machine epsilon before multiplying the scales to avoid overflow.
+- Preserve high-level dispatch, =V=/=L= overrides, the explicit legacy
+  strong-ID fallback, and the concentrated-nuisance subvector reference.
+
+*** Reuse decisions and verification
+
+- *Extend* the existing correction and whitening helpers into a shared array
+  kernel; retain measure/covariance dispatch in the high-level wrapper.
+- *Reuse* the singular projection, p-value helper, and result container.
+- *New* public wrapper: existing entry points require model/measure objects,
+  which cannot represent this consumer's externally constructed covariance.
+- Check nonzero-correction parity with the high-level =score_cov_fn=/=V= path,
+  a case differing from raw-=G=, unequal moment rescaling of every tensor,
+  quotient dimensions with =p_id <= M < p=, jit/vmap, structural refusal,
+  and numerical failure events.
+  Rescaling invariance alone cannot detect an omitted correction.
+- No unresolved statistical design question in this slice.
+  Contribution aggregation, design/FPC/dof construction, and subvector array
+  tests remain outside it; callers supply the matched covariance tensors.
+
+Verification against 7.6 :: *OK*.
+The array wrapper shares the existing correction, whitening, projection, tails and result assembly; the legacy dispatch and subvector reference are preserved.
+The new array tests and independent adversarial checks pass, including nonzero nonsymmetric cross-covariance, unequal moment units, quotient dimensions, jit/vmap, and named numerical-failure events.
+Pair-specific symmetry checks reject the mixed-unit counterexample while accepting roundoff at tiny and huge scales without overflowing the tolerance.
+Ruff, black, mypy and diff checks pass; no =REINVENTION= or =CONTRADICTION= with this section's definitions and invariants.
+
 * Section 8 -- =EstimatorLaw= CORE (#144): the empirical-law carrier umbrella
 
 The carrier-class generalisation of the #167 point/tuple slice (Sec. 1-6):
