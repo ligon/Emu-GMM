@@ -9,29 +9,45 @@ conditional-on-fixed-strata sampling covariance.
 The default remains =fixed_strata=False=: the original random-stratum
 uncentered =ClusteredCovariance= sampling block and cross pass are unchanged.
 Use the opt-in when the nuisance profile is a fixed conditional mean of
-observed moment contributions within each stratum, sampling clusters are
+observed moment contributions within each stratum-by-arm cell, sampling clusters are
 nested in strata, and multiple clusters support the moment pairs of interest.
 In the opt-in mode, the design block \(V_{TT}\) remains the original
 =StratifiedCovariance= result, while one pair-supported exposure-projection
 kernel supplies both \(V_{SS}\) and \(V_{TS}\).
 This retains the #109 coupled/uncoupled decomposition.
 
-The implementation uses the projected numerator
-\((M_jt_j)'(M_kt_k)\) on the pair-overlap clusters of each stratum, with
-\(e_{h,j}=\sum_{i\in h}d_{ij}w_i\) and
-\(M_j=I-e_j(e_j'e_j)^{-1}e_j'\).
-It multiplies by the local factor \(H_{s,jk}/\operatorname{tr}(M_jM_k)\)
-when \(H_{s,jk}\geq2\) and both exposure norms and the trace are positive.
-This factor is justified by homogeneous cluster cross covariance within the
-stratum; it is a working correction under heterogeneity.
+For each ordered pair of cells \((c,d)\) in one stratum and moments \((j,k)\),
+the implementation uses the projected numerator
+\((M_{c,j}t_{c,j})'(M_{d,k}t_{d,k})\) on the clusters supporting both cell components.
+Here \(t_{h,c,j}=\sum_{i\in h,c}d_{ij}w_i\psi_j(x_i,\theta)\),
+\(e_{h,c,j}=\sum_{i\in h,c}d_{ij}w_i\), and
+\(M_{c,j}=I-e_{c,j}(e_{c,j}'e_{c,j})^{-1}e_{c,j}'\) on that pair-supported set.
+Each term receives its own \(H_{cd,jk}/\operatorname{tr}(M_{c,j}M_{d,k})\)
+factor when \(H_{cd,jk}\geq2\) and both exposure norms and the trace are positive.
+This factor is justified by homogeneous cluster cross covariance within each
+cell pair; it is a working correction under heterogeneity.
+The sum over ordered \((c,d)\) is the expansion of the covariance of the
+sum of cell components: for a variance, the \((c,d)\) and \((d,c)\)
+cross terms are both required, and are not duplicate estimates.
+If every sampling cluster belongs to one cell, cross-cell terms have zero
+support, reproducing the design engine's within-cell Neyman assembly.
+If a sampling cluster pairs distinct arms, the cross-cell terms retain its
+shared shock while removing fixed arm-specific cell means.
+The covariance kernel stores dense \(G\times C\times M\) cell components
+and \(P\times M\times M\) pair geometry, where
+\(P=\sum_s C_s^2\) counts /within-stratum/ ordered cell pairs.
+It does not construct all cross-stratum \(C^2\) pairs during covariance
+evaluation.
+The detailed diagnostic expands to \(C\times C\times M\times M\) only
+when requested, so its memory cost should be considered for many cells.
 For \(H=2\), nearly orthogonal exposure vectors make the trace tiny and
 the raw correction unstable.
-The implementation treats a pair as unsupported when
-\(\operatorname{tr}(M_jM_k)\leq\sqrt{\epsilon_{\mathrm{mach}}}H\), where the
+The implementation treats a cell pair as unsupported when
+\(\operatorname{tr}(M_{c,j}M_{d,k})\leq\sqrt{\epsilon_{\mathrm{mach}}}H_{cd,jk}\), where the
 machine epsilon matches the cluster-total dtype.
 The cutoff is a numerical guard; its effect on coverage requires separate
 study.
-The local factor corrects for estimating the stratum mean under the
+The local factor corrects for estimating the cell mean under the
 homogeneous-cluster working model.
 The constructor rejects =sampling.dof_correction=True= in this mixed opt-in mode
 because the global \(G_{jk}/(G_{jk}-1)\) would add a second inflation.
@@ -40,15 +56,22 @@ use the sampling correction, regardless of this flag.
 The default random-stratum mode retains the #119 correction unchanged.
 Scaling remains \(1/(N_jN_k)\).
 
-A stratum/pair with \(H_{s,jk}<2\), zero exposure norm, or trace below
+A cell pair with \(H_{cd,jk}<2\), zero exposure norm, or trace below
 the numerical guard contributes exactly zero.
 The \(H<2\) part matches the design-side unsupported-pair rule.
+=fixed_cell_pair_diagnostics(measure)= returns \(C\times C\times M\times M\)
+arrays for each ordered cell pair's support count, projection trace, and
+exact usability flag.
 =fixed_stratum_pair_diagnostics(measure)= returns \(S\times M\times M\)
-arrays for pair-support count, projection trace, and the exact usability flag.
+arrays summarizing distinct cluster count, the /sum/ of usable cell-pair traces,
+and whether /any/ cell-pair term contributes.
+Its summed trace is not one projection trace; inspect the cell-pair diagnostic
+to locate which term is guarded out.
 =fixed_stratum_pair_support(measure)= remains a count-only convenience.
 Callers can inspect losses from both low support and the trace guard before
 inference.
-The constructor refuses sampling clusters crossing strata.
+The constructor refuses sampling clusters crossing strata and a design with
+at most one sampling cluster in every observed stratum.
 One sampling cluster per stratum cannot identify a random stratum shock
 separately from an arbitrary fixed profile; the opt-in does not estimate
 that unconditional random-stratum component.
@@ -59,15 +82,61 @@ The deterministic tests in
 =tests/covariance/test_design_aware_fixed_strata.py= establish algebra and
 compatibility, not coverage; a separate Monte Carlo validation remains.
 
+* 300-rep falsification and cell correction
+
+The SHA-pinned =co_carleton= job 40405069 ran 300 common-random-number
+replications of the unchanged #130 fixed-profile ladder design with seed
+20260610 and per-rep ridge anchoring.
+The published implementation =dec68caeb8bff67735a58919056613b47d1d11dd=
+centered on the bare stratum and was *not calibrated* for that ladder:
+the randomized coefficient's coverage was 266/298 = 0.893 (MCSE 0.018),
+below 0.95, while pure =StratifiedCovariance= gave 281/297 = 0.946
+(MCSE 0.013) and the default coupled path gave 117/177 = 0.661
+(MCSE 0.036).
+The fixed-local b1 mean-SE/empirical-SD ratio was 0.872 versus 0.936
+for pure Stratified; b1 biases were -0.0118 and -0.0109, respectively.
+Extra global dof inflation gave coverage 262/295 = 0.888, so it did not
+resolve the ladder deficit.
+The result is recorded in =/global/scratch/users/ligon/emu-gmm-145-40405069.log=.
+
+The ladder assigns each sampling cluster to exactly one stratum-by-arm
+cell and uses the same PSU units for design and sampling.
+The design moment \(rT\) is structurally zero in controls while its mask
+is one there; bare-stratum projection pools treated and control exposures.
+On ten fixed-seed draws at \(\theta=\beta_{\mathrm{true}}\), the published
+fixed-stratum implementation disagreed with pure Stratified in SS and TS.
+An independent NumPy projection within each cell matched pure Stratified
+to a maximum absolute entry difference of \(3.47\cdot10^{-18}\).
+This identifies the arm-cell pooling defect and motivates the ordered
+cell-pair estimator above.
+The new pointwise check is reproducible with
+=nice -n 19 taskset -c 36-39 poetry run python scripts/validation/design_aware_fixed_cell_pointwise.py=;
+it uses the same ten seed-20260610 draws and reports the revised kernel's
+maximum entry difference from both the NumPy and Stratified references.
+The revised kernel's maximum absolute entry difference from pure Stratified
+was \(8.67\cdot10^{-18}\), with the independent NumPy result differing from
+pure Stratified by \(3.47\cdot10^{-18}\).
+The exact output is saved in =.coder/design-145-cell-pointwise-2026-10-23.log=.
+The 4096-draw paired-cluster check with the same seed estimates the cross
+covariance at 0.053405 (MCSE 0.000370) for \(\rho=0.8\) against the analytic
+0.053333; at -0.053495 (MCSE 0.000377) for \(\rho=-0.8\) against -0.053333;
+and at -0.000045 (MCSE 0.000131) for \(\rho=0\) against zero.
+The extra-global ablation remains high at 0.057219 for \(\rho=0.8\).
+The output is saved in =.coder/design-145-cell-paired-4096-2026-10-23.log=.
+The revised estimator's 300-rep coverage remains to be measured.
+
 * Recommendation and limit
 
-For a fixed /per-observation/ stratum profile, center the sampling contribution and its cross block by projecting each sampling-cluster total on its observed weighted exposure /within each stratum and pair-overlap set/.
+For a fixed /per-observation/ cell profile, project each cluster's cell
+component on its observed weighted exposure within each cell-pair overlap set.
 This has a well-defined target when the caller's sampling clusters are nested in strata and at least two clusters support a pair in an informative stratum.
 It cannot identify a random cross-arm stratum shock when the stratum itself is the sole sampling cluster: subtracting that stratum's estimated mean removes the shock, while leaving it uncentered confounds the shock with an arbitrary fixed stratum mean.
-That case needs either repeated cross-arm sampling clusters within strata, an externally specified mean model, or an explicit refusal/caveat.
+That case needs either repeated cross-arm sampling clusters within strata or
+an externally specified mean model; the mixed opt-in rejects the all-singleton
+configuration eagerly.
 
-The implementation slice above is opt-in; the numerical checks below test
-its local correction under a paired-cluster working model.
+The implementation slice above is opt-in; the pre-revision numerical checks
+below test its local correction under a paired-cluster working model.
 The distinction between fixed and random stratum effects and the
 heterogeneous-cluster finite-sample correction remain substantive limits.
 
@@ -83,7 +152,12 @@ heterogeneous-cluster finite-sample correction remain substantive limits.
 - The consumer appendix defines \(V_X\) for a joint sampling-plus-assignment population and derives a cross-arm term at the stratum/group sampling unit (=../Seasonality/Text/ai_neyman_covariance.org:245-310=).
   It does not supply an estimator that separates one realized fixed stratum mean from one realized random stratum shock.
 
-* Candidate algebra for nested sampling clusters
+* Superseded bare-stratum candidate algebra
+
+This section records the first implementation's rationale for audit.
+The 300-rep falsification above supersedes its bare-stratum projection;
+the revised kernel projects separate cell components and sums ordered
+cell-pair terms.
 
 Let \(h\) index the supplied sampling clusters and \(s(h)\) their fixed stratum, with each \(h\) contained in exactly one stratum.
 For coordinate \(j\), define \(t_{h,j}=\sum_{i\in h}d_{ij}w_i\psi_j(x_i,\theta)\), \(q_{h,j}=\mathbf 1\{\sum_{i\in h}d_{ij}>0\}\), and \(N_j=\sum_i d_{ij}w_i\).
@@ -146,14 +220,12 @@ The small fit pilot shows the default coupled arm with 4 valid SE rows among 6 c
 These six draws cannot establish coverage.
 In the paired-cluster check, the analytic cross covariance is \(0.8/15=0.053333\), the local estimate is 0.053405 (MCSE 0.000370), and the local-plus-global ablation is 0.057219 (MCSE 0.000396).
 The negative-shock control reverses the sign, and the zero-shock control is near zero.
-The planned coverage comparison uses 300 common-random-number draws of the
-unchanged #130 fixed-profile DGP with per-rep ridge anchoring and all four
-arms above.
-=scripts/validation/design_aware_fixed_strata_burst.sh= pins the published
-branch SHA in a separate four-CPU =co_carleton= job and writes its log to
-durable scratch; it requires review before submission.
-Coverage, ridge-binding, convergence, and validity rates are pending that
-run, so the opt-in's estimator calibration is not yet established.
+The 300-rep comparison of the published bare-stratum implementation is
+reported above; it falsified estimator calibration in that ladder.
+=scripts/validation/design_aware_fixed_strata_burst.sh= pins a branch SHA
+in a separate four-CPU =co_carleton= job and writes its log to durable
+scratch.
+The revised cell-pair implementation still requires a fresh coverage run.
 
 * Discriminating fixtures and falsification
 

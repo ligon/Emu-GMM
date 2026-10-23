@@ -451,19 +451,26 @@ class DesignAwareCovariance:
         and ``couple`` has no effect.
     fixed_strata : bool (static), default False
         Opt into exposure-projected centering within each fixed stratum
-        for both SS and TS. TT remains the design engine output. A
-        stratum/pair with fewer than two supporting clusters contributes
-        zero; fixed_stratum_pair_diagnostics exposes counts, projection
-        traces, and usability. The local
-        H/tr(M_j M_k) factor assumes homogeneous cluster cross-covariance;
+        for both SS and TS. TT remains the design engine output. Each
+        ordered pair of cells within a stratum contributes separately, so
+        paired sampling clusters can retain cross-arm covariance.
+        fixed_cell_pair_diagnostics exposes the exact local count,
+        projection trace, and usability; fixed_stratum_pair_diagnostics
+        summarizes them by stratum. The local H/tr(M_j M_k) factor assumes
+        homogeneous cluster cross-covariance within each cell pair;
         traces at or below sqrt(machine epsilon) times H are treated as
         unsupported to avoid numerically unbounded inflation.
         ``sampling.dof_correction=True`` is rejected when sampled moments
         are present: the local H/tr(M_j M_k) factor already corrects for
-        estimating each stratum's mean under the stated working model.
+        estimating each cell's mean under the stated working model.
         With all moments assigned to design, the exact design-only
         reduction has no sampling correction to apply. The default mode
         retains the sampling strategy's #119 global correction.
+
+        The fixed kernel stores a dense ``(n_clusters, n_cells, M)`` array
+        of cell components and ``(P, M, M)`` geometry, where
+        ``P = sum_s n_cells_in_stratum[s] ** 2``. The detailed diagnostic
+        expands to ``(n_cells, n_cells, M, M)`` only when called.
     """
 
     design: StratifiedCovariance
@@ -472,6 +479,9 @@ class DesignAwareCovariance:
     all_design: bool = jdc.static_field()  # type: ignore[attr-defined]
     couple: bool = jdc.static_field(default=True)  # type: ignore[attr-defined]
     fixed_strata: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
+    cell_pair_left: Array | None = None
+    cell_pair_right: Array | None = None
+    cell_pair_strata: Array | None = None
 
     @classmethod
     def from_design_mask(
@@ -495,6 +505,7 @@ class DesignAwareCovariance:
         """
         m = jnp.asarray(design_moment_mask)
         all_design = bool(jnp.all(m > 0.0))
+        pair_left = pair_right = pair_strata = None
         if fixed_strata and not all_design:
             if sampling.dof_correction:
                 raise ValueError(
@@ -518,6 +529,35 @@ class DesignAwareCovariance:
                 raise ValueError(
                     "fixed_strata=True requires sampling clusters nested in strata"
                 )
+            cluster_strata = strata[np.unique(clusters, return_index=True)[1]]
+            counts = np.bincount(cluster_strata, minlength=design.n_strata)
+            if not np.any(counts >= 2):
+                raise ValueError(
+                    "fixed_strata=True requires at least two sampling "
+                    "clusters in an observed stratum"
+                )
+            cells = np.rint(np.asarray(design.cell_ids)).astype(np.int64)
+            if cells.shape != strata.shape:
+                raise ValueError("design cells and strata must align")
+            if np.any((cells < 0) | (cells >= design.n_cells)):
+                raise ValueError("design cell ID is outside n_cells")
+            cell_order = np.argsort(cells, kind="stable")
+            if np.any(
+                (cells[cell_order][1:] == cells[cell_order][:-1])
+                & (strata[cell_order][1:] != strata[cell_order][:-1])
+            ):
+                raise ValueError("fixed_strata=True requires cells nested in strata")
+            left, right, owners = [], [], []
+            for stratum in np.unique(strata):
+                within = np.unique(cells[strata == stratum])
+                for c in within:
+                    for d in within:
+                        left.append(c)
+                        right.append(d)
+                        owners.append(stratum)
+            pair_left = jnp.asarray(left, dtype=jnp.int32)
+            pair_right = jnp.asarray(right, dtype=jnp.int32)
+            pair_strata = jnp.asarray(owners, dtype=jnp.int32)
         return cls(
             design=design,
             sampling=sampling,
@@ -525,6 +565,9 @@ class DesignAwareCovariance:
             all_design=all_design,
             couple=couple,
             fixed_strata=fixed_strata,
+            cell_pair_left=pair_left,
+            cell_pair_right=pair_right,
+            cell_pair_strata=pair_strata,
         )
 
     def _sampling_cluster_strata(self, seg: Any) -> Any:
@@ -538,22 +581,57 @@ class DesignAwareCovariance:
             self.design.n_strata - 1,
         )
 
-    def _fixed_pair_geometry(
-        self, support: Any, exposure: Any, strata: Any, j: Any, k: Any
-    ) -> tuple[Any, Any, Any, Any, Any]:
-        """Pair support and exposure-projection trace used by the sampling kernel."""
-        both = (support[:, j] & support[:, k]).astype(exposure.dtype)
+    def _fixed_cell_components(
+        self, measure: Any, psi_safe: Any = None
+    ) -> tuple[Any, Any, Any]:
+        """Return cluster-by-cell totals, exposure, and observed support."""
+        clusters = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
+        cells = jnp.round(self.design.cell_ids).astype(jnp.int32)
+        flat = clusters * self.design.n_cells + cells
+        n_segments = self.sampling.n_clusters * self.design.n_cells
+        exposure_obs = measure.mask * measure.weights[:, None]
+        exposure = jax.ops.segment_sum(
+            exposure_obs, flat, num_segments=n_segments
+        ).reshape(self.sampling.n_clusters, self.design.n_cells, -1)
+        observed = jax.ops.segment_sum(
+            (measure.mask > 0.0).astype(exposure.dtype),
+            flat,
+            num_segments=n_segments,
+        ).reshape(exposure.shape)
+        totals = (
+            jax.ops.segment_sum(
+                exposure_obs * psi_safe, flat, num_segments=n_segments
+            ).reshape(exposure.shape)
+            if psi_safe is not None
+            else jnp.zeros_like(exposure)
+        )
+        return totals, exposure, observed > 0.0
 
-        def sum_by_stratum(values: Any) -> Any:
-            return jax.ops.segment_sum(
-                values, strata, num_segments=self.design.n_strata
+    def _fixed_cell_geometry(
+        self, exposure: Any, support: Any
+    ) -> tuple[Any, Any, Any, Any, Any, Any]:
+        """Local geometry for ordered cell pairs and moment pairs.
+
+        The ordered (c, d) sum is the expansion of the covariance of the
+        *sum* of cell components. Cross-cell terms occur only for sampling
+        clusters present in both cells; (c, d) and (d, c) are both required
+        for a variance, so paired cross-arm shocks are not double-counted.
+        """
+        assert self.cell_pair_left is not None
+        assert self.cell_pair_right is not None
+        s = support.astype(exposure.dtype)
+
+        def cross(left: Any, right: Any) -> Any:
+            return jnp.einsum(
+                "gpj,gpk->pjk",
+                left[:, self.cell_pair_left, :],
+                right[:, self.cell_pair_right, :],
             )
 
-        ej, ek = exposure[:, j], exposure[:, k]
-        H = sum_by_stratum(both)
-        dj = sum_by_stratum(both * ej * ej)
-        dk = sum_by_stratum(both * ek * ek)
-        cross_exposure = sum_by_stratum(both * ej * ek)
+        H = cross(s, s)
+        dj = cross(exposure * exposure, s)
+        dk = cross(s, exposure * exposure)
+        cross_exposure = cross(exposure, exposure)
         raw_trace = (
             H
             - 2.0
@@ -562,51 +640,82 @@ class DesignAwareCovariance:
         trace = jnp.where((H >= 2.0) & (dj > 0.0) & (dk > 0.0), raw_trace, 0.0)
         min_trace = jnp.sqrt(jnp.finfo(exposure.dtype).eps) * H
         usable = (H >= 2.0) & (dj > 0.0) & (dk > 0.0) & (trace > min_trace)
-        return H, dj, dk, trace, usable
+        return H, dj, dk, cross_exposure, trace, usable
+
+    def fixed_cell_pair_diagnostics(
+        self, measure: Any
+    ) -> tuple[Float[Array, "C C M M"], Float[Array, "C C M M"], Array]:
+        """Return exact ``(count, trace, usable)`` for ordered cell pairs.
+
+        Each shape is ``(n_cells, n_cells, n_moments, n_moments)``. A cell
+        pair contributes only when its own ``usable`` entry is true. Pairs
+        from different strata have zero support because sampling clusters
+        must be nested in strata.
+
+        The returned arrays explicitly include the zero cross-stratum
+        entries, so diagnostics can be large when many cells are supplied.
+        """
+        if not self.fixed_strata or self.all_design:
+            raise ValueError("pair diagnostics require mixed fixed_strata=True")
+        _totals, exposure, support = self._fixed_cell_components(measure)
+        H, _dj, _dk, _cross, trace, usable = self._fixed_cell_geometry(
+            exposure, support
+        )
+        assert self.cell_pair_left is not None
+        assert self.cell_pair_right is not None
+        C = self.design.n_cells
+        index = self.cell_pair_left * C + self.cell_pair_right
+
+        def expand(value: Any) -> Any:
+            return (
+                jnp.zeros((C * C, *value.shape[1:]), value.dtype)
+                .at[index]
+                .set(value)
+                .reshape(C, C, *value.shape[1:])
+            )
+
+        return expand(H), expand(trace), expand(usable)
 
     def fixed_stratum_pair_diagnostics(
         self, measure: Any
     ) -> tuple[Float[Array, "S M M"], Float[Array, "S M M"], Array]:
         r"""Return ``(count, trace, usable)`` for each stratum and moment pair.
 
-        ``count`` is the number of sampling clusters supporting both moments.
-        ``trace`` is the overlap of their exposure projections,
-        :math:`\operatorname{tr}(M_jM_k)`. ``usable`` is the exact kernel guard:
-        count at least two, positive exposure norms, and trace greater than
-        ``sqrt(machine epsilon) * count``. An unusable pair contributes zero
-        to the fixed-stratum SS/TS kernel even when its count is at least two.
-        Arrays have shape ``(n_strata, n_moments, n_moments)``.
+        ``count`` is the number of distinct sampling clusters supporting both
+        moments somewhere in the stratum. ``trace`` sums the traces of usable
+        ordered cell-pair terms and ``usable`` is true if *any* cell-pair term
+        contributes. The summed trace is a summary, not one projection trace:
+        inspect :meth:`fixed_cell_pair_diagnostics` for the exact per-term
+        count, trace, and guard. Shapes are ``(n_strata, M, M)``.
         """
-        if not self.fixed_strata:
-            raise ValueError("pair diagnostics are defined for fixed_strata=True")
+        if not self.fixed_strata or self.all_design:
+            raise ValueError("pair diagnostics require mixed fixed_strata=True")
         seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
-        exposure = jax.ops.segment_sum(
-            measure.mask * measure.weights[:, None],
-            seg,
-            num_segments=self.sampling.n_clusters,
-        )
-        observed = jax.ops.segment_sum(
-            (measure.mask > 0.0).astype(jnp.float64),
-            seg,
-            num_segments=self.sampling.n_clusters,
-        )
-        support = observed > 0.0
         strata = self._sampling_cluster_strata(seg)
-        M = int(support.shape[1])
-
-        def pair_geometry(index: Any) -> tuple[Any, Any, Any]:
-            j, k = index // M, index % M
-            H, _dj, _dk, trace, usable = self._fixed_pair_geometry(
-                support, exposure, strata, j, k
+        _totals, exposure, support = self._fixed_cell_components(measure)
+        _cell_H, _dj, _dk, _cross, cell_trace, cell_usable = self._fixed_cell_geometry(
+            exposure, support
+        )
+        cluster_support = jnp.any(support, axis=1).astype(exposure.dtype)
+        pair_support = cluster_support[:, :, None] * cluster_support[:, None, :]
+        count = jax.ops.segment_sum(
+            pair_support, strata, num_segments=self.design.n_strata
+        )
+        assert self.cell_pair_strata is not None
+        trace = jax.ops.segment_sum(
+            jnp.where(cell_usable, cell_trace, 0.0),
+            self.cell_pair_strata,
+            num_segments=self.design.n_strata,
+        )
+        usable = (
+            jax.ops.segment_sum(
+                cell_usable.astype(exposure.dtype),
+                self.cell_pair_strata,
+                num_segments=self.design.n_strata,
             )
-            return H, trace, usable
-
-        count, trace, usable = jax.lax.map(pair_geometry, jnp.arange(M * M))
-
-        def arrange(values: Any) -> Any:
-            return jnp.transpose(values.reshape(M, M, self.design.n_strata), (2, 0, 1))
-
-        return arrange(count), arrange(trace), arrange(usable)
+            > 0.0
+        )
+        return count, trace, usable
 
     def fixed_stratum_pair_support(self, measure: Any) -> Float[Array, "S M M"]:
         """Return the pair-supported cluster counts from the full diagnostics."""
@@ -638,46 +747,31 @@ class DesignAwareCovariance:
             psi_safe = jnp.where(mask > 0.0, psi_batch, 0.0)
             N_j = jnp.sum(mask * weights[:, None], axis=0)
 
-        exposure_obs = mask * weights[:, None]
-        seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
-        totals = jax.ops.segment_sum(
-            exposure_obs * psi_safe, seg, num_segments=self.sampling.n_clusters
+        totals, exposure, support = self._fixed_cell_components(measure, psi_safe)
+        H, dj, dk, cross_exposure, trace, usable = self._fixed_cell_geometry(
+            exposure, support
         )
-        exposure = jax.ops.segment_sum(
-            exposure_obs, seg, num_segments=self.sampling.n_clusters
-        )
-        observed = jax.ops.segment_sum(
-            (mask > 0.0).astype(jnp.float64),
-            seg,
-            num_segments=self.sampling.n_clusters,
-        )
-        support = observed > 0.0
-        strata = self._sampling_cluster_strata(seg)
-        M = int(totals.shape[1])
-        S = self.design.n_strata
 
-        def sum_by_stratum(values: Any) -> Any:
-            return jax.ops.segment_sum(values, strata, num_segments=S)
-
-        def pair_numerator(index: Any) -> Any:
-            j, k = index // M, index % M
-            both = (support[:, j] & support[:, k]).astype(totals.dtype)
-            tj, tk = totals[:, j], totals[:, k]
-            ej, ek = exposure[:, j], exposure[:, k]
-            H, dj, dk, trace, usable = self._fixed_pair_geometry(
-                support, exposure, strata, j, k
+        def cross(left: Any, right: Any) -> Any:
+            assert self.cell_pair_left is not None
+            assert self.cell_pair_right is not None
+            return jnp.einsum(
+                "gpj,gpk->pjk",
+                left[:, self.cell_pair_left, :],
+                right[:, self.cell_pair_right, :],
             )
-            bj = sum_by_stratum(both * ej * tj) / jnp.where(dj > 0, dj, 1.0)
-            bk = sum_by_stratum(both * ek * tk) / jnp.where(dk > 0, dk, 1.0)
-            residual_j = tj - bj[strata] * ej
-            residual_k = tk - bk[strata] * ek
-            centered = sum_by_stratum(both * residual_j * residual_k)
-            # The shared geometry guard prevents near-orthogonal projections
-            # from receiving a numerically explosive local correction.
-            local = jnp.where(usable, H / jnp.where(usable, trace, 1.0), 0.0)
-            return jnp.sum(local * centered)
 
-        numer = jax.lax.map(pair_numerator, jnp.arange(M * M)).reshape(M, M)
+        s = support.astype(totals.dtype)
+        bj = cross(exposure * totals, s) / jnp.where(dj > 0.0, dj, 1.0)
+        bk = cross(s, exposure * totals) / jnp.where(dk > 0.0, dk, 1.0)
+        centered = (
+            cross(totals, totals)
+            - bj * cross(exposure, totals)
+            - bk * cross(totals, exposure)
+            + bj * bk * cross_exposure
+        )
+        local = jnp.where(usable, H / jnp.where(usable, trace, 1.0), 0.0)
+        numer = jnp.sum(local * centered, axis=0)
         return _safe_outer_divide(numer, N_j)
 
     def covariance(

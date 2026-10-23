@@ -88,53 +88,91 @@ def _objects(fx, *, dof=False, fixed=True, couple=True, all_design=False):
 
 
 def _reference(fx):
-    """Independent NumPy pair/exposure projection with local trace factor."""
+    """Independent NumPy ordered-cell-pair projection and trace correction."""
     x, mask, weights = fx["x"], fx["mask"], fx["weights"]
-    G, M = 6, x.shape[1]
-    totals = np.zeros((G, M))
-    exposure = np.zeros((G, M))
-    support = np.zeros((G, M), dtype=bool)
+    G, C, M = 6, 4, x.shape[1]
+    totals = np.zeros((G, C, M))
+    exposure = np.zeros_like(totals)
+    support = np.zeros((G, C, M), dtype=bool)
     for i, h in enumerate(fx["cluster"]):
         h = int(h)
-        totals[h] += mask[i] * weights[i] * x[i]
-        exposure[h] += mask[i] * weights[i]
-        support[h] |= mask[i] > 0
+        c = int(fx["cell"][i])
+        totals[h, c] += mask[i] * weights[i] * x[i]
+        exposure[h, c] += mask[i] * weights[i]
+        support[h, c] |= mask[i] > 0
     Nj = (mask * weights[:, None]).sum(axis=0)
     out = np.zeros((M, M))
     counts = np.zeros((2, M, M))
+    cell_counts = np.zeros((C, C, M, M))
+    cell_trace = np.zeros_like(cell_counts)
+    cell_usable = np.zeros_like(cell_counts, dtype=bool)
     for j in range(M):
         for k in range(M):
             numerator = 0.0
             for s in range(2):
                 hs = np.arange(3 * s, 3 * s + 3)
-                hs = hs[support[hs, j] & support[hs, k]]
-                H = len(hs)
-                counts[s, j, k] = H
-                if H < 2:
-                    continue
-                ej, ek = exposure[hs, j], exposure[hs, k]
-                Pj = np.eye(H) - np.outer(ej, ej) / (ej @ ej)
-                Pk = np.eye(H) - np.outer(ek, ek) / (ek @ ek)
-                numerator += (
-                    H
-                    / np.trace(Pj @ Pk)
-                    * ((Pj @ totals[hs, j]) @ (Pk @ totals[hs, k]))
+                counts[s, j, k] = np.sum(
+                    support[hs, :, j].any(axis=1) & support[hs, :, k].any(axis=1)
                 )
+                for c in (2 * s, 2 * s + 1):
+                    for d in (2 * s, 2 * s + 1):
+                        ids = hs[support[hs, c, j] & support[hs, d, k]]
+                        H = len(ids)
+                        cell_counts[c, d, j, k] = H
+                        if H < 2:
+                            continue
+                        ej, ek = exposure[ids, c, j], exposure[ids, d, k]
+                        Pj = np.eye(H) - np.outer(ej, ej) / (ej @ ej)
+                        Pk = np.eye(H) - np.outer(ek, ek) / (ek @ ek)
+                        trace = np.trace(Pj @ Pk)
+                        cell_trace[c, d, j, k] = trace
+                        if trace <= np.sqrt(np.finfo(float).eps) * H:
+                            continue
+                        cell_usable[c, d, j, k] = True
+                        numerator += (
+                            H
+                            / trace
+                            * ((Pj @ totals[ids, c, j]) @ (Pk @ totals[ids, d, k]))
+                        )
             if Nj[j] * Nj[k] > 0:
                 out[j, k] = numerator / (Nj[j] * Nj[k])
-    return out, counts
+    return out, counts, cell_counts, cell_trace, cell_usable
 
 
 def test_fixed_stratum_matches_pair_exposure_reference_and_profile_invariance():
     fx = _fixture(profile=True)
     dac, _, measure = _objects(fx)
     V = np.asarray(dac.covariance(_identity, None, measure))
-    reference, counts = _reference(fx)
+    reference, counts, cell_counts, cell_trace, cell_usable = _reference(fx)
     np.testing.assert_allclose(V[1:, 1:], reference[1:, 1:], atol=1e-12)
     np.testing.assert_allclose(V[0, 1:], reference[0, 1:], atol=1e-12)
     np.testing.assert_array_equal(
         np.asarray(dac.fixed_stratum_pair_support(measure)), counts
     )
+    observed_cell = dac.fixed_cell_pair_diagnostics(measure)
+    np.testing.assert_array_equal(np.asarray(observed_cell[0]), cell_counts)
+    np.testing.assert_allclose(np.asarray(observed_cell[1]), cell_trace, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(observed_cell[2]), cell_usable)
+    summary_count, summary_trace, summary_usable = (
+        np.asarray(value) for value in dac.fixed_stratum_pair_diagnostics(measure)
+    )
+    np.testing.assert_array_equal(summary_count, counts)
+    for s in range(2):
+        within = slice(2 * s, 2 * s + 2)
+        np.testing.assert_allclose(
+            summary_trace[s],
+            np.where(cell_usable[within, within], cell_trace[within, within], 0.0).sum(
+                axis=(0, 1)
+            ),
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            summary_usable[s], cell_usable[within, within].any(axis=(0, 1))
+        )
+    # Both ordered cross-cell terms enter the variance of a sum. For this
+    # fixture, the T/S covariance has exactly one supported cell direction.
+    assert cell_counts[0, 1, 0, 1] == 3
+    assert cell_counts[1, 0, 0, 1] == 0
     # Unequal exposure makes total-mean centering invalid; projection
     # removes a fixed per-observation profile in both SS and TS.
     fx0 = _fixture(profile=False)
@@ -163,12 +201,52 @@ def test_cross_arm_shock_sign_and_zero_shock():
     np.testing.assert_allclose(values[2], 0.0, atol=1e-14)
 
 
+def test_coincident_psu_clusters_recover_cell_neyman_assembly():
+    """One cell per cluster makes the cell-pair expansion exactly Neyman."""
+    psu = jnp.arange(12)
+    cell = jnp.repeat(jnp.arange(4), 3)
+    strata = cell // 2
+    design = StratifiedCovariance(
+        psu_ids=psu,
+        cell_ids=cell,
+        stratum_ids=strata,
+        n_psu=12,
+        n_cells=4,
+        n_strata=2,
+    )
+    sampling = ClusteredCovariance(cluster_ids=psu, n_clusters=12)
+    mixed = DesignAwareCovariance.from_design_mask(
+        design, sampling, jnp.array([1.0, 0.0, 0.0]), fixed_strata=True
+    )
+    index = jnp.arange(12)
+    treatment = (cell % 2 == 0).astype(jnp.float64)
+    x = jnp.stack(
+        [
+            treatment * (10.0 * strata + index % 3 - 1.0),
+            20.0 * cell + index % 3 - 1.0,
+            -5.0 * cell + (index % 3 - 1.0) ** 2,
+        ],
+        axis=1,
+    )
+    mask = jnp.ones_like(x).at[jnp.arange(2, 12, 3), 2].set(0.0)
+    measure = EmpiricalMeasure(x=x, mask=mask, weights=jnp.ones(12))
+    np.testing.assert_allclose(
+        np.asarray(mixed.covariance(_identity, None, measure)),
+        np.asarray(design.covariance(_identity, None, measure)),
+        atol=1e-12,
+    )
+    cell_count = np.asarray(mixed.fixed_cell_pair_diagnostics(measure)[0])
+    assert not np.any(cell_count[0, 1])
+    assert not np.any(cell_count[1, 0])
+
+
 def test_local_dof_decomposition_and_unsupported_pair():
     fx = _fixture(single_support=True)
     raw, _, measure = _objects(fx)
     V_raw = np.asarray(raw.covariance(_identity, None, measure))
-    ref, counts = _reference(fx)
+    ref, counts, cell_counts, _trace, _usable = _reference(fx)
     assert np.all(counts[:, 0, 2] == 1)
+    assert cell_counts[0, 1, 0, 2] == 1
     assert V_raw[0, 2] == 0.0
     np.testing.assert_allclose(V_raw[0, 1:], ref[0, 1:], atol=1e-12)
     # The local trace factor is the complete finite-cluster correction
@@ -235,21 +313,21 @@ def test_fixed_strata_requires_nested_sampling_clusters():
         _objects(fx)
 
 
-def test_one_sampling_cluster_per_stratum_has_visible_zero_rule():
+def test_fixed_strata_requires_cells_nested_in_strata():
     fx = _fixture()
-    _, design, measure = _objects(fx)
+    fx["cell"][6] = 0  # cell 0 now spans strata 0 and 1
+    with pytest.raises(ValueError, match="cells nested in strata"):
+        _objects(fx)
+
+
+def test_one_sampling_cluster_per_stratum_is_rejected():
+    fx = _fixture()
+    _, design, _measure = _objects(fx)
     sampling = ClusteredCovariance(cluster_ids=jnp.asarray(fx["strata"]), n_clusters=2)
-    dac = DesignAwareCovariance.from_design_mask(
-        design, sampling, jnp.array([1.0, 0.0, 0.0]), fixed_strata=True
-    )
-    support = np.asarray(dac.fixed_stratum_pair_support(measure))
-    assert np.all(support <= 1.0)
-    V = np.asarray(dac.covariance(_identity, None, measure))
-    assert np.array_equal(V[1:, 1:], np.zeros((2, 2)))
-    assert np.array_equal(V[0, 1:], np.zeros(2))
-    np.testing.assert_array_equal(
-        V[:1, :1], np.asarray(design.covariance(_identity, None, measure))[:1, :1]
-    )
+    with pytest.raises(ValueError, match="at least two sampling clusters"):
+        DesignAwareCovariance.from_design_mask(
+            design, sampling, jnp.array([1.0, 0.0, 0.0]), fixed_strata=True
+        )
 
 
 def test_nearly_orthogonal_pair_exposures_are_not_inflated():
@@ -261,15 +339,21 @@ def test_nearly_orthogonal_pair_exposures_are_not_inflated():
     fx["mask"][7, 2] = 0.0
     dac, _, measure = _objects(fx)
     support, trace, usable = (
+        np.asarray(value) for value in dac.fixed_cell_pair_diagnostics(measure)
+    )
+    assert support[0, 1, 0, 2] == 2
+    assert support[2, 3, 0, 2] == 0
+    assert trace[0, 1, 0, 2] <= np.sqrt(np.finfo(float).eps) * support[0, 1, 0, 2]
+    assert not usable[0, 1, 0, 2]
+    assert usable[0, 0, 0, 0]
+    summary_support, summary_trace, summary_usable = (
         np.asarray(value) for value in dac.fixed_stratum_pair_diagnostics(measure)
     )
-    assert support[0, 0, 2] == 2
-    assert support[1, 0, 2] == 0
-    assert trace[0, 0, 2] <= np.sqrt(np.finfo(float).eps) * support[0, 0, 2]
-    assert not usable[0, 0, 2]
-    assert usable[0, 0, 0]
+    assert summary_support[0, 0, 2] == 2
+    assert summary_trace[0, 0, 2] == 0.0
+    assert not summary_usable[0, 0, 2]
     np.testing.assert_array_equal(
-        np.asarray(dac.fixed_stratum_pair_support(measure)), support
+        np.asarray(dac.fixed_stratum_pair_support(measure)), summary_support
     )
     V = np.asarray(dac.covariance(_identity, None, measure))
     assert V[0, 2] == 0.0

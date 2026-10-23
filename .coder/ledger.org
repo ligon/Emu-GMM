@@ -808,44 +808,61 @@ The fixed-strata versus random-stratum estimand, exposure-adjusted nuisance
 profile, and one-cluster support rule are resolved by the opt-in slice below.
 The global #119 factor is retained only in the default random-stratum mode.
 
-** 12.7 -- First opt-in slice after review
+** 12.7 -- Opt-in slice and falsification
 
 The approved choice is a conditional-on-fixed-strata mode, selected by
 =from_design_mask(..., fixed_strata=True)=; the default uncentered
-random-stratum assembly remains unchanged.
-The new kernel reuses the pair-supported sampling IDs for both \(SS\) and
-\(TS\), projects the cluster totals off each coordinate's observed weighted
-exposure, and applies the local \(H/\operatorname{tr}(M_jM_k)\) factor under
-a homogeneous-cluster-covariance working assumption.
-The local factor is the finite-cluster correction under the stated working
-model; a mixed =fixed_strata=True= covariance rejects
-=sampling.dof_correction=True= rather than multiply by the extra global #119
-factor. The all-design reduction ignores sampling and keeps its exact
-=StratifiedCovariance= output even when that flag is true.
-The default random-stratum mode retains #119 unchanged.
-The #109 identity and \(1/(N_jN_k)\) scaling are retained.
-Unsupported \(H<2\) stratum/pairs contribute zero and their counts are
-available from =fixed_stratum_pair_support(measure)=.
-Pairs with nearly orthogonal exposure projections are also set to zero
-when the trace is at or below \(\sqrt{\epsilon_{\mathrm{mach}}}H\), avoiding
-unstable local inflation; =fixed_stratum_pair_diagnostics(measure)= exposes
-the per-stratum pair count, projection trace, and the exact usability flag.
-The diagnostic and sampling kernel share =_fixed_pair_geometry=, so the
-reported flag cannot drift from the cutoff applied to the covariance.
-The factory rejects sampling clusters crossing strata; one sampling
-cluster per stratum yields zero \(SS/TS\) and a visible support count of one.
-No result-type diagnostic was added.
+random-stratum assembly and #119 correction remain unchanged.
+The first published branch commit =dec68ca= projected cluster totals on
+one exposure per bare stratum.
+The unchanged #130 300-rep ladder falsified its estimator calibration:
+b1 coverage 266/298 = 0.893 versus pure Stratified's 281/297 = 0.946.
+An independent within-cell NumPy projection matched pure Stratified to
+\(3.47\cdot10^{-18}\) on ten seed-20260610 draws at the true parameter;
+the bare-stratum implementation differed in its \(SS/TS\) blocks.
 
-Verification against the ledger: the new deterministic test file compares
-against an independent NumPy pair-projection reference with ragged masks
-and unequal weights, profiles, paired cross-arm shock signs, zero shock,
-one-cluster support, and a nearly orthogonal exposure pair.
-The existing =tests/covariance/test_stratified.py= suite remains green
-alongside the new tests; the full =make quick-check= gate passed on the
-final source and test tree before commit, with =nice -n 19 taskset -c 32-35=.
-A six-rep #130 pilot checks feasibility only; its rates do not establish
-coverage.
-The separate paired-cluster covariance check with seed 20260610 and 4096
-draws compares the local estimator with the analytic cross target and
-shows the extra global factor overestimates it; exact commands and output
-are in =.coder/design-145-final-paired-4096-2026-10-23.log=.
+The revision decomposes each sampling cluster's moments into
+stratum-by-arm cell components.
+For each ordered cell pair \((c,d)\) and moment pair \((j,k)\), it selects
+sampling clusters supporting both components, projects each component on
+its own observed weighted exposure, and uses the local
+\(H_{cd,jk}/\operatorname{tr}(M_{c,j}M_{d,k})\) factor.
+Summing the ordered cell-pair terms recovers the variance of the sum of
+cell components: one-cell-per-cluster data recover the existing Neyman
+within-cell assembly, while cross-cell paired clusters retain their
+shared-shock covariance.
+The local factor uses a homogeneous-cluster-covariance working assumption.
+A mixed =fixed_strata=True= covariance rejects
+=sampling.dof_correction=True= rather than multiply by the extra global
+#119 factor; the all-design reduction ignores sampling and remains bitwise
+=StratifiedCovariance= even when that flag is true.
+The #109 identity and \(1/(N_jN_k)\) scaling are retained.
+
+The factory rejects sampling clusters crossing strata, cells crossing
+strata, and designs with fewer than two sampling clusters in /every/
+observed stratum.
+Sparse individual cell pairs still contribute zero when \(H<2\), either
+exposure norm is zero, or the projection trace is at or below
+\(\sqrt{\epsilon_{\mathrm{mach}}}H\).
+=fixed_cell_pair_diagnostics(measure)= exposes exact \(C\times C\times M\times M\)
+count, trace, and usability arrays from the same geometry as the kernel.
+=fixed_stratum_pair_diagnostics(measure)= summarizes distinct cluster
+counts, sums usable cell-pair traces, and reports whether any cell pair is
+usable; its summed trace is not one projection trace.
+The hot path stores \(G\times C\times M\) components and
+\(P\times M\times M\) geometry for \(P=\sum_s C_s^2\) within-stratum
+cell pairs, avoiding a global \(C^2\) geometry array.
+
+The independent NumPy pair-cell test covers ragged masks, unequal weights,
+fixed cell profiles, paired cross-arm sign and zero shocks, trace guard,
+and the #109 identity.
+A coincident-PSU deterministic test recovers the full Stratified covariance;
+the unchanged #130 ten-draw pointwise check differs from Stratified by at
+most \(8.67\cdot10^{-18}\) in the revised kernel.
+The 4096-draw paired-cluster cross estimate is 0.053405 (MCSE 0.000370)
+for \(\rho=0.8\) versus the analytic 0.053333; the extra global factor
+overestimates it at 0.057219.
+Exact commands and output are in
+=.coder/design-145-cell-pointwise-2026-10-23.log= and
+=.coder/design-145-cell-paired-4096-2026-10-23.log=.
+The revised estimator's full coverage calibration remains to be measured.
