@@ -1,0 +1,4 @@
+paired_cluster seed=20260610 reps=4096 strata=3 pairs_per_stratum=5
+{"analytic_cross": 0.05333333333333334, "empirical_cross": 0.05374870616111149, "estimated_local": 0.053404531198388935, "estimated_plus_global": 0.057219140569702426, "local_mcse": 0.00036954065188123054, "plus_global_mcse": 0.00039593641272988987, "rho": 0.8}
+{"analytic_cross": -0.05333333333333334, "empirical_cross": -0.054285567382478306, "estimated_local": -0.05349458461703957, "estimated_plus_global": -0.05731562637539953, "local_mcse": 0.0003772168001821812, "plus_global_mcse": 0.0004041608573380513, "rho": -0.8}
+{"analytic_cross": 0.0, "empirical_cross": -0.0002684306106834201, "estimated_local": -4.5026709325316785e-05, "estimated_plus_global": -4.8242902848553735e-05, "local_mcse": 0.00013109705140738017, "plus_global_mcse": 0.0001404611265079073, "rho": 0.0}
