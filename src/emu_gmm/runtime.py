@@ -96,15 +96,17 @@ def recommended_env(
 
 
 def _backend_initialized() -> bool:
-    """Best-effort: has the JAX backend already initialised? (Never triggers it.)"""
+    """Has the JAX backend initialised? Refuse to guess if the probe fails."""
     try:
         from jax._src import xla_bridge
 
         return bool(xla_bridge.backends_are_initialized())
-    except Exception:
-        # Unknown JAX internal -> assume not initialised (configure() proceeds
-        # rather than spuriously raising on a version it can't introspect).
-        return False
+    except Exception as exc:
+        raise RuntimeError(
+            "emu_gmm.configure() could not determine whether the JAX backend "
+            "has initialised; set recommended_env() before launching Python "
+            "or pass force=True to configure a child process."
+        ) from exc
 
 
 def _merge_xla_flags(host_devices: int) -> str:
