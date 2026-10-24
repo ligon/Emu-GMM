@@ -107,7 +107,11 @@ A refit that does not converge --- a resampled world can extinguish a rare momen
 =docs/howto.org= has the expanded menu and the refit-vs-refit-free decision in full.
 For =StratifiedCovariance(fpc=False)=, =stratified_bootstrap= resamples PSUs within each stratum-by-arm cell.
 For mixed =DesignAwareCovariance(fixed_strata=True)=, =mixed_bootstrap= resamples complete balanced paired sampling bundles within strata, requiring =design.fpc=False= and =sampling.dof_correction=False=.
-The mixed default random-stratum and FPC schemes remain tracked in issue #251.
+For default =fixed_strata=False= with sampling clusters and strata defining the same partition, it draws whole strata with replacement, preserving variable sizes, cell counts, rows, masks, weights and the sampling centering/dof flags.
+This targets unconditional iid-stratum variation under the usual finite-moment, positive-support and regular-estimator assumptions; it need not match the conditional design =V_TT= when random common stratum profiles are omitted (#145), and does not repair analytic covariance, J chi-square calibration or general studentization.
+Copied covariance IDs are fresh at every level; IDs inside arbitrary model-data columns are not rewritten, so model grouping reductions must respect their intended relabeling/population contract.
+Both modes reject FPC: without-replacement resampling requires an explicit population/assignment law.
+Finer or crossing sampling partitions and broader calibration remain tracked in issue #251.
 
 * Documents
 

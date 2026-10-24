@@ -1,0 +1,72 @@
+#+title: Whole-stratum mixed bootstrap verification (#251)
+
+* Scope and reuse
+
+Sue, 2026-10-24; base =392ac813832b8a4336238710920f322f02166c22=.
+Ledger Section 27 grounds this extension; Section 18 continues to govern the fixed-stratum path.
+No covariance formula or tolerance changes are included.
+
+=mixed_bootstrap= now supports default =fixed_strata=False= with =design.fpc=False= when sampling clusters and design strata are the same partition.
+Sampling IDs may be a permutation of stratum IDs.
+The original number of whole strata is drawn independently with replacement.
+=_cell_layout= and =_ids= supply the existing ID/nesting validation, =_resample_one= clones all rows/masks/weights, and =_refit_bootstrap_worlds= retains labels and NaN/nonconvergence/zero-support/tau events.
+Every copied stratum, sampling cluster, cell and PSU receives a fresh ID; duplicated original strata cannot be pooled accidentally at any level.
+Variable stratum row counts, PSU/cell counts and absent arms are permitted.
+The existing complete balanced within-stratum paired-bundle experiment and its guards remain in place for =fixed_strata=True=.
+
+The default path preserves =sampling.centered=, =sampling.dof_correction=, =design_moment_mask= and =couple=.
+=couple=False= changes the fitted criterion's covariance assembly; it does not erase dependence from the jointly resampled data.
+
+* Statistical target and limits
+
+This is unconditional iid-stratum refit variability, requiring finite moments, no dominant stratum, positive limiting coordinate support and a regular consistent estimator.
+Means remain pooled weighted ratios; no equal weighting of stratum means is introduced.
+Rebuilding a matching mixed covariance does not prove those assumptions or equate its conditional design TT block with unconditional variation.
+The exact common-profile counterexample is included as a regression: two balanced strata with profiles =(-1,+1)= yield raw mixed covariance =[[0,.5],[.5,.5]]=, while enumerated whole-stratum mean covariance is =[[.5,.5],[.5,.5]]=.
+This existing #145 discrepancy is retained and documented, including the absence of a claim to repair analytic covariance, J chi-square calibration or general studentization.
+
+FPC remains rejected because without-replacement behavior requires the population/assignment experiment.
+Finer, coarser and crossing sampling partitions are rejected pending their resampling targets.
+Only covariance metadata IDs are rewritten; arbitrary grouping IDs inside model-data columns require an appropriate equivariant grouping/population contract.
+Weighted/sparse/nonlinear coverage beyond the deterministic oracles is not established here.
+The independently reviewed pilot script supplies the bounded feasibility evidence below; no general calibration result is claimed.
+
+* Focused verification
+
+All commands use the root virtualenv read-only, =nice -n 19= and CPUs 28-29, with =PYTHONPATH= pointing to this worktree's =src=.
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue251-random/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest -q tests/inference/test_mixed_bootstrap_random.py tests/inference/test_mixed_bootstrap.py
+env PYTHONPATH=/local/job40438881/tmp/issue251-random/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest -q -m 'not slow' tests/inference/test_stratified_bootstrap.py tests/covariance/test_stratified.py
+env PYTHONPATH=/local/job40438881/tmp/issue251-random/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m ruff check src/emu_gmm/inference/mixed_bootstrap.py tests/inference/test_mixed_bootstrap.py tests/inference/test_mixed_bootstrap_random.py
+env PYTHONPATH=/local/job40438881/tmp/issue251-random/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m black --check src/emu_gmm/inference/mixed_bootstrap.py tests/inference/test_mixed_bootstrap.py tests/inference/test_mixed_bootstrap_random.py
+env PYTHONPATH=/local/job40438881/tmp/issue251-random/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m mypy src/emu_gmm/inference/mixed_bootstrap.py
+#+end_src
+
+The mixed suites passed: 32 tests in 36.36 seconds.
+New guards cover exact enumeration of all 27 draws for unequal weighted exposures, demonstrate failure of equal-stratum-mean averaging, preserve copied rows and all grouping levels with an absent arm, retain covariance flags/decomposition, reject unsupported partitions and malformed IDs, preserve event-complete labelled results, and check actual coupled CU refits against independent ratio solutions.
+Existing stratified/covariance guards passed: 43 tests, one slow calibration deselected, in 21.82 seconds.
+Ruff, Black, source mypy and =git diff --check= passed.
+An initial guard invocation omitted the slow-marker exclusion and was interrupted by exact PID during the existing 60-refit calibration, after four ordinary tests passed (74.99 seconds); it supplies no calibration result.
+No full-suite job, commit or external tracker write was made by this worker.
+
+* Immutable release gate and independent pilot
+
+Source/test tree =c0ac7c4bd6d9d0bdc1500957fc644899c8668f06= passed =make quick-check= in free Slurm job 40447207 (12 CPUs, 48 GiB).
+Ruff, Black, mypy and the non-slow suite passed; the separate slow suite is running before merge.
+Only Org status/evidence changed after that snapshot.
+Independent review passed the new and existing mixed-bootstrap tests and found no source blocker.
+
+The frozen pilot evidence is at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/random251-pilot=.
+Its 22-payload manifest has SHA-256 =e8ff73ed644bc7030a2be826c10c9bb9d081a9c52bd3692962ab5f23c3abe16b=.
+Jobs 40447269 and 40447270 completed in about five minutes each, using four CPUs and 8 GiB apiece.
+Seed 251, six outer cases and 20 refits per case/sign gave 12 valid original fits and 240 valid refits, with zero nonconvergence, zero-support or tau-saturation events.
+Mean analytic/refit/population-oracle contrast SEs were 0.164238/0.172338/0.175594 for rho=+0.8 and 0.256821/0.268688/0.253311 for rho=-0.8.
+Refit cross covariance had the intended sign in all six cases per sign.
+Every reported interval method covered in 6/6 cases per sign, whose Wilson 95% interval is [0.609666,1]; this small pilot establishes feasibility rather than coverage calibration.
+All draw-based SEs, denominators, cross summaries and saved summaries were independently recomputed without research imports.
+
+This is an affine two-mean, Identity-weighted fixture using the public linear solver, rather than general CUE calibration.
+Negative-rho stderr retains a fitted non-PD Vstar warning; Identity does not use Vstar, and warning filtering prevents a per-fit event count from stderr.
+No zero-warning or CUE-feasibility claim is made from these finite mean refits.
+Raw covariance, actual anchor/tau events and fresh diagnostic matrices remain distinct in the saved records.

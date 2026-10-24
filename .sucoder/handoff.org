@@ -1,6 +1,20 @@
 #+TITLE: Handoff -- Emu-GMM backlog
 #+DATE: [2026-10-24 Sat]
 
+* Random-stratum bootstrap candidate -- 2026-10-24 (Sue)
+
+Branch =fix/251-whole-stratum= builds on ledger Section 27, commit =392ac813=.
+The code implements whole-stratum draws only when sampling clusters and strata are the same partition, with no FPC.
+Source/test tree =c0ac7c4b= passed quick-check in job 40447207; slow validation and fresh GitHub CI remain required before merge.
+Independent review and the bounded 12-fit/240-refit pilot passed; see =.coder/random-stratum-251-verification.org= for denominators and limits.
+FPC and finer/coarser/crossing partitions remain unsupported pending their explicit resampling experiment.
+
+PR #258 merged as =db1ce50= after all fresh GitHub checks passed; issue #191 is closed.
+Concurrent #113 candidate tree =3e682aac= passed quick-check, but one existing Positive-boundary convergence assertion failed in slow validation; baseline comparison is in progress.
+The actual projected native #180 driver is being implemented; isolated data preparation passed without scientific fits.
+Shared evidence root remains =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881=.
+The older snapshots below are historical and their pending statuses are superseded by this entry.
+
 * Review snapshot -- 2026-10-24 (Sue, GPT-6 Codex)
 
 Scope is issues opened or substantially updated since the October 22 review.

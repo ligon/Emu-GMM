@@ -356,7 +356,7 @@ def test_unsupported_covariance_modes_rejected():
         cov.sampling,
         cov.design_moment_mask,
     )
-    with pytest.raises(ValueError, match="fixed_strata=True"):
+    with pytest.raises(ValueError, match="same partition"):
         run(random_mode)
     fpc_design = StratifiedCovariance(
         psu_ids=cov.design.psu_ids,
