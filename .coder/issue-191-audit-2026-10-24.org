@@ -1,0 +1,50 @@
+#+TITLE: Issue 191 residual audit -- 2026-10-24
+#+AUTHOR: Sue
+#+OPTIONS: toc:nil
+
+* Scope
+
+Every remaining tracker bullet was checked against =a6da415= by an independent read-only reviewer.
+Bounded reproductions used the local editable package at explicit =PYTHONPATH=, nice 19 and CPUs 28-29.
+These are dispositions and next actions, not a claim that the residuals have all been fixed.
+
+#+name: tab:191-audit
+| Item | Disposition | Evidence / next action |
+|------+-------------+------------------------|
+| PSU in multiple cells | Confirmed | stratified.py:268 uses segment_max; validate eager nesting. |
+| IDs beyond declared counts | Confirmed | clustered.py:131 and stratified.py:250 drop groups; validate IDs/counts/length. |
+| Cells spanning strata / FPC | Confirmed | Invalid nesting gives negative V; refuse malformed designs. |
+| Zero-weight support | Convention | mask>0 defines support even at weight0; document without changing statistics. |
+| Fixed-tau branch changes | Confirmed | Offdiag 0 ->3e-12 at tau1 changes ridge diag [3.5,6.5] ->[2,8]; freeze anchor branch. |
+| Diagonal detector scale | Confirmed | Scale1e-14 correlated matrix misclassified by absolute floor; make detector relative. |
+| PD floor scale | Owner decision | Retain the existing absolute PD safety floor; signed-spectrum safety remains. |
+| Negative/nonfinite penalty | Confirmed | Negative c yields negative p and NaN sqrt; eager validation and explicit traced failure policy. |
+| Factory tree mismatch | Resolved | PR254 merged; static structure/shape guard. |
+| TR gauge_floor | Dead knob | Public compatibility argument unused; clarify/deprecate without artificial curvature. |
+| TR rank sentinel | Confirmed | Factor scale1e-8 rejects every proposal at absolute1e-12 Gram-eigenvalue threshold. |
+| TR false convergence | Confirmed | Four rejected steps, unchanged iterate, gradient2.83e8 reported converged; distinguish stagnation. |
+| TR trace tail | Confirmed | Zero-initialized unused slots mean negative curvature; sentinel -1. |
+| TR Positive metric prose | Confirmed | Production tCG is ambient; manifold metric is convergence norm. |
+| LM mixed Positive advisory | Confirmed | PSD+Positive strict minimum falsely warned saddle (curvature -17.672); metric-orthonormal curvature. |
+| Static/container binding | Confirmed | params.py:206 positional field zip misattaches manifold; bind actual dynamic tree paths. |
+| Draws-backed used mask | Confirmed | Explicit finite unused row becomes used after reload; restore and validate persisted mask. |
+| MomentsBacking bypass | Resolved | persistence.py:776 uses MomentsBacking.build since 059ec3f/PR219. |
+| Atomic overwrite | Confirmed | persistence.py:647 truncates before serialization completes; sibling temp + atomic replace. |
+| Constructor mask dtype | Confirmed hygiene | Convenience constructors differ f32/f64; normalize under x64 default. |
+
+* Priorities and exact reproductions
+
+Invalid grouping can silently understate variance: IDs [0,1,2] with values [1,3,5] give V=3.888889 when n_clusters=3 but V=1.111111 when n_clusters=2, without an error.
+Malformed design nesting can give V=-1.25 under FPC.
+These require input guards, rather than silently clipping IDs or variance.
+
+TR false convergence and LM false saddle advisories are a coherent first solver fix; see worktree ledger Section20.
+Group validation, anchored ridge context, persistence and parameter naming/binding are separate change sets so their contracts remain reviewable.
+The owner chose checked errors for negative/nonfinite evaluated penalties, including runtime errors under JIT; coefficients must not be silently clipped.
+
+Support at zero weight follows the existing ledger Section15: observability is mask-defined, while weights define exposure and contribution.
+Changing that convention would change both moment covariance and derivative/moment covariance and needs a separate statistical decision.
+The old July exact-boolean predicate requirement is intentional; the old three-flags count is obsolete.
+Labels for an arbitrary functional cannot safely be inferred from its Python callable.
+
+-- Sue
