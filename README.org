@@ -53,6 +53,15 @@ print(law.cov())  # asymptotic parameter covariance
 
 The same =euler_residual= drives the analytical and empirical variants of the demo; only the =Measure= / =CovarianceStrategy= change. See =docs/api-sketch.org= Section 5 for the three side-by-side, and =examples/run_euler.py= for the runnable script.
 
+* Sample reductions
+
+On =EmpiricalMeasure=, a model may supply =aux(measure, theta)= and =psi(row, theta, aux)= instead of a row callable.
+The package recomputes aux at each parameter value inside differentiation and shares the resulting residuals across moments and covariance.
+The model declares the reduction's population and handles excluded inputs and empty denominators.
+Use one =build_estimator= factory for fresh same-structure datasets; model configuration and covariance layouts stay fixed.
+Reducing synthetic and analytical models require a future explicit adapter.
+See [[file:docs/design.org::*Empirical sample reductions (#113)][the sample-reduction contract]] for derivative, labeling and inference limits.
+
 * Inference
 
 Estimation gives you =theta_hat=; inference gives you the uncertainty around it. =emu-gmm= hands you a menu, not a single number, and every tool reads off the same pipeline --- you never recompute a variance by hand (see "Using emu-gmm correctly" below).

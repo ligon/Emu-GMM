@@ -1,13 +1,57 @@
 """Shared pytest fixtures for the emu-gmm suite.
 
-The single fixture here bounds JAX's process-global compilation cache so the
-full suite can run in one process. See :func:`_clear_jax_caches_between_modules`.
+The module fixture bounds JAX's process-global compilation cache. The optional
+trace observer separates lazy advisory compilation from solve/inference reuse.
 """
 
 from __future__ import annotations
 
 import jax
 import pytest
+
+
+@pytest.fixture
+def lm_advisory_trace_counts(monkeypatch):
+    """Observe model traces excluding the separately cached curvature probe.
+
+    The first stationary fit may occur after initial factory warm-up. Its
+    advisory is compiled then, rather than paying Hessian compilation at every
+    nonstationary cost stop. Tests still bound this probe to one trace and
+    require solve/inference model traces to remain frozen.
+    """
+    import importlib
+
+    module = importlib.import_module("emu_gmm.manifolds.riemannian_lm")
+    original = module._horizontal_curvature_eigenvalues
+
+    def observe(counter):
+        totals = [0] * len(counter())
+        traces = 0
+
+        def curvature(*args, **kwargs):
+            nonlocal traces
+            before = counter()
+            result = original(*args, **kwargs)
+            after = counter()
+            for i in range(len(totals)):
+                totals[i] += after[i] - before[i]
+            traces += 1
+            return result
+
+        monkeypatch.setattr(module, "_horizontal_curvature_eigenvalues", curvature)
+
+        def snapshot():
+            return (
+                tuple(
+                    value - total
+                    for value, total in zip(counter(), totals, strict=True)
+                ),
+                traces,
+            )
+
+        return snapshot
+
+    return observe
 
 
 @pytest.fixture(autouse=True, scope="module")

@@ -72,6 +72,7 @@ import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
 from emu_gmm._internal import labels as labels_mod
+from emu_gmm._internal.models import is_reducing_model, prepare_row_model
 from emu_gmm._internal.nan_safety import safe_x_for_psi
 from emu_gmm._internal.params import flatten_params_for_ad, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
@@ -430,8 +431,10 @@ class EmpiricalMeasure:
         # so the aggregate is unchanged.
         x_safe = safe_x_for_psi(self.x)
 
+        row_model = prepare_row_model(psi, self, theta)
+
         def psi_at(x):
-            return _to_plain(psi(x, theta))
+            return _to_plain(row_model(x))
 
         psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
         # Trace-time shape guard: the mask must broadcast against psi's
@@ -542,8 +545,10 @@ class EmpiricalMeasure:
         # (see :meth:`expectation` for the reverse-mode AD rationale).
         x_safe = safe_x_for_psi(self.x)
 
+        row_model = prepare_row_model(psi, self, theta)
+
         def psi_at(x):
-            return _to_plain(psi(x, theta))
+            return _to_plain(row_model(x))
 
         psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
         # Same trace-time shape check as :meth:`expectation_and_contributions`.
@@ -576,6 +581,11 @@ class EmpiricalMeasure:
         exact nullspace of the result (consumed gauge-aware by the
         K-statistic, #41). All-scalar trees take the v1 flatten verbatim.
         """
+        if is_reducing_model(psi):
+            D = self.jacobian_contributions(psi, theta)
+            N_j = jnp.sum(self.mask * self.weights[:, None], axis=0)
+            return _safe_divide(jnp.sum(D, axis=0), N_j[:, None])
+
         flat_theta, treedef, mspec = flatten_params_for_ad(theta)
 
         # Pre-sanitise x with the per-column observed-mean sentinel
@@ -584,7 +594,7 @@ class EmpiricalMeasure:
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
             params = unflatten_params(flat, treedef, manifold_spec=mspec)
-            return _to_plain(psi(x, params))
+            return _to_plain(prepare_row_model(psi, self, params)(x))
 
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
@@ -647,6 +657,15 @@ class EmpiricalMeasure:
             ambient dimension for manifold trees (see :meth:`jacobian`).
         """
         flat_theta, treedef, mspec = flatten_params_for_ad(theta)
+        if is_reducing_model(psi):
+            # Ledger Section 26: differentiate the complete weighted row batch,
+            # including d psi / d aux * d aux / d theta. Aux outside a row-wise
+            # jacfwd would silently omit this global derivative.
+            def contributions_of_flat(flat):
+                params = unflatten_params(flat, treedef, manifold_spec=mspec)
+                return self.moment_contributions(psi, params)
+
+            return jax.jacfwd(contributions_of_flat)(flat_theta)
 
         # Pre-sanitise x with the per-column observed-mean sentinel
         # (see :meth:`expectation` for the reverse-mode AD rationale).
@@ -659,7 +678,7 @@ class EmpiricalMeasure:
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
             params = unflatten_params(flat, treedef, manifold_spec=mspec)
-            return _to_plain(psi(x, params))
+            return _to_plain(prepare_row_model(psi, self, params)(x))
 
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)

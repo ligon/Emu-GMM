@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.models import prepare_row_model
 from emu_gmm._internal.nan_safety import safe_x_for_psi
 from emu_gmm.types import ParamsLike, StructuralModel
 
@@ -132,7 +133,8 @@ class _OuterProductCovariance:
             # masked-out cells and poison reverse-mode AD (see safe_x_for_psi
             # and EmpiricalMeasure.expectation).
             x_safe = safe_x_for_psi(measure.x)
-            psi_batch = jax.vmap(lambda x: _to_plain(psi(x, theta)))(x_safe)  # (N,M)
+            row_model = prepare_row_model(psi, measure, theta)
+            psi_batch = jax.vmap(lambda x: _to_plain(row_model(x)))(x_safe)  # (N,M)
             mask = measure.mask
             weights = measure.weights
             # NaN-safe: zero psi at masked-out cells before any contraction.

@@ -140,6 +140,7 @@ from scipy.integrate import quad_vec
 from emu_gmm._internal import axes as axes_mod
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
+from emu_gmm._internal.models import shift_model
 from emu_gmm.covariance.clustered import ClusteredCovariance
 from emu_gmm.estimator import estimate
 from emu_gmm.inference.adaptive import BootstrapPValue
@@ -494,15 +495,7 @@ def _null_recentered_model(
     model: StructuralModel, offset: np.ndarray
 ) -> StructuralModel:
     """Freeze the same residual shift for every refit and covariance pass."""
-    shift = jnp.asarray(offset)
-
-    def shifted(x: jax.Array, theta: ParamsLike) -> jax.Array | ha.NamedArray:
-        residual = model(x, theta)
-        if isinstance(residual, ha.NamedArray):
-            return ha.NamedArray(residual.array - shift, residual.axes)
-        return jnp.asarray(residual) - shift
-
-    return shifted
+    return shift_model(model, jnp.asarray(offset))
 
 
 def cluster_bootstrap(

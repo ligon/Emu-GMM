@@ -28,8 +28,8 @@ the v1 path for one-shot callers.
 
 Caching contract (#124)
 -----------------------
-On the ported surface (v1 scalar parameters, a standard residual-path
-weighting, an optimiser exposing the ``args`` channel --- the defaults),
+On the ported surface (v1 scalar parameters, or native LM/TR with a built-in
+measure, and an optimiser exposing the ``args`` channel),
 the measure rides through the jit boundary as a TRACED ARGUMENT of a
 factory-built kernel: any call-time measure of the template's class
 shares one trace per shape signature, so fresh same-structure measures
@@ -43,16 +43,15 @@ whose ``outer_loop_driver`` accepts the ``fixed_kernel=`` capability)
 ride the args channel too (PR B): the inner Fixed-weight solves thread
 ``args=(measure, L0_k)`` through one factory-stable kernel, so all
 outer steps and repeated fits share a single trace, and the
-post-optimum inference reuses the traced kernel. The remaining branches
-(the v2 manifold optimiser inside :func:`estimate`, third-party
+post-optimum inference reuses the traced kernel. Native manifold outer solves
+also retain their pytree geometry and gauge-invariant stopping. The remaining
+branches (third-party v2 optimisers/measures, third-party
 two-argument optimisers, old-signature outer-loop drivers) ride the
 legacy closure contract: the residual closure captures the *template*
 measure instance; same-object calls reuse the optimiser's compilation
 cache, while a different measure object rebuilds the closure and the
 optimiser path traces once more (its internal cache keys on closure
-identity). (:func:`emu_gmm.manifolds.riemannian_lm.riemannian_lm`
-itself accepts ``args=`` when called directly; the estimator's v2
-dispatch still binds by closure -- PR C territory.)
+identity).
 
 See ``docs/api-sketch.org`` Section 4 and
 ``docs/implementation-plan.org`` Section 7 for the architectural spec.
@@ -77,6 +76,7 @@ from emu_gmm._internal import cholesky as cho
 from emu_gmm._internal import labels as labels_mod
 from emu_gmm._internal import params as params_mod
 from emu_gmm._internal.jacobian import columnwise_jacobian
+from emu_gmm._internal.models import prepare_row_model
 from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.diagnostics import (
     build_diagnostics,
@@ -435,12 +435,11 @@ def build_estimator(
         Captured in the factory's closure; the returned callable does not
         accept a different model.
     measure : :class:`Measure`
-        A template measure. Used here for label probing and ridge
-        anchoring. The returned callable's *cache-hit path* requires
-        being invoked with the same measure object (``measure is
-        template_measure``); calls with a different measure are still
-        correct but rebuild the residual closure so the optimiser's
-        internal JIT cache misses once on that new closure.
+        A template measure, used for label probing and ridge anchoring.
+        Compiled reuse requires unchanged static configuration, leaf shapes
+        and dtypes. Supported built-in measure/native solver combinations
+        pass fresh data as
+        traced leaves; unsupported combinations retain closure rebuilding.
     covariance : :class:`CovarianceStrategy`
         Captured in the factory's closure; fixed for the lifetime of the
         returned callable.
@@ -463,6 +462,45 @@ def build_estimator(
     when asked for per-replicate ridge anchoring
     (``anchor_per_rep=True``; #142) without duplicating this factory's
     kwarg surface at the driver.
+    """
+    return _build_estimator(
+        model,
+        measure=measure,
+        covariance=covariance,
+        weighting=weighting,
+        regularization=regularization,
+        optimizer=optimizer,
+        parameters=parameters,
+        theta_init=theta_init,
+        moment_names=moment_names,
+        penalty=penalty,
+        linear=linear,
+        jacobian_memory=jacobian_memory,
+        native_manifold_args=True,
+    )
+
+
+def _build_estimator(
+    model: StructuralModel,
+    *,
+    measure: Measure,
+    covariance: CovarianceStrategy,
+    weighting: WeightingStrategy | None = None,
+    regularization: RegularizationStrategy | None = None,
+    optimizer: Optimizer | RiemannianOptimizer | None = None,
+    parameters: Any = None,
+    theta_init: Any = _THETA_INIT_UNSET,
+    moment_names: tuple[str, ...] | None = None,
+    penalty: PenaltyStrategy | None = None,
+    linear: bool = False,
+    jacobian_memory: str = "default",
+    native_manifold_args: bool,
+) -> Callable[[ParamsLike, Measure], OptimizationResult]:
+    """Shared setup with explicit one-shot/factory native routing.
+
+    One-shot native calls preserve their historical closure compilation;
+    public factories additionally enable amortized traced-measure solves.
+    Existing v1 args dispatch is independent of this choice (ledger Sec. 26).
     """
     # One-time at-risk-host warning before the first compile (#115).
     maybe_warn_cpu_oversubscription()
@@ -511,9 +549,9 @@ def build_estimator(
     # #124 kernel-path gate (factory-static). The traced-argument path
     # serves the ported surface: v1 scalar parameters, a standard
     # residual-path weighting, and an optimiser exposing the ``args``
-    # channel. Everything else (outer-loop weightings, the v2 manifold
-    # optimiser, third-party 2-arg optimisers) rides the legacy closure
-    # path unchanged until PR B.
+    # channel. Native v2 solvers on registered built-in measures additionally
+    # use their existing args cache (#113); unsupported custom combinations
+    # retain their closure pathway.
     _optimizer_accepts_args = _supports_args(optimizer)
 
     # The flatten / Jacobian *representation* dispatch is independent of the
@@ -529,9 +567,18 @@ def build_estimator(
     # non-scalar leaf, Euclidean or not.
     all_scalar = all(ls.ambient_shape == () for ls in manifold_spec.leaf_specs)
 
+    # Native v2 solvers already cache two-argument solves. Limit this additive
+    # path to known registered measures and native calling conventions; custom
+    # measures/optimizers retain their existing closure behavior.
+    _native_manifold_args_ok = (
+        native_manifold_args
+        and dispatch_mode == "v2"
+        and type(optimizer) in (_RiemannianLM, _RiemannianTR)
+        and type(measure) in (EmpiricalMeasure, SyntheticMeasure, AnalyticalMeasure)
+    )
+
     _kernel_path_ok = (
-        all_scalar
-        and dispatch_mode == "v1"
+        ((all_scalar and dispatch_mode == "v1") or _native_manifold_args_ok)
         and not getattr(weighting, "requires_outer_loop", False)
         and _optimizer_accepts_args
     )
@@ -555,17 +602,21 @@ def build_estimator(
     # detection used for the kernels, so an OLD-signature third-party
     # driver simply never receives the kwarg.
     _driver_accepts_manifold_spec = False
+    _driver_accepts_optimizer_spec = False
     if _outer_driver is not None:
         try:
             _driver_params = inspect.signature(_outer_driver).parameters
             _driver_accepts_kernels = "fixed_kernel" in _driver_params
             _driver_accepts_manifold_spec = "manifold_spec" in _driver_params
+            _driver_accepts_optimizer_spec = "optimizer_manifold_spec" in _driver_params
         except (TypeError, ValueError):
             _driver_accepts_kernels = False
             _driver_accepts_manifold_spec = False
     _outer_args_ok = (
-        all_scalar
-        and dispatch_mode == "v1"
+        (
+            (all_scalar and dispatch_mode == "v1")
+            or (_native_manifold_args_ok and _driver_accepts_optimizer_spec)
+        )
         and getattr(weighting, "requires_outer_loop", False)
         and _optimizer_accepts_args
         and _driver_accepts_kernels
@@ -627,7 +678,11 @@ def build_estimator(
     # Probe for labelled output by calling model on one sample
     # observation, if the measure exposes one.
     x_sample = _sample_observation(template_measure, theta_init)
-    model_return = model(x_sample, theta_init) if x_sample is not None else None
+    model_return = (
+        prepare_row_model(model, template_measure, theta_init)(x_sample)
+        if x_sample is not None
+        else None
+    )
 
     # Resolve all labels.
     param_names = tuple(params_mod.param_names(theta_init))
@@ -1242,6 +1297,8 @@ def build_estimator(
             # path) so its legacy-path unflatten reshapes ambient blocks.
             if _driver_accepts_manifold_spec:
                 kernel_kwargs["manifold_spec"] = unflatten_spec
+            if _driver_accepts_optimizer_spec:
+                kernel_kwargs["optimizer_manifold_spec"] = manifold_spec
             (
                 theta_hat_flat,
                 optimizer_info,
@@ -1263,9 +1320,17 @@ def build_estimator(
             # takes the ORIGINAL pytree plus the manifold_spec. The
             # residual closure is the same flat-vector closure (scalar
             # leaves keep flat coords).
-            theta_hat_pytree, optimizer_info = cast(Any, optimizer)(
-                residual_fn, theta_init_call, manifold_spec
-            )
+            if use_traced_path:
+                theta_hat_pytree, optimizer_info = cast(Any, optimizer)(
+                    _residual_kernel,
+                    theta_init_call,
+                    manifold_spec,
+                    args=measure_call,
+                )
+            else:
+                theta_hat_pytree, optimizer_info = cast(Any, optimizer)(
+                    residual_fn, theta_init_call, manifold_spec
+                )
             # Manifold-aware flatten of the recovered pytree: the v1
             # 2-tuple raises on non-scalar ManifoldLeaf blocks (R19).
             theta_hat_flat, _, _ = params_mod.flatten_params_with_spec(theta_hat_pytree)
@@ -1536,8 +1601,10 @@ def estimate(
     """Estimate :math:`\\hat\\theta` by minimising
     :math:`Q_\\mu(\\theta) = \\| L_\\mu(\\theta)^{-1}\\, \\mathbb{E}_\\mu[\\psi(\\cdot,\\theta)] \\|^2`.
 
-    Thin wrapper around :func:`build_estimator`: builds an estimator
-    callable from the supplied arguments and immediately invokes it.
+    Builds and immediately invokes an estimator using the shared factory
+    implementation. Native manifold solves retain their historical one-shot
+    closure route; :func:`build_estimator` additionally enables traced-data
+    reuse. Compilation routes can round differently near unstable boundaries.
     Bitwise-equivalent to the v1 implementation for one-shot callers;
     callers that estimate the same model on many ``(theta_init,
     measure)`` pairs should prefer :func:`build_estimator` so the JIT
@@ -1637,7 +1704,7 @@ def estimate(
     # estimator and to invoke it (the run() call needs a concrete PyTree, not
     # a ParameterSpace class). Pure Python; runs before any tracing (#107).
     resolved_theta = _resolve_parameters(parameters, theta_init)
-    run = build_estimator(
+    run = _build_estimator(
         model,
         measure=measure,
         covariance=covariance,
@@ -1649,6 +1716,7 @@ def estimate(
         penalty=penalty,
         linear=linear,
         jacobian_memory=jacobian_memory,
+        native_manifold_args=False,
     )
     return run(resolved_theta, measure)
 
