@@ -1396,3 +1396,16 @@ The relative detector is tested from =1e-200= through =1e300=; the absolute PD f
 6. Open questions :: No new owner preference blocks this bounded implementation.
    Owner #113 already requests theta-dependent within-product/market projection; present K-Aggregators uses an unweighted retained panel.
    Consumer group/row alignment, a timed projected-model preflight and broader synthetic/analytical support remain explicit subsequent evidence/scope.
+
+** Section 26 refinement -- one-shot native numerical compatibility
+
+The immutable #113 full gate (job 40446758, tree =3e682aac=) found a genuine routing regression in the existing frozen Positive-boundary fit.
+On the same environment/data, main =db1ce50= returns sigma 8.213302155e-11 and converges in 134 steps; the new native args path stagnates at 3.455599679e-12 in 155 steps near the documented power-transform cancellation cliff.
+A read-only legacy optimizer adapter on the candidate reproduces main's iterate, objective, gradient and moment Jacobian bitwise.
+No solver or acceptance tolerance should be changed to turn the failed path into a certificate.
+
+Reuse decision :: Preserve the historical native closure route for one-shot =estimate()=, which cannot amortize a fresh factory, while enabling native args through reusable =build_estimator()=.
+A private shared implementation takes the internal routing decision; both public signatures and third-party optimizer behavior stay intact.
+Only the new native-v2 gate differs; preexisting scalar-v1 args dispatch remains unchanged.
+Retain Positive-scalar public factory reuse and the Product-PSD reuse tests; add explicit one-shot routing parity and fresh Positive-measure reuse regressions.
+The two compilation routes may round differently at numerically unstable boundaries; stable model parity and truthful convergence events remain required.
