@@ -2,6 +2,38 @@
 #+DATE: [2026-10-24 Sat]
 
 
+* Recent-backlog batch completed -- 2026-10-24 (Sue, GPT-6 Codex)
+
+Branch: =main=.
+Last source merge: =dbb5a43b2697b91a2c34190987860e27523c999f=; this documentation-only commit follows it.
+All eight PRs #254 through #261 are merged after reviewed-head quick/full gates; GitHub, node-local main and the durable mirror were synchronized after each merge.
+Issue #113 closed with #260 (=9cd200f=); #141 and #191 were already closed with their verified implementations.
+Final paginated inventory at 2026-10-24 21:50:59 UTC has eight open issues and zero open PRs.
+All five recent issues since the October 22 review were examined; six older open issues remain metadata-only in this pass.
+The final report =.coder/backlog-2026-10-24.org= supersedes older snapshots below.
+
+Issue #251 remains partially addressed after fixed paired bundles (#255) and matching-partition whole-stratum draws (#259).
+Its residual body names the missing FPC/resampling-design inputs, broader layouts and separate calibration fixtures.
+Issue #180 remains open for native profile validity and identification evidence.
+The seven-point artifact completed and passed independent audit and all 127 capacity-query round trips: six valid rejections, one unknown at global index 1 / s=0.050088084721517094.
+The unknown's finite raw p-value does not establish rejection; known_empty_scanned_set=False and full-grid capacity is NaN with one nonconverged realization.
+No optimizer, FOC threshold, solver tolerance or penalty was changed to obtain rejection.
+Nuisance strength and finite-interior stabilization were not established.
+The current CU/subvector experiment does not recover historical Fixed/full-vector validity or establish continuous-domain emptiness or native coverage.
+
+Completed native jobs: 40449668 (53:14), 40453967 (28:22), 40453968 (43:53), all exit 0.
+Final manifest: =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-projected-remainder/assembled-seven/manifest.json=.
+SHA256: =38dd948a4422556e3b535e0b6c4e0f7a4afb258a4abc3e9417aa40a3fc8ac6aa=.
+See =.coder/native180-artifact-verification.org= for exact grid/verdicts, source/input/environment pins, independent audits and reproducible assembly commands.
+Shared scratch also holds the final paginated inventory and the frozen 57-wheel producer bundle.
+
+Next concrete action: research owner diagnoses the unresolved native inner fit using a genuine retained result and its anchored metric, or supplies the FPC/layout experiment needed for #251.
+There is no active implementation or burst job remaining in this batch.
+The parent condo allocation 40438881 remains held; the human can run =sucoder release= when ready.
+Before a fresh task, read git log/status and this note; do not treat older pending statuses below as current.
+The required final precommit make quick-check passed in job 40456191 (exit 0, 12:10) on tree 03b804980bcc1c4417e2cb225706ddb87b8f6a71; only Org validation-status wording followed.
+The green #261 quick/full gates remain the source-release evidence; no code, test or dependency configuration changed afterward.
+
 * Native projected-set driver -- 2026-10-24 20:05 UTC (Sue)
 
 Branch =validation/180-native-projected= integrates #260 head =4c0e731d= and preserves ledger Sections 26-28.

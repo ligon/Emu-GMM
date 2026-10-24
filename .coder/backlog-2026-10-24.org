@@ -2,6 +2,86 @@
 #+AUTHOR: Sue (GPT-6 Codex)
 #+OPTIONS: toc:nil
 
+* Completion record -- 2026-10-24 21:50:59 UTC
+
+This section supersedes the dated execution snapshots below.
+The agreed scope covered all five issues opened or substantially updated since the October 22 review, following their dependencies.
+Six older open issues received metadata review only; twenty recent closures were reconciled without a fresh acceptance audit.
+Final inventory: eight open issues and zero open PRs, retrieved at 2026-10-24 21:50:59 UTC with the exhausted paginated REST endpoints. Three scoped issues are resolved and two retain explicit residuals.
+Reviewed main: =dbb5a43b2697b91a2c34190987860e27523c999f= (source-merge checkpoint before this documentation-only record); durable mirror and GitHub synchronization: verified after each of the eight PR merges.
+
+| Issue | Final disposition | Verified work and residual |
+|-------+-------------------+----------------------------|
+| #191 | Resolved | PRs #254/#258 fix factory/state preservation, numerical classification, validation and parameter ownership. |
+| #141 | Resolved | PR #256 completes mixed score/derivative covariance through the existing covariance engine. |
+| #113 | Resolved | PR #260 adds empirical reducing models and reusable native manifold factories, preserving ordinary models and one-shot native acceptance. |
+| #180 | Partially addressed | PR #257 supplies bounded known-DGP evidence; PR #261 supplies the projected native driver; the seven-point artifact preserves six valid rejections and one unknown. |
+| #251 | Partially addressed | PR #255 adds fixed balanced paired bundles; PR #259 adds matching-partition whole-stratum draws. FPC, broader layouts and calibration retain the residual requirements below. |
+
+** Merge and validation record
+
+The initially open PRs #254/#255 were independently reviewed, integrated and merged.
+PRs #256/#257/#258/#259 subsequently merged after fresh GitHub quick-check and every full-suite shard passed.
+PR #260: reviewed head =9a37d792= merged as =9cd200f56fd49d04eb711df24ccc9d34f5e68de2= after [[https://github.com/ligon/Emu-GMM/actions/runs/40131773625][all fresh CI checks passed]]. The tested merge tree is =2962210f1f2397d518afa293a5a8713b02e982f0=.
+PR #261: reviewed head =5586ac3d= merged as =dbb5a43b2697b91a2c34190987860e27523c999f= after [[https://github.com/ligon/Emu-GMM/actions/runs/40131894384][all fresh CI checks passed]]. Retargeting to main preserved the tested tree =1b07fefa154364c4a8b4e0a1b6f24af7c977ffef=.
+The merge records identify tested heads and compare the content integrated into main.
+Successful immutable gates include the non-slow and slow suites with the original real-data and numerical acceptance controls.
+No acceptance tolerance or recovery guarantee was weakened.
+Package dependencies were not changed to obtain a passing gate, and no nuisance penalty was added to the native experiment.
+
+The #113 gates caught and corrected trace-observer accounting and a Positive-boundary dispatch regression; the original acceptance test passes unchanged.
+One-shot =estimate= retains its historical native route, while =build_estimator= enables native reuse.
+A later GitHub quick-check reached 92 percent without reported test failures before its 45-minute timeout; the workflow now allows 60 minutes for quick-check and retains 45 minutes per full-suite shard.
+No failed or interrupted run is counted as a completed gate.
+
+The required final precommit =make quick-check= passed in job 40456191 (exit 0, 12:10) on staged tree =03b804980bcc1c4417e2cb225706ddb87b8f6a71=.
+Archive SHA256: =50079e4965156158c52902966194f514c7ef078e843aa78e7c39440e71c5265e=.
+The runner verified its job-local import; scheduler fallback from inherited parent-node paths is logged and did not affect the isolated gate.
+Only this Org validation-status record was added after that snapshot; code, tests and dependency configuration are unchanged.
+
+** Native finite-grid acceptance
+
+The frozen projected-model run covers the exact seven stored magnitudes on the retained 236,088-row panel with 43 moments.
+Jobs 40449668, 40453967 and 40453968 all completed with exit 0; independent shard and full-assembly audits passed.
+Six points are valid rejections; global index 1 at s=0.050088084721517094 is unknown due to nuisance nonconvergence, despite raw p_K=0.005459606358393752.
+There are zero invalid-statistic points, one nonconverged point and no known accepted points.
+The scan is not known empty: full-grid capacity has estimate NaN, zero decidable realizations and one nonconverged realization.
+All 127 capacity-query round trips agree: 63 decidable rejection queries and 64 unknown queries.
+The final manifest SHA256 is =38dd948a4422556e3b535e0b6c4e0f7a4afb258a4abc3e9417aa40a3fc8ac6aa=.
+The new experiment uses projected CU/subvector inference and does not reconstruct the historical Fixed/full-vector output or its missing convergence provenance.
+Exact-grid results and interpolated edges do not establish off-grid membership or continuous-domain emptiness.
+The separate seed-180 study covered the exact true point in 582/600 draws on both five- and nine-point grids, with 600 decidable draws, no invalid/nonconverged draws and NPZ parity.
+Its declared four-MCSE band passed; this establishes neither exact 95 percent finite-sample coverage nor native profiled coverage.
+
+Both initial native nuisance fits reached 1500 steps and passed the existing public FOC fallback; this is distinct from optimizer-certified convergence.
+Nuisance strength and stabilization at a finite interior optimum were not established.
+Large coordinate shifts alone do not classify failure, and finite K statistics do not establish finite analytic SEs.
+
+** Residual queue and next actor
+
+First diagnose #180's unresolved native profile, which directly limits interpretation of the completed artifact.
+Then define #251's remaining resampling experiment; those unsupported cases fail explicitly and still lack a declared target.
+The native item is ready for a focused diagnostic check; the broader resampling item needs research-design input before implementation effort can be estimated.
+
+Issue #251 retains its original requirements and history.
+The maintainer and research owner must define the finite-population assignment/resampling experiment for FPC, and the estimand, dependence and sampling stages for broader partitions.
+The next implementation check is an independent oracle for that declared experiment.
+Incomplete or unbalanced fixed bundles, and weighted, sparse, nonlinear or multi-PSU calibration, require separate fixtures; the two bounded pilots do not establish those cases.
+
+Issue #180 is narrowed to remaining native profile validity and identification evidence.
+The carrier and event-complete artifact are operational; the original scientific empty-set acceptance is not established.
+Diagnose the unresolved null under its original initialization, CU weighting and anchored regularization, then declare any follow-up optimizer, budget or inference-protocol change as a separate experiment.
+Keep unknown membership until that scientific validity requirement is met; do not change the threshold to obtain rejection.
+The research owner retains the native nuisance-identification and finite-interior-stability questions.
+The public =identification_strength= interface can assess a retained genuine inner fit result with its anchored metric; raw parameter/optimizer checkpoints alone do not supply that result.
+This follow-up does not recover historical validity or turn one native scan into a coverage study.
+No downstream-consumer source was edited.
+Final commands, artifacts and handoff: [[file:native180-artifact-verification.org][native seven-point verification]], [[file:native-reuse-113-verification.org][sample-reduction/native-reuse gates]], [[file:random-stratum-251-verification.org][random-stratum evidence]], and [[file:../.sucoder/handoff.org][current handoff]].
+The complete final inventory and immutable job artifacts remain at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881=.
+
+-- Sue
+
+
 * Execution update -- 2026-10-24 19:31 UTC
 
 PR #258 merged as =db1ce50= after all fresh checks; #191 is closed.

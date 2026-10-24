@@ -1,0 +1,92 @@
+#+TITLE: Native seven-point artifact verification -- issue 180
+#+AUTHOR: Sue (GPT-6 Codex)
+#+DATE: [2026-10-24 Sat]
+
+* Scope and result
+
+The new projected-model CU/subvector experiment uses the frozen retained panel, exact stored grid and unchanged native LM settings.
+It does not reconstruct the historical Fixed/full-vector experiment or its missing convergence provenance.
+All three producer jobs completed with exit 0; independent shard and complete-assembly audits passed.
+Six scanned points are valid rejections; one remains unknown due to public nuisance nonconvergence.
+There are no invalid-statistic points and no known accepted points.
+The raw topology is =empty=, but =known_empty_scanned_set=False=.
+Full-grid capacity is NaN with =n_decidable=0= and =n_nonconverged=1=; a finite raw p-value does not override the failed profile.
+
+| Magnitude s | Raw K p-value | Public verdict | Raw LM steps / status |
+|-------------+---------------+----------------+-----------------------|
+| 0 | 0.004154626975559606 | valid rejection | 1500 / max_iterations |
+| 0.050088084721517094 | 0.0054596063583937518 | unknown: nuisance nonconvergence | 1500 / max_iterations |
+| 0.10017616944303419 | 0.0068192189563441395 | valid rejection | 1500 / max_iterations |
+| 0.20035233888606838 | 0.0086388120868906501 | valid rejection | 1500 / max_iterations |
+| 0.5008808472151709 | 0.006456564087199526 | valid rejection | 1500 / max_iterations |
+| 1.0017616944303418 | 0.0064291698953287566 | valid rejection | 213 / converged |
+| 2.0035233888606836 | 0.00070870710068924789 | valid rejection | 1500 / max_iterations |
+
+All points use df_K=1, df_S=22 and df_J=23.
+Six raw solves reached the 1500-step cap; one certified convergence at 213 steps.
+Five capped solves passed the public FOC fallback, while the remaining capped solve failed it.
+No threshold, nuisance penalty, covariance formula or solver tolerance was changed after observing these outcomes.
+
+* Identities and integrity
+
+Artifact root:
+=/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-projected-remainder/assembled-seven=.
+Manifest SHA256: =38dd948a4422556e3b535e0b6c4e0f7a4afb258a4abc3e9417aa40a3fc8ac6aa=.
+Frozen producer source archive SHA256: =200c20a5d5293ac7ab1746723ecdab6a0bbb81bdd85e4154cc21018847442b93=.
+Reviewed assembly plan SHA256: =4a1689e231c9067cd5f89f21aea66b09b3b9d32a0d25ca4bed1c79b39975bee6=.
+Assembler SHA256: =0b23811403ca518f4099d0659e02c12f5681c03077123c59670fbdfda33876fc=.
+The artifact SHA256SUMS verifies the manifest and nine payloads; all seven nuisance checkpoint copies retain their producer bytes.
+The manifest embeds the three original manifests, complete raw records and local/global point mappings.
+Root and independent reviewer254 verified every source/statistic/checkpoint mapping and the public event reindexing.
+The sole unknown is global index 1.
+
+All 127 nonempty capacity queries, seven point verdicts, grid-empty events and set metadata pass the inert NPZ round trip.
+There are 63 decidable rejection queries and 64 unknown queries involving the unresolved point.
+The recorded grid-empty event is retained separately from known emptiness.
+No fit, FOC test, reference distribution or p-value was recomputed during assembly.
+The assembler uses the existing package =_assemble_set= helper and =RandomSetLaw= codec.
+Its 26 synthetic controls cover unknowns, malformed provenance, changed payloads, raw/profile geometry and topology across shard boundaries.
+Coordinator review caught a draft raw-c0 shape error; separate raw singleton geometry and actual-reducer fixture assertions corrected it before use.
+
+| Job | Points | Elapsed | Peak step RSS (KiB) |
+|-----+--------+---------+---------------------|
+| 40449668 | 0, 0.10017616944303419 | 53:14 | 10317680 |
+| 40453967 | 0.050088084721517094, 0.20035233888606838 | 28:22 | 10378060 |
+| 40453968 | 0.5008808472151709, 1.0017616944303418, 2.0035233888606836 | 43:53 | 10583588 |
+
+Every job used free co_carleton with eight CPUs and 64 GiB.
+The remaining two jobs had disjoint affinities and completed before their 75/105-minute caps.
+Each null starts from the same frozen nuisance point; there is no preceding-fit warm start between grid points.
+The shared scratch =native180-sharding.org= records the source check.
+
+* Reproduce the inert assembly
+
+The frozen source archive, plan, assembler, tests and three producer directories remain under the shared artifact root.
+Extract the exact producer source to a new local directory before assembly; the current package differs only in unrelated mixed_bootstrap.py and strict byte verification rejects that difference.
+Use the project environment and an allowed two-CPU affinity; the following repeats the verified assembly using this allocation's affinity.
+The output directory must be new.
+The assembler records its own runtime separately: NumPy 2.4.6 versus producer 2.4.3; the inert check is not a recreation of the producer's exact 57-wheel scientific environment.
+
+#+begin_src sh
+native_base=/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881
+native_source=$(mktemp -d)
+tar -xf "$native_base/native180-projected-preflight/combined-source.tar" -C "$native_source"
+env PYTHONPATH="$native_source/src" OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 XLA_FLAGS=--xla_force_host_platform_device_count=1 taskset -c 48-49 poetry run python "$native_base/native180-projected-remainder/assemble.py" --plan "$native_base/native180-projected-remainder/assembly-plan.json" --driver "$native_source/scripts/validation/native_projected_set_180.py" --output-dir "$native_base/native180-projected-remainder/NEW-assembled-seven" "$native_base/native180-projected-preflight/results/job-40449668" "$native_base/native180-projected-remainder/shard-a/results/job-40453967" "$native_base/native180-projected-remainder/shard-b/results/job-40453968"
+#+end_src
+
+* Remaining scientific acceptance
+
+Issue #180 remains open for the unresolved native profile and nuisance-identification evidence.
+The next bounded check retains a genuine inner fit result under the original initialization, CU weighting and anchored regularization, then uses existing public identification diagnostics.
+Raw parameter/optimizer checkpoints alone do not supply that information metric.
+Any alternative optimizer, iteration budget or inference protocol needs a separately declared follow-up experiment; this batch did not tune the failed point into rejection.
+The native nuisance-strength and finite-interior-stability questions belong to the research owner, with package interface support from the maintainer if needed.
+Large parameter shifts are descriptive, not an identification-failure classification.
+The initial two c0 values grew from about 0.000389 to 16.47/16.60; the shared interpretation note records the separately audited coordinate shifts.
+Affected analytic SEs were warned unavailable; finite K values do not establish finite analytic SEs.
+
+Exact-grid results and interpolated edges do not establish off-grid membership or continuous-domain emptiness.
+One native artifact does not establish coverage or strong nuisance identification.
+The separate seed-180 study's 582/600 coverage on each five/nine-point grid remains bounded fixed-curve evidence, not native profiled or weak-nuisance calibration.
+
+-- Sue
