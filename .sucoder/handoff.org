@@ -2,6 +2,21 @@
 #+DATE: [2026-10-24 Sat]
 
 
+* Native projected-set driver -- 2026-10-24 20:05 UTC (Sue)
+
+Branch =validation/180-native-projected= integrates #260 head =4c0e731d= and preserves ledger Sections 26-28.
+The standalone driver and six small tests passed independent scientific/operational reviews; root added a test-only optional-loader type guard and the targeted static gate passes.
+No package implementation is changed by the driver slice.
+Trial =40449668= runs exact #113 source tree =e3ec9345= plus frozen driver =74cda9ca=, with eight CPUs, 64 GiB and a one-hour cap.
+Actual alignment, graph/rank and both projection guards passed; the first nuisance fit is running.
+Raw optimizer/checkpoint files are not authoritative profile-validity evidence until the public inversion returns.
+The runtime, event completeness and remaining-grid budget are still unresolved.
+
+The integrated driver/test tree =891f7de2= passed quick-check in job 40449836 (exit 0).
+Next: publish the reviewed slice as a draft PR stacked on #260, then retarget main after #260 merges.
+Require all fresh GitHub checks before merge; attach real trial results without changing their declared protocol.
+The older snapshots below are historical.
+
 * Active sample-reduction implementation -- 2026-10-24 (Sue, GPT-6 Codex)
 
 - Branch :: =fix/113-manifold-traced-measure=, based on reviewed #191 head =e0d9523=; ledger Section 26 committed separately as =9f0d11f=.
