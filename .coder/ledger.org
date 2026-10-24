@@ -1365,3 +1365,34 @@ The relative detector is tested from =1e-200= through =1e300=; the absolute PD f
    Avoid constructor validation because it would reject legitimate negative cotangents of a positive primal penalty; this is a representation distinction, not a relaxation of evaluated-coefficient validation.
 6. Open questions :: None; the human and coordinator resolved runtime errors and constructor-carrier behavior explicitly.
    General custom penalty validation and alternative covariance-floor policy are outside scope.
+
+* Section 26 -- Empirical reducing models and native traced-measure reuse (#113)
+
+1. Task :: Add the explicitly opted-in =aux(measure,theta)= plus =psi(row,theta,aux)= contract on EmpiricalMeasure and preserve complete parameter derivatives of row contributions.
+   Reuse native manifold args kernels for fresh same-shape measure leaves through the public factory without losing the interactive LM advisory or gauge-aware outer stopping.
+2. Existing machinery :: Search tier: git, ripgrep, source/tests and owner issue comments, grounded at =e0d9523=.
+   =measures/empirical.py:368= owns shared expectation/residual/exposure/N_j, =:610= owns weighted row Jacobian contributions, and =_internal/params.py:flatten_params_for_ad= owns ambient parameter codecs.
+   =covariance/_outer_product.py= and =covariance/stratified.py= own covariance formulas and cached-intermediate routes; extend fallback evaluation, never copy their statistical algebra.
+   =estimator.py:_residual_core= and =_inference_core= own stable factory kernels; scalar gates currently exclude native manifold calling conventions.
+   =manifolds/riemannian_lm.py= and =riemannian_tr.py= already cache args solves through =_internal/fn_cache.py=; =weighting.py:IteratedWeighting.outer_loop_driver= already owns refresh, statuses and gauge signatures.
+   Tests: =tests/test_estimator_traced_measure.py=, =tests/test_iterated_traced_args.py=, =tests/manifolds/test_riemannian_lm_traced_args.py=, =tests/manifolds/test_iterated_weighting_manifold.py= and =tests/manifolds/test_riemannian_lm_advisory.py= establish those contracts.
+   =inference/confidence_set.py= wraps reduced parameters and =inference/cluster_bootstrap.py= wraps null shifts; each needs a two-stage-preserving adapter.
+   =scripts/validation/sample_reductions_113.py= is the independent weighted unbalanced-panel oracle: equal FWL means/derivatives do not identify residual covariance contributions.
+3. Definitions :: =weight_mask=mask*weights= and =N_j=sum(weight_mask)= remain unchanged; no explicit common-N factor is added.
+   Aux receives the actual original measure and declares its own reduction population; the package does not impute excluded observations into that population.
+   Final row evaluation retains safe_x_for_psi and mask-before-weight behavior; aux must guard partial functions and empty denominators itself.
+   A complete callable aux/psi pair takes precedence over __call__; ordinary row callables retain their current arithmetic.
+   Full reducing-model D is jacfwd of theta-to-weighted-batch-contributions with aux inside, retaining dpsi/daux*daux/dtheta. G=sum(D)/N_j.
+4. Invariants :: Preserve ordinary models on all three measures, existing covariance/weighting/regularization ownership, NamedArray label precedence and ambient/gauge conventions.
+   First-slice reducing models on SyntheticMeasure/AnalyticalMeasure raise an explicit unsupported-contract error; synthetic sampler dependence and population adapters need separate contracts.
+   Native args calls receive original parameter pytrees and actual geometry specs, distinct from optional scalar flatten-layout specs.
+   Iterated native calls preserve theta_next_pytree and gauge-invariant stopping; custom optimizer compatibility remains capability-based.
+   Preserve eager stationary LM advisory with a stable cached args-aware probe; transformed/replicate paths do not warn or introduce per-dataset probe closures.
+   Same static configuration, leaf shapes/dtypes and model identity define reuse; covariance group IDs captured independently by a factory do not update merely because measure data change.
+5. Reuse decision :: Extend the empirical shared evaluator and derivative primitives, covariance fallback routes, label probe and existing parameter/null-shift wrappers.
+   Add one small internal two-stage dispatch/adapter helper and a public protocol union; no new estimator, covariance formula, solver or projection algorithm is required.
+   Extend existing native kernel gates/calling conventions and function-keyed probe caching; test public factory reuse in addition to existing direct solver tests.
+   Generic hook correctness, native compiled reuse and actual consumer acceptance are separate checks; do not claim a raw-residual native rerun establishes requested projected-model acceptance.
+6. Open questions :: No new owner preference blocks this bounded implementation.
+   Owner #113 already requests theta-dependent within-product/market projection; present K-Aggregators uses an unweighted retained panel.
+   Consumer group/row alignment, a timed projected-model preflight and broader synthetic/analytical support remain explicit subsequent evidence/scope.
