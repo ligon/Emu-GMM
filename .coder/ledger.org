@@ -1062,11 +1062,13 @@ clean output is =.coder/design-145-cell-coverage-300-2026-10-23.log=.
 
 * Section 15 -- Pure stratified K cross covariance (#141)
 
-1. Task :: Compute the automatic design-matched \(\Sigma_{G,m}\) for pure =StratifiedCovariance=, leaving mixed =DesignAwareCovariance= refused.
+1. Task :: Compute the automatic design-matched \(\Sigma_{G,m}\) for pure =StratifiedCovariance=.
+   Section 19 extends the matched construction to mixed =DesignAwareCovariance=.
 2. Existing machinery :: =src/emu_gmm/covariance/stratified.py= constructs the pair-supported within-cell Neyman covariance with \(H_{c,jk}/(H_{c,jk}-1)\), optional cell FPC, and \(N_jN_k\) scaling. =src/emu_gmm/measures/empirical.py= supplies mask- and weight-adjusted moment and derivative contributions. =src/emu_gmm/inference/k_statistic.py= already accepts =score_cov_fn= and dispatches IID/clustered contribution estimators. =tests/covariance/test_stratified.py= supplies an independent pair-support oracle.
 3. Invariants :: A derivative/moment cross entry uses precisely the PSUs supporting both moment coordinates in each stratum-by-arm cell; support is =mask>0= even when weight is zero. The same cell FPC is used for every pair. \(N_j\) is the original weighted mask sum, not a binary support count. Cells with \(H<2\) and zero-denominator coordinates contribute zero.
 4. Reuse decision :: Apply the tested stratified covariance engine to an augmented vector of already adjusted derivative and moment contributions, with repeated binary support, unit pseudo weights, and cached original weighted \(N_j\). Extract the derivative/moment cross block; do not multiply mask/weights again.
-5. Boundaries :: The one-cell singleton-PSU sample result is centered with its Bessel factor, so equality with the uncentered IID estimator holds in expectation at a zero null moment, not sample by sample. =DesignAwareCovariance= remains fail-closed because its matched derivative-moment cross covariance has not been implemented for either the default random-stratum or opt-in fixed-stratum semantics (Section 14). An explicit matched =score_cov_fn= is required.
+5. Boundaries :: The one-cell singleton-PSU sample result is centered with its Bessel factor, so equality with the uncentered IID estimator holds in expectation at a zero null moment, not sample by sample. =DesignAwareCovariance= uses the matched extension in Section 19 for both default random-stratum and opt-in fixed-stratum semantics (Section 14).
+   Measures without empirical contributions, masks, and weights still require an explicit matched =score_cov_fn=.
 6. Verification :: =docs/k-stratified-cross-cov.org= gives the derivation. Independent unequal-support/weights/FPC and singleton-reduction tests, public K oracle parity, and a seeded 600-repetition fixed-cell weak-null calibration pass; matched mean \(p_K=0.4903\) and 30/600 nominal-5% rejections, versus mean \(p_K=0.4358\) under a deliberately wrong uncentered IID cross term.
 
 * Section 16 -- Exact null-recentred cluster-refit J law (#185)
@@ -1102,3 +1104,51 @@ The targeted tests check both covariance flags on the ordinary path, frozen shif
 3. Definitions :: Same-length flat buffers do not imply the same parameter structure. The factory's compiled residual, labels, and unflatten operation all belong to its template tree.
 4. Invariants :: Preserve same-structure calls, including different numeric values, and the scalar-vs-manifold flatten dispatch. Compare the call-time PyTreeDef before entering the solver; for manifold trees also compare each leaf's ambient shape. This is an eager structural guard and does not inspect traced numeric values.
 5. Reuse decision :: Use the flatteners' existing returned PyTreeDef and =ManifoldSpec.leaf_specs=; no new parameter codec or estimator branch is needed.
+
+* Section 19 -- Mixed design-matched K cross covariance (#141)
+
+1. Task :: Extend automatic K orthogonalisation to =DesignAwareCovariance= in both its default random-stratum and opt-in fixed-stratum modes.
+   Estimate each derivative/moment cross entry on exactly the dependence, centering, pair-support and covariance-of-means scale of the selected moment covariance.
+   Retain the pure stratified path and its bitwise all-design reduction.
+2. Existing machinery :: Search tier: ripgrep, source/tests, and ledger git history, grounded at =a6da415c52097c58c53482652719ed33f6334dc9=.
+   =inference/k_statistic.py:330= already augments weighted derivative and moment contributions and extracts their cross block from the tested stratified covariance engine; =tests/inference/test_k_statistic_stratified.py= independently tests that construction and a weak-null calibration.
+   =covariance/stratified.py:171= owns pair-supported Neyman TT totals, within-cell centering, Bessel correction, FPC, and weighted denominators.
+   =covariance/stratified.py:610,636,750= own original weighted exposure, pair-cell projection geometry, and local trace correction for fixed-mode SS/TS; =tests/covariance/test_design_aware_fixed_strata.py= tests these against independent NumPy projection calculations.
+   =covariance/stratified.py:812,895= compose TT/SS/TS and the coupled/uncoupled decomposition; =tests/covariance/test_stratified.py= covers random-mode cross products and per-pair dof inheritance.
+   =covariance/_outer_product.py:100= consumes the actual cached mean when sampling is centered; =covariance/clustered.py:89,140= own cluster totals and per-pair support correction.
+   =measures/empirical.py:492= and its Jacobian-contribution method supply already mask- and weight-adjusted observations.
+3. Definitions :: For original exposure =e_ij = mask_ij * weight_i=, =g_ij = e_ij * psi_j=, =D_ija = e_ij * partial_a psi_j=, and =N_j = sum_i e_ij=.
+   The augmented column order is =D[:,:,0], ..., D[:,:,p-1], g=, with the original design-moment mask repeated in the same order.
+   Each extracted cross slice has order =(parameter, derivative moment, moment)=; it need not be symmetric in its final two indices.
+   Support remains =mask>0= even at zero weight.
+   Fixed-mode centering projects on original weighted exposure by ordered cell pair and inherits the existing local =H/trace= correction (Section 14).
+   In random mode centered sampling affects SS through its actual global mean, while the existing TS engine remains uncentered; dof correction reaches SS and TS, and design FPC reaches TT only.
+4. Invariants :: Do not copy the pure-stratified binary-mask/unit-weight pseudo measure into the mixed fixed-mode path: that would replace weighted exposure by support counts and change the projection and trace.
+   Preserve repeated original masks and original weights; recover pseudo residuals from already weighted contribution columns by safe division by original exposure, with zero at zero exposure.
+   Supply repeated original exposure and weighted N_j in the cached tuple, together with the actual augmented mean =sum_i contributions_i / N_j= using the existing zero-denominator convention.
+   Never apply mask or weight twice, substitute a common N, or symmetrize each extracted cross slice.
+   Preserve =all_design=, =couple=, =fixed_strata=, children and existing fixed cell-pair metadata when repeating the moment mask.
+   The eager =from_design_mask= factory cannot run inside JIT/vmap because its Python bool and NumPy validation require concrete values; replace the already validated dataclass without rebuilding or changing those invariants.
+   All-design calls delegate to the existing pure-stratified helper, retaining bitwise equality and ignoring irrelevant sampling metadata.
+   All-sampling calls reduce to the selected sampling semantics, including fixed-mode projection or random-mode centered sampling.
+   A measure missing empirical masks, weights, or contribution methods must still fail closed unless an explicit matched =score_cov_fn= is supplied.
+5. Reuse decision :: Extend the existing augmented cross-block construction, retaining the pure-stratified implementation unchanged for its path and all-design reduction.
+   Reuse the mixed covariance engine with a repeated design-moment mask, original exposure, actual means, and unchanged validated geometry; do not implement a second statistical kernel.
+   Use =dataclasses.replace=, already used for native JAX dataclasses in =estimator.py:261=, to retain static and dynamic metadata under tracing.
+   A small CPU-affinity-bounded JIT reproduction confirms replacement works for =DesignAwareCovariance= and retains its cell-pair arrays; calling the factory under the same trace raises =TracerBoolConversionError=.
+   New code is limited to the mixed contribution adapter and dispatcher; independent NumPy formulas belong only in tests.
+   Tests will loop over original PSUs/cells for TT and original sampling clusters for random SS/TS; fixed SS/TS will explicitly form overlap-restricted exposure projection matrices and their trace for each ordered cell pair.
+   Test two parameters, a mixed design mask, asymmetric cross slices, ragged and fractional masks, unequal and zero weights, zero N_j, H<2, trace degeneracy, FPC, couple=False, random dof/centering combinations, and fixed-mode centered metadata invariance.
+   Assert public automatic K parity with an independent =score_cov_fn= oracle, JIT/vmap parity, all-design bitwise reduction, and all-sampling reduction to an independently centered or projected oracle.
+6. Open questions and calibration plan :: The mathematical target is fixed by the existing covariance modes; no new estimand or dependency is needed.
+   General K calibration under arbitrary paired dependence is not implied by matching its cross block, so calibration must use fixtures whose moment covariance itself targets the null law.
+   Extend the existing seed-141 fixed-cell weak-null fixture using paired T/S PSUs, a design coordinate observed in the T arm and sampling coordinates in the S arm, opposite fixed stratum profiles, and positive/negative paired innovation correlation.
+   For the default mode use centered-in-population random clusters without fixed stratum profiles, respecting the selected uncentered random-stratum covariance.
+   Reuse public =k_statistic= and explicit unmatched cross overrides, report requested/finite/invalid denominators, mean p-values and rejection counts with Monte Carlo uncertainty, and include a deliberately mismatched IID or count-exposure ablation.
+   Run the bounded seeded calibration and broader gates in separate Slurm allocations; keep this interactive slice to deterministic checks.
+   Broad weighted/sparse estimator calibration remains outside a single fixture's guarantee.
+
+Verification against Section 19 :: *OK*: the adapter delegates TT/SS/TS to existing covariance engines, retains original exposure and means, and leaves the pure helper unchanged.
+The focused mixed, pure-stratified and existing K tests passed (calibration tests excluded from this local run); the independent oracle includes fractional masks, zero-weight support, and an exactly degenerate projection trace.
+Ruff, Black and =git diff --check= pass for the changed Python files.
+The mixed calibration script completed a two-repetition smoke for both modes with finite matched and ablation outputs; statistical calibration and broad integration gates await a separate Slurm job.
