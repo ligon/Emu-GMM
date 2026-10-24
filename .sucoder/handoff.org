@@ -1,6 +1,7 @@
 #+TITLE: Handoff -- Emu-GMM backlog
 #+DATE: [2026-10-24 Sat]
 
+
 * Active sample-reduction implementation -- 2026-10-24 (Sue, GPT-6 Codex)
 
 - Branch :: =fix/113-manifold-traced-measure=, based on reviewed #191 head =e0d9523=; ledger Section 26 committed separately as =9f0d11f=.
@@ -16,7 +17,8 @@
 - Native 180 prerequisites :: Frozen shared bundle at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-prereqs/= contains exact source/input/vendor archives and 57 binary wheels.
   Manifest SHA256SUMS digest =2cf6ad6d4d603e031ac02400afdfb4ca004a76725166fc71b9c9acb701fe479b=; independent checksum verification passed.
   Isolated data preparation passed in job 40446236, with 236088 aligned rows, 45 products, 5460 markets and one connected graph.
-  The new projected-model CU/subvector driver is in preparation; no scientific native fit has run.
+  The new projected-model CU/subvector driver and launcher passed independent reviews; source-pinned two-point trial job 40449668 is running with eight CPUs, 64 GiB and a one-hour cap.
+  It is not yet completed acceptance evidence.
 - Validation :: Initial tree =80e79915= passed lint/types but job 40445430 failed one new cache-count assertion; all other quick tests passed and slow tests did not run.
   The second fit first activated the lazy curvature probe; its seven Hessian-column traces were incorrectly counted as solve/inference retracing.
   The corrected observer excludes only traced curvature-helper calls and separately bounds that probe to one trace per signature; solve/stationarity/inference counts must stay frozen.
@@ -26,10 +28,27 @@
   Independent baseline/adapter comparison isolates native-args compilation rounding near the power-transform cancellation cliff.
   The private shared builder now retains legacy one-shot native routing and enables args only through public reusable factories; original v1 args dispatch is untouched.
   Seven new routing/reuse regressions plus the unchanged boundary test passed (8 cases, 44.36 seconds), with independent source review and static checks green.
-- Next :: Freeze this third candidate and rerun complete quick/slow validation before publication.
-  PR #259 covers whole-stratum mixed bootstrap; its quick gate and bounded 240-refit pilot passed, slow and fresh CI gates are running.
+- Next :: Source checkpoint =762ce6e= is durable; tree =e3ec9345= passed quick-check and the full slow suite in job 40448304 (exit 0).
+  Reviewed #259 head =e4b86ae= is integrated, preserving ledger Sections 26/27 and both handoff entries.
+  Integration tree =95d955a3= passed quick-check in job 40448938; publish the integrated head and require all fresh GitHub checks before merge.
+  PR #259 covers whole-stratum mixed bootstrap; its quick/full local gate and bounded 240-refit pilot passed, fresh CI checks are running.
   Publish #113 after its complete local gate, then require fresh GitHub checks before merging.
   Remaining scoped work also includes #180 native event-complete evidence and #251 remaining design/calibration scope.
+
+* Earlier random-stratum bootstrap checkpoint -- 2026-10-24 (Sue)
+
+Branch =fix/251-whole-stratum= builds on ledger Section 27, commit =392ac813=.
+The code implements whole-stratum draws only when sampling clusters and strata are the same partition, with no FPC.
+Source/test tree =c0ac7c4b= passed quick-check in job 40447207; slow validation and fresh GitHub CI remain required before merge.
+Independent review and the bounded 12-fit/240-refit pilot passed; see =.coder/random-stratum-251-verification.org= for denominators and limits.
+FPC and finer/coarser/crossing partitions remain unsupported pending their explicit resampling experiment.
+
+PR #258 merged as =db1ce50= after all fresh GitHub checks passed; issue #191 is closed.
+Concurrent #113 candidate tree =3e682aac= passed quick-check, but one existing Positive-boundary convergence assertion failed in slow validation; baseline comparison is in progress.
+The actual projected native #180 driver is being implemented; isolated data preparation passed without scientific fits.
+Shared evidence root remains =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881=.
+The older snapshots below are historical and their pending statuses are superseded by this entry.
+
 
 * Review snapshot -- 2026-10-24 (Sue, GPT-6 Codex)
 

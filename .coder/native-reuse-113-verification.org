@@ -104,3 +104,16 @@ AnalyticalMeasure carries only static population functions, so fresh objects wit
 This does not claim dynamic population data or generic reducing-model support for AnalyticalMeasure.
 All fits converge, geometry is checked, and no stale first population is retained.
 Reproducible scratch script/results/log are frozen at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native-other-measures113=; JSON SHA-256 =cd2bb2d9f138acd68ac42859cc219a9eee7dcba5e75a7e04ecf7aae9506009d7=.
+
+* Completed source and integration gates
+
+Job 40448304 completed quick-check and every slow test on source/test tree =e3ec9345=, exit 0 (24 minutes, peak RSS about 18.4 GiB).
+The frozen Positive-boundary contract and both new reducing-Euler acceptance tests pass with their original tolerances.
+Controlled baseline/candidate/legacy-adapter reproductions are durable at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/boundary113-diagnosis=.
+
+Reviewed whole-stratum candidate =e4b86ae= is integrated, preserving ledger Sections 26/27 and both handoff entries.
+Its integration tree =95d955a3f880dc0079764372446991c506f4c444= passed quick-check in job 40448938, exit 0.
+Archive SHA-256 =5b0d1b2d04de7a558f0d23c11693a2fbad627552d3b683ae82cbfc563a980b86=.
+Only Org status/evidence and trailing whitespace changed after that snapshot.
+Fresh GitHub checks on the resulting head remain required before merge.
+The independent #180 scientific driver and operational launcher reviews passed; the source-pinned two-point projected native trial is running in job 40449668, not yet acceptance evidence.

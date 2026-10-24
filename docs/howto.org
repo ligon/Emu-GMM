@@ -384,7 +384,10 @@ For a pure =StratifiedCovariance=, =stratified_bootstrap= draws PSUs with replac
 Its first path requires populated PSUs and cells and =fpc=False=.
 For a mixed =DesignAwareCovariance= with =fixed_strata=True=, =mixed_bootstrap= draws whole paired sampling bundles with replacement within each stratum.
 It requires complete bundles with the same positive PSU-count vector across cells in each stratum, =design.fpc=False=, and =sampling.dof_correction=False=; each copied bundle and PSU receives a fresh ID, and the original =couple= choice is retained.
-The default random-stratum mode and FPC-adjusted resampling are outside this first mixed path.
+For default =fixed_strata=False=, =mixed_bootstrap= draws whole strata with replacement when sampling clusters and strata are the same partition, retaining variable sizes/cell counts and assigning fresh stratum, cluster, cell and PSU IDs.
+This is unconditional iid-stratum refit variability, under regular-estimator and positive-support assumptions; it need not equal the conditional design =V_TT= (#145), and does not repair analytic covariance or J chi-square calibration.
+Both paths require =design.fpc=False=; finer/crossing sampling partitions and without-replacement experiments require a separately specified resampling target.
+Covariance IDs are rebuilt, but grouping IDs embedded inside arbitrary model-data columns are not rewritten automatically.
 
 For large =n_boot=, build on the =build_estimator= factory rather than bare =estimate()= (see "Performance: estimating many times"), and let =adaptive_bootstrap= choose =n_boot= by targeting the Monte Carlo precision of the functional you care about. =examples/empirical_bootstrap.py= runs the wild and cluster bootstraps side by side.
 

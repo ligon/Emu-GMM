@@ -62,7 +62,7 @@ This document deliberately interleaves settled architecture, planned design, pro
 |                | =moment_wild_bootstrap= | Cluster-wild Rademacher/Mammen J bootstrap                 | =inference/wild_bootstrap.py=    |
 |                | =cluster_bootstrap=     | Refit-based cluster bootstrap                              | =inference/cluster_bootstrap.py= |
 |                | =stratified_bootstrap=  | Refit PSUs within fixed stratum-by-arm cells                | =inference/stratified_bootstrap.py= |
-|                | =mixed_bootstrap=       | Refit paired bundles within fixed strata                   | =inference/mixed_bootstrap.py= |
+|                | =mixed_bootstrap=       | Refit fixed paired bundles or iid whole strata            | =inference/mixed_bootstrap.py= |
 |                | =adaptive_bootstrap=    | Precision-targeted stopping rule for batched bootstraps    | =inference/adaptive.py=          |
 |----------------+-------------------------+------------------------------------------------------------+----------------------------------|
 | Results        | =EstimationResult=      | Labelled \(\hat\theta\), SEs, J p-values, functional SEs   | =types.py=                       |
