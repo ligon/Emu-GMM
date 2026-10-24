@@ -205,11 +205,11 @@ _CURV_RTOL: float = 1e-6
 _CURV_ATOL: float = 1e-9
 
 
-def _min_horizontal_curvature(
+def _horizontal_curvature_eigenvalues(
     residuals: Callable[[Float[Array, " K"]], Float[Array, " M"]],
     manifold_spec: ManifoldSpec,
     x_flat: Float[Array, " K"],
-) -> tuple[float, float]:
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """Smallest / largest eigenvalue of the projected horizontal true Hessian.
 
     Assembles the ``(K, K)`` retraction-pullback Hessian of
@@ -221,7 +221,7 @@ def _min_horizontal_curvature(
     ``-(_CURV_ATOL + _CURV_RTOL * |lambda_max|)`` is genuine horizontal negative
     curvature (a saddle), the regime ``riemannian_tr`` exists for.
 
-    EAGER-only helper (a handful of HVPs at a single point). Reuses
+    Traceable helper (a handful of HVPs at a single point). Reuses
     ``riemannian_tr._riemannian_hvp`` via a local import -- the TR module does
     not import this one, so there is no cycle.
     """
@@ -244,7 +244,17 @@ def _min_horizontal_curvature(
     H = metric_sqrt[:, None] * H / metric_sqrt[None, :]
     H = 0.5 * (H + H.T)  # symmetrise numerical residue before eigvalsh
     evals = jnp.linalg.eigvalsh(H)
-    return float(evals[0]), float(evals[-1])
+    return evals[0], evals[-1]
+
+
+def _min_horizontal_curvature(
+    residuals: Callable[[Float[Array, " K"]], Float[Array, " M"]],
+    manifold_spec: ManifoldSpec,
+    x_flat: Float[Array, " K"],
+) -> tuple[float, float]:
+    """Eager scalar view of the projected horizontal Hessian extrema."""
+    lo, hi = _horizontal_curvature_eigenvalues(residuals, manifold_spec, x_flat)
+    return float(lo), float(hi)
 
 
 # #124 (PR B): memoised jitted solve cores for the traced-``args`` path.
@@ -262,6 +272,7 @@ def _min_horizontal_curvature(
 # does and object-identity keying forecloses the id-recycling stale-hit
 # hazard. See ``_internal/fn_cache.py`` for the full design rationale.
 _TRACED_SOLVE_CACHE = FunctionKeyedCache("_emu_gmm_traced_solve")
+_TRACED_ADVISORY_CACHE = FunctionKeyedCache("_emu_gmm_traced_lm_advisory")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -707,11 +718,10 @@ class _RiemannianLM:
         # solve converges to a genuine STATIONARY POINT whose horizontal true
         # Hessian is indefinite -- a saddle, where riemannian_tr (which follows
         # negative curvature) may do better. Three guards keep it precise:
-        #   * ``status == "converged" and not two_arg`` -> only the eager v2 path
-        #     (a single ``estimate()`` / interactive fit). The vmapped/replicate
-        #     path is ``"traced"`` (warnings cannot fire inside vmap, fields stay
-        #     None) and the #124 ``args`` channel is skipped so the user kernel
-        #     is not re-traced (trace-sharing preserved).
+        #   * ``status == "converged"`` -> only the eager v2 path. Transformed
+        #     solves have status="traced" and leave both fields None. The args
+        #     path uses a kernel-scoped cached probe, preserving fresh-measure
+        #     reuse without losing the interactive advisory (ledger Sec. 26).
         #   * a recomputed ``grad_ok`` stationarity test at ``theta_hat``. NOTE
         #     this REVISES the handoff's "fire iff the ftol stall path" trigger:
         #     empirically the #156 ftol (cost-stagnation) certification stops
@@ -726,36 +736,75 @@ class _RiemannianLM:
         # Euclidean / Positive path is bitwise unchanged.
         stalled_indefinite = None
         min_curvature = None
-        if (
-            self.advise_nonconvex
-            and ftol_active
-            and status == "converged"
-            and not two_arg
-        ):
+        if self.advise_nonconvex and ftol_active and status == "converged":
 
-            def _residuals_eager(xx: Float[Array, " K"]) -> Float[Array, " M"]:
-                # two_arg is False in this branch (gated above): the v2 path
-                # passes a one-argument flat residual closure.
-                return residual_fn(xx)
+            def _stationarity(xx: Float[Array, " K"], data: Any) -> Any:
+                def residuals(z: Float[Array, " K"]) -> Float[Array, " M"]:
+                    return residual_fn(z, data) if two_arg else residual_fn(z)
 
-            # Genuine-stationarity gate: the exact ``grad_ok`` test the solve
-            # loop uses, recomputed at the returned iterate (horizontal gradient).
-            r_fin = _residuals_eager(x_final)
-            Jh_fin = project_jacobian(
-                x_final,
-                (
-                    columnwise_jacobian(_residuals_eager, x_final)
-                    if self.jacobian_memory == "bounded"
-                    else jax.jacfwd(_residuals_eager)(x_final)
-                ),
-            )
-            g_norm_fin = riem_norm(x_final, Jh_fin.T @ r_fin)
-            r_norm_fin = jnp.sqrt(jnp.sum(r_fin * r_fin))
-            is_stationary = bool(g_norm_fin < (self.atol + self.rtol * r_norm_fin))
-            if is_stationary:
-                lam_min, lam_max = _min_horizontal_curvature(
-                    _residuals_eager, manifold_spec, x_final
+                r_fin = residuals(xx)
+                Jh_fin = project_jacobian(
+                    xx,
+                    (
+                        columnwise_jacobian(residuals, xx)
+                        if self.jacobian_memory == "bounded"
+                        else jax.jacfwd(residuals)(xx)
+                    ),
                 )
+                g_norm_fin = riem_norm(xx, Jh_fin.T @ r_fin)
+                r_norm_fin = jnp.sqrt(jnp.sum(r_fin * r_fin))
+                return g_norm_fin < (self.atol + self.rtol * r_norm_fin)
+
+            if two_arg:
+                stationarity = _TRACED_ADVISORY_CACHE.get_or_build(
+                    residual_fn,
+                    lambda: jax.jit(_stationarity),
+                    key=(self, manifold_spec, "stationarity"),
+                )
+                stationary = stationarity(x_final, args)
+                if bool(stationary):
+                    # A lax.cond would still trace every Hessian column at a
+                    # nonstationary ftol stop. Build this separate cached probe
+                    # only when the eager stationarity check actually passes.
+                    def _curvature(xx: Float[Array, " K"], data: Any) -> Any:
+                        return _horizontal_curvature_eigenvalues(
+                            lambda z: residual_fn(z, data), manifold_spec, xx
+                        )
+
+                    curvature = _TRACED_ADVISORY_CACHE.get_or_build(
+                        residual_fn,
+                        lambda: jax.jit(_curvature),
+                        key=(self, manifold_spec, "curvature"),
+                    )
+                    lo, hi = curvature(x_final, args)
+                else:
+                    lo, hi = float("nan"), float("nan")
+            else:
+                # Retain the original eager probe behavior, including avoiding
+                # curvature assembly entirely at a nonstationary cost stop.
+                def residuals(xx: Float[Array, " K"]) -> Float[Array, " M"]:
+                    return residual_fn(xx)
+
+                r_fin = residuals(x_final)
+                Jh_fin = project_jacobian(
+                    x_final,
+                    (
+                        columnwise_jacobian(residuals, x_final)
+                        if self.jacobian_memory == "bounded"
+                        else jax.jacfwd(residuals)(x_final)
+                    ),
+                )
+                g_norm_fin = riem_norm(x_final, Jh_fin.T @ r_fin)
+                r_norm_fin = jnp.sqrt(jnp.sum(r_fin * r_fin))
+                stationary = g_norm_fin < (self.atol + self.rtol * r_norm_fin)
+                lo, hi = (
+                    _min_horizontal_curvature(residuals, manifold_spec, x_final)
+                    if bool(stationary)
+                    else (float("nan"), float("nan"))
+                )
+            is_stationary = bool(stationary)
+            if is_stationary:
+                lam_min, lam_max = float(lo), float(hi)
                 min_curvature = lam_min
                 neg_tol = _CURV_ATOL + _CURV_RTOL * abs(lam_max)
                 stalled_indefinite = lam_min < -neg_tol

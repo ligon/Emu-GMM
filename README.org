@@ -53,6 +53,15 @@ print(law.cov())  # asymptotic parameter covariance
 
 The same =euler_residual= drives the analytical and empirical variants of the demo; only the =Measure= / =CovarianceStrategy= change. See =docs/api-sketch.org= Section 5 for the three side-by-side, and =examples/run_euler.py= for the runnable script.
 
+* Sample reductions
+
+On =EmpiricalMeasure=, a model may supply =aux(measure, theta)= and =psi(row, theta, aux)= instead of a row callable.
+The package recomputes aux at each parameter value inside differentiation and shares the resulting residuals across moments and covariance.
+The model declares the reduction's population and handles excluded inputs and empty denominators.
+Use one =build_estimator= factory for fresh same-structure datasets; model configuration and covariance layouts stay fixed.
+Reducing synthetic and analytical models require a future explicit adapter.
+See [[file:docs/design.org::*Empirical sample reductions (#113)][the sample-reduction contract]] for derivative, labeling and inference limits.
+
 * Inference
 
 Estimation gives you =theta_hat=; inference gives you the uncertainty around it. =emu-gmm= hands you a menu, not a single number, and every tool reads off the same pipeline --- you never recompute a variance by hand (see "Using emu-gmm correctly" below).
@@ -107,7 +116,11 @@ A refit that does not converge --- a resampled world can extinguish a rare momen
 =docs/howto.org= has the expanded menu and the refit-vs-refit-free decision in full.
 For =StratifiedCovariance(fpc=False)=, =stratified_bootstrap= resamples PSUs within each stratum-by-arm cell.
 For mixed =DesignAwareCovariance(fixed_strata=True)=, =mixed_bootstrap= resamples complete balanced paired sampling bundles within strata, requiring =design.fpc=False= and =sampling.dof_correction=False=.
-The mixed default random-stratum and FPC schemes remain tracked in issue #251.
+For default =fixed_strata=False= with sampling clusters and strata defining the same partition, it draws whole strata with replacement, preserving variable sizes, cell counts, rows, masks, weights and the sampling centering/dof flags.
+This targets unconditional iid-stratum variation under the usual finite-moment, positive-support and regular-estimator assumptions; it need not match the conditional design =V_TT= when random common stratum profiles are omitted (#145), and does not repair analytic covariance, J chi-square calibration or general studentization.
+Copied covariance IDs are fresh at every level; IDs inside arbitrary model-data columns are not rewritten, so model grouping reductions must respect their intended relabeling/population contract.
+Both modes reject FPC: without-replacement resampling requires an explicit population/assignment law.
+Finer or crossing sampling partitions and broader calibration remain tracked in issue #251.
 
 * Documents
 

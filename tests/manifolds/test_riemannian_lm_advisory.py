@@ -238,7 +238,17 @@ class TestAdvisorySilentAtFtolDriftStop:
     """
 
     @pytest.mark.slow
-    def test_ftol_drift_is_not_probed_or_warned(self):
+    def test_ftol_drift_is_not_probed_or_warned(self, monkeypatch):
+        import importlib
+
+        lm_module = importlib.import_module("emu_gmm.manifolds.riemannian_lm")
+
+        def forbidden_curvature(*args, **kwargs):
+            raise AssertionError("nonstationary stop must not even trace curvature")
+
+        monkeypatch.setattr(
+            lm_module, "_horizontal_curvature_eigenvalues", forbidden_curvature
+        )
         n4, k2 = 4, 2
         triu4 = jnp.array(np.triu_indices(n4)).T
         m_dim = n4 * (n4 + 1) // 2 + 1

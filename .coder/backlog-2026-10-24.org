@@ -2,6 +2,17 @@
 #+AUTHOR: Sue (GPT-6 Codex)
 #+OPTIONS: toc:nil
 
+* Execution update -- 2026-10-24 19:31 UTC
+
+PR #258 merged as =db1ce50= after all fresh checks; #191 is closed.
+The default random-stratum #251 candidate now implements whole-stratum draws under a matching stratum/sampling partition and no FPC.
+Its immutable tree =c0ac7c4b= passed quick-check; full slow validation and fresh GitHub CI remain before merge.
+The independent bounded pilot has 12 valid original fits and 240 valid refits, with signed cross dependence retained; see =.coder/random-stratum-251-verification.org= for uncertainty and exclusions.
+Issue #251 will retain FPC and broader-layout residuals.
+The #113 implementation passed quick-check and both new real-data reducing-model acceptance tests, but an existing boundary convergence check failed; baseline comparison is underway.
+The #180 data preparation is frozen and aligned, with a new projected-model CU/subvector driver in progress; no native scientific refit has run.
+Earlier dispositions below are historical snapshots.
+
 * Scope and evidence
 
 The owner authorized thoughtful PR merges and work on all recent backlog issues, using backlog-workflow.

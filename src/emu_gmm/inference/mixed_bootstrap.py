@@ -1,7 +1,8 @@
-"""Paired-bundle refit bootstrap for fixed-stratum mixed covariance (#251).
+"""Refit bootstrap for two explicitly scoped mixed covariance designs (#251).
 
-The first supported design has complete, balanced sampling bundles within
-each stratum. See ledger Section 18 for the resampling unit and exclusions.
+Fixed strata use complete balanced paired bundles; random strata use whole
+strata when sampling clusters and strata are the same partition. See ledger
+Sections 18 and 27 for the different conditioning targets and exclusions.
 """
 
 from __future__ import annotations
@@ -170,6 +171,74 @@ def _resample_mixed_one(
     return boot_measure, boot_cov
 
 
+def _stratum_layout(
+    measure: EmpiricalMeasure, covariance: DesignAwareCovariance
+) -> list[np.ndarray]:
+    """Validate the same sampling/stratum partition, irrespective of labels."""
+    n_rows = int(measure.x.shape[0])
+    if n_rows == 0:
+        raise ValueError("mixed_bootstrap: the sample must have rows")
+    design, sampling = covariance.design, covariance.sampling
+    _cell_layout(measure, design)
+    stratum = np.asarray(design.stratum_ids, dtype=np.int64)
+    cluster = _ids(sampling.cluster_ids, sampling.n_clusters, n_rows, "cluster_ids")
+    rows = _cluster_row_indices(stratum, design.n_strata)
+    clusters = _cluster_row_indices(cluster, sampling.n_clusters)
+    if any(group.size == 0 for group in rows + clusters):
+        raise ValueError(
+            "mixed_bootstrap: every declared stratum and cluster needs rows"
+        )
+    if any(np.unique(cluster[group]).size != 1 for group in rows) or any(
+        np.unique(stratum[group]).size != 1 for group in clusters
+    ):
+        raise ValueError(
+            "mixed_bootstrap: random mode requires sampling clusters and strata "
+            "to be the same partition"
+        )
+    return rows
+
+
+def _resample_strata_one(
+    measure: EmpiricalMeasure,
+    covariance: DesignAwareCovariance,
+    rows_by_stratum: list[np.ndarray],
+    drawn: np.ndarray,
+) -> tuple[EmpiricalMeasure, DesignAwareCovariance]:
+    """Clone entire strata with fresh IDs at all four grouping levels."""
+    boot_measure, sampling = _resample_one(
+        measure, rows_by_stratum, drawn, source_covariance=covariance.sampling
+    )
+    design = covariance.design
+    old_psu, old_cell = np.asarray(design.psu_ids), np.asarray(design.cell_ids)
+    psus, cells = [], []
+    n_psu, n_cells = 0, 0
+    for s in drawn:
+        rows = rows_by_stratum[int(s)]
+        unique_psu, psu_inverse = np.unique(old_psu[rows], return_inverse=True)
+        unique_cell, cell_inverse = np.unique(old_cell[rows], return_inverse=True)
+        psus.append(n_psu + psu_inverse)
+        cells.append(n_cells + cell_inverse)
+        n_psu += len(unique_psu)
+        n_cells += len(unique_cell)
+    boot_design = StratifiedCovariance(
+        psu_ids=jnp.asarray(np.concatenate(psus), dtype=jnp.float64),
+        cell_ids=jnp.asarray(np.concatenate(cells), dtype=jnp.float64),
+        stratum_ids=sampling.cluster_ids,
+        n_psu=n_psu,
+        n_cells=n_cells,
+        n_strata=int(len(drawn)),
+        fpc=False,
+    )
+    boot_cov = DesignAwareCovariance.from_design_mask(
+        boot_design,
+        sampling,
+        covariance.design_moment_mask,
+        couple=covariance.couple,
+        fixed_strata=False,
+    )
+    return boot_measure, boot_cov
+
+
 def mixed_bootstrap(
     model: StructuralModel,
     theta_init: ParamsLike,
@@ -183,41 +252,65 @@ def mixed_bootstrap(
     optimizer: Callable | None = None,
     penalty: PenaltyStrategy | None = None,
 ) -> MixedBootstrapResult:
-    """Refit fixed-stratum mixed GMM after paired sampling-bundle draws.
+    """Refit mixed GMM under its explicitly selected resampling experiment.
 
-    Every bundle has the same positive PSU-count vector across cells in
-    its stratum. The original bundle count is drawn with replacement within
-    each stratum, preserving each cell's fixed PSU count. Repeated bundles
-    and their PSUs get fresh IDs. This first slice excludes the default
-    random-stratum mode and finite-population correction; it is not a
-    general mixed bootstrap. Sparse moment support is handled by the
-    rebuilt covariance and the shared NaN/event validity path.
+    With ``fixed_strata=True``, each sampling bundle has the same positive
+    PSU-count vector across cells in its stratum. Draw the original bundle
+    count with replacement within each stratum, preserving fixed cell counts.
     ``sampling.centered`` is retained as metadata; the fixed-mode #145
-    exposure projection supplies centering for the SS and TS blocks.
+    exposure projection supplies centering for SS and TS. This mode requires
+    ``sampling.dof_correction=False``.
+
+    Default random mode requires sampling clusters and strata to be the same
+    partition. Draw the original number of whole strata with replacement,
+    retaining their realized sizes, cell counts, rows, masks and weights.
+    All copied stratum/cluster/cell/PSU IDs are fresh. Sampling centering and
+    dof flags are preserved; coordinate means remain pooled weighted ratios.
+    This targets unconditional iid-stratum variation, assuming finite moments,
+    no dominant stratum, positive limiting support and a regular consistent
+    estimator. The default design TT can omit random common stratum profiles
+    (#145); refit variability does not repair analytic TT, J chi-square
+    calibration or general studentization.
+
+    Both modes reject FPC: without-replacement support needs an explicit
+    population/assignment law. Sparse support uses the shared NaN/event path.
+    IDs inside arbitrary model-data columns are not rewritten; model grouping
+    reductions must respect the intended relabeling/population contract.
     """
     if not isinstance(covariance, DesignAwareCovariance):
         raise TypeError("mixed_bootstrap requires DesignAwareCovariance")
-    if not covariance.fixed_strata:
-        raise ValueError("mixed_bootstrap requires fixed_strata=True")
     if covariance.design.fpc:
         raise ValueError("mixed_bootstrap requires design.fpc=False")
-    if covariance.sampling.dof_correction:
+    if covariance.fixed_strata and covariance.sampling.dof_correction:
         raise ValueError("mixed_bootstrap requires sampling.dof_correction=False")
     if covariance.all_design:
         raise ValueError("mixed_bootstrap requires both design and sampling moments")
     if n_boot <= 0:
         raise ValueError(f"mixed_bootstrap: n_boot must be positive, got {n_boot}")
-    rows, strata, psu = _paired_layout(measure, covariance)
     keys = jax.random.split(key, n_boot)
-    drawn_all = [_draw_bundles(strata, keys[b]) for b in range(n_boot)]
+    if covariance.fixed_strata:
+        rows, strata, psu = _paired_layout(measure, covariance)
+        drawn_all = [_draw_bundles(strata, keys[b]) for b in range(n_boot)]
+
+        def resample_one(b):
+            return _resample_mixed_one(measure, covariance, rows, psu, drawn_all[b])
+
+    else:
+        rows = _stratum_layout(measure, covariance)
+        n_strata = len(rows)
+        drawn_all = [
+            np.asarray(jax.random.randint(k, (n_strata,), 0, n_strata)) for k in keys
+        ]
+
+        def resample_one(b):
+            return _resample_strata_one(measure, covariance, rows, drawn_all[b])
+
     return _refit_bootstrap_worlds(
         model,
         theta_init,
         n_boot=n_boot,
         key=key,
-        resample_one=lambda b: _resample_mixed_one(
-            measure, covariance, rows, psu, drawn_all[b]
-        ),
+        resample_one=resample_one,
         weighting=weighting,
         regularization=regularization,
         optimizer=optimizer,

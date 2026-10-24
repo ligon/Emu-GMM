@@ -82,7 +82,30 @@ class Emu_GMM_DimensionError(ValueError):
 # A StructuralModel is any callable taking (x, theta) and returning
 # either a plain (M,) JAX array or a haliax NamedArray with a Moments
 # axis. The label adapter handles both.
-StructuralModel = Callable[[Float[Array, " D"], ParamsLike], Any]
+RowModel = Callable[[Float[Array, " D"], ParamsLike], Any]
+
+
+@runtime_checkable
+class ReducingModel(Protocol):
+    """Empirical sample reduction followed by a per-row residual.
+
+    ``aux`` receives the original measure and declares its own population,
+    masks and weights. It must guard excluded inputs before partial nonlinear
+    operations and safely handle empty denominators. Its PyTree structure and
+    shapes must be stable for a compiled signature. No row ID is injected.
+    Covariance uses the declared row contributions; influence corrections for
+    estimated auxiliary quantities are not inferred automatically. Both stages
+    remain inside parameter differentiation. The complete pair
+    takes precedence over ``__call__`` when an object supplies both interfaces.
+    Synthetic and analytical reducing models require a future explicit adapter.
+    """
+
+    def aux(self, measure: Any, theta: ParamsLike) -> Any: ...
+
+    def psi(self, row: Any, theta: ParamsLike, aux: Any) -> Any: ...
+
+
+StructuralModel = RowModel | ReducingModel
 
 
 # ---------------------------------------------------------------------------
@@ -975,6 +998,8 @@ EstimationResult = OptimizationResult
 __all__ = [
     "ParamsLike",
     "StructuralModel",
+    "ReducingModel",
+    "RowModel",
     "Measure",
     "CovarianceStrategy",
     "WeightingStrategy",

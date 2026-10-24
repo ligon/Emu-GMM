@@ -135,6 +135,7 @@ from emu_gmm.types import (
     OptimizationResult,
     Optimizer,
     OptimizerInfo,
+    ReducingModel,
     RegularizationStrategy,
     StructuralModel,
     WeightingStrategy,
@@ -280,5 +281,6 @@ __all__ = [
     "PenaltyStrategy",
     "Optimizer",
     "StructuralModel",
+    "ReducingModel",
     "ManifoldParam",
 ]

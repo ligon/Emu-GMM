@@ -1,0 +1,145 @@
+#+title: Projected native set validation driver (#180)
+
+* Scope and identity
+
+Sue, 2026-10-24; driver worktree base =01c1f0c02087b7b7c6217107288bcbef5e06bcb4=.
+Ledger Section 28 is the scientific contract.
+No package code, covariance formula, solver tolerance, nuisance penalty or ledger was changed.
+No real-panel load, scientific fit, job submission, commit or downstream-consumer write was performed locally.
+The driver requires the #113 empirical reducing-model and profile-adapter release; it fails before fitting if =ReducingModel= is unavailable.
+Focused verification imports the candidate at =/local/job40438881/tmp/issue113-kernel/src= explicitly.
+
+The new experiment is current CU/subvector profiling of magnitude =s=, with nuisance =A(5,2),c0(1),pi(10)= and direction fixed to the warm bundle's five-vector.
+It uses native =ManifoldLeaf= geometry, public =profiled_k_confidence_set=, package default regularization and the original =riemannian_lm(rtol=1e-9,atol=1e-9,max_steps=1500)=.
+It does not recreate the historical Fixed/full-vector protocol or reconstruct historical missing convergence.
+The public subvector reference additionally assumes strong nuisance identification; this artifact alone does not establish that assumption or coverage.
+
+* FE reduction and guards
+
+=ProjectedModel.aux= recomputes incidence counts, product-by-market C and transformed-outcome totals from the actual measure's appended product/market keys.
+It projects =exp(-c0-s*c_dir'zeta)*Y= jointly at the current theta.
+The fixed sum-zero product basis Q removes exactly the one graph-identified gauge and solves =Q' S Q=; on the validated connected graph this equals the rank-44 Schur pseudoinverse solution.
+It never constructs an N-by-N projector on the real panel.
+Both stages stay inside package parameter AD, including complete per-row derivatives needed by K.
+The original instrument endpoint remains 85; appended keys at85/86 cannot enter the moment vector.
+The population is the unweighted full retained panel, with unit masks/weights constructed explicitly.
+General disconnected graphs, changed populations or weighting are outside this driver.
+
+Before any fit, the driver verifies exact data/report/warm hashes, frozen dimensions and column map, finite and correctly shaped warm components, nonempty integer group support, connectedness, counts/C and the one-null Schur spectrum.
+It compares native Schur residuals against the saved independent raw-Y oracle and against the frozen NumPy Schur pseudoinverse applied to the current warm transformed Y.
+Those frozen arrays are verification oracles only; they never enter model.aux.
+Numerical oracle comparisons use atol=rtol=1e-9, separately from the unchanged solver tolerances.
+
+* Artifact and event semantics
+
+Default grid is =0,0.10017617=; the public inversion requires at least two points.
+The driver limits an invocation to twelve points so exhaustive capacity-parity queries remain bounded; the planned seven-point experiment is included.
+=--print-protocol= emits a reviewable manifest without loading inputs or creating an output directory.
+=--diagnostics-only= verifies inputs/oracles, then saves public pre-fit means/G/V and complete row-D summaries plus eight selected D rows, without a fit.
+The full D tensor is differentiated before summarizing; auxiliaries are not frozen for the row Jacobian.
+
+Normal execution saves the full confidence-set grid, membership, p-values, topology/edges and separate invalid/nonconverged indices/counts; per-point K/S/J, dofs and all p-values; native profiled parameters; and a RandomSetLaw NPZ artifact.
+The optimizer protocol wrapper delegates unchanged to native LM and records every returned OptimizerInfo field, exact solver wall time and RSS.
+It uses the supported protocol closure route; it does not bypass package optimizer gates or patch package internals.
+The span from one optimizer entry to the next/profile end is labelled exactly and also includes estimator/inference preparation between calls.
+Profiler certified-or-FOC events are copied from the public set and remain authoritative, independently of raw optimizer.done/status/stagnated flags.
+Raw info is checkpointed to JSONL before subsequent inference, alongside a small NPZ of the returned nuisance leaves with their ordering, paths, shapes, dtypes, treedef representation and hash.
+These checkpoints explicitly say that public-profiler K/FOC validity is pending until the scan completes.
+The public profiler has no point observer; a timeout can therefore leave raw nuisance/optimizer evidence without a completed statistical verdict, which must remain unknown.
+No observer API or duplicate FOC/inference machinery was added.
+
+Round-trip checks cover every exact grid verdict, every nonempty capacity query on the scanned grid, both grid-empty events, p-values/membership and all set metadata.
+The package's recorded =grid_empty= event is retained, while =known_empty_scanned_set= additionally requires no invalid/nonconverged points.
+An all-unknown scan is never labelled a known empty set, and scanned-grid emptiness is never a continuous-domain assertion.
+Finite p-values do not override invalid or nonconverged verdicts.
+Input, driver, imported package-file and installed-distribution hashes, selected numerical environment, backend/precision, job ID/affinity, timing/RSS and output hashes are saved in strict JSON.
+
+* Local verification
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue113-kernel/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest -q tests/test_native_projected_driver_180.py
+env PYTHONPATH=/local/job40438881/tmp/issue113-kernel/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m ruff check scripts/validation/native_projected_set_180.py tests/test_native_projected_driver_180.py
+env PYTHONPATH=/local/job40438881/tmp/issue113-kernel/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m black --check scripts/validation/native_projected_set_180.py tests/test_native_projected_driver_180.py
+env PYTHONPATH=/local/job40438881/tmp/issue113-kernel/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python scripts/validation/native_projected_set_180.py --output-dir /local/job40438881/tmp/native180-not-executed --print-protocol
+#+end_src
+
+The first focused run passed five tests in10.09seconds.
+The small unbalanced/incomplete connected fixture compares effects to an independent NumPy dummy-design projection, and complete N-by-43-by-22 D/G/cluster-V to an independent analytic chain rule.
+It demonstrates that freezing aux loses derivatives, verifies the factor gauge-null direction, and changes dynamic grouping keys/outcomes through a reused JIT.
+Other controls cover all-unknown law persistence and unchanged optimizer-protocol forwarding.
+At the coordinator's subsequent request, =--synthetic-smoke= adds an explicitly labelled 80-row API control: two public profiled grid points, actual native LM capped at two steps, full serialization and event/parity checks, without any scientific input read.
+Its protocol manifest changes kind, graph rank and maximum steps explicitly; the normal scientific mode retains its original contract.
+The final run passed all six tests in58.63seconds, including the actual CLI/public-profiler/serialization control.
+Ruff, Black and =git diff --check= passed.
+
+* Draft dispatch recipe (not submitted)
+
+Wait for the #113 release gate and root review, then freeze a union containing the released package plus this driver/tests.
+Archive the exact source tree to the shared artifact directory and use the staged immutable wheelhouse/requirements from native180-prereqs; never point a remote job at this node's /local worktree or the mutable shared repository checkout.
+The coordinator should give the archive/dependency manifest hashes and output prefix in the job record.
+
+#+begin_src sh
+#SBATCH --account=co_carleton
+#SBATCH --partition=savio4_htc
+#SBATCH --qos=carleton_htc4_normal
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=01:00:00
+set -eu
+# Coordinator supplies an immutable combined source archive and an isolated
+# pinned CPython3.11.6 executable; no donor site-packages or consumer imports.
+native_bundle=/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-prereqs
+native_prep=/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-data-prep/results
+native_stage=/local/job${SLURM_JOB_ID}/native180
+native_source=${native_stage}/source
+native_python=${native_stage}/env/bin/python
+native_output=/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-results/job-${SLURM_JOB_ID}
+cd "${native_bundle}"
+printf '%s  %s\n' 2cf6ad6d4d603e031ac02400afdfb4ca004a76725166fc71b9c9acb701fe479b SHA256SUMS | sha256sum --check --status
+sha256sum --check --quiet SHA256SUMS
+printf '%s  %s\n' "${NATIVE180_SOURCE_SHA256:?}" "${NATIVE180_SOURCE_ARCHIVE:?}" | sha256sum --check --status
+mkdir -p "${native_source}" "${native_stage}/data" "${native_stage}/cache" "${native_stage}/tmp"
+tar -xf "${NATIVE180_SOURCE_ARCHIVE}" -C "${native_source}"
+unset PYTHONPATH PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_REQUIREMENT PIP_CONSTRAINT
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_CACHE_DIR=${native_stage}/cache TMPDIR=${native_stage}/tmp
+"${NATIVE180_BOOTSTRAP_PYTHON:?}" -c 'import sys; assert sys.version_info[:3] == (3,11,6)'
+"${NATIVE180_BOOTSTRAP_PYTHON}" -m venv "${native_stage}/env"
+"${native_python}" -m pip install --no-index --no-deps --only-binary=:all: --find-links "${native_bundle}/wheelhouse" --requirement "${native_bundle}/metadata/consumer-index-requirements.txt"
+cp "${native_prep}/job-40446236-aligned-data.npz" "${native_stage}/data/aligned.npz"
+cp "${native_prep}/job-40446236-report.json" "${native_stage}/data/report.json"
+cp "${native_bundle}/raw/consumer/var/het_robust/het_point_corrected_K2.npz" "${native_stage}/data/warm.npz"
+export PYTHONPATH=${native_source}/src
+export XLA_FLAGS=--xla_force_host_platform_device_count=1
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+export JAX_COMPILATION_CACHE_DIR=${native_stage}/cache/jax
+export OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8
+"${native_python}" "${native_source}/scripts/validation/native_projected_set_180.py" --output-dir "${native_output}" --data "${native_stage}/data/aligned.npz" --report "${native_stage}/data/report.json" --warm "${native_stage}/data/warm.npz" --grid 0,0.10017617
+#+end_src
+
+The two-point timing/RSS and validity events determine a subsequent seven-point budget.
+Do not infer that missing or unknown points are rejections or claim calibration from this artifact.
+
+* Static review follow-up
+
+Root's two-file mypy check found four optional ModuleSpec/loader type errors in the test's dynamic import setup.
+An explicit non-None guard now narrows both types before module creation/loading; the driver and its scientific behavior are unchanged.
+The preflight archive retains the original frozen test blob as provenance, while the eventual repository PR includes this static import guard.
+No real-data fit is implied by either version.
+
+Root's post-guard two-file mypy, Ruff and Black checks pass.
+The reviewed source candidate passed all quick/slow tests in job 40448304; its integration with the whole-stratum candidate passed quick-check in job 40448938.
+The independent operational review passed before the source-pinned eight-CPU/64-GiB/one-hour trial was submitted as job 40449668.
+The actual panel passed the driver input and raw/current transformed-Y projection guards and entered its first nuisance fit; no completed scientific output is yet claimed.
+This worktree integrates reviewed #260 head =4c0e731d= and preserves ledger Sections 26, 27 and 28 in order.
+
+* Integrated repository quick gate
+
+Source/test tree =891f7de2a969327b5ad615275db078ff26f41c77= passed =make quick-check= in free Slurm job 40449836, exit 0.
+Archive SHA-256 is =dcd1579d71628a72e347094607577e7ef019b0ed5ad7491b8c0760417c43093a=.
+The gate includes all six new driver tests and the optional import-loader typing guard.
+Only Org status/evidence changed after that snapshot; the driver remains blob =74cda9ca58444b2bc985e878372d773e4593bb2e=.
+Fresh GitHub checks on the committed head remain before merge.
+The real-panel trial is still running separately, so the code gate is not reported as a completed scientific fit.

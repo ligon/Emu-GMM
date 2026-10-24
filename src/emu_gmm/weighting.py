@@ -492,6 +492,7 @@ class IteratedWeighting:
         fixed_kernel: Any = None,
         chol_kernel: Any = None,
         manifold_spec: Any = None,
+        optimizer_manifold_spec: Any = None,
     ) -> tuple[Float[Array, " K"], OptimizerInfo, str]:
         """Drive the outer iterated-GMM loop in pure Python.
 
@@ -555,6 +556,10 @@ class IteratedWeighting:
             exactly. Like the kernel kwargs it is keyword-only with a
             default, so OLD-signature third-party drivers are unaffected
             (the estimator passes it only when the signature accepts it).
+        optimizer_manifold_spec
+            Actual optimizer geometry, independently of the optional flatten
+            layout above. In particular scalar Positive parameters still need
+            their geometry when the scalar codec uses manifold_spec=None.
 
         Termination
         -----------
@@ -630,6 +635,11 @@ class IteratedWeighting:
             and chol_kernel is not None
             and _supports_args(optimizer)
         )
+        geometry_spec = (
+            optimizer_manifold_spec
+            if optimizer_manifold_spec is not None
+            else manifold_spec
+        )
         if use_args_path:
             # Normalise away the WEAK dtype of the factory-flattened
             # ``theta_init_flat`` (``~float64``): the optimiser returns
@@ -646,7 +656,7 @@ class IteratedWeighting:
         for _k in range(int(self.weighting_iterations)):
             # Set only on the v2 (manifold) inner solve; drives the
             # gauge-invariant convergence signal below. Stays ``None`` on
-            # the scalar / kernel paths, where the test runs on ambient
+            # the v1 scalar paths, where the test runs on ambient
             # flats and is therefore unchanged bit-for-bit.
             theta_next_pytree = None
             if use_args_path:
@@ -660,9 +670,23 @@ class IteratedWeighting:
                 # ``args=`` is not part of the v1 Optimizer protocol;
                 # ``use_args_path`` has already probed for it (mirrors
                 # the estimator's cast on its traced branch).
-                theta_next_flat, info_k = cast(Any, optimizer)(
-                    fixed_kernel, theta_k_flat, args=(measure, L0_k)
-                )
+                if _takes_manifold_spec(optimizer):
+                    theta_k = params_mod.unflatten_params(
+                        theta_k_flat, treedef, manifold_spec=manifold_spec
+                    )
+                    theta_next_pytree, info_k = cast(Any, optimizer)(
+                        fixed_kernel,
+                        theta_k,
+                        geometry_spec,
+                        args=(measure, L0_k),
+                    )
+                    theta_next_flat, _, _ = params_mod.flatten_params_with_spec(
+                        theta_next_pytree
+                    )
+                else:
+                    theta_next_flat, info_k = cast(Any, optimizer)(
+                        fixed_kernel, theta_k_flat, args=(measure, L0_k)
+                    )
             else:
                 # #146: pass ``manifold_spec`` so a non-scalar (manifold)
                 # parameter space takes the manifold-aware unflatten path
@@ -694,7 +718,7 @@ class IteratedWeighting:
                     # convergence test below instead runs on the
                     # gauge-invariant signature of this pytree.
                     theta_next_pytree, info_k = cast(Any, optimizer)(
-                        inner_residual, theta_k, manifold_spec
+                        inner_residual, theta_k, geometry_spec
                     )
                     theta_next_flat, _, _ = params_mod.flatten_params_with_spec(
                         theta_next_pytree
@@ -728,7 +752,7 @@ class IteratedWeighting:
             # Outer-loop convergence on a GAUGE-INVARIANT signal. On the
             # manifold path the raw ambient factor ``A`` is identified only
             # up to ``A -> A Q``, so compare ``vec(A A^T)`` (and the
-            # gauge-free leaves unchanged) instead; on the scalar / kernel
+            # gauge-free leaves unchanged) instead; on the v1 scalar
             # paths ``theta_next_pytree is None`` and the signal is the
             # ambient flat, identical to the v1 test.
             if theta_next_pytree is not None:

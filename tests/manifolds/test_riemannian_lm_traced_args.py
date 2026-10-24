@@ -164,12 +164,15 @@ class TestArgsPathParity:
 
 
 class TestArgsPathNoRetrace:
-    def test_fresh_same_structure_measures_share_one_trace(self):
+    def test_fresh_same_structure_measures_share_one_trace(
+        self, lm_advisory_trace_counts
+    ):
         base, Y0, _ = _make_measure(data_seed=1242)
         theta0 = _theta0(Y0)
         spec = params_mod.manifold_spec_from_params(theta0)
         _, treedef, _ = params_mod.flatten_params_with_spec(theta0)
         counting = _CountingPsi()
+        observed = lm_advisory_trace_counts(lambda: (counting.calls,))
         kernel = _make_kernel(counting, spec, treedef)
         rlm = riemannian_lm(max_steps=400)
 
@@ -178,15 +181,16 @@ class TestArgsPathNoRetrace:
 
         th1, info1 = rlm(kernel, theta0, spec, args=m1)
         assert bool(info1.done)
-        calls_after_first = counting.calls
+        calls_after_first = observed()[0][0]
         assert calls_after_first > 0  # tracing happened
 
         th2, info2 = rlm(kernel, theta0, spec, args=m2)
         assert bool(info2.done)
-        assert counting.calls == calls_after_first, (
+        assert observed()[0][0] == calls_after_first, (
             f"psi re-traced on a fresh same-structure measure: "
             f"{counting.calls} != {calls_after_first}"
         )
+        assert observed()[1] <= 1
         # Fresh draws -> a genuinely different (but nearby) optimum.
         g1 = np.asarray(_gamma(th1))
         g2 = np.asarray(_gamma(th2))

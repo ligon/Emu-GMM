@@ -32,6 +32,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.models import prepare_row_model, reject_reducing_model
 from emu_gmm.types import ParamsLike, StructuralModel
 
 
@@ -88,13 +89,14 @@ class SyntheticCovariance:
         V : (M, M) jax array
             Symmetric PSD by construction.
         """
+        reject_reducing_model(psi, type(measure).__name__)
         if cached_intermediates is not None:
             _m, psi_batch = cached_intermediates
         else:
             x_batch = measure._draws(theta)
 
             def psi_at(x):
-                return _to_plain(psi(x, theta))
+                return _to_plain(prepare_row_model(psi, measure, theta)(x))
 
             psi_batch = jax.vmap(psi_at)(x_batch)  # (n_sim, M)
 

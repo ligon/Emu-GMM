@@ -62,6 +62,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.models import map_model_parameters
 from emu_gmm._internal.pinv_eigvalrule import pinv_eigvalrule
 from emu_gmm.inference.k_statistic import KStatisticResult, k_statistic
 from emu_gmm.types import (
@@ -831,8 +832,10 @@ def profiled_k_confidence_set(
         theta_full_init = theta_builder(float(g))
         free_init = reducer.free_init(theta_full_init)
 
-        def _reduced_model(x: Any, free: Any, _tf: Any = theta_full_init) -> Any:
-            return model(x, reducer.recombine(_tf, free))
+        def _recombine(free: Any, _tf: Any = theta_full_init) -> Any:
+            return reducer.recombine(_tf, free)
+
+        _reduced_model = map_model_parameters(model, _recombine)
 
         inner = estimate(
             _reduced_model,
