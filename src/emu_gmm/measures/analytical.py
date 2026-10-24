@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.models import reject_reducing_model
 from emu_gmm._internal.params import flatten_params_for_ad, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
 
@@ -81,6 +82,7 @@ class AnalyticalMeasure:
         Delegates to ``expectation_fn(psi, theta)`` and strips a returned
         :class:`haliax.NamedArray` to its underlying array.
         """
+        reject_reducing_model(psi, type(self).__name__)
         return _to_plain(self.expectation_fn(psi, theta))
 
     def jacobian(self, psi: StructuralModel, theta: ParamsLike) -> Float[Array, "M K"]:
@@ -96,6 +98,7 @@ class AnalyticalMeasure:
         of leaves for all-scalar trees and the total ambient dimension
         for manifold trees (#41).
         """
+        reject_reducing_model(psi, type(self).__name__)
         if self.jacobian_fn is not None:
             return _to_plain(self.jacobian_fn(psi, theta))
 

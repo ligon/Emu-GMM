@@ -144,10 +144,49 @@ The architecture separates the model into orthogonal interfaces so that integrat
 ** Primitives
 
 *** The Model Primitive: StructuralModel
-The =StructuralModel= abstraction encapsulates only the elementary, observation-level structural equations. It possesses no awareness of sample scale, sampling weights, missingness patterns, or the empirical design layout.
+The ordinary row-callable form of =StructuralModel= encapsulates the elementary, observation-level structural equations. It possesses no awareness of sample scale, sampling weights, missingness patterns, or the empirical design layout.
 
 - *Elementary Function*: \(\psi(x, \theta)\), an \(M \times 1\) vector mapping an observation \(x \in \mathcal{X} \subseteq \mathbb{R}^D\) and parameter vector \(\theta \in \Theta\) to structural residuals (e.g., the raw Euler equation residual for an individual household).
 - *Elementary Gradient*: \(\nabla_\theta \psi(x, \theta) = \frac{\partial \psi(x, \theta)}{\partial \theta'}\), an \(M \times K\) matrix of structural derivatives evaluated at a single point.
+
+**** Empirical sample reductions (#113)
+
+An empirical model may instead implement the additive =ReducingModel= protocol:
+
+#+begin_src python
+model.aux(measure, theta)       # JAX-compatible auxiliary PyTree
+model.psi(row, theta, aux)     # moment vector or NamedArray
+#+end_src
+
+The complete callable pair takes precedence over =__call__=.
+The shared empirical pass prepares aux once at the current parameter, then evaluates the row residuals from that state.
+Aux receives the original measure, including its original data, mask and weights.
+The model declares its reduction population explicitly: a holder-only group mean, for example, need not have the same denominator as the final instrumented moment.
+The package does not turn imputed row sentinels into observations for this reduction.
+Aux must guard excluded inputs before partial nonlinear operations and handle empty group denominators safely.
+The row map retains the existing safe-input and mask-before-weight behavior.
+Group or row keys may be columns of the measure; no row ID is injected automatically.
+Declared group counts and model configuration remain static for a compiled signature.
+
+The moment means, covariance and derivative contributions use the same declared residuals and existing per-coordinate exposure normalization.
+Differentiation includes the auxiliary reduction: the empirical Jacobian contributions differentiate the complete parameter-to-weighted-row-batch function, including the indirect derivative through aux.
+Covariance strategies continue to own all covariance assembly.
+They do not infer influence-function corrections for estimated auxiliary quantities; a model requiring those corrections must declare appropriate contributions rather than assume arbitrary sample reductions establish an inferential reference distribution.
+
+This first slice supports reducing models on =EmpiricalMeasure=.
+=SyntheticMeasure= and =AnalyticalMeasure= raise an explicit unsupported-contract error for this new protocol; ordinary row-callable models remain supported on all three paths.
+Synthetic support needs a common-draw and sampler-derivative contract, and analytical support needs an explicit population adapter.
+Profile parameter adapters and null-recentering adapters retain both empirical stages, recomputing aux in each current measure.
+
+For repeated fits, use a single =build_estimator= factory with fixed model and strategy configuration.
+Fresh numeric data and group keys with the same leaf shapes, dtypes and static metadata may reuse compiled kernels.
+Covariance group layouts remain strategy state: replacing a measure does not replace independently captured cluster or design IDs.
+Repeated bare =estimate= calls and profiling routines that rebuild factories do not carry a no-recompile guarantee.
+One-shot native =estimate= retains its historical closure route, while reusable native factories pass measure leaves as traced arguments.
+These compilation routes may round differently near numerically unstable boundaries; no failed convergence event is promoted to a certificate.
+The optional eager LM curvature advisory has a separate lazy cache: it first compiles when a genuinely stationary fit is encountered, which can occur after the first dataset.
+Its stationarity and curvature kernels then reuse each compiled signature; transformed replicate fits skip this advisory.
+An iterative sample reduction must expose and check its own convergence; a fixed iteration count is not a convergence certificate.
 
 *** The Integration Primitive: Measure
 The =Measure= interface (\(\mu\)) acts strictly as a functional integration operator over a measurable space \((\mathcal{X}, \mathcal{F})\). It is agnostic to whether \(\mu\) is composed of real-world survey responses, analytical density functions, or synthetic simulations, and exposes exactly two operations when evaluated against a =StructuralModel= at parameter vector \(\theta\):

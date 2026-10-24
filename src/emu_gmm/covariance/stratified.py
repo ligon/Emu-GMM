@@ -55,6 +55,7 @@ import jax_dataclasses as jdc
 import numpy as np
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.models import is_reducing_model, prepare_row_model
 from emu_gmm._internal.nan_safety import safe_x_for_psi
 from emu_gmm.covariance._group_layout import validate_group_ids, validate_nesting
 from emu_gmm.covariance.clustered import ClusteredCovariance
@@ -268,9 +269,10 @@ class StratifiedCovariance:
             # AD. The cached producer (expectation_and_contributions) runs
             # this same safe_x_for_psi pass, so cached == self-compute.
             x_safe = safe_x_for_psi(measure.x)
+            row_model = prepare_row_model(psi, measure, theta)
 
             def psi_at(x: Any) -> jnp.ndarray:
-                return _to_plain(psi(x, theta))
+                return _to_plain(row_model(x))
 
             psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
             mask_bool = mask > 0.0
@@ -830,9 +832,10 @@ class DesignAwareCovariance:
             _m, psi_safe, _weight_mask, N_j = cached_intermediates
         else:
             x_safe = safe_x_for_psi(measure.x)
+            row_model = prepare_row_model(psi, measure, theta)
 
             def psi_at(x: Any) -> jnp.ndarray:
-                return _to_plain(psi(x, theta))
+                return _to_plain(row_model(x))
 
             psi_batch = jax.vmap(psi_at)(x_safe)
             psi_safe = jnp.where(mask > 0.0, psi_batch, 0.0)
@@ -917,6 +920,10 @@ class DesignAwareCovariance:
         (:class:`DiagonalTikhonov`) handles it.
         """
         self._validate_layout(measure.mask.shape[0])
+        if cached_intermediates is None and is_reducing_model(psi):
+            # One reducing-model evaluation feeds TT, SS and TS alike
+            # (ledger Section 26); their covariance formulas stay delegated.
+            cached_intermediates = measure.expectation_and_contributions(psi, theta)
         if self.all_design:
             return self.design.covariance(psi, theta, measure, cached_intermediates)
 
@@ -995,9 +1002,10 @@ class DesignAwareCovariance:
             _m, psi_safe, _weight_mask, N_j = cached_intermediates
         else:
             x_safe = safe_x_for_psi(measure.x)
+            row_model = prepare_row_model(psi, measure, theta)
 
             def psi_at(x: Any) -> jnp.ndarray:
-                return _to_plain(psi(x, theta))
+                return _to_plain(row_model(x))
 
             psi_batch = jax.vmap(psi_at)(x_safe)  # (N, M)
             psi_safe = jnp.where(mask > 0.0, psi_batch, 0.0)  # (N, M)

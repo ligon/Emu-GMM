@@ -55,3 +55,14 @@ The proposed API is additive, but its unsupported analytical-model behavior and 
 Issue 113 remains active with this concrete implementation boundary.
 
 -- Sue
+
+* Implementation candidate -- 2026-10-24
+
+Ledger Section 26 grounds the empirical-only two-stage protocol, shared covariance fallbacks, total contribution-batch AD and profile/null-shift adapters.
+The owner requirement already chooses parameter-dependent within-product/market projection for the K-Aggregators outcome; no raw-versus-projected preference remains to ask.
+The current retained K-Aggregators panel uses all-one masks/weights; its concrete projection population is unweighted retained rows.
+The generic hook lets other models declare their own population explicitly.
+A separate native factory patch extends existing LM/TR args caches and preserves the eager advisory and gauge-aware outer stopping.
+The original oracle remains the evidence that mean equivalence alone does not identify covariance contributions.
+Consumer-shaped frozen Seasonality parity, projected-panel contribution checks and compiled factory reuse are acceptance gates for this candidate, not claims established by the API signature alone.
+The native #180 artifact still requires its new protocol identity and event-complete projected-model preflight.

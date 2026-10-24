@@ -1,0 +1,119 @@
+#+TITLE: Native factory reuse prerequisite for issue 113
+#+AUTHOR: Sue
+#+DATE: 2026-10-24
+
+* Scope and reuse decisions
+
+Implementation is grounded in ledger Section 26 at =9f0d11f=.
+The existing residual, inference and Cholesky-refresh kernels retain their statistical algebra.
+The native LM/TR solve caches already support traced args; this change connects them to the public factory.
+No solver tolerance, covariance formula, ridge policy, parameter codec or acceptance tolerance changes.
+
+The additional v2 factory path is limited to exact native LM/TR types and exact registered built-in empirical, synthetic and analytical measure types.
+Custom optimizers, subclasses and third-party measures retain the existing closure path.
+The ordinary v1 capability-based args path is unchanged.
+Repeated calls require unchanged static model/covariance configuration, parameter geometry, leaf shapes and dtypes; a new supported shape signature compiles separately and then reuses its trace.
+Independent covariance group IDs and the template ridge anchor remain factory configuration, rather than silently updating when new measure leaves arrive.
+
+IteratedWeighting receives an optional actual optimizer geometry spec separately from the flatten-layout spec.
+Its v2 args calls reconstruct the parameter pytree, pass that pytree and geometry to the native solver, and retain the returned pytree for the existing gauge-invariant outer stopping test.
+Scalar Positive geometry is retained even when its scalar flatten codec uses None.
+Old-signature outer drivers remain on the legacy path; native outer args requires the separate geometry capability.
+Existing weak-dtype normalization, status propagation, fixed-k schedules and V-refresh ownership remain unchanged.
+
+Interactive LM advisories remain enabled for eager stationary fits after args dispatch.
+Separate stationarity and curvature probes are memoized on the residual kernel using the existing FunctionKeyedCache lifetime machinery.
+It takes the measure as an argument, uses the established horizontal true-Hessian calculation, and compiles or computes curvature only after the eager stationarity check passes.
+The nonstationary ftol regression now rejects even tracing the curvature helper; it passed against the integrated source.
+The public eager curvature helper retains its float return values and eager one-argument behavior.
+Transformed/vmapped solves retain status=traced and skip the advisory entirely.
+
+This prerequisite uses ordinary row models in its tests; the empirical two-stage model implementation is a concurrent separate slice.
+The integrated reducing-model public-factory regression passed both native solvers, changing group masses and outcomes without aux/psi retracing.
+Its independent ambient row-derivative oracle and gauge-null control passed as well (three cases, 21.91 seconds).
+
+* Focused regressions
+
+The new =tests/test_native_factory_reuse_113.py= covers:
+
+- Public LM/TR reuse on fresh empirical data under CU, Identity, Fixed and IteratedWeighting.
+  Changed level estimates and covariance matrices exclude stale captured-data behavior.
+- One new trace for a new row-count signature, followed by reuse.
+- Scalar legacy Positive geometry independently of scalar flatten layout.
+- Gauge-invariant iterated stopping when a fake native step rotates the factor exactly but leaves Gamma unchanged.
+- Transformed fits skipping the eager advisory.
+- Eager saddle warnings, diagnostic fields and probe reuse on fresh measures.
+- Unregistered third-party measure and third-party optimizer compatibility fallbacks.
+- Public args-versus-legacy parity for Gamma, objective, moment Jacobian, covariance, weighting matrix, labels and convergence under CU and iterated weighting.
+
+The initial thirteen cases passed in 73.49 seconds.
+An expanded twelve-case selection, including Fixed and the four public parity checks, passed in 96.84 seconds.
+The union covers all nineteen new cases; the selections overlap.
+The five existing scalar/native factory, iterated, cache-lifetime and advisory suites passed: 36 passed in 162.70 seconds.
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue113-native-reuse/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/test_native_factory_reuse_113.py -q
+env PYTHONPATH=/local/job40438881/tmp/issue113-native-reuse/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/test_estimator_traced_measure.py tests/test_iterated_traced_args.py tests/manifolds/test_riemannian_lm_traced_args.py tests/manifolds/test_iterated_weighting_manifold.py tests/manifolds/test_riemannian_lm_advisory.py -q
+#+end_src
+
+Ruff passes on the changed source and regression file.
+Mypy passes on all four Python files.
+Black and git diff --check pass.
+The canonical full gate belongs on an immutable integrated Slurm snapshot; no full suite or batch job was run locally.
+
+-- Sue
+
+* Integrated gate correction
+
+Initial integrated gate 40445430 passed lint/format/types, but one new CU/LM cache-count test failed: the second dataset was the first stationary fit and lazily compiled the separate curvature probe.
+This is not per-dataset solve/inference recompilation.
+The revised observer counts helper-internal HVP traces separately and requires at most one curvature trace per signature, while all solve/stationarity/inference model traces remain frozen.
+A third fresh native fit checks subsequent reuse.
+The exact failed case passed independently on one core; all eight native weighting/solver reuse cases passed together.
+Production source and numerical tolerances were unchanged by this correction.
+The exp-link joint-FE Product-PSD acceptance also passes both solvers, matching a closure oracle's fit, K and complete row derivatives across fresh panels.
+A new immutable full gate includes these test corrections and that additional consumer-shaped test.
+
+* One-shot numerical compatibility refinement
+
+The second immutable gate, tree =3e682aac= in job 40446758, passed quick-check and both new frozen-data reducing-model tests.
+It found one existing Positive-boundary convergence regression; the other slow tests passed or were skipped by their existing gates.
+The same fixture on main =db1ce50= converged at sigma 8.213302155e-11 in 134 steps, while the new native-args route stagnated at 3.455599679e-12 in 155 steps.
+A read-only legacy optimizer adapter reproduced main's iterate, objective, gradient and moment Jacobian bitwise on the candidate.
+This isolates compilation rounding near the model's documented power-transform cancellation cliff rather than an inherited stopping-rule defect.
+
+Ledger Section 26 records the refinement before implementation: public =build_estimator= retains all new native args reuse, including scalar Positive geometry, while one-shot =estimate= retains its historical native closure compilation.
+A private shared builder supplies the routing choice without adding a public option or wrapping custom optimizers.
+The preexisting v1 args gate is unchanged.
+Acceptance tolerances and solver certificates remain unchanged; an additional immutable full gate is required after this refinement.
+
+The new frozen routing test blob is =7502007eab3ad2ba91e6b16dcd90729e4386159c=.
+Its seven regressions and the original boundary acceptance passed together in 44.36 seconds on CPUs 42-43.
+They verify unchanged one-shot LM/TR calls under CU/iterated weighting against an independent legacy adapter, retained v1 args dispatch, and fresh Positive-scalar reducing-model factory reuse with changed outcomes/masses.
+Independent review of the shared-builder split and all targeted static checks passed.
+
+* Third immutable gate and remaining measure gates
+
+Tree =e3ec9345b5e02d17b95e3c4b797ac47c8ffb2721= passed =make quick-check= in free Slurm job 40448304; its full slow suite is running before merge.
+Archive SHA-256 is =08ada73b12ab8614254f6d9bd2029aec86a69e89c47ee04337e934f828e9b202=.
+Only this Org evidence changed after that snapshot.
+
+A separate read-only smoke covers public native Product-PSD factories on the other built-in measures: 14 tiny fits across LM/TR passed in 36.34 seconds.
+Fresh synthetic keys change known roots with stable solve/inference traces.
+AnalyticalMeasure carries only static population functions, so fresh objects with the same function reuse a signature; a new population function correctly changes the root and compiles a new signature once.
+This does not claim dynamic population data or generic reducing-model support for AnalyticalMeasure.
+All fits converge, geometry is checked, and no stale first population is retained.
+Reproducible scratch script/results/log are frozen at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native-other-measures113=; JSON SHA-256 =cd2bb2d9f138acd68ac42859cc219a9eee7dcba5e75a7e04ecf7aae9506009d7=.
+
+* Completed source and integration gates
+
+Job 40448304 completed quick-check and every slow test on source/test tree =e3ec9345=, exit 0 (24 minutes, peak RSS about 18.4 GiB).
+The frozen Positive-boundary contract and both new reducing-Euler acceptance tests pass with their original tolerances.
+Controlled baseline/candidate/legacy-adapter reproductions are durable at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/boundary113-diagnosis=.
+
+Reviewed whole-stratum candidate =e4b86ae= is integrated, preserving ledger Sections 26/27 and both handoff entries.
+Its integration tree =95d955a3f880dc0079764372446991c506f4c444= passed quick-check in job 40448938, exit 0.
+Archive SHA-256 =5b0d1b2d04de7a558f0d23c11693a2fbad627552d3b683ae82cbfc563a980b86=.
+Only Org status/evidence and trailing whitespace changed after that snapshot.
+Fresh GitHub checks on the resulting head remain required before merge.
+The independent #180 scientific driver and operational launcher reviews passed; the source-pinned two-point projected native trial is running in job 40449668, not yet acceptance evidence.

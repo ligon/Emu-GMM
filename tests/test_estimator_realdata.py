@@ -478,3 +478,103 @@ class TestDesignSpec:
         assert float(fit_design_boundary_limit.objective_value) == pytest.approx(
             j_neighbor, rel=1e-3
         )
+
+
+class _ReducingEuler:
+    """The existing holder-only consumer population as a traced reduction."""
+
+    def __init__(self, cols, crops, instruments, n_t):
+        self.m_idx = cols["m"]
+        self.t_idx = cols["t_code"]
+        self.delta_idxs = tuple(cols[f"delta_{c}"] for c in crops)
+        self.R_idxs = tuple(cols[f"R_{c}"] for c in crops)
+        self.z_idxs = tuple(cols[c] for c in instruments)
+        self.n_t = n_t
+
+    def aux(self, measure, theta):
+        # Preserve the consumer's holder count, rather than substituting the
+        # moment mask or a new weighted population (ledger Section 26).
+        full = measure.x
+        delta = full[:, jnp.array(self.delta_idxs)]
+        period = full[:, self.t_idx].astype(jnp.int32)
+        m = full[:, self.m_idx]
+        transformed = m**theta.sigma / jnp.abs(theta.sigma)
+        transformed = jnp.where(jnp.isnan(transformed), 0.0, transformed)
+        numerator = segment_sum(
+            transformed[:, None] * delta, period, num_segments=self.n_t
+        )
+        denominator = segment_sum(delta, period, num_segments=self.n_t)
+        return numerator / jnp.where(denominator > 0, denominator, 1.0)
+
+    def psi(self, row, theta, aux):
+        transformed = row[self.m_idx] ** theta.sigma / jnp.abs(theta.sigma)
+        transformed = jnp.where(jnp.isnan(transformed), 0.0, transformed)
+        mean = aux[row[self.t_idx].astype(jnp.int32)]
+        delta = row[jnp.array(self.delta_idxs)]
+        returns = row[jnp.array(self.R_idxs)]
+        z = row[jnp.array(self.z_idxs)]
+        residual = (transformed - mean) * returns * delta
+        return (residual[:, None] * z[None, :]).reshape(-1)
+
+
+def _reducing_euler(extract):
+    return _ReducingEuler(
+        extract["column_index"],
+        extract["crop_list"],
+        INSTRUMENTS,
+        int(extract["t_codes"].max()) + 1,
+    )
+
+
+def test_reducing_euler_preserves_frozen_consumer_primitives(extract, bundle):
+    model, measure = _reducing_euler(extract), bundle["measure"]
+    theta = EulerSigma(jnp.asarray(1.1))
+    for method in (
+        "expectation",
+        "jacobian",
+        "moment_contributions",
+        "jacobian_contributions",
+    ):
+        np.testing.assert_allclose(
+            getattr(measure, method)(model, theta),
+            getattr(measure, method)(bundle["psi"], theta),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+    for covariance in (
+        _design_covariance(bundle),
+        ClusteredCovariance(
+            jnp.asarray(bundle["cell_codes"], dtype=float), bundle["n_cells"]
+        ),
+    ):
+        np.testing.assert_allclose(
+            covariance.covariance(model, theta, measure),
+            covariance.covariance(bundle["psi"], theta, measure),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+
+def test_reducing_euler_retains_published_fit(extract, bundle, fit_published):
+    covariance = ClusteredCovariance(
+        jnp.asarray(bundle["cell_codes"], dtype=float), bundle["n_cells"]
+    )
+    result = estimate(
+        _reducing_euler(extract),
+        bundle["measure"],
+        covariance=covariance,
+        weighting=ContinuouslyUpdated(),
+        regularization=DiagonalTikhonov(kappa_target=1e10),
+        parameters=EulerSigma(jnp.asarray(1.0)),
+    )
+    # Existing published acceptance tolerances are unchanged above.
+    assert bool(result.converged)
+    np.testing.assert_allclose(
+        result.theta_hat.sigma, fit_published.theta_hat.sigma, rtol=1e-7
+    )
+    np.testing.assert_allclose(
+        result.objective_value, fit_published.objective_value, rtol=1e-10
+    )
+    np.testing.assert_allclose(
+        result.asymptotic().cov(), fit_published.asymptotic().cov(), rtol=1e-6
+    )

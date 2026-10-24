@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
+from emu_gmm._internal.models import prepare_row_model, reject_reducing_model
 from emu_gmm._internal.params import flatten_params_for_ad, unflatten_params
 from emu_gmm.types import ParamsLike, StructuralModel
 
@@ -135,10 +136,11 @@ class SyntheticMeasure:
             that produced ``m``. CRN preserves identity across the two
             outputs: ``m == jnp.mean(psi_batch, axis=0)`` exactly.
         """
+        reject_reducing_model(psi, type(self).__name__)
         x_batch = self._draws(theta)
 
         def psi_at(x):
-            return _to_plain(psi(x, theta))
+            return _to_plain(prepare_row_model(psi, self, theta)(x))
 
         psi_batch = jax.vmap(psi_at)(x_batch)
         m = jnp.mean(psi_batch, axis=0)
@@ -188,10 +190,11 @@ class SyntheticMeasure:
         analogue of :meth:`EmpiricalMeasure.moment_contributions`, but
         backed by the synthetic sampler rather than the observed data.
         """
+        reject_reducing_model(psi, type(self).__name__)
         x_batch = self._draws(theta)
 
         def psi_at(x):
-            return _to_plain(psi(x, theta))
+            return _to_plain(prepare_row_model(psi, self, theta)(x))
 
         return jax.vmap(psi_at)(x_batch)
 
@@ -220,11 +223,12 @@ class SyntheticMeasure:
         # per-draw Jacobian then differentiates psi alone, mirroring the
         # empirical case where x is observation data and not a function
         # of theta.
+        reject_reducing_model(psi, type(self).__name__)
         x_batch = self._draws(theta)
 
         def psi_flat(x: Float[Array, " D"], flat: Float[Array, " K"]):
             params = unflatten_params(flat, treedef, manifold_spec=mspec)
-            return _to_plain(psi(x, params))
+            return _to_plain(prepare_row_model(psi, self, params)(x))
 
         def grad_at(x: Float[Array, " D"]) -> Float[Array, "M K"]:
             return jax.jacfwd(lambda flat: psi_flat(x, flat))(flat_theta)
