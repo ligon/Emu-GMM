@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -174,7 +174,10 @@ def _parameter_leaves_and_names(params: Any) -> tuple[list[Any], list[str | None
     and any custom child order. A container descendant never acquires its root
     field's name. Checked constructors that refuse opaque objects get a second
     probe with unique value-preserving JAX copies, retaining native wrappers.
-    Validation is never bypassed, and ownership remains identity-only.
+    Validation is never bypassed, and ownership remains identity-only. For a
+    lawful, stable registration, re-flattened probe leaves retain the registered
+    order even when the constructor copies its inputs. Duplicate output aliases
+    and untouched root values cannot prove dynamic direct ownership.
     """
     leaves, treedef = jax.tree_util.tree_flatten(
         params, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
@@ -205,8 +208,27 @@ def _parameter_leaves_and_names(params: Any) -> tuple[list[Any], list[str | None
             ]
         except Exception:
             return leaves, names
-    for i, token in enumerate(tokens):
-        owners = [name for name, value in fields if value is token]
+    try:
+        output_leaves, output_treedef = jax.tree_util.tree_flatten(
+            probe, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
+        )
+        if cast(object, output_treedef) != cast(object, treedef) or len(
+            output_leaves
+        ) != len(leaves):
+            return leaves, names
+    except Exception:
+        return leaves, names
+    output_counts: dict[int, int] = {}
+    for leaf in output_leaves:
+        output_counts[id(leaf)] = output_counts.get(id(leaf), 0) + 1
+    for i, leaf in enumerate(output_leaves):
+        if output_counts[id(leaf)] != 1:
+            continue
+        owners = [
+            name
+            for name, value in fields
+            if value is leaf and value is not getattr(params, name)
+        ]
         if len(owners) == 1:
             names[i] = owners[0]
     return leaves, names

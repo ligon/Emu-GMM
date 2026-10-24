@@ -75,6 +75,8 @@ class _Reordered:
             for value in (self.left, self.right)
         ):
             raise TypeError("constructor requires numeric parameters")
+        object.__setattr__(self, "left", jnp.array(self.left, copy=True))
+        object.__setattr__(self, "right", jnp.array(self.right, copy=True))
 
     def tree_flatten(self):
         return (self.right, self.left), (self.config,)
@@ -201,15 +203,37 @@ class _CheckedScalars:
             raise TypeError("constructor requires numeric parameters")
 
 
+@jdc.pytree_dataclass
+class _CopyingScalars:
+    a: Any
+    b: Any
+
+    def __post_init__(self):
+        object.__setattr__(self, "a", jnp.array(self.a, copy=True))
+        object.__setattr__(self, "b", jnp.array(self.b, copy=True))
+
+
+@jdc.pytree_dataclass
+class _CopyingNative:
+    block: ManifoldLeaf
+
+    def __post_init__(self):
+        leaf = self.block
+        object.__setattr__(
+            self, "block", ManifoldLeaf(jnp.array(leaf.array, copy=True), leaf.manifold)
+        )
+
+
 @pytest.mark.parametrize("initial", [(0.0, 0.0), (0.25, 0.75)])
-def test_checked_scalar_estimate_and_factory_remain_supported(initial):
+@pytest.mark.parametrize("point_type", [_CheckedScalars, _CopyingScalars])
+def test_checked_scalar_estimate_and_factory_remain_supported(initial, point_type):
     # Eight cube vertices give centered, independent empirical noise with a
     # positive covariance. All three moment means vanish at (1.5, -0.5).
     noise = np.array(
         [[a, b, c] for a in (-1.0, 1.0) for b in (-1.0, 1.0) for c in (-1.0, 1.0)]
     )
     measure = EmpiricalMeasure.from_arrays(noise + np.array([1.5, -0.5, 1.0]))
-    theta = _CheckedScalars(*initial)
+    theta = point_type(*initial)
 
     def model(row, point):
         return row - jnp.array([point.a, point.b, point.a + point.b])
@@ -227,9 +251,10 @@ def test_checked_scalar_estimate_and_factory_remain_supported(initial):
         assert params_mod.param_names(fitted.theta_hat) == ["a", "b"]
 
 
-def test_checked_native_wrapper_estimate_and_factory_remain_supported():
+@pytest.mark.parametrize("point_type", [_Checked, _CopyingNative])
+def test_checked_native_wrapper_estimate_and_factory_remain_supported(point_type):
     measure = EmpiricalMeasure.from_arrays(np.array([[1.0], [2.0], [3.0], [4.0]]))
-    theta = _Checked(ManifoldLeaf(jnp.array(1.0), Positive()))
+    theta = point_type(ManifoldLeaf(jnp.array(1.0), Positive()))
 
     def model(row, point):
         return jnp.array([row[0] - point.block.array])
@@ -245,8 +270,9 @@ def test_checked_native_wrapper_estimate_and_factory_remain_supported():
         assert params_mod.param_names(fitted.theta_hat) == ["block"]
 
 
-def test_checked_numeric_probe_preserves_jit_vmap_ad_and_original_leaves():
-    theta = _CheckedScalars(jnp.array(1.0, dtype=jnp.float32), jnp.array(1.0))
+@pytest.mark.parametrize("point_type", [_CheckedScalars, _CopyingScalars])
+def test_checked_numeric_probe_preserves_jit_vmap_ad_and_original_leaves(point_type):
+    theta = point_type(jnp.array(1.0, dtype=jnp.float32), jnp.array(1.0))
     original = jax.tree.leaves(theta)
     leaves, names = params_mod._parameter_leaves_and_names(theta)
     assert names == ["a", "b"]
@@ -267,7 +293,7 @@ def test_checked_numeric_probe_preserves_jit_vmap_ad_and_original_leaves():
     assert theta.a.dtype == jnp.float32
 
 
-def test_constructor_that_erases_probe_identity_still_refuses_legacy_binding():
+def test_copying_constructor_retains_legacy_binding_and_names():
     @jdc.pytree_dataclass
     class CopiesInput:
         sigma: Any
@@ -278,6 +304,69 @@ def test_constructor_that_erases_probe_identity_still_refuses_legacy_binding():
             object.__setattr__(self, "sigma", jnp.array(self.sigma, copy=True))
 
     theta = CopiesInput(2.0)
+    spec = params_mod.manifold_spec_from_params(theta)
+    assert spec.leaf_specs[0].field_name == "sigma"
+    assert isinstance(spec.leaf_specs[0].manifold, Positive)
+    assert params_mod.param_names(theta) == ["sigma"]
+
+
+def test_numeric_probe_breaks_original_static_and_container_aliases():
+    @jdc.pytree_dataclass
+    class Shared:
+        static: jdc.Static[Any]
+        direct: Any
+        nested: tuple
+
+        __emu_manifolds__ = {"direct": Positive()}
+
+        def __post_init__(self):
+            if not isinstance(self.direct, jax.Array | jax.core.Tracer):
+                raise TypeError("requires numeric direct leaf")
+
+    value = jnp.array(2.0)
+    theta = Shared(value, value, (value,))
+    leaves, names = params_mod._parameter_leaves_and_names(theta)
+    assert names == ["direct", None]
+    assert leaves[0] is value and leaves[1] is value
+    assert theta.static is theta.direct is theta.nested[0]
+    spec = params_mod.manifold_spec_from_params(theta)
+    assert isinstance(spec.leaf_specs[0].manifold, Positive)
+    assert isinstance(spec.leaf_specs[1].manifold, Euclidean)
+
+
+def test_constructor_created_direct_container_alias_stays_unproven():
+    @jdc.pytree_dataclass
+    class ForcedAlias:
+        direct: Any
+        nested: tuple
+
+        __emu_manifolds__ = {"direct": Positive()}
+
+        def __post_init__(self):
+            object.__setattr__(self, "direct", jnp.array(self.direct, copy=True))
+            object.__setattr__(self, "nested", (self.direct,))
+
+    # This constructor does not independently reconstruct its registered
+    # leaves. Repeated output identity cannot prove either positional owner.
+    theta = ForcedAlias(2.0, (3.0,))
+    assert params_mod._parameter_leaves_and_names(theta)[1] == [None, None]
+    with pytest.raises(ValueError, match="cannot bind"):
+        params_mod.manifold_spec_from_params(theta)
+
+
+def test_constructor_reintroduced_untouched_static_alias_stays_unproven():
+    @jdc.pytree_dataclass
+    class StaticAlias:
+        static: jdc.Static[Any]
+        nested: tuple
+
+        __emu_manifolds__ = {"static": Positive()}
+
+        def __post_init__(self):
+            object.__setattr__(self, "nested", (self.static,))
+
+    theta = StaticAlias(jnp.array(2.0), (3.0,))
+    assert params_mod._parameter_leaves_and_names(theta)[1] == [None]
     with pytest.raises(ValueError, match="cannot bind"):
         params_mod.manifold_spec_from_params(theta)
 
