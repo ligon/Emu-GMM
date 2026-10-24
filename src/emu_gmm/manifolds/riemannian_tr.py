@@ -44,17 +44,18 @@ raised by the per-leaf inverse metric and projected to horizontal per leaf::
   the bare Euclidean ``Q''`` (red-team blocker #4). No manual Christoffel
   algebra is needed.
 
-Metric throughout
------------------
-The tCG inner products, the trust-radius boundary test, and the convergence
-norm use the per-leaf *manifold* ``inner_product`` (Frobenius for
-PSD/Euclidean; ``1/x^2`` for Positive). The trust-region constraint is applied
-in this metric (required for pymanopt parity). For the scalar Positive
-boundary case the affine geometry pushes the boundary to infinite distance, so
-``sigma -> 0+`` is correct, not a stall (the exponential retraction is
-multiplicative and never crosses 0). A pure-JAX ``jnp.where`` NaN-guard on the
-``rho`` ``0/0`` floor keeps ``Delta`` finite (pymanopt raises
-``ZeroDivisionError``; JAX yields a silent NaN we must trap).
+Production solver metric
+------------------------
+The outer solver uses the ambient horizontal gradient and pullback Hessian,
+and Frobenius tCG inner products and trust-radius constraints. Leaf retractions
+still preserve their own domains; Positive uses the multiplicative exponential
+retraction and never crosses zero. Only the convergence norm uses the per-leaf
+manifold ``inner_product`` (``1/x^2`` for Positive). This follows the established
+LM convention on Positive boundary trajectories. For PSD/Euclidean leaves the
+ambient and manifold metrics coincide, as in the pymanopt parity checks.
+The standalone Riemannian HVP and tCG helpers retain their manifold-metric
+default. A pure-JAX ``jnp.where`` NaN-guard on the ``rho`` ``0/0`` floor keeps
+``Delta`` finite.
 
 REVERSE-MODE AD IS NOT SUPPORTED (matches ``riemannian_lm`` / #77): the outer
 loop is a :func:`jax.lax.while_loop`, which has no reverse rule.
@@ -263,25 +264,25 @@ def _retract_flat(plan: list, x: jnp.ndarray, d: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate(parts)
 
 
-def _min_eig_YtY(plan: list, x: jnp.ndarray) -> jnp.ndarray:
-    """Smallest eigenvalue of ``Y^T Y`` over PSD leaves (rank-drop sentinel).
+def _psd_factors_full_rank(plan: list, x: jnp.ndarray) -> jnp.ndarray:
+    """Check each PSD factor using the relative law diagnostic rule (#191).
 
-    Returns ``+inf`` when there is no PSD leaf (no rank structure to lose).
+    Singular values avoid cancellation in the Gram spectrum; each factor uses
+    its own scale, so uniformly small factors remain admissible (ledger Sec. 20).
     """
     from emu_gmm.manifolds.psd_fixed_rank import PSDFixedRank
 
-    vals = []
+    valid = jnp.asarray(True)
     for offset, size, shape, manifold in plan:
         if isinstance(manifold, PSDFixedRank):
             Y = jnp.reshape(x[offset : offset + size], shape)
-            ev = jnp.linalg.eigvalsh(Y.T @ Y)
-            vals.append(jnp.min(ev))
-    if not vals:
-        # No PSD leaf -> no rank structure to lose; a large finite positive
-        # sentinel so the rank-drop guard passes (NOT +inf, which would fail
-        # an ``isfinite`` check downstream).
-        return jnp.asarray(1.0)
-    return jnp.min(jnp.stack(vals))
+            singular_values = jnp.linalg.svd(Y, compute_uv=False)
+            threshold = 64 * max(shape) * jnp.finfo(Y.dtype).eps * singular_values[0]
+            regular = jnp.all(jnp.isfinite(singular_values)) & (
+                singular_values[-1] > threshold
+            )
+            valid = valid & regular
+    return valid
 
 
 # ===========================================================================
@@ -1013,14 +1014,18 @@ class _RiemannianTR:
             # init radius, not 0.
             init_trace["Delta"] = jnp.full((max_steps,), Delta0, dtype=jnp.float64)
             init_trace["proposed_full_rank"] = jnp.ones((max_steps,), dtype=jnp.float64)
+            # -1 denotes an unwritten step; 0 is a real negative-curvature stop.
+            init_trace["stop_code"] = -jnp.ones((max_steps,), dtype=jnp.float64)
 
             def cond_fun(carry: Any) -> Any:
-                _x, _g, _gn, _f, _rn, Delta, step, done, _nn, _tr, _stall = carry
+                _x, _g, _gn, _f, _rn, Delta, step, done, _nn, _tr, _stall, stuck = carry
                 del _x, _g, _gn, _f, _rn, Delta, _nn, _tr
-                return jnp.logical_and(step < max_steps, jnp.logical_not(done))
+                return (step < max_steps) & ~done & ~stuck
 
             def body_fun(carry: Any) -> Any:
-                x, g, gnorm, fx, rnorm, Delta, step, done, n_negc, trace, stall = carry
+                x, g, gnorm, fx, rnorm, Delta, step, done, n_negc, trace, stall, _ = (
+                    carry
+                )
                 del done
 
                 hvp = hvp_at(x, args_in)
@@ -1045,8 +1050,7 @@ class _RiemannianTR:
 
                 x_prop = _retract_flat(plan, x, eta)
                 # Rank-drop sentinel on the PROPOSED iterate.
-                min_ev = _min_eig_YtY(plan, x_prop)
-                rank_ok = jnp.logical_and(jnp.isfinite(min_ev), min_ev > 1e-12)
+                rank_ok = _psd_factors_full_rank(plan, x_prop)
                 prop_finite = jnp.all(jnp.isfinite(x_prop))
                 prop_valid = jnp.logical_and(rank_ok, prop_finite)
 
@@ -1144,18 +1148,40 @@ class _RiemannianTR:
                 # while the *consecutive-accepted* ftol counter keeps resetting
                 # on the rejects and never reaches patience (whereas LM's
                 # monotone-accepted collapse lets ftol fire -- #156). The radius
-                # collapse is monotone through the oscillation, so certify when
-                # Delta falls below _MIN_RADIUS: the solver is at the achievable
-                # floor and cannot make further progress. Both criteria are gated
-                # on gauge structure (scalar boundary keeps its grad-norm stop)
-                # and are gauge-safe (cost and Delta are gauge-invariant).
+                # collapse alone also follows invalid / rejected proposals,
+                # which establishes no stationarity (#191, ledger Sec. 20).
+                # A rejected proposal can instead certify cost stagnation if
+                # its model predicts less than objective-relative machine
+                # precision AND its observed change meets the existing ftol.
+                # Requiring both prevents nonlinear model mismatch from
+                # certifying merely because a tiny radius predicts tiny gain.
+                # No absolute objective floor enters this certificate: scaling
+                # the residual must not turn material progress into stagnation.
+                # This is a cost certificate, not gradient stationarity.
                 radius_collapsed = Delta_new < _MIN_RADIUS
+                cost_scale = jnp.abs(fx)
+                finite_costs = jnp.isfinite(fx) & jnp.isfinite(fx_prop)
+                finite_changes = jnp.isfinite(rhoden) & jnp.isfinite(rhonum)
+                model_stagnant = (rhoden >= 0.0) & (
+                    rhoden <= jnp.finfo(fx.dtype).eps * cost_scale
+                )
+                cost_stagnant = jnp.abs(rhonum) <= ftol * cost_scale
+                floor_cost_certificate = (
+                    prop_valid
+                    & finite_costs
+                    & finite_changes
+                    & (cost_scale > 0.0)
+                    & model_stagnant
+                    & cost_stagnant
+                )
+                floor_converged = radius_collapsed & (accept | floor_cost_certificate)
                 converged = grad_converged
                 if ftol_active:
                     converged = jnp.logical_or(
                         converged,
-                        jnp.logical_or(stall_next >= ftol_patience, radius_collapsed),
+                        jnp.logical_or(stall_next >= ftol_patience, floor_converged),
                     )
+                stagnated = ftol_active & radius_collapsed & ~accept & ~converged
 
                 n_negc_new = n_negc + jnp.where(is_negc, 1, 0)
 
@@ -1190,6 +1216,7 @@ class _RiemannianTR:
                     n_negc_new,
                     trace,
                     stall_next,
+                    stagnated,
                 )
 
             init_carry = (
@@ -1204,6 +1231,7 @@ class _RiemannianTR:
                 jnp.asarray(0),
                 init_trace,
                 jnp.asarray(0),
+                jnp.asarray(False),  # #191 rejected / invalid radius collapse
             )
             (
                 x_final,
@@ -1217,12 +1245,14 @@ class _RiemannianTR:
                 n_negc,
                 trace,
                 _stall,
+                stagnated,
             ) = jax.lax.while_loop(cond_fun, body_fun, init_carry)
 
             return {
                 "x": x_final,
                 "steps": steps,
                 "done": done,
+                "stagnated": stagnated,
                 "final_objective": f_final,
                 "grad_norm": gnorm_final,
                 "n_negc": n_negc,
@@ -1240,6 +1270,7 @@ class _RiemannianTR:
         x_final = out["x"]
         steps = out["steps"]
         done = out["done"]
+        stagnated = out["stagnated"]
         final_objective = out["final_objective"]
         gnorm_final = out["grad_norm"]
         n_negc = out["n_negc"]
@@ -1247,7 +1278,12 @@ class _RiemannianTR:
 
         try:
             done_concrete = bool(done)
-            status = "converged" if done_concrete else "max_iterations"
+            if done_concrete:
+                status = "converged"
+            elif bool(stagnated):
+                status = "stagnated"
+            else:
+                status = "max_iterations"
         except (jax.errors.TracerBoolConversionError, TypeError):
             status = "traced"
 
@@ -1269,6 +1305,7 @@ class _RiemannianTR:
             "status": status,
             "final_objective": final_objective,
             "done": jnp.asarray(done),
+            "stagnated": jnp.asarray(stagnated),
         }
         info = OptimizerInfo(
             steps=steps,
@@ -1276,6 +1313,7 @@ class _RiemannianTR:
             status=status,
             backend="emu_gmm.riemannian_tr",
             done=jnp.asarray(done),
+            stagnated=jnp.asarray(stagnated),
             final_gradient_norm=gnorm_final,
             max_tcg_steps=jnp.asarray(max_tcg),
             max_radius=jnp.asarray(Delta_bar),
@@ -1310,6 +1348,8 @@ def riemannian_tr(
     retraction-pullback Hessian. ``max_tcg_steps`` / ``max_radius`` default to
     the **intrinsic** quotient dimension (``total_dimension - total_gauge_dim``)
     rather than the ambient ``nk``.
+    ``gauge_floor`` is retained for API compatibility and has no effect on this
+    trust-region solver; the LM damping floor does not apply to tCG.
     """
     return _RiemannianTR(
         rtol=rtol,

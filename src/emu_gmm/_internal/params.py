@@ -167,6 +167,51 @@ def unflatten_params(
     return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
+def _parameter_leaves_and_names(params: Any) -> tuple[list[Any], list[str | None]]:
+    """Prove direct field ownership through registered reconstruction (#191).
+
+    Opaque leaf tokens follow the actual PyTreeDef, including its static fields
+    and any custom child order. A container descendant never acquires its root
+    field's name. Checked constructors that refuse opaque objects get a second
+    probe with unique value-preserving JAX copies, retaining native wrappers.
+    Validation is never bypassed, and ownership remains identity-only.
+    """
+    leaves, treedef = jax.tree_util.tree_flatten(
+        params, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
+    )
+    names: list[str | None] = [None] * len(leaves)
+    if not dataclasses.is_dataclass(params):
+        return leaves, names
+    tokens = [object() for _ in leaves]
+    try:
+        probe = jax.tree_util.tree_unflatten(treedef, tokens)
+        fields = [(f.name, getattr(probe, f.name)) for f in dataclasses.fields(params)]
+    except Exception:
+        # A valid registered constructor may insist on numeric/native leaves.
+        # Distinct copies preserve its invariants and distinguish equal values
+        # without touching the original flatten buffer (ledger Section 23).
+        try:
+            tokens = [
+                (
+                    ManifoldLeaf(jnp.array(leaf.array, copy=True), leaf.manifold)
+                    if isinstance(leaf, ManifoldLeaf)
+                    else jnp.array(leaf, copy=True)
+                )
+                for leaf in leaves
+            ]
+            probe = jax.tree_util.tree_unflatten(treedef, tokens)
+            fields = [
+                (f.name, getattr(probe, f.name)) for f in dataclasses.fields(params)
+            ]
+        except Exception:
+            return leaves, names
+    for i, token in enumerate(tokens):
+        owners = [name for name, value in fields if value is token]
+        if len(owners) == 1:
+            names[i] = owners[0]
+    return leaves, names
+
+
 def _walk_leaf_specs(params: Any) -> tuple[ManifoldSpec, list[Any]]:
     """Shared leaf-walk that builds a :class:`ManifoldSpec` from ``params``.
 
@@ -203,20 +248,18 @@ def _walk_leaf_specs(params: Any) -> tuple[ManifoldSpec, list[Any]]:
     is one leaf, matching the topology the returned treedef descends into
     (red-team R1/R6/R26).
     """
-    if dataclasses.is_dataclass(params):
-        field_names: list[str | None] = [f.name for f in dataclasses.fields(params)]
-    else:
-        field_names = []
-
     field_manifolds: dict[str, Any] = {}
     if dataclasses.is_dataclass(params):
         field_manifolds = dict(getattr(type(params), "__emu_manifolds__", {}) or {})
 
-    wrapped_leaves = jax.tree_util.tree_leaves(
-        params, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
-    )
-    if len(field_names) != len(wrapped_leaves):
-        field_names = [None] * len(wrapped_leaves)
+    wrapped_leaves, field_names = _parameter_leaves_and_names(params)
+    unproven = set(field_manifolds).difference(field_names)
+    if unproven:
+        raise ValueError(
+            "__emu_manifolds__ requires directly registered top-level parameter "
+            f"leaves; cannot bind {sorted(unproven)}. Use ManifoldLeaf for "
+            "nested parameter blocks or constructors with validation."
+        )
 
     leaf_specs: list[LeafSpec] = []
     blocks: list[Any] = []
@@ -340,23 +383,11 @@ def flatten_params_with_spec(
     (red-team R24). ``K == 0`` (empty tree) is caught upstream at the
     estimator boundary (red-team R31).
     """
-    # Field names from the dataclass root, when available (mirrors
-    # manifold_spec_from_params); else positional None.
-    if dataclasses.is_dataclass(params):
-        field_names: list[str | None] = [f.name for f in dataclasses.fields(params)]
-    else:
-        field_names = []
-
     # Walk treating ManifoldLeaf as opaque so we can read each leaf's
     # manifold + ambient shape. The *returned* treedef (below) is the
     # FULL treedef --- it descends into ManifoldLeaf so tree_unflatten
     # re-wraps blocks automatically and the recorded dtype is restored.
-    wrapped_leaves = jax.tree_util.tree_leaves(
-        params, is_leaf=lambda x: isinstance(x, ManifoldLeaf)
-    )
-    if len(field_names) != len(wrapped_leaves):
-        # Non-flat dataclass / non-dataclass root: positional names.
-        field_names = [None] * len(wrapped_leaves)
+    wrapped_leaves, field_names = _parameter_leaves_and_names(params)
 
     _, treedef = jax.tree_util.tree_flatten(params)
 
@@ -435,7 +466,7 @@ def flatten_params_with_spec(
 
 
 def param_names(params: Any) -> list[str]:
-    """Return the dataclass field names in canonical (declaration) order.
+    """Return direct dynamic field names in registered PyTree-leaf order.
 
     For v1, parameter dataclasses must be flat: every field must be a
     scalar (not a nested dataclass). Nested structures raise a clear
@@ -449,30 +480,29 @@ def param_names(params: Any) -> list[str]:
     Returns
     -------
     names
-        Field names in declaration order; matches the leaf order of
-        :func:`flatten_params` for flat dataclasses.
+        Dynamic field names in leaf order (declaration order for ordinary
+        jax_dataclasses); static fields are excluded.
 
     Raises
     ------
     TypeError
         If ``params`` is not a dataclass instance.
     NotImplementedError
-        If any field is itself a dataclass (nested parameter structure).
+        If dynamic leaves do not map to direct root fields (nested structures
+        or a constructor that prevents proving ownership).
     """
     if not dataclasses.is_dataclass(params):
         raise TypeError(
             f"param_names expects a dataclass instance, got " f"{type(params).__name__}"
         )
-    names: list[str] = []
-    for field in dataclasses.fields(params):
-        value = getattr(params, field.name)
-        if dataclasses.is_dataclass(value):
-            raise NotImplementedError(
-                f"Nested dataclass parameter field {field.name!r} is not "
-                "supported in v1; use a flat dataclass with scalar fields"
-            )
-        names.append(field.name)
-    return names
+    _, names = _parameter_leaves_and_names(params)
+    if any(name is None for name in names):
+        raise NotImplementedError(
+            "Nested dataclass / container parameter fields or unproven field "
+            "ownership are not supported by param_names; use a flat dataclass "
+            "with directly registered scalar or ManifoldLeaf fields"
+        )
+    return [name for name in names if name is not None]
 
 
 def manifold_spec_from_params(params: Any) -> ManifoldSpec:

@@ -1,5 +1,41 @@
 #+TITLE: Handoff -- Emu-GMM backlog
-#+DATE: [2026-10-23 Fri]
+#+DATE: [2026-10-24 Sat]
+
+* Current backlog session -- 2026-10-24 (Sue, GPT-6 Codex)
+
+Scope is issues opened or substantially updated since the October 22 review.
+All five active recent issues were examined: #113, #141, #180, #191 and #251.
+Six older open issues remain metadata-only in this review.
+The inventory and bounded acceptance evidence are in PR #257, branch =backlog/2026-10-24= at =870a12c=.
+
+- Main :: PRs #254, #255 and #256 merged as =a6da415=, =e22ad7a= and =affb3e8=; GitHub, local main and the durable mirror were synchronized.
+- Merge status :: Fresh GitHub quick/full checks passed for #255 at =19ed2b4= and #256 at =cfc6ec3= before merging.
+  PR #257 at =c2bcadf= has a documentation refresh validated in job 40440135; fresh GitHub checks are pending.
+- Local validation :: Jobs 40439289 (#255), 40439290 (#141) and 40439291 (backlog evidence) completed with quick and slow tests passing.
+  Job 40439385 passed quick-check on the combined #255/#256 tree.
+- Issue 191 :: The owner chose to retain the absolute PD safety floor and raise runtime errors for invalid evaluated penalty coefficients under JIT.
+  The coherent robustness batch includes solver stagnation/rank/advisory fixes, group-layout guards, persisted used masks and atomic replacement, parameter ownership/mask dtype, anchored diagonal mode and penalty validation.
+  The checked-constructor regression was repaired and independently reviewed.
+  An owner answer is still required before publishing strict ownership behavior for constructors that erase leaf identity by copying; they previously fitted successfully and now raise for unproven ownership.
+  Initial combined tree =cc1210d= passed quick-check but failed two slow TR estimator gauge convergence assertions in job 40439616.
+  Traces matched baseline estimates/objectives exactly; the new accepted-only collapse classification caused the failures.
+  Corrected solver tree =f2d34f3b= uses the existing ftol observed-cost rule plus objective-relative unresolvable model gain for valid rejected proposals.
+  It preserves invalid/high-improvement failure; the two gauge tests and new scaling/nonlinearity/ftol guards pass focused checks.
+  Corrected source snapshot =4e02b2ce= passed quick-check in job 40440319; its slow suite is running.
+  Subsequent changes are limited to ledger/verification/handoff wording about the pending compatibility decision.
+  The code branch is =fix/191-robustness-final=, based on =cfc6ec3=; fresh GitHub checks remain required before merge.
+- Residual 251 :: The reviewed fixed, balanced paired-bundle bootstrap slice does not implement random-stratum/FPC or broader design support.
+- Residual 180 :: The known-DGP study has 582/600 truth coverage on both grids, full denominators and NPZ query parity.
+  The actual native consumer artifact still lacks profile-convergence provenance; do not infer it from finite p-values.
+- Residual 113 :: The FWL oracle matches means/AD derivatives while covariance contributions differ materially.
+  The additive aux proposal still needs the contribution/projection contract and manifold no-retrace acceptance; no model protocol change is implemented.
+- Next :: Publish the independently reviewed candidate as a draft PR for concrete review.
+  Finish slow tests and fresh GitHub checks; obtain the owner compatibility decision before marking ready and merging.
+  Update the tracker and this note as those gates complete.
+
+Scratch validation artifacts are under =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881=.
+Local worktrees are under =/local/job40438881/tmp=; only committed work survives job turnover durably.
+Use Sue commit identity and the GPT-6 Codex co-author trailer.
 
 * Current backlog session -- 2026-10-23 (Sue, GPT-6)
 

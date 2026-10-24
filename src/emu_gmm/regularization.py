@@ -63,7 +63,8 @@ of the "minimum-tau knob" anticipated in #8.
 
 The :math:`\\tau` search is implemented via bisection over a fixed
 number of iterations so the routine remains jit-compatible. The
-"anchor-once-then-freeze" policy that pins :math:`\\tau` to the
+"anchor-once-then-freeze" policy that pins :math:`\\tau` and the native
+ridge mode to the
 :math:`\\theta_{\\mathrm{init}}` evaluation lives in
 :mod:`emu_gmm.estimator`; the regulariser itself merely returns the
 optimal :math:`(V^\\star, \\tau)` for the ``V`` it is handed.
@@ -87,7 +88,7 @@ _BISECT_ITERS: int = 30
 _TAU_MAX: float = 1.0e3
 
 # Relative tolerance for the diagonal-V detector. ``V`` is treated as
-# diagonal when ``max|off-diag| <= _DIAG_RTOL * max(mean|diag|, 1.0)``.
+# diagonal when ``max|off-diag| <= _DIAG_RTOL * mean|diag|``.
 # Tight enough that a generic floating-point off-diagonal won't trip the
 # branch; loose enough to absorb roundoff in symmetrised covariance
 # constructions.
@@ -161,13 +162,17 @@ def _is_diagonal(V: Float[Array, "M M"]) -> Bool[Array, ""]:
 
     A matrix is treated as diagonal when the largest off-diagonal entry
     is below ``_DIAG_RTOL`` times the typical diagonal scale. The
-    comparison is jit-friendly (pure JAX, no Python branching) and
-    handles all-zero ``V`` gracefully via the ``max(..., 1.0)`` floor.
+    comparison is relative at every covariance scale. Normalize first to
+    avoid overflow in the diagonal mean; zero matrices compare 0 <= 0.
+    This detector is separate from the unchanged absolute PD safety floor.
     """
     diag = jnp.diag(V)
     off = V - jnp.diag(diag)
-    diag_scale = jnp.maximum(jnp.mean(jnp.abs(diag)), 1.0)
-    return jnp.max(jnp.abs(off)) <= _DIAG_RTOL * diag_scale
+    scale = jnp.max(jnp.abs(diag))
+    safe_scale = jnp.where(scale > 0.0, scale, 1.0)
+    return jnp.max(jnp.abs(off)) / safe_scale <= _DIAG_RTOL * jnp.mean(
+        jnp.abs(diag) / safe_scale
+    )
 
 
 def _apply_tau(
@@ -402,23 +407,24 @@ class DiagonalTikhonov:
         self,
         V: Float[Array, "M M"],
         tau: Float[Array, ""],
+        *,
+        diagonal_mode: Bool[Array, ""] | bool | None = None,
     ) -> Float[Array, "M M"]:
         """Return :math:`V + \\tau \\cdot R(V)` at a fixed, externally supplied :math:`\\tau`.
 
-        :math:`R(V)` is dispatched diagonally vs. non-diagonally exactly
-        as in :meth:`apply`. Detection happens on the supplied ``V``;
-        for a covariance family that is structurally diagonal at every
-        :math:`\\theta` (e.g. :class:`IIDCovariance` on uncorrelated
-        moments), the detection is stable along the optimisation path
-        and the residual surface stays :math:`C^1`.
+        With ``diagonal_mode=None``, detect the ridge formula from the
+        supplied ``V`` as in :meth:`apply`. This standalone default can
+        switch formulas across the detector threshold. Supply the mode
+        detected at an anchor to keep the formula fixed along a smooth
+        covariance family.
 
         This is the "anchor-once-then-freeze" application path: the
         :func:`emu_gmm.estimator.estimate` driver calls
-        :meth:`apply` once at :math:`\\theta_{\\mathrm{init}}` to obtain a
-        ``tau_anchor``; subsequent evaluations during optimisation route
-        through :meth:`apply_fixed_tau` with that anchored ``tau`` so the
-        residual surface is deterministic and :math:`C^1` in
-        :math:`\\theta`. See ``docs/design.org`` Section 5 and CLAUDE.md
+        :meth:`apply` once at :math:`\\theta_{\\mathrm{init}}` to obtain
+        ``tau_anchor`` and detects the mode from that same anchor matrix.
+        Subsequent native evaluations pass both values here. The ridge
+        then varies smoothly with ``V`` while its formula remains fixed.
+        See ``docs/design.org`` Section 5 and CLAUDE.md
         commitment 3 for the policy.
 
         Parameters
@@ -427,6 +433,9 @@ class DiagonalTikhonov:
         tau : scalar array
             The anchored ridge magnitude, computed by an earlier
             :meth:`apply` call. May be a Python float or a 0-d JAX array.
+        diagonal_mode : bool or scalar bool array, keyword-only, optional
+            Fixed diagonal/additive mode (True) or canonical mode (False).
+            None detects the mode from this call's ``V``.
 
         Returns
         -------
@@ -434,7 +443,11 @@ class DiagonalTikhonov:
             The regularised matrix.
         """
         tau_arr = jnp.asarray(tau)
-        is_diag = _is_diagonal(V)
+        is_diag = (
+            _is_diagonal(V) if diagonal_mode is None else jnp.asarray(diagonal_mode)
+        )
+        if is_diag.shape != () or is_diag.dtype != jnp.bool_:
+            raise ValueError("diagonal_mode must be a scalar boolean")
         return _apply_tau(V, tau_arr, is_diag)
 
 

@@ -225,7 +225,11 @@ def _min_horizontal_curvature(
     ``riemannian_tr._riemannian_hvp`` via a local import -- the TR module does
     not import this one, so there is no cycle.
     """
-    from emu_gmm.manifolds.riemannian_tr import _riemannian_hvp
+    from emu_gmm.manifolds.riemannian_tr import (
+        _build_plan,
+        _metric_diag,
+        _riemannian_hvp,
+    )
 
     K = int(x_flat.shape[0])
     eye = jnp.eye(K, dtype=x_flat.dtype)
@@ -233,6 +237,11 @@ def _min_horizontal_curvature(
         _riemannian_hvp(residuals, x_flat, manifold_spec, eye[:, j]) for j in range(K)
     ]
     H = jnp.stack(cols, axis=1)  # column j = H @ e_j
+    # The raised operator is self-adjoint in G, not in Euclidean coordinates.
+    # Similarity to the metric-orthonormal basis preserves its eigenvalues
+    # (ledger Sec. 20). For Frobenius leaves both factors are exactly one.
+    metric_sqrt = jnp.sqrt(_metric_diag(_build_plan(manifold_spec, K), x_flat))
+    H = metric_sqrt[:, None] * H / metric_sqrt[None, :]
     H = 0.5 * (H + H.T)  # symmetrise numerical residue before eigvalsh
     evals = jnp.linalg.eigvalsh(H)
     return float(evals[0]), float(evals[-1])

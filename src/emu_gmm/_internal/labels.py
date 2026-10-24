@@ -194,7 +194,7 @@ def normalise_mask(
     mask : (N, M) jax array of 0/1 floats
     """
     if mask_in is None:
-        return jnp.ones((n, m))
+        return jnp.ones((n, m), dtype=jnp.float64)
     if _is_pandas_frame(mask_in):
         arr = jnp.asarray(mask_in.to_numpy())
     elif _is_haliax_named(mask_in):
@@ -203,7 +203,7 @@ def normalise_mask(
         arr = jnp.asarray(mask_in)
     if arr.shape != (n, m):
         raise ValueError(f"normalise_mask: expected shape ({n}, {m}), got {arr.shape}")
-    return arr.astype(jnp.float32)
+    return arr.astype(jnp.float64)
 
 
 def _axis_coordinate_labels(axis: ha.Axis) -> tuple[str, ...] | None:

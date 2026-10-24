@@ -36,11 +36,38 @@ from typing import Any, Protocol, runtime_checkable
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
+import numpy as np
 from jaxtyping import Array, Float
 
 from emu_gmm._internal.params import flatten_params_for_ad
 
 ParamsLike = Any
+
+
+def _check_coefficient_metadata(shape: tuple[int, ...], dtype: Any) -> None:
+    real_numeric = jnp.issubdtype(dtype, jnp.integer) or jnp.issubdtype(
+        dtype, jnp.floating
+    )
+    if shape != () or not real_numeric:
+        raise ValueError("TikhonovPenalty.c must be a real numeric scalar")
+
+
+def _check_coefficient_value(c: Any) -> None:
+    value = np.asarray(c)
+    _check_coefficient_metadata(value.shape, value.dtype)
+    if not np.isfinite(value) or value < 0:
+        raise ValueError("TikhonovPenalty.c must be finite and non-negative")
+
+
+def _validated_coefficient(c: Any) -> Any:
+    # Inspect the original object: asarray of a captured Python scalar inside
+    # jit would create a tracer and unnecessarily add a callback (ledger 25).
+    if isinstance(c, jax.core.Tracer):
+        _check_coefficient_metadata(c.shape, c.dtype)
+        jax.debug.callback(_check_coefficient_value, c, ordered=True)
+    else:
+        _check_coefficient_value(c)
+    return jnp.asarray(c)
 
 
 @runtime_checkable
@@ -100,8 +127,14 @@ class TikhonovPenalty:
     Parameters
     ----------
     c : float or jax scalar (traced)
-        Non-negative penalty coefficient. Traced (not a static field) so
+        Finite, non-negative real scalar coefficient. Traced (not static) so
         users can sweep over ``c`` without retriggering compilation.
+        Validation runs when :meth:`penalty` is evaluated: invalid concrete
+        values raise ``ValueError``; genuinely traced values use a scalar
+        debug callback and raise JAX's runtime error wrapper under JIT.
+        Captured concrete values add no callback. Construction itself remains
+        unrestricted so JAX can reconstruct abstract carriers and cotangents,
+        whose coefficient-shaped leaf need not be a valid primal coefficient.
     """
 
     c: Float[Array, ""]
@@ -113,8 +146,9 @@ class TikhonovPenalty:
         flatten is used (see the class docstring for the gauge-invariance
         of the resulting ridge on a ``PSDFixedRank`` factor).
         """
+        c = _validated_coefficient(self.c)
         flat, _, _ = flatten_params_for_ad(theta)
-        return jnp.asarray(self.c) * jnp.sum(flat * flat)
+        return c * jnp.sum(flat * flat)
 
     def gradient(self, theta: ParamsLike) -> ParamsLike:
         """Return :math:`\\nabla_\\theta p(\\theta) = 2 c \\theta` shaped like ``theta``.

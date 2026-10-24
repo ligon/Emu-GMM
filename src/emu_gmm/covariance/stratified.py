@@ -56,6 +56,7 @@ import numpy as np
 from jaxtyping import Array, Float
 
 from emu_gmm._internal.nan_safety import safe_x_for_psi
+from emu_gmm.covariance._group_layout import validate_group_ids, validate_nesting
 from emu_gmm.covariance.clustered import ClusteredCovariance
 from emu_gmm.types import ParamsLike, StructuralModel
 
@@ -146,9 +147,8 @@ class StratifiedCovariance:
         the finite-population correction (``fpc=True``); pass zeros when
         ``fpc`` is off.
     n_psu, n_cells, n_strata : int (static)
-        Segment counts. ``n_psu`` must equal ``max(psu_ids) + 1`` for
-        0-based contiguous ids (``segment_sum`` silently drops ids
-        ``>= num_segments``).
+        Positive integer segment counts. Rounded IDs must lie within the
+        corresponding declared count; unused slots and gaps are allowed.
     fpc : bool (static), default ``False``
         Apply the :math:`(1 - H_{sD}/H_s)` finite-population correction
         (off by default; conservative). The numerator is the
@@ -158,6 +158,18 @@ class StratifiedCovariance:
         observability (which already enters via the dof and centering). See
         :meth:`_fpc_factor` and ``docs/design.org``. The FPC belongs to the
         design estimand (no masking); the masked GMM path runs ``fpc=False``.
+
+    Notes
+    -----
+    Evaluation validates concrete IDs, counts, row alignment, PSU nesting
+    in one cell/stratum, and cell nesting in one stratum, including when
+    FPC is off. Near-integer rounding uses
+    ``min(1e-6 + 8*eps(dtype)*max(1, abs(round(id))), 1e-3)``.
+    Shape, dtype and count checks remain active under JIT/vmap; genuinely
+    dynamic traced ID values and nesting must be checked by evaluating
+    each new layout eagerly before tracing. No runtime callback validates
+    them. Declared empty slots are inert. Support uses ``mask > 0`` even
+    at zero weight; weights change exposure and totals, not support counts.
     """
 
     psu_ids: Float[Array, " N"]
@@ -167,6 +179,31 @@ class StratifiedCovariance:
     n_cells: int = jdc.static_field()  # type: ignore[attr-defined]
     n_strata: int = jdc.static_field()  # type: ignore[attr-defined]
     fpc: bool = jdc.static_field(default=False)  # type: ignore[attr-defined]
+
+    def _validate_layout(self, n_rows: int) -> None:
+        """Check original rows before casts/segments (ledger Section 22)."""
+        psu = validate_group_ids(
+            self.psu_ids, self.n_psu, name="StratifiedCovariance.psu_ids", n_rows=n_rows
+        )
+        cell = validate_group_ids(
+            self.cell_ids,
+            self.n_cells,
+            name="StratifiedCovariance.cell_ids",
+            n_rows=n_rows,
+        )
+        stratum = validate_group_ids(
+            self.stratum_ids,
+            self.n_strata,
+            name="StratifiedCovariance.stratum_ids",
+            n_rows=n_rows,
+        )
+        validate_nesting(psu, cell, message="StratifiedCovariance: a PSU spans cells")
+        validate_nesting(
+            psu, stratum, message="StratifiedCovariance: a PSU spans strata"
+        )
+        validate_nesting(
+            cell, stratum, message="StratifiedCovariance: a cell spans strata"
+        )
 
     def covariance(
         self,
@@ -212,6 +249,7 @@ class StratifiedCovariance:
             (:class:`DiagonalTikhonov`) handles the finite-sample
             non-PD risk. This routine performs **no** internal PD repair.
         """
+        self._validate_layout(measure.mask.shape[0])
         mask = measure.mask  # (N, M)
         weights = measure.weights  # (N,)
 
@@ -336,6 +374,7 @@ class StratifiedCovariance:
         Returns a ``(n_cells, 1, 1)`` array that broadcasts identically over the
         ``(M, M)`` block of each cell.
         """
+        self._validate_layout(psu_seg.shape[0])
         # Populated-PSU indicator: an empty / over-declared slot must not be
         # counted (and its segment_max stratum/cell fill must not corrupt a real
         # one). We weight every count by ``populated`` and clip the segment_max
@@ -596,6 +635,30 @@ class DesignAwareCovariance:
             cell_pair_strata=pair_strata,
         )
 
+    def _validate_layout(self, n_rows: int) -> None:
+        """Validate both used children without changing their group semantics."""
+        self.design._validate_layout(n_rows)
+        if self.all_design:
+            return
+        clusters = validate_group_ids(
+            self.sampling.cluster_ids,
+            self.sampling.n_clusters,
+            name="DesignAwareCovariance.sampling.cluster_ids",
+            n_rows=n_rows,
+        )
+        if self.fixed_strata:
+            strata = validate_group_ids(
+                self.design.stratum_ids,
+                self.design.n_strata,
+                name="DesignAwareCovariance.design.stratum_ids",
+                n_rows=n_rows,
+            )
+            validate_nesting(
+                clusters,
+                strata,
+                message="fixed_strata=True requires sampling clusters nested in strata",
+            )
+
     def _sampling_cluster_strata(self, seg: Any) -> Any:
         return jnp.clip(
             jax.ops.segment_max(
@@ -611,6 +674,7 @@ class DesignAwareCovariance:
         self, measure: Any, psi_safe: Any = None
     ) -> tuple[Any, Any, Any]:
         """Return cluster-by-cell totals, exposure, and observed support."""
+        self._validate_layout(measure.mask.shape[0])
         clusters = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
         cells = jnp.round(self.design.cell_ids).astype(jnp.int32)
         flat = clusters * self.design.n_cells + cells
@@ -716,6 +780,7 @@ class DesignAwareCovariance:
         """
         if not self.fixed_strata or self.all_design:
             raise ValueError("pair diagnostics require mixed fixed_strata=True")
+        self._validate_layout(measure.mask.shape[0])
         seg = jnp.round(self.sampling.cluster_ids).astype(jnp.int32)
         strata = self._sampling_cluster_strata(seg)
         _totals, exposure, support = self._fixed_cell_components(measure)
@@ -851,6 +916,7 @@ class DesignAwareCovariance:
         No internal PD repair is performed; the regularization layer
         (:class:`DiagonalTikhonov`) handles it.
         """
+        self._validate_layout(measure.mask.shape[0])
         if self.all_design:
             return self.design.covariance(psi, theta, measure, cached_intermediates)
 
@@ -914,6 +980,7 @@ class DesignAwareCovariance:
         self-compute agree by construction. Used by :meth:`covariance` (when
         ``couple``) and exposed via :meth:`cross_block`.
         """
+        self._validate_layout(measure.mask.shape[0])
         if self.fixed_strata:
             V_cross = self._fixed_stratum_sampling(
                 psi, theta, measure, cached_intermediates

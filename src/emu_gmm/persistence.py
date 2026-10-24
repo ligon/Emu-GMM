@@ -46,6 +46,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import stat
+import uuid
 from typing import Any
 
 import jax
@@ -381,6 +384,22 @@ def _coupling_id_to_json(value: Any) -> Any:
     return _jsonable(value, what="coupling_id")
 
 
+def _validated_draws_used(draws: Any, used: Any, *, source: str) -> np.ndarray:
+    """Validate explicit draw validity without recomputing exclusions (#191)."""
+    values = np.asarray(draws)
+    mask = np.asarray(used)
+    if values.ndim != 2:
+        raise ValueError(f"{source}: draws must be a 2-D array, got {values.shape}")
+    if mask.dtype.kind != "b" or mask.shape != (values.shape[0],):
+        raise ValueError(
+            f"{source}: used must be a 1-D boolean mask with length "
+            f"{values.shape[0]}, got shape {mask.shape} and dtype {mask.dtype}"
+        )
+    if np.any(mask & ~np.all(np.isfinite(values), axis=1)):
+        raise ValueError(f"{source}: used mask includes nonfinite draw rows")
+    return mask
+
+
 def _empirical_state(law: EmpiricalLaw) -> LawState:
     """Build a :class:`LawState` from an empirical law (records- or draws-backed)."""
     if law._conditioned:
@@ -459,6 +478,7 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
         )
 
     # Draws-backed: persist the raw draws + {0,1}^E event flags.
+    used = _validated_draws_used(law._draws, law._used, source="save_law")
     events = (
         None
         if law._events is None
@@ -473,7 +493,7 @@ def _empirical_state(law: EmpiricalLaw) -> LawState:
         diagnostics={},
         backing="draws",
         draws=np.asarray(law._draws),
-        used=np.asarray(law._used, dtype=bool),
+        used=used,
         events=events,
     )
 
@@ -642,10 +662,30 @@ def _write_state(state: LawState, target: Any) -> None:
         # ".npz" to a file object, so the bytes are literal.
         np.savez(target, **arrays)  # type: ignore[arg-type]
     else:
-        # A filesystem path: open it ourselves so the path is LITERAL (np.savez
-        # would append ".npz" to a bare path, mismatching load_law's open).
-        with open(target, "wb") as fh:
-            np.savez(fh, **arrays)  # type: ignore[arg-type]
+        # Serialize beside the destination before replacing it (ledger Sec. 21).
+        # Exclusive creation avoids collisions and honors umask for new files.
+        path = os.path.abspath(os.fsdecode(target))
+        directory, filename = os.path.split(path)
+        temporary = os.path.join(directory, f".{filename}.{uuid.uuid4().hex}.tmp")
+        try:
+            target_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            target_mode = None
+        created = False
+        try:
+            with open(temporary, "xb") as fh:
+                created = True
+                # A handle keeps literal paths: np.savez must not append .npz.
+                np.savez(fh, **arrays)  # type: ignore[arg-type]
+                fh.flush()
+                if target_mode is not None:
+                    os.fchmod(fh.fileno(), target_mode)
+                os.fsync(fh.fileno())
+            os.replace(temporary, path)
+            created = False
+        finally:
+            if created:
+                os.unlink(temporary)
 
 
 def _read_state(target: Any) -> LawState:
@@ -849,13 +889,24 @@ def _state_to_empirical(state: LawState) -> EmpiricalLaw:
             record, component_shapes=state.component_shapes, label="empirical(loaded)"
         )
 
-    # Draws-backed.
-    return EmpiricalLaw.from_draws(
+    # Normalize draws/events with the existing constructor, then restore the
+    # persisted validity population rather than deriving it from finiteness.
+    normalized = EmpiricalLaw.from_draws(
         np.asarray(state.draws),
         names=tuple(state.param_names),
         component_shapes=state.component_shapes,
         events=state.events,
         label="empirical(loaded)",
+    )
+    used = _validated_draws_used(normalized._draws, state.used, source="load_law")
+    return EmpiricalLaw(
+        draws=normalized._draws,
+        used=used,
+        names=normalized._names,
+        component_shapes=normalized._component_shapes,
+        events=normalized._events,
+        label=normalized._label,
+        conditioned=state.conditioned,
     )
 
 
@@ -877,6 +928,10 @@ def save_law(
         object-store / URI-addressed law store (e.g. ``s3://``) write directly
         with no temp round-trip --- symmetric with :func:`load_law`, which goes
         through :func:`numpy.load` and already accepts a buffer.
+        Filesystem paths are written to a sibling temporary file, synced, and
+        atomically replaced; failures before replacement preserve an existing
+        artifact. Existing permission bits are preserved; new files honor umask.
+        Already-open file-like targets are written directly and are non-atomic.
     factory_spec
         Optional typed :class:`FactorySpec` recording the estimator
         configuration that is part of T's identity (#142): which weighting /

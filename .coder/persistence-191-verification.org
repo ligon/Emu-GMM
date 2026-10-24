@@ -1,0 +1,41 @@
+#+TITLE: Persistence robustness checks for issue 191
+#+DATE: 2026-10-24
+
+* Scope and fixtures
+
+Sue implemented ledger Section 21 on base =a6da415c52097c58c53482652719ed33f6334dc9=.
+The deterministic, estimation-free fixtures are in =tests/test_persistence_robustness_191.py=.
+
+The explicit draws-backed law has draws =[[1,2],[100,200],[3,4],[NaN,6]]=, used mask =[True,False,True,False]=, and an event selecting the first two rows.
+Its mean is =[2,3]= before and after reload; selecting the event leaves one used row with mean =[1,2]=.
+The old loader revived the finite excluded row and changed the law's query population.
+The new tests check raw draws, exclusions, scalar functionals, events, conditioning refusal, and re-save fidelity for paths and BytesIO.
+
+Malformed persisted masks cover wrong length, non-vector shape, integer dtype, nonfinite float mask, and a true mask at a nonfinite row.
+Save-side validation occurs before any existing artifact is touched.
+Entirely excluded finite draws remain a valid empty-used law.
+
+Atomic path tests inject partial serialization, fsync, and replacement failures, each with and without a pre-existing artifact.
+They check exact old bytes, continued reloadability, and absence of leftover temporary files.
+A replacement observer opens the complete sibling archive before replacement.
+The tests also check suffix-free paths, existing mode =0640=, new-file umask =0027=, and direct non-atomic file-like failure behavior.
+Only the tests temporarily set their own process umask; the implementation never changes it.
+
+* Focused command
+
+Run from this worktree, using the root environment read-only:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-persistence/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/test_persistence_robustness_191.py tests/test_persistence.py::TestEmpiricalRoundTrip tests/test_persistence.py::TestShardedProvenance tests/test_persistence.py::TestGuardrails::test_conditioned_empirical_law_save_refused tests/test_persistence.py::TestGuardrails::test_bare_npz_refuses -q
+#+end_src
+
+No full suite or Monte Carlo calibration runs locally.
+The canonical quick/full gates require an immutable snapshot in a separate Slurm allocation before commit or merge.
+
+* Results
+
+The focused command passed: 44 passed in 3.53 seconds, with no skips.
+Ruff and Black pass on the changed source and new regression file; =git diff --check= is clean.
+
+Verification against Section 21 :: *OK*: finite exclusions and conditioned metadata survive reload, malformed draw validity is refused, and failure injection preserves existing path artifacts without leaked temporary files.
+Records-backed provenance and typed/sharded keys continue to pass their existing regression tests.

@@ -35,6 +35,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Array, Float
 
+from ._group_layout import validate_group_ids
 from ._outer_product import _OuterProductCovariance, _safe_outer_divide
 
 
@@ -52,9 +53,9 @@ class ClusteredCovariance(_OuterProductCovariance):
         float32 round-off on a large code) bins to the right cluster rather
         than truncating into a neighbour. Integer-dtype arrays work directly.
     n_clusters : int (static)
-        Number of distinct cluster IDs. Must satisfy
-        ``max(cluster_ids) < n_clusters``. Treated as a static field so
-        the segment-sum output dimension is concrete at trace time.
+        Positive integer number of available cluster slots. Rounded IDs
+        must lie in ``[0, n_clusters)``; unused declared slots are allowed.
+        Static so the segment-sum output dimension is concrete at trace time.
     dof_correction : bool (static), default ``False``
         Apply the finite-cluster degrees-of-freedom correction
         :math:`G_{jk}/(G_{jk}-1)`, where :math:`G_{jk}` is the number of
@@ -84,6 +85,17 @@ class ClusteredCovariance(_OuterProductCovariance):
         convention. The single-PSU reduction to :class:`IIDCovariance` holds
         in both centering directions (the shared template subtracts the same
         :math:`m_j`; see the reduction test).
+
+    Notes
+    -----
+    Evaluation checks concrete IDs for finite near-integer values, row
+    alignment and declared range. The rounding tolerance is
+    ``min(1e-6 + 8*eps(dtype)*max(1, abs(round(id))), 1e-3)``.
+    Shape, dtype and count checks also run under JIT/vmap; runtime values
+    of genuinely dynamic traced IDs are not inspected. Evaluate each new
+    layout eagerly before using it as a traced input. No runtime callback
+    certifies dynamic ID values. Coordinate support is ``mask > 0`` even
+    when a row's weight is zero; weights change exposure and contributions.
     """
 
     cluster_ids: Float[Array, " N"]
@@ -125,6 +137,12 @@ class ClusteredCovariance(_OuterProductCovariance):
         """
         del weights, measure  # weight_mask already encodes d_ij * w_i
         # Per-observation contribution to moment j: d_ij * w_i * v_j.
+        validate_group_ids(
+            self.cluster_ids,
+            self.n_clusters,
+            name="ClusteredCovariance.cluster_ids",
+            n_rows=mask.shape[0],
+        )
         contrib = weight_mask * centered_psi  # (N, M)
         # segment_sum operates on the leading axis: sum the (N, M) contribution
         # along N grouped by cluster ID -> (n_clusters, M) cluster totals.
@@ -150,6 +168,12 @@ class ClusteredCovariance(_OuterProductCovariance):
         equals the total cluster count, so this is the scalar
         :math:`G/(G-1)`.
         """
+        validate_group_ids(
+            self.cluster_ids,
+            self.n_clusters,
+            name="ClusteredCovariance.cluster_ids",
+            n_rows=mask.shape[0],
+        )
         seg = jnp.round(self.cluster_ids).astype(jnp.int32)
         per_cluster_obs = jax.ops.segment_sum(
             (mask > 0.0).astype(mask.dtype), seg, num_segments=self.n_clusters

@@ -1,0 +1,61 @@
+#+TITLE: Parameter ownership and mask dtype checks for issue 191
+#+DATE: 2026-10-24
+
+* Scope and representation decisions
+
+Sue implemented ledger Section 23 on base =a6da415c52097c58c53482652719ed33f6334dc9=.
+The shared ownership helper first uses public registered PyTreeDef reconstruction with unique opaque leaf tokens.
+If a checked constructor refuses opaque objects, it retries with unique value-preserving JAX copies of numeric leaves and copied ManifoldLeaf wrappers retaining the same geometry.
+Only a probe leaf placed directly in exactly one root dataclass field establishes its name.
+This observes actual dynamic ownership, including foreign registrations and static metadata, without comparing parameter values or inspecting JDC internals.
+Nested descendants stay unnamed, and legacy annotations without a proven direct field refuse explicitly.
+The ordinary and manifold flatten buffers retain their original traversal order.
+
+The two spec builders continue to differ intentionally on legacy annotations: the spec builder honors a direct scalar Positive annotation, while the ambient flatten codec leaves that bare scalar Euclidean.
+Native ManifoldLeaf wrappers still carry their own geometry inside arbitrary containers.
+Root constructor invariants are retained by both probes, and the original leaves, flatten buffer, dtype and weak-value behavior are untouched.
+If a constructor transforms its inputs so direct identity still cannot be proved, native geometry remains available without inferred names and legacy annotations and flat-field labels refuse rather than guessing.
+Independent baseline comparison confirmed that a flat constructor assigning =jnp.array(field, copy=True)= previously fitted successfully.
+Strict ownership now refuses that identity-erasing case; this compatibility restriction is awaiting an owner decision before merge.
+This does not add a nested estimator parameter-label API.
+
+Convenience masks, explicit and inferred, use float64 consistently.
+The direct low-level EmpiricalMeasure constructor retains explicit float32 masks.
+Constructor missingness values are unchanged.
+
+* Deterministic regression data
+
+- Original corruption :: Static config, scalar sigma =2= annotated Positive, offsets =(-3,4)=.
+  The former field zip applied Positive to the first offset; the corrected spec assigns it to sigma and leaves both offsets Euclidean and unnamed.
+- Registered order :: A frozen slots dataclass flattens right before left, stores config as static metadata, and annotates left Positive.
+  Both distinct and duplicate numeric values preserve the registered order and correct annotation owner.
+- Constructor invariants :: Checked scalar and native wrapped fields reject bare objects in their constructors.
+  Value-preserving probes establish their names without bypassing those checks; actual estimate and factory reuse, native JIT and JIT/vmap, and parameter AD are covered.
+  A checked foreign slots registration also tests distinct and duplicate scalar values in reversed registered order.
+- Convenience masks :: Seven construction variants over =[[1,2],[3,4],[5,6]]= share one jitted expectation trace.
+  Additional missingness fixtures include NaN and infinity, with unchanged cell-wise and row-wise masks.
+
+* Focused command and results
+
+Run from this worktree using the root environment read-only:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-params/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/_internal/test_parameter_ownership_191.py tests/_internal/test_params.py tests/_internal/test_params_v2.py tests/_internal/test_params_spec_builder_phase2.py tests/_internal/test_params_manifold_leaf.py tests/_internal/test_labels.py tests/measures/test_mask_dtype_191.py tests/measures/test_empirical.py tests/measures/test_empirical_namedarray_mask.py -q
+#+end_src
+
+The initial token-only candidate passed 209 tests in 23.80 seconds but independent review exposed a checked-constructor compatibility regression.
+The corrected candidate adds actual estimator regressions and a value-preserving reconstruction fallback; focused results below supersede that initial candidate.
+The corrected ownership regression file passed 14 tests in 22.69 seconds, including checked scalar and native-wrapper estimation and factory reuse.
+The four existing params suites passed 74 tests in 5.86 seconds.
+These corrected-candidate commands were run separately:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-params/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/_internal/test_parameter_ownership_191.py -q
+env PYTHONPATH=/local/job40438881/tmp/issue191-params/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/_internal/test_params.py tests/_internal/test_params_v2.py tests/_internal/test_params_spec_builder_phase2.py tests/_internal/test_params_manifold_leaf.py -q
+#+end_src
+
+Ruff and Black pass on the changed source and regression files; =git diff --check= is clean.
+No full suite or calibration ran locally; canonical quick/full validation requires the consolidated immutable Slurm snapshot.
+
+Verification against Section 23 :: *OK*: direct dynamic ownership follows registered reconstruction, static fields are excluded, unproven nested labels and legacy annotations refuse, native containers remain supported, and intentional annotation divergence remains pinned by existing tests.
+The dtype change passes existing observability, constructor-validation, NaN/Inf, NamedArray-mask and label guards, plus the new convenience-constructor single-trace check.
