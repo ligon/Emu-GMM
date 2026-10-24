@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import numpy as np
 import pytest
 from emu_gmm import IIDCovariance, build_estimator, estimate
@@ -37,6 +38,27 @@ def _measure(seed: int) -> EmpiricalMeasure:
 
 def _theta0() -> EulerParams:
     return EulerParams(beta=0.9, gamma=1.0)
+
+
+@jdc.pytree_dataclass
+class _OtherTheta:
+    gamma: float
+    beta: float
+
+
+def test_factory_rejects_same_length_different_parameter_tree():
+    model = _CountingModel()
+    measure = _measure(seed=0)
+    run = build_estimator(
+        model,
+        measure=measure,
+        covariance=IIDCovariance(),
+        parameters=_theta0(),
+    )
+    calls_before = model.calls
+    with pytest.raises(ValueError, match="template parameter tree"):
+        run(_OtherTheta(gamma=1.0, beta=0.9), measure)
+    assert model.calls == calls_before
 
 
 class _CountingModel:

@@ -1,0 +1,51 @@
+#+title: Stratified derivative-moment cross covariance for K (#141)
+
+* Scope and existing definitions
+
+This note covers the pure =StratifiedCovariance= path.
+The mixed =DesignAwareCovariance= moment covariance now has default random-stratum and opt-in fixed-stratum semantics (#145).
+Its matched derivative-moment cross covariance has not been implemented for either mode, so automatic K inference there remains refused and callers must supply an explicit matched =score_cov_fn=.
+The K correction in =src/emu_gmm/inference/k_statistic.py= subtracts \(\widehat\Sigma_{G_a,m}(V^\star)^{-1}m\) from Jacobian column \(G_a\).
+The target \(\widehat\Sigma_{G_a,m}\) must use the same dependence structure and \(N_jN_k\) scale as the moment covariance \(V\); see =.coder/ledger.org= Sections 3, 4, and 7.6--7.7.
+
+* Matched per-cell, per-pair form
+
+At a fixed null parameter, the measure's contribution methods already return
+\[
+g_{ij}=d_{ij}w_i\psi_j(x_i,\theta_0),\qquad
+D_{ija}=d_{ij}w_i\partial_a\psi_j(x_i,\theta_0).
+\]
+For PSU \(g\), let \(T^m_{gj}=\sum_{i\in g}g_{ij}\) and \(T^D_{gja}=\sum_{i\in g}D_{ija}\).
+Let \(s_{gj}=\mathbf 1\{\sum_{i\in g}d_{ij}>0\}\), \(u_{g,jk}=s_{gj}s_{gk}\), and \(H_{c,jk}=\sum_{g\in c}u_{g,jk}\) for stratum-by-arm cell \(c\).
+The support convention uses \(d_{ij}>0\) even if \(w_i=0\), matching =StratifiedCovariance=.
+On the pair-supported PSUs in cell \(c\), define \(A^D_{c,jka}=\sum_{g\in c}u_{g,jk}T^D_{gja}\), \(B^m_{c,jk}=\sum_{g\in c}u_{g,jk}T^m_{gk}\), and \(P_{c,jka}=\sum_{g\in c}u_{g,jk}T^D_{gja}T^m_{gk}\).
+Then
+\[
+\widehat\Sigma_{G_a,m}[j,k]
+=\frac{1}{N_jN_k}\sum_c F_c\,\mathbf 1\{H_{c,jk}\geq2\}
+  \frac{H_{c,jk}}{H_{c,jk}-1}
+  \left(P_{c,jka}-\frac{A^D_{c,jka}B^m_{c,jk}}{H_{c,jk}}\right),
+\qquad N_j=\sum_i d_{ij}w_i.
+\]
+Here \(F_c=1\) by default; with FPC it is the engine's coordinate-independent \(1-H_{sD,c}/H_s\).
+A cell with fewer than two jointly supporting PSUs contributes zero; a zero \(N_j\) gives a zero row or column through the existing safe divide.
+
+This expression is the derivative/moment cross block of the tested stratified covariance engine applied to the augmented vector \((D_{\cdot,\cdot,1},\ldots,D_{\cdot,\cdot,p},g)\).
+The augmented pseudo measure uses binary copies of the original support mask and unit weights, because \(D\) and \(g\) already contain \(d_{ij}w_i\).
+The engine's cached denominator is explicitly set to repeated *original weighted* \(N_j\), avoiding a second mask/weight multiplication or a switch to support counts.
+This reuses pair support, within-cell centering, \(H/(H-1)\), FPC, and safe division without a parallel implementation.
+It materializes the full augmented \(((p+1)M)\times((p+1)M)\) covariance to extract only the derivative/moment cross block.
+The first slice is suitable for moderate \(p,M\); it does not provide a bounded-memory route.
+
+With one observation per PSU and one cell of \(H\) fully supported PSUs, the sample expression is \(H/(H-1)\) times the centered derivative/moment cross product divided by \(N_jN_k\).
+It is not bitwise equal to the uncentered IID cross product in one sample; under a zero null moment its expectation has the IID reduction.
+The tested one-cell reduction therefore asserts the centered sample identity rather than an incorrect finite-sample IID equality.
+
+* Verification and limits
+
+=tests/inference/test_k_statistic_stratified.py= independently loops over cells, PSUs, parameters, and moment pairs in NumPy; it covers unequal support, unequal weights, zero-weight support, FPC, \(H<2\), and zero \(N_j\).
+A public K call matches the independent =score_cov_fn= oracle.
+The seeded fixed-cell weak-identification null simulation (seed 141; 600 repetitions; 120 singleton PSUs, two fixed cells; \(\theta_0=0\)) produced matched mean \(p_K=0.4903\) and 30/600 rejections at nominal 5%.
+Using the deliberately uncentered IID derivative/moment cross term with the same stratified \(V\) gave mean \(p_K=0.4358\) and 36/600 rejections.
+This is a finite-sample regression check of the matched automatic path, not a universal calibration guarantee.
+The mixed design/sampling strategy continues to require an explicit =score_cov_fn= matched to its selected covariance mode and the package's \(N_jN_k\) scale.
