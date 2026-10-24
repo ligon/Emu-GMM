@@ -1,0 +1,81 @@
+#+TITLE: Native solver robustness checks for issue 191
+#+DATE: 2026-10-24
+
+* Scope and fixtures
+
+Sue implemented the bounded solver fixes from ledger Section 20 on base =a6da415c52097c58c53482652719ed33f6334dc9=.
+The reproducible fixtures live in =tests/manifolds/test_solver_robustness_191.py=.
+They are deterministic float64 examples with no random draws.
+
+- Small factor :: =1e-8 * [[1,0],[0,1],[0,0]]= with a Gram residual targeting twice its covariance, initial radius =1e-10=, maximum radius =1e-8=.
+  Before the fix every proposal was rejected and the unchanged point was certified after four steps with gradient =2.828427124746189e8=.
+- Invalid collapse :: A factor with singular values =1= and =1e-16=, initial radius =1e-10=, and a nonzero radial moment.
+  Rejected proposals now stop as =stagnated= with =done=False= under eager, jit, and jit/vmap execution.
+- Valid rejected collapse :: A gauge-invariant cubic residual in the first Gram diagonal has a rejected local-model step and a large gradient.
+  The same failure contract holds without a rank-invalid proposal.
+- Mixed metric :: The identity-shaped rank-two factor plus a Positive scalar at =10= has a coupled zero-residual least-squares minimum.
+  Before the fix the LM advisory reported minimum curvature =-17.672447925991523= and warned of a saddle.
+  A separate nonzero quadratic residual supplies a genuine saddle control.
+- Rank scale :: Each PSD factor uses its own singular-value scale, including factors differing by =1e24= and nearly parallel columns whose Gram eigenvalues cancel.
+- Trace :: Unwritten tCG stop codes equal =-1=; Frobenius advisory eigenvalues retain exact equality with the former calculation.
+
+* Focused commands
+
+Run from this worktree, using the root environment read-only:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-solvers/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/manifolds/test_solver_robustness_191.py tests/manifolds/test_riemannian_lm_advisory.py::TestCurvatureProbeDetector tests/manifolds/test_rtr_trust_region.py::TestRankDropBoundaryStepRejected::test_rank_drop_step_is_rejected_not_nan tests/manifolds/test_rtr_reductions.py::TestPositiveHvpConnectionTerm tests/manifolds/test_rtr_reductions.py::TestEuclideanReductionVsPymanopt -q
+#+end_src
+
+The pymanopt checks skip when its optional development dependency is absent.
+The canonical quick and full gates must run on an immutable snapshot in a separate Slurm allocation before committing or merging.
+The accepted-step ftol and accepted valid radius-floor policy remain in force; the rejected-floor extension below uses the existing ftol and does not change TR geometry.
+
+* Focused results
+
+The command above passed: 28 passed, 2 skipped in 44.38 seconds.
+The skips are the optional pymanopt Euclidean parity cases; pymanopt is absent from the shared development environment.
+The existing rank-loss rejection, Positive HVP connection, and Frobenius curvature detector checks all ran.
+Ruff passes on the three modified source files and the new regression file; Black reports those files formatted, and =git diff --check= is clean.
+No full suite or Monte Carlo calibration was run in the persistent slice.
+
+Verification against Section 20 :: *OK*: the relative rank criterion matches the established law convention; the new guard uses per-factor singular values, not Gram eigenvalues.
+The Frobenius advisory comparison is exact, mixed-metric minima and saddles are distinguished, and rejected-collapse failure flags survive eager, jit, and jit/vmap paths.
+
+* Rejected cost-floor follow-up
+
+The first consolidated slow gate exposed two failures in =TestEstimatorPathGaugeInvariance=, at ranks two and three.
+The accepted-bit restriction classified numerically equivalent accurate fits differently at the CU cost floor.
+A bounded reproduction on the initial solver snapshot and on unchanged =a6da415= returned bit-identical points, objectives, gradients, step counts, and traces in all four runs.
+Only the new failure classification differed.
+
+| Rank / gauge | Initial classification | Gradient norm | Objective | Maximum Gamma error |
+|--------------+------------------------+---------------+-----------+---------------------|
+| 2 / a        | stagnated              | 7.894475e-7   | 8.273611  | 9.773505e-4         |
+| 2 / b        | stagnated              | 7.876905e-7   | 8.273611  | 9.773505e-4         |
+| 3 / a        | converged              | 5.242873e-9   | 0.893646  | 1.862517e-3         |
+| 3 / b        | stagnated              | 1.340459e-6   | 0.893646  | 1.862517e-3         |
+
+Gamma differences between gauges were =1.78e-15= at rank two and =2.02e-13= at rank three.
+The failing proposals were finite and full rank, with predicted decreases of =3.17e-20= and =1.38e-19=, respectively.
+Their evaluated objective differences were instead negative at approximately =1e-12= and =2e-13=.
+The rank-three rotated run also misses a guessed =1000 eps (abs(cost) + abs(proposed_cost))= bound, so that guessed bound was not adopted or tuned.
+
+The bounded extension retains the accepted-step policy and permits a rejected proposal at the collapsed radius to certify /cost stagnation/ only if the proposal and both costs are finite and valid, its nonnegative predicted improvement is at most =eps * abs(cost)=, and its observed absolute change is at most the existing =ftol * abs(cost)=.
+This is not a gradient-stationarity certificate.
+It has no absolute objective floor or new tolerance.
+Radius collapse or rejection alone still cannot certify convergence.
+
+New controls include residual scaling by =1e-8=, which retains a material predicted relative gain, and a =1e40= cubic residual term whose tiny model gain accompanies a large actual increase.
+Both remain failures; the nonlinear mismatch is checked eagerly, under jit, and under jit/vmap.
+A deterministic =1e-12= residual evaluation jump certifies with the existing default ftol but fails with =ftol= set to =1e-14= and =0=.
+The expanded solver regression file passed: 24 passed in 54.61 seconds.
+The previously failing rank-two and rank-three estimator gauge tests and the existing curvature, rank-loss, and Positive-HVP controls passed together: 14 passed, 2 optional pymanopt skips in 74.04 seconds.
+
+The original diagnosis scripts and exact pre-extension traces are saved in =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/= as =diagnose191_tr.py=, =diagnose191_tr_rejected.py=, =diagnose191-tr-solver.log=, and =diagnose191-tr-baseline.log=.
+Reproduce the parameter/trace comparison with the corresponding source worktree selected in both environment variables:
+
+#+begin_src sh
+env REPRO_ROOT=/local/job40438881/tmp/issue191-solvers PYTHONPATH=/local/job40438881/tmp/issue191-solvers/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python /global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/diagnose191_tr.py
+env PYTHONPATH=/local/job40438881/tmp/issue191-solvers/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/manifolds/test_solver_robustness_191.py tests/manifolds/test_rtr_gauge_numerical.py::TestEstimatorPathGaugeInvariance -q
+#+end_src

@@ -150,6 +150,7 @@ from emu_gmm.covariance import (
     DesignAwareCovariance,
     StratifiedCovariance,
 )
+from emu_gmm.covariance._group_layout import validate_group_ids
 from emu_gmm.regularization import DiagonalTikhonov
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -320,6 +321,12 @@ def _sigma_jm_clustered_from_contributions(
     :func:`_sigma_jm_iid_from_contributions` (verified in
     ``tests/inference/test_k_statistic.py::TestSingletonClustersMatchIID``).
     """
+    validate_group_ids(
+        cluster_ids,
+        n_clusters,
+        name="k_statistic.cluster_ids",
+        n_rows=g.shape[0],
+    )
     segment_ids = jnp.round(cluster_ids).astype(jnp.int32)
     # Cluster totals on the moment side: (n_clusters, M)
     g_totals = jax.ops.segment_sum(g, segment_ids, num_segments=n_clusters)

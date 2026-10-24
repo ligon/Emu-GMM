@@ -1,0 +1,90 @@
+#+TITLE: Parameter ownership and mask dtype checks for issue 191
+#+DATE: 2026-10-24
+
+* Scope and representation decisions
+
+Sue implemented ledger Section 23 on base =a6da415c52097c58c53482652719ed33f6334dc9=.
+The shared ownership helper first uses public registered PyTreeDef reconstruction with unique opaque leaf tokens.
+If a checked constructor refuses opaque objects, it retries with unique value-preserving JAX copies of numeric leaves and copied ManifoldLeaf wrappers retaining the same geometry.
+The reconstructed probe is re-flattened using the same opaque ManifoldLeaf boundary.
+Its PyTreeDef and leaf count must match the original, and only an output leaf placed directly in exactly one root dataclass field establishes its name.
+That output identity must occur once in the registered traversal, and its owner must differ by identity from the same original root field, excluding unchanged static aliases.
+The positional mapping uses JAX's lawful stable PyTree reconstruction contract; no data-dependent traversal is inferred.
+This observes actual dynamic ownership, including foreign registrations and static metadata, without comparing parameter values or inspecting JDC internals.
+Nested descendants stay unnamed, and legacy annotations without a proven direct field refuse explicitly.
+The ordinary and manifold flatten buffers retain their original traversal order.
+
+The two spec builders continue to differ intentionally on legacy annotations: the spec builder honors a direct scalar Positive annotation, while the ambient flatten codec leaves that bare scalar Euclidean.
+Native ManifoldLeaf wrappers still carry their own geometry inside arbitrary containers.
+Root constructor invariants are retained by both probes, and the original leaves, flatten buffer, dtype and weak-value behavior are untouched.
+Copying constructors remain supported because output ownership is independent of whether their input token identity survives construction.
+If registered output leaves still cannot prove direct ownership, native geometry remains available without inferred names and legacy annotations and flat-field labels refuse rather than guessing.
+This does not add a nested estimator parameter-label API.
+
+Convenience masks, explicit and inferred, use float64 consistently.
+The direct low-level EmpiricalMeasure constructor retains explicit float32 masks.
+Constructor missingness values are unchanged.
+
+* Deterministic regression data
+
+- Original corruption :: Static config, scalar sigma =2= annotated Positive, offsets =(-3,4)=.
+  The former field zip applied Positive to the first offset; the corrected spec assigns it to sigma and leaves both offsets Euclidean and unnamed.
+- Registered order :: A frozen slots dataclass flattens right before left, stores config as static metadata, and annotates left Positive.
+  Both distinct and duplicate numeric values preserve the registered order and correct annotation owner.
+- Constructor invariants :: Checked scalar and native wrapped fields reject bare objects in their constructors.
+  Value-preserving probes establish their names without bypassing those checks; actual estimate and factory reuse, native JIT and JIT/vmap, and parameter AD are covered.
+  A checked foreign slots registration also tests distinct and duplicate scalar values in reversed registered order.
+  Copying scalar and native constructors additionally exercise actual estimate and factory reuse, and copying scalars exercise JIT, JIT/vmap, parameter AD, and original dtype/identity preservation.
+  The reversed foreign slots registration copies its fields, retaining correct names for equal and distinct values.
+- Aliases :: Shared original values in a static field, direct dynamic field, and container descendant are separated by the probe without mutating the originals.
+  Constructor-forced duplicate output aliases and reintroduced untouched static aliases remain unproven and refuse legacy binding.
+- Convenience masks :: Seven construction variants over =[[1,2],[3,4],[5,6]]= share one jitted expectation trace.
+  Additional missingness fixtures include NaN and infinity, with unchanged cell-wise and row-wise masks.
+
+* Focused command and results
+
+Run from this worktree using the root environment read-only:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-params/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/_internal/test_parameter_ownership_191.py tests/_internal/test_params.py tests/_internal/test_params_v2.py tests/_internal/test_params_spec_builder_phase2.py tests/_internal/test_params_manifold_leaf.py tests/_internal/test_labels.py tests/measures/test_mask_dtype_191.py tests/measures/test_empirical.py tests/measures/test_empirical_namedarray_mask.py -q
+#+end_src
+
+The initial token-only candidate passed 209 tests in 23.80 seconds but independent review exposed a checked-constructor compatibility regression.
+The corrected candidate adds actual estimator regressions and a value-preserving reconstruction fallback; focused results below supersede that initial candidate.
+The corrected ownership regression file passed 14 tests in 22.69 seconds, including checked scalar and native-wrapper estimation and factory reuse.
+The four existing params suites passed 74 tests in 5.86 seconds.
+These corrected-candidate commands were run separately:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-params/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/_internal/test_parameter_ownership_191.py -q
+env PYTHONPATH=/local/job40438881/tmp/issue191-params/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/_internal/test_params.py tests/_internal/test_params_v2.py tests/_internal/test_params_spec_builder_phase2.py tests/_internal/test_params_manifold_leaf.py -q
+#+end_src
+
+Ruff and Black pass on the changed source and regression files; =git diff --check= is clean.
+No full suite or calibration ran locally; canonical quick/full validation requires the consolidated immutable Slurm snapshot.
+
+Verification against Section 23 :: *OK*: direct dynamic ownership follows registered reconstruction, static fields are excluded, unproven nested labels and legacy annotations refuse, native containers remain supported, and intentional annotation divergence remains pinned by existing tests.
+The dtype change passes existing observability, constructor-validation, NaN/Inf, NamedArray-mask and label guards, plus the new convenience-constructor single-trace check.
+
+* Output ownership compatibility follow-up
+
+The earlier input-token identity requirement rejected copying constructors even when their registered numeric reconstruction was lawful and had worked before this change.
+The final implementation identifies direct ownership from the reconstructed probe's registered /output/ leaves instead.
+Their tree definition and leaf count must match, every output identity must be unique, exactly one direct field must own it, and that field must differ by identity from the same original root value.
+This preserves copying constructors without comparing parameter values, guessing field order, bypassing constructors, or consulting JDC internals.
+The earlier proposed copying-constructor compatibility restriction and its pending approval are superseded.
+
+The lawful stable registration requirement is the existing JAX contract: registered leaf positions retain their meaning across reconstruction.
+A constructor that forces one input leaf to replace another cannot independently reconstruct its registered leaves; such duplicate output aliases remain unproven.
+An unchanged static value reintroduced as a nested dynamic leaf also remains unproven.
+A flatten operation that synthesizes fresh leaves instead of returning stored direct fields cannot establish a direct root-field name by identity.
+These cases fail closed instead of assigning another field's geometry.
+
+Final focused verification passed: 21 ownership regressions in 34.99 seconds and 200 existing params, spec, label, mask, and empirical constructor checks in 22.39 seconds.
+The copying scalar checks cover equal and distinct starts, actual estimate and factory reuse, JIT, JIT/vmap, AD, original leaf identity, and mixed dtypes.
+The copying native wrapper checks cover actual estimate and factory reuse; reversed copying foreign registration preserves duplicate values and static metadata.
+Ruff and Black pass on the source and regression file.
+The scratch proof and output are retained at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/ownership-output-probe191.py= and =ownership-output-probe191.log=.
+
+The first combined gate for this output-mapping update stopped before pytest because mypy rejected direct PyTreeDef inequality.
+Object-interface casts preserve the runtime structural comparison; targeted mypy and Black checks pass after that typing-only correction.

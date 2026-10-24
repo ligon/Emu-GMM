@@ -61,6 +61,8 @@ This document deliberately interleaves settled architecture, planned design, pro
 |                | =k_confidence_set=      | Identification-robust set by grid inversion                | =inference/confidence_set.py=    |
 |                | =moment_wild_bootstrap= | Cluster-wild Rademacher/Mammen J bootstrap                 | =inference/wild_bootstrap.py=    |
 |                | =cluster_bootstrap=     | Refit-based cluster bootstrap                              | =inference/cluster_bootstrap.py= |
+|                | =stratified_bootstrap=  | Refit PSUs within fixed stratum-by-arm cells                | =inference/stratified_bootstrap.py= |
+|                | =mixed_bootstrap=       | Refit paired bundles within fixed strata                   | =inference/mixed_bootstrap.py= |
 |                | =adaptive_bootstrap=    | Precision-targeted stopping rule for batched bootstraps    | =inference/adaptive.py=          |
 |----------------+-------------------------+------------------------------------------------------------+----------------------------------|
 | Results        | =EstimationResult=      | Labelled \(\hat\theta\), SEs, J p-values, functional SEs   | =types.py=                       |
@@ -415,6 +417,13 @@ Alternative regularisers are planned as opt-in; =DiagonalTikhonov= is the only i
 - *Higham nearest-PSD* [cite:@higham88]: project to the nearest positive semidefinite matrix in Frobenius norm. Most principled, slowest.
 
 To avoid introducing non-smoothness into the objective surface, \(\tau\) is selected once at an anchor point and held fixed thereafter. /Implemented policy/: the anchor is the \(V\) built by the covariance strategy at \(\theta_{\mathrm{init}}\), for *every* weighting strategy (=Fixed= / =Iterated= included --- the earlier sketch of a first-stage-\(\hat\theta_1\) anchor for those strategies was simplified away; see =api-sketch.org= Section 6 question 3). =build_estimator= computes the anchor once at /factory/ time from its template measure, so repeated calls of the returned estimator share one \(\tau\) --- deliberate, for cross-fit comparability (see issue #123 for the semantics note). The chosen \(\tau\), the achieved \(\kappa(V_\mu^\star)\), and the Cholesky pivot floor are surfaced on =Diagnostics= at convergence; a binding ridge is a diagnostic flag rather than silently absorbed.
+
+For the native =DiagonalTikhonov= strategy, the diagonal-versus-canonical ridge mode is also detected at the same anchor and held fixed with tau.
+This prevents a smooth covariance family from switching ridge formulas when it crosses the diagonal detector threshold during optimisation.
+Factory reuse retains its template's mode and tau; =replicate(anchor_per_rep=True)= rebuilds both for each dataset.
+Custom regularizers and native subclasses retain their own two-argument =apply_fixed_tau(V, tau)= behavior.
+The standalone native method accepts =diagonal_mode=True/False= to pin a mode explicitly; its default =None= detects the supplied matrix on each call.
+The detector uses a relative off-diagonal comparison at every scale, while the existing absolute positive-definiteness safety floor remains unchanged.
 
 *Implementation note --- diagonal-V dispatch.* The canonical form \(V + \tau\,\operatorname{diag}(V)\) is degenerate when \(V\) is itself diagonal: it collapses to \((1+\tau)\,V\), which leaves \(\kappa(V^\star) = \kappa(V)\) regardless of \(\tau\), so the bisection over \(\tau\) silently saturates at \(\tau_{\max}\) without ever achieving the target. =DiagonalTikhonov= therefore dispatches: it detects near-diagonal \(V\) with relative tolerance \(10^{-12}\) on the off-diagonal entries and switches to the additive eigenvalue shift
 \[ V^\star = V + \tau\,\frac{\operatorname{tr}(V)}{M}\,I, \]

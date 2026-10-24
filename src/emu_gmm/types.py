@@ -290,13 +290,14 @@ class OptimizerInfo:
     stalled_indefinite: Any = None
     min_curvature: Any = None
 
-    # #210 (Riemannian-LM numerical-stagnation exit): traced 0-d bool, set by
-    # ``riemannian_lm`` only. ``True`` when the solve stopped early on a
+    # #210 / #191 (native Riemannian numerical-stagnation exit): traced 0-d
+    # bool. ``True`` when the LM solve stopped early on a
     # rejected step from which no later step could be accepted (the retracted
     # proposal was bitwise the current point, or the LM step / damping went
     # nonfinite) -- a FAILURE report, exclusive with ``done``: the requested
     # stationarity test did not pass, so the estimator's ``converged`` stays
-    # ``False``. Eager ``status`` is ``"stagnated"``. ``None`` on every other
+    # ``False``. TR also sets it on rejected / invalid collapsed-radius stops.
+    # Eager ``status`` is ``"stagnated"``. ``None`` on every other
     # backend (additive, backward-compatible, same pattern as ``done``).
     stagnated: Any = None
 

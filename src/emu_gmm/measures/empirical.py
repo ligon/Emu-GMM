@@ -782,7 +782,7 @@ class EmpiricalMeasure:
             # NaN or +/-inf. Both are "missing" -- an inf cell left
             # mask-ON would be silently rewritten by safe_x_for_psi
             # below, fabricating an observation.
-            mask_arr = jnp.isfinite(x_arr).astype(jnp.float32)
+            mask_arr = jnp.isfinite(x_arr).astype(jnp.float64)
             m = int(x_arr.shape[1])
         else:
             m = int(x_arr.shape[1])
@@ -940,7 +940,7 @@ class EmpiricalMeasure:
             # time, so a (N, D) mask with M != D produces an opaque
             # shape error from inside the hot path -- pass M= explicitly
             # to avoid that trap.
-            mask_arr = jnp.isfinite(x_arr).astype(jnp.float32)
+            mask_arr = jnp.isfinite(x_arr).astype(jnp.float64)
         else:
             if not isinstance(M, int) or M <= 0:
                 raise ValueError(
@@ -955,7 +955,7 @@ class EmpiricalMeasure:
             # u'(c_{t+1}) / u'(c_t) * r_{t+1} reads three columns to
             # build one scalar).
             row_finite = jnp.all(jnp.isfinite(x_arr), axis=1)  # (N,)
-            mask_arr = jnp.broadcast_to(row_finite[:, None], (n, M)).astype(jnp.float32)
+            mask_arr = jnp.broadcast_to(row_finite[:, None], (n, M)).astype(jnp.float64)
 
         # Substitute the per-column observed-mean sentinel at
         # non-finite cells rather than ``0.0`` so that partial

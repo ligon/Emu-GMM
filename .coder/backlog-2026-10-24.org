@@ -10,7 +10,7 @@ Repository: [[https://github.com/ligon/Emu-GMM][ligon/Emu-GMM]], default/develop
 The initial inspected checkout was clean =413018db4e833056b00bf4365b8d803299045af6=.
 Retrieval began at 2026-10-24 15:54 UTC: connector open searches plus the paginated REST issues endpoint (100/page, exhausted), individual discussions, PR metadata, reviews, threads, and CI.
 There were eleven open issues and two open draft PRs.
-The five active recent issues are #113, #141, #180, #191, and #251; six older open issues are metadata-only in this pass.
+The five issues in the recent review scope are #113, #141, #180, #191, and #251; six older open issues are metadata-only in this pass.
 Recently closed issues were inventoried for reconciliation, without reopening or claiming a fresh acceptance audit of every closed item.
 No assignees are set on the active five.
 Issue #113 carries =missing-feature= and =from-seasonality=; the other four have no labels.
@@ -25,22 +25,23 @@ Issues #113 and #141 have milestone v2.1.
 - Tests :: =make quick-check= before commits; full regression via non-slow plus slow suites or CI full-suite shards. No acceptance tolerance changes or new dependencies.
 - Temporary artifacts :: =/local/job40438881/tmp/backlog-2026-10-24=; shared validation snapshots/logs at =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881=.
 
-* Queue and dispositions
+* Dispositions in this batch
 
 #+name: tab:recent-backlog-20261024
-| Order | Issue | Disposition | Completion criterion / next action |
-|-------+-------+-------------+------------------------------------|
-| 1 | #191 | Partially addressed | Merge #254; audit every residual against current code, fix demonstrated correctness defects first. |
-| 2 | #251 | In progress | Merge reviewed fixed paired-bundle slice #255 after ledger integration and validation; retain unsupported-design residual. |
-| 3 | #141 | Partially addressed | Extend matched K derivative/moment covariance to both mixed modes with exposure/centering fidelity, independent oracles and null calibration. |
-| 4 | #180 | Partially addressed | Actual native consumer artifact + explicit validity provenance, round-trip evidence, larger known-DGP calibration and grid refinement. |
-| 5 | #113 | Needs contract/oracle | Reconcile FWL moments versus covariance contributions, weighted/masked two-way projection, and manifold no-retrace acceptance before API changes. |
+| Issue | Disposition | Evidence / remaining acceptance |
+|-------+-------------+---------------------------------|
+| #191 | Addressed on this branch | PR #254 plus the reviewed PR #258 robustness batch; final release gates below. |
+| #141 | Resolved | Pure-stratified PR #252 and mixed-design PR #256, merged as affb3e8. |
+| #251 | Partially addressed | PR #255 merged as e22ad7a; default random-stratum, FPC and broader designs remain open. |
+| #180 | Partially addressed | PR #257 known-DGP study complete; native provenance/protocol acceptance remains. |
+| #113 | Needs contract review | FWL oracle complete; additive aux and manifold reuse contracts remain to implement. |
 
-Correctness defects in #191 rank before features because silent data loss, misclassification, or false convergence can invalidate existing output.
-#251 already has a reviewed bounded implementation and completed confirmation evidence, so its integration precedes new statistical machinery.
-#141 builds directly on the settled covariance engines and unblocks mixed-design robust inference.
-#180 has finite-grid machinery but lacks all requested consumer/coverage evidence.
-#113 changes the model contract and requires a precise oracle before implementation.
+This batch prioritizes demonstrated correctness defects and bounded implementations with independent acceptance evidence.
+The remaining dependency-ordered queue is:
+
+1. #113: pin the sample-reduction contribution/projection contract, explicit behavior for each measure path, and the separate manifold no-retrace gate before changing the model protocol.
+2. #180: choose and freeze a new native inference protocol/environment/input manifest, then time a one-point preflight before budgeting the full event-complete artifact run.
+3. #251: define default random-stratum and FPC/without-replacement resampling targets before extending the validated fixed balanced-bundle implementation.
 
 ** Older open issues (metadata only)
 
@@ -77,20 +78,23 @@ Both SE denominators are 50/50 and every cross-block sign agrees.
 This confirms one just-identified paired fixed-profile fixture with balanced exposures and (1,1) bundles; it does not establish weighted/sparse/nonlinear/multi-PSU bundle coverage.
 Recompute: =taskset -c 42-43 nice -n 19 python3 /global/scratch/users/ligon/emu-gmm-251-aggregate.py 40422901=.
 
-* Evidence needing disposition
+* Acceptance and remaining followups
 
 ** #191
 
-The factory tree bug is fixed by #254.
-The claimed missing =MomentsBacking.build= validation in =_state_to_asymptotic= is obsolete on current main; exact history and other residuals are being audited.
-Zero-weight support counts are an explicit mask-observability convention (ledger Section 15), not a license to alter the covariance's effective-PSU definition.
+PR #254 fixes the factory tree bug; the claimed missing MomentsBacking.build validation was already obsolete after PR #219.
+PR #258 supplies concrete group-layout guards, relative TR rank checks and valid cost-stagnation classification, metric-correct LM advisories, preserved used masks and atomic path replacement, strict registered ownership, consistent convenience-mask dtype, frozen native ridge mode and invalid-penalty errors.
+Concrete IDs/nesting must be validated before genuinely dynamic tracing; shape/dtype/count guards still run under tracing.
+The owner chose the existing absolute PD safety floor and runtime errors for invalid traced penalty coefficients, and accepted strict ownership checks.
+The final ownership design also preserves ordinary copying constructors; its proposed compatibility restriction was avoided.
+Zero-weight support remains the mask-observability convention, and cost-stagnation certification remains distinct from gradient stationarity.
 
 ** #141
 
-#252 implements and calibrates the pure StratifiedCovariance case.
-The issue title/body was narrowed to the remaining mixed scope, preserving the completed pure-design work and original acceptance criteria.
-A naive reuse of the augmented pseudo-measure with binary support and unit weights would give the wrong fixed-mode exposure projection.
-The mixed extension must retain original weighted exposure and sampling centering, as well as TT/SS/TS partition, FPC, dof and ablation settings.
+PR #252 supplies the pure StratifiedCovariance case.
+PR #256 completes both mixed DesignAwareCovariance modes by retaining original weighted exposure, sampling centering, TT/SS/TS partition, FPC, dof and ablation settings through the existing covariance engine.
+Independent NumPy oracles, public K equivalence, JIT/vmap and reductions passed; fresh GitHub quick/full checks passed before merge.
+The bounded weak-null calibration and its fixed-negative 7 percent rejection result are recorded below without an exact-size claim.
 
 ** #180
 
@@ -98,6 +102,10 @@ The actual saved native consumer summary is present at =K-Aggregators/var/het_ro
 It contains native full-vector K with df=21, distinct from the legacy subvector df=1, and no accepted point on its seven-point grid.
 It omits profiled-fit convergence indices, so finite p-values alone cannot certify all-known rejection under the package's present validity contract.
 A correct import must preserve this uncertainty or regenerate event-complete native outputs; do not manufacture convergence from finite p-values.
+Further native feasibility review found no historical Emu-GMM runtime pin or input hashes; ignored generated modules are required for a new clone, and readable input timestamps postdate the historical artifact.
+The old driver uses Fixed nuisance weighting and full-vector prose, while the current profiler uses a subvector reference and warns about missing CU concentration under Fixed weighting.
+A new run needs its own method identity, dependency/input manifest and event-complete output; it cannot recover historical convergence merely by rerunning newer code.
+Issue #180 records source/input pins, staging requirements and a timed one-point preflight as the next bounded check.
 
 ** #113
 
@@ -110,16 +118,17 @@ The next independent check separates a preprojected instrument's FWL moment iden
 #+name: tab:backlog-priority-dimensions-20261024
 | Item | Impact | Urgency/readiness | Effort | Confidence |
 |------+--------+-------------------+--------+------------|
-| #191 | Silent variance/state corruption and false solver status | Current correctness; bounded fixes ready for integrated gate | Several small/medium patches | High: direct reproductions and targeted regressions |
-| #251 | Enables paired fixed-design refit uncertainty | Reviewed implementation; integration ready | Small merge; broader designs separate | High within bounded fixture; general coverage unknown |
-| #141 | Enables mixed-design identification-robust K inference | Settled covariance semantics and independent oracles | Medium adapter/testing/calibration | High implementation; bounded finite-sample evidence |
+| #191 | Silent variance/state corruption and false solver status | Implemented candidate; final release gates below | Implemented and independently reviewed | High: direct reproductions and targeted regressions |
+| #251 | Enables paired fixed-design refit uncertainty | Fixed slice merged; broader designs need contracts | Medium/large subsequent design work | High within bounded fixture; general coverage unknown |
+| #141 | Enables mixed-design identification-robust K inference | Resolved by PR #256 | Complete | High implementation; bounded finite-sample evidence |
 | #180 | Missing native consumer acceptance evidence | Carrier exists; historical event provenance absent | Medium study plus event-complete consumer fixture | High on metadata gap; general set-law scope deferred |
 | #113 | Data closures force retracing; residual ambiguity changes covariance | Executable oracle ready; model contract needs review | Large model/measure/manifold integration | High problem evidence; proposed contract needs validation |
 
-Coverage reconciliation: five recent issues examined (three primary partially addressed, one in progress, one needs contract/oracle), plus six older open issues inventoried but not technically reassessed.
+Coverage reconciliation: all five scoped recent issues examined and actioned; two have complete implementation candidates on this branch, two retain bounded residual acceptance work, and one needs model-contract review.
+Six older open issues were inventoried but not technically reassessed.
 The twenty recently closed issue records were retrieved for historical reconciliation; this pass does not claim a fresh full acceptance audit of those closures.
 
-* Execution update -- 2026-10-24 17:12 UTC snapshot
+* Execution evidence -- 2026-10-24 18:12 UTC review snapshot
 
 PR #255 integration is committed as =19ed2b4= and pushed to its original GitHub branch after quick-check.
 Free job 40439289 completed all lint/type/non-slow/slow checks on exact tree =cf4ee3e3=, exit 0, in 13:17; its predecessor 40439155 was deliberately cancelled before completion when validation switched to the repository-supported parallel test settings.
@@ -142,11 +151,21 @@ The declared four-null-MCSE band is satisfied (null MCSE 0.008898), but 97% is n
 The actual historical native consumer artifact still lacks convergence provenance; this study cannot replace it.
 
 The owner chose to retain the absolute PD safety floor and raise an error for invalid evaluated penalty coefficients, including JIT calls.
-The remaining #191 candidate combines relative TR rank/stagnation, metric-correct LM advisories, validated group layouts, used-mask/atomic persistence, parameter ownership/mask dtypes, frozen ridge mode, and explicit invalid penalty errors.
-Each cluster has a separate frozen worktree and targeted regression evidence.
-The combined corrected tree =cc1210d0754adf4cbf2d4b19efb6f8a6fa9a9c52= passed quick-check in job 40439616; the slow suite is running.
-Checked scalar/native constructors and factory reuse pass independent regressions.
-A confirmed compatibility restriction for constructors that erase leaf identity is awaiting an owner decision before publication: such fits previously worked and now refuse unproven ownership.
+The #191 candidate combines relative TR rank/stagnation, metric-correct LM advisories, validated group layouts, used-mask/atomic persistence, parameter ownership/mask dtypes, frozen ridge mode, and explicit invalid penalty errors.
+The initial combined slow gate caught two gauge-convergence classification regressions; neither tolerance nor recovery guarantees were weakened.
+The revised model-gain plus existing-ftol certificate passed independent regressions and full quick/slow validation in job 40440319.
+The copying-constructor regression was then removed through lawful registered output mapping, unique identity and fresh-owner guards; independent naming, actual estimate, factory reuse and alias controls passed.
+The owner accepted strict checks; the final candidate preserves copying support as well.
+Final copying-compatible source snapshot =93c4e420= passed quick-check and all slow tests in job 40441138 (exit 0).
+Integrated source/report tree =634bc950= passed quick-check in job 40441970 (exit 0), including the #113 oracle and 24-draw #180 persistence/calibration smoke.
+The smoke supplements the recorded 600-draw study; it does not replace it.
+Only Org validation-status wording changed after this integrated gate.
+The first attempt 40440582 stopped before pytest on a typing error; object-interface casts corrected it and targeted mypy/Black passed.
+No failed or interrupted run is counted as a green gate.
+
+Current main =76fb9a2= contains merged PRs #254, #255, #256 and #257 and is integrated into this branch.
+Fresh GitHub quick-check and every full-suite shard on the pushed PR #258 head remain required before merge.
+After this batch, the remaining recent issue queue is #113, #180 and #251 as specified above.
 
 Priority-account usage began at 72605.86/1500000 SUs; all dispatched compute uses free co_carleton allocations.
 Initial serial jobs 40439155,40439235,40439236,40439249 were deliberately cancelled and replaced by bounded parallel gates; no infrastructure failure is implied.
@@ -154,9 +173,10 @@ Source snapshots and logs remain in the shared scratch directory recorded above.
 
 * Action journal
 
-2026-10-24: merged #254 and #255; synchronized GitHub, local main and durable mirror; dispatched independent reviews, residual #191 fixes and #141 extension.
-PR #256 awaits fresh CI; PR #257 contains the reproducible #113/#180 evidence.
-Issue #251 now tracks only its unsupported design/calibration residual, and #180 records the completed known-DGP study separately from missing native provenance.
+2026-10-24: merged PRs #254, #255, #256 and #257 after reviewed-head checks and synchronized GitHub, node-local main and durable mirror after each merge.
+Issue #141 is closed; issue #191 is addressed by the PR #258 candidate and may close only after its final gates and merge.
+Issue #251 now tracks its remaining design/calibration scope, and #180 records completed known-DGP evidence separately from native provenance/protocol work.
+Issue #113 retains its concrete oracle and additive contract proposal.
 No external comments were sent.
 
 -- Sue

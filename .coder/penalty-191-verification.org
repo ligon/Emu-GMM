@@ -1,0 +1,43 @@
+#+TITLE: Native penalty coefficient validation for issue 191
+#+DATE: 2026-10-24
+
+* Scope and representation choice
+
+Sue implemented ledger Section 25 on base =a6da415c52097c58c53482652719ed33f6334dc9=.
+The user's selected contract is an error for an evaluated negative or nonfinite native Tikhonov coefficient, including under JIT; the absolute covariance PD floor remains unchanged.
+Only =penalty.py= changes production behavior.
+Custom PenaltyStrategy implementations retain their existing protocol behavior.
+
+The validator runs at penalty evaluation, not construction.
+JAX reconstructs cotangents in the same PyTree class as primals, and the cotangent of =-penalty(theta)= with respect to a valid coefficient =1= has coefficient-shaped value =-4= when theta =2=.
+That is a legal cotangent carrier and must not fail during reconstruction; evaluating it as a new primal coefficient still raises.
+Abstract and placeholder carriers likewise remain constructible.
+
+Shape and real-numeric dtype validation remain static under tracing.
+Concrete invalid coefficients raise ValueError, while genuinely traced values use an ordered scalar =jax.debug.callback= and propagate JAX's runtime error wrapper.
+The original coefficient object is checked before JAX conversion, so a captured Python scalar, NumPy scalar, or concrete JAX scalar introduces no callback into its compiled penalty.
+Quadratic arithmetic and differentiation remain native JAX operations.
+
+* Deterministic regressions
+
+- Invalid values :: =-1=, NaN, positive infinity and negative infinity fail under eager evaluation, JIT, vmap, and JIT/vmap.
+- Static guards :: Non-scalar, complex, boolean, string and None coefficients fail with a real-scalar error.
+- Dtypes :: Valid integer, float32, float64 and bfloat16 coefficients retain their values under eager/JIT evaluation.
+- AD :: First derivatives with respect to theta and c, a second derivative with respect to c, and negative cotangent reconstruction remain valid.
+- Elimination guard :: Invalid c still raises when theta is zero and even when differentiating that identically zero arithmetic, because the validation effect remains live.
+- Effects :: Fixed valid captured coefficients have no debug callback or effects in their JAXPR; dynamic vmapped callbacks execute in scalar batch order.
+- Integration :: A fixed negative native coefficient raises from an eager estimate instead of entering its square-root residual as NaN.
+
+* Focused command and results
+
+Run from this worktree, using the root environment read-only:
+
+#+begin_src sh
+env PYTHONPATH=/local/job40438881/tmp/issue191-penalty/src nice -n 19 taskset -c 28-29 /local/job40438881/mirrors/Emu-GMM/.venv/bin/python -m pytest tests/test_penalty_validation_191.py tests/test_penalty.py::TestTikhonovPenaltyValue tests/test_penalty.py::TestTikhonovPenaltyGradient tests/test_penalty.py::TestProtocolConformance tests/test_penalty.py::TestTikhonovPenaltyManifold -q
+#+end_src
+
+Result: 50 passed in 6.27 seconds, no skips, under installed JAX 0.10.1.
+Ruff and Black pass on the changed source and regression file; =git diff --check= is clean.
+No full suite or calibration ran locally; the consolidated immutable Slurm gate remains required.
+
+Verification against Section 25 :: *OK*: evaluated coefficients fail loudly under the requested transforms, fixed valid coefficients add no callback, native scalar/manifold math and AD remain intact, and construction still supports cotangent and abstract carriers.

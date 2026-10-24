@@ -102,7 +102,7 @@ from emu_gmm.optimizer import (
     optimistix_lm,
 )
 from emu_gmm.penalty import PenaltyStrategy
-from emu_gmm.regularization import DiagonalTikhonov
+from emu_gmm.regularization import DiagonalTikhonov, _is_diagonal
 from emu_gmm.runtime import maybe_warn_cpu_oversubscription
 from emu_gmm.types import (
     CovarianceStrategy,
@@ -680,9 +680,16 @@ def build_estimator(
     # like tau_anchor itself. Traced 0-d bool; False for regularisers
     # without the concept (the _binding_ridge pattern).
     tau_saturated_anchor = _tau_saturated(regularization, V0, tau_anchor)
+    # Native mode and tau share the same anchor (ledger Section 24).
+    # Exact type identity preserves custom subclass two-argument overrides.
+    diagonal_mode_anchor = (
+        _is_diagonal(V0) if type(regularization) is DiagonalTikhonov else None
+    )
 
     def _apply_anchored(V: Float[Array, "M M"]) -> Float[Array, "M M"]:
-        """Apply the ridge at the anchored ``tau_anchor`` deterministically."""
+        """Apply the anchored tau and, for the native regularizer, its mode."""
+        if type(regularization) is DiagonalTikhonov:
+            return apply_fixed_tau(V, tau_anchor, diagonal_mode=diagonal_mode_anchor)
         return apply_fixed_tau(V, tau_anchor)
 
     # Detect whether the measure / covariance combination supports the
@@ -1493,7 +1500,7 @@ def build_estimator(
     # emu_gmm.studies.replicate(anchor_per_rep=True) can run the bare
     # estimate() path per replicate -- the anchor-once-then-freeze tau
     # policy (commitment 3) is per-FIT semantics, and this factory
-    # freezes the TEMPLATE measure's anchor (tau_anchor above) across
+    # freezes the TEMPLATE measure's anchor (tau and native diagonal mode) across
     # every subsequent call. An additive function attribute (the #139
     # fix's function-attribute pattern); the values are the RESOLVED
     # strategies (defaults applied, optimiser dispatched), so a per-rep
