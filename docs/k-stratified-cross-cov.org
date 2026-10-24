@@ -1,10 +1,10 @@
-#+title: Stratified derivative-moment cross covariance for K (#141)
+#+title: Design-matched derivative-moment cross covariance for K (#141)
 
 * Scope and existing definitions
 
-This note covers the pure =StratifiedCovariance= path.
-The mixed =DesignAwareCovariance= moment covariance now has default random-stratum and opt-in fixed-stratum semantics (#145).
-Its matched derivative-moment cross covariance has not been implemented for either mode, so automatic K inference there remains refused and callers must supply an explicit matched =score_cov_fn=.
+Automatic K inference supports pure =StratifiedCovariance= and both modes of =DesignAwareCovariance= when the measure supplies empirical contributions, masks, and weights.
+The derivative/moment cross covariance uses the same TT/SS/TS dependence and normalization as the selected moment covariance, including the opt-in fixed-stratum exposure projection (#145).
+Other measures can supply an explicit matched =score_cov_fn=.
 The K correction in =src/emu_gmm/inference/k_statistic.py= subtracts \(\widehat\Sigma_{G_a,m}(V^\star)^{-1}m\) from Jacobian column \(G_a\).
 The target \(\widehat\Sigma_{G_a,m}\) must use the same dependence structure and \(N_jN_k\) scale as the moment covariance \(V\); see =.coder/ledger.org= Sections 3, 4, and 7.6--7.7.
 
@@ -41,6 +41,26 @@ With one observation per PSU and one cell of \(H\) fully supported PSUs, the sam
 It is not bitwise equal to the uncentered IID cross product in one sample; under a zero null moment its expectation has the IID reduction.
 The tested one-cell reduction therefore asserts the centered sample identity rather than an incorrect finite-sample IID equality.
 
+* Mixed TT/SS/TS construction
+
+For a mixed strategy, each derivative column inherits the design/sampling classification of its original moment coordinate.
+Repeating the original classification over the augmented vector makes the covariance engine choose the matching TT, SS, or TS rule for every derivative/moment pair.
+The all-design case delegates exactly to the pure-stratified helper.
+The all-sampling case retains the selected sampling semantics.
+
+Weighted exposure matters here.
+The fixed-stratum engine projects each cell component on its original weighted exposure, not on the count of observed rows.
+Its augmented pseudo measure therefore retains repeated original masks and original weights; safely dividing the adjusted contributions by their original exposure recovers pseudo residuals, with zero at zero exposure.
+The cached tuple carries the actual augmented means, exposure, and original weighted denominators.
+This also preserves the global centering of random-mode SS when =sampling.centered=True=, while random-mode TS remains uncentered as specified by the selected mixed covariance.
+Fixed-mode SS/TS use their ordered-cell-pair projection and local trace correction instead.
+
+The original child strategies, =couple=, =fixed_strata= and validated cell-pair geometry are retained when the moment mask is repeated.
+We copy the already validated dataclass rather than rerun its eager factory under JIT.
+Design FPC continues to affect TT only; random-mode sampling dof corrections continue to affect SS and TS; fixed-mode sampling dof correction remains refused by its factory.
+The extracted derivative/moment cross slice need not be symmetric in its moment indices.
+Like the pure-stratified helper, this construction materializes the full augmented covariance and is intended for moderate parameter and moment dimensions.
+
 * Verification and limits
 
 =tests/inference/test_k_statistic_stratified.py= independently loops over cells, PSUs, parameters, and moment pairs in NumPy; it covers unequal support, unequal weights, zero-weight support, FPC, \(H<2\), and zero \(N_j\).
@@ -48,4 +68,7 @@ A public K call matches the independent =score_cov_fn= oracle.
 The seeded fixed-cell weak-identification null simulation (seed 141; 600 repetitions; 120 singleton PSUs, two fixed cells; \(\theta_0=0\)) produced matched mean \(p_K=0.4903\) and 30/600 rejections at nominal 5%.
 Using the deliberately uncentered IID derivative/moment cross term with the same stratified \(V\) gave mean \(p_K=0.4358\) and 36/600 rejections.
 This is a finite-sample regression check of the matched automatic path, not a universal calibration guarantee.
-The mixed design/sampling strategy continues to require an explicit =score_cov_fn= matched to its selected covariance mode and the package's \(N_jN_k\) scale.
+The mixed deterministic checks are in =tests/inference/test_k_statistic_mixed.py=.
+They compare original-coordinate NumPy PSU/cluster and exposure-projection calculations with automatic cross covariance, including unequal and fractional masks, zero weights, FPC, centering, dof corrections, uncoupled blocks, reductions, and JIT/vmap execution.
+The reproducible mixed weak-null study is =scripts/validation/mixed_k_calibration.py=; its JSON summaries report finite and invalid denominators separately for each matched or deliberately unmatched cross covariance.
+No general mixed calibration guarantee follows from these deterministic identities or one study fixture.
