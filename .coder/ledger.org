@@ -1060,6 +1060,15 @@ fixed-profile use case without a general coverage guarantee.
 The SHA-pinned Slurm job 40409988 completed exit zero in 1:56:15; its
 clean output is =.coder/design-145-cell-coverage-300-2026-10-23.log=.
 
+* Section 15 -- Pure stratified K cross covariance (#141)
+
+1. Task :: Compute the automatic design-matched \(\Sigma_{G,m}\) for pure =StratifiedCovariance=, leaving mixed =DesignAwareCovariance= refused.
+2. Existing machinery :: =src/emu_gmm/covariance/stratified.py= constructs the pair-supported within-cell Neyman covariance with \(H_{c,jk}/(H_{c,jk}-1)\), optional cell FPC, and \(N_jN_k\) scaling. =src/emu_gmm/measures/empirical.py= supplies mask- and weight-adjusted moment and derivative contributions. =src/emu_gmm/inference/k_statistic.py= already accepts =score_cov_fn= and dispatches IID/clustered contribution estimators. =tests/covariance/test_stratified.py= supplies an independent pair-support oracle.
+3. Invariants :: A derivative/moment cross entry uses precisely the PSUs supporting both moment coordinates in each stratum-by-arm cell; support is =mask>0= even when weight is zero. The same cell FPC is used for every pair. \(N_j\) is the original weighted mask sum, not a binary support count. Cells with \(H<2\) and zero-denominator coordinates contribute zero.
+4. Reuse decision :: Apply the tested stratified covariance engine to an augmented vector of already adjusted derivative and moment contributions, with repeated binary support, unit pseudo weights, and cached original weighted \(N_j\). Extract the derivative/moment cross block; do not multiply mask/weights again.
+5. Boundaries :: The one-cell singleton-PSU sample result is centered with its Bessel factor, so equality with the uncentered IID estimator holds in expectation at a zero null moment, not sample by sample. =DesignAwareCovariance= remains fail-closed because its matched derivative-moment cross covariance has not been implemented for either the default random-stratum or opt-in fixed-stratum semantics (Section 14). An explicit matched =score_cov_fn= is required.
+6. Verification :: =docs/k-stratified-cross-cov.org= gives the derivation. Independent unequal-support/weights/FPC and singleton-reduction tests, public K oracle parity, and a seeded 600-repetition fixed-cell weak-null calibration pass; matched mean \(p_K=0.4903\) and 30/600 nominal-5% rejections, versus mean \(p_K=0.4358\) under a deliberately wrong uncentered IID cross term.
+
 * Section 16 -- Exact null-recentred cluster-refit J law (#185)
 
 1. Task :: Add an opt-in, finite-draw J reference law to the existing whole-cluster refit bootstrap only when every original cluster has positive exposure for every moment.

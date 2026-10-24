@@ -937,11 +937,7 @@ class TestScoreCovFnPath:
 
 
 class TestDesignSandwichRefused:
-    """StratifiedCovariance / DesignAwareCovariance have no matched
-    Sigma_{G,m} form yet; silently using the IID form mis-scales the
-    orthogonalisation (#41, surfaced by the Seasonality consumer). The
-    dispatch must refuse with actionable guidance.
-    """
+    """The mixed design/sampling Sigma_{G,m} still needs a matched form."""
 
     def _measure(self):
         measure, _cov, theta_true = _simulate_clustered_dataset(
@@ -949,7 +945,7 @@ class TestDesignSandwichRefused:
         )
         return measure, _OneParam(theta=theta_true)
 
-    def test_stratified_refused(self):
+    def test_stratified_supported(self):
         from emu_gmm.covariance import StratifiedCovariance
 
         measure, theta_0 = self._measure()
@@ -962,8 +958,8 @@ class TestDesignSandwichRefused:
             n_cells=1,
             n_strata=1,
         )
-        with pytest.raises(ValueError, match="score_cov_fn"):
-            k_statistic(theta_0, measure, design, model=_linear_psi, V=jnp.eye(3))
+        result = k_statistic(theta_0, measure, design, model=_linear_psi, V=jnp.eye(3))
+        assert np.isfinite(float(result.K))
 
     def test_design_aware_refused(self):
         from emu_gmm.covariance import DesignAwareCovariance, StratifiedCovariance
