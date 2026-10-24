@@ -1,0 +1,57 @@
+#+TITLE: Sample reductions: a contract oracle for issue 113
+#+AUTHOR: Sue
+#+OPTIONS: toc:nil
+
+* Question and existing machinery
+
+The row-only model contract cannot express a parameter-dependent within-sample projection without closing over the data.
+The next contract must preserve both the moment mean and the covariance of its contributions, while letting fresh data flow through the compiled solve.
+Matching the mean alone does not settle the consumer discrepancy.
+
+Search tier: source, ripgrep and git.
+=measures/empirical.py:368= owns =expectation_and_contributions=, the shared mask-safe residual, exposure and per-coordinate denominator pass.
+=tests/test_estimator_realdata.py:180= implements the existing parameter-dependent group-mean closure; the frozen-data acceptance estimates must remain unchanged.
+=estimator.py:532,566= gate the traced-measure optimizer paths; =:629= probes a single observation for moment labels.
+The K-Aggregators consumer's =src/cv_consumer_lf.py:407= alternates product and market projections, while =src/cereal_emu_het.py:127= uses the raw parameter-dependent outcome against projected instruments.
+
+* Definitions and invariants
+
+For a fixed nonnegative weight matrix W and dummy design F, let P be the weighted orthogonal projector onto F and M=I-P.
+If an instrument z is already projected using the same W, then z' W M y equals z' W y.
+This identity also holds for the parameter derivative when F and W do not depend on the parameter.
+It does not identify per-row contributions: z_i (M y)_i and z_i y_i generally have different cluster totals and hence different covariance estimates.
+With moment-specific observability, the projection must be defined on each coordinate's own exposure, or an explicit common estimation population; a projection under different weights or support does not inherit the identity.
+On an unbalanced panel, one product pass followed by one market pass is generally not the joint weighted projection.
+An iterative projection needs its own numerical convergence event; fixed iteration count alone is not a convergence certificate.
+
+* Proposed bounded API slice
+
+Retain plain =psi(x_i, theta)= unchanged.
+For an explicitly opted-in two-stage model, define a sample reduction =aux(measure, theta)= and a row evaluation using that auxiliary state.
+The shared empirical contribution pass computes aux once per evaluation, inside the differentiated objective, and feeds the same residual matrix to moment means, covariance, and Jacobian contributions.
+Group IDs are data leaves; declared group counts, model configuration and output labels are static.
+Masked rows and zero-weight exposures must be handled before nonlinear operations, preserving the existing NaN discipline.
+The one-row label probe must use prepared auxiliary state or explicit labels rather than calling the row method without its prerequisite.
+Unsupported measure paths must fail with an explicit contract error; an analytical expectation function needs a declared adapter rather than being silently vmapped as empirical data.
+
+The first implementation should cover the empirical consumer and preserve all three existing measure paths for ordinary models.
+A separate acceptance check must generalize the factory's traced-measure manifold path: computing aux correctly does not itself eliminate closure recompilation for fresh manifold datasets.
+No covariance or inferential quantity moves into the consumer.
+
+* Executable oracle
+
+Run =XLA_FLAGS=--xla_force_host_platform_device_count=1 taskset -c 48-49 nice -n 19 .venv/bin/python scripts/validation/sample_reductions_113.py= from the checkout (adapt affinity to the allocation).
+Seed 113 uses 90 synthetic unbalanced rows, two moment-specific masks, unequal weights, seven product effects and six market effects.
+The package empirical expectation, JAX AD and ClusteredCovariance give maximum mean and derivative gaps 9.16e-16 and 6.66e-16, but a covariance-block gap 1.46017.
+Projected-residual variances are [0.06489,0.00646], versus raw-residual [1.52506,0.40243].
+This demonstrates why an FWL mean identity alone cannot settle a GMM covariance contract.
+It is a deterministic counterexample, not a coverage study or an estimator redesign.
+
+* Review boundary and next action
+
+Before changing the model protocol, run a small weighted unbalanced-panel oracle comparing raw/preprojected moment means, their AD derivatives, and their cluster covariance contributions.
+Then pin the consumer's intended residual contribution and projection population; this is a statistical contract decision, not an API naming choice.
+The proposed API is additive, but its unsupported analytical-model behavior and manifold no-retrace guarantee need to be agreed before calling the complete issue implemented.
+Issue 113 remains active with this concrete implementation boundary.
+
+-- Sue

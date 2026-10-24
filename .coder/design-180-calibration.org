@@ -1,0 +1,35 @@
+#+TITLE: Random-set known-DGP calibration: grounding for issue 180
+#+AUTHOR: Sue
+#+OPTIONS: toc:nil
+
+* Task and existing machinery
+
+Extend the 24-draw fixed-curve smoke to a reproducible repeated-sampling check of exact-grid capacity at the true point, preserving all validity denominators and NPZ query parity.
+The existing linear model and strong-ID DGP are in =tests/test_random_set_law.py:155-193=.
+=emu_gmm.inference.k_statistic= owns K and its null p-value, and =inference/confidence_set.py::_assemble_set= owns the same finite-grid inversion assembly used by =k_confidence_set=.
+=RandomSetLaw.from_k_confidence_sets=, =coverage=, =capacity= and =save/load= already own the carrier, denominators and persistence.
+Search tier: ripgrep, source and tests.
+
+* Definitions and invariants
+
+The true parameter is 1 and must be an exact point of both coarse and refined grids.
+A draw with nonfinite p at that point has unknown membership, not a rejection.
+The fixed-curve path has no nuisance minimization and hence no profile nonconvergence event.
+Capacity at the singleton truth equals coverage.
+Compare grids at common scanned points: a finer grid cannot change their mathematical membership, although grid-empty events may change.
+Report requested, decidable, invalid and nonconverged counts, the rejection fraction, Monte Carlo standard error and a predeclared four-MCSE falsification band.
+The check tests this known DGP only; it does not establish continuous-domain capacity or profiled weak-ID coverage.
+
+* Reuse decision
+
+Reuse public =k_statistic= under JIT/vmap for batch evaluation, then reuse the existing confidence-set assembler and finite-grid carrier.
+No statistic, covariance, inversion or persistence implementation is replaced.
+Batch data generation is new harness code, using seed 180 and the existing linear fixture's distribution.
+The actual native consumer summary's missing convergence provenance remains a separate acceptance item; this study does not fill it in.
+
+* Next action
+
+Run a small harness smoke, then a separate bounded Slurm calibration with 600 repeated datasets of 220 rows.
+Keep the original consumer output and inferential reference (native df=21 versus subvector df=1) distinct.
+
+-- Sue
