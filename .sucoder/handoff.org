@@ -10,7 +10,7 @@ The inventory and bounded acceptance evidence are in PR #257, branch =backlog/20
 
 - Main :: PRs #254, #255 and #256 merged as =a6da415=, =e22ad7a= and =affb3e8=; GitHub, local main and the durable mirror were synchronized.
 - Merge status :: Fresh GitHub quick/full checks passed for #255 at =19ed2b4= and #256 at =cfc6ec3= before merging.
-  PR #257 at =c2bcadf= has a documentation refresh validated in job 40440135; fresh GitHub checks are pending.
+  PR #257 at =c2bcadf= passed fresh quick/full checks and merged as =76fb9a2=; main is integrated into this branch.
 - Local validation :: Jobs 40439289 (#255), 40439290 (#141) and 40439291 (backlog evidence) completed with quick and slow tests passing.
   Job 40439385 passed quick-check on the combined #255/#256 tree.
 - Issue 191 :: The owner chose to retain the absolute PD safety floor and raise runtime errors for invalid evaluated penalty coefficients under JIT.
@@ -26,15 +26,17 @@ The inventory and bounded acceptance evidence are in PR #257, branch =backlog/20
   The copying-compatible combined source needs a fresh immutable quick/slow gate and GitHub checks.
   Its initial gate 40440582 stopped at a mypy PyTreeDef comparison error before pytest; object-interface casts corrected the typing without changing runtime behavior, and targeted mypy/Black passed.
   The new ownership implementation changes params.py and its regressions, with corresponding ledger/verification/handoff updates.
-  Last committed checkpoint is =e92c211dbf184945c21302beea644ac0ff522a73=; the reviewed copying-preservation update is staged for the next gate.
+  Last committed checkpoint is =c0a6ba5=; the final update preserves copying constructors and passed quick-check on source tree =93c4e420= in job 40441138.
+  Its slow suite is running; current main =76fb9a2= is integrated and the report/handoff refresh awaits its combined quick-check.
   The code branch is =fix/191-robustness-final=, based on =cfc6ec3=; fresh GitHub checks remain required before merge.
 - Residual 251 :: The reviewed fixed, balanced paired-bundle bootstrap slice does not implement random-stratum/FPC or broader design support.
 - Residual 180 :: The known-DGP study has 582/600 truth coverage on both grids, full denominators and NPZ query parity.
   The actual native consumer artifact still lacks profile-convergence provenance; do not infer it from finite p-values.
 - Residual 113 :: The FWL oracle matches means/AD derivatives while covariance contributions differ materially.
   The additive aux proposal still needs the contribution/projection contract and manifold no-retrace acceptance; no model protocol change is implemented.
-- Next :: Refresh draft PR #258 with the independently reviewed copying-preservation update after quick-check.
-  Validate the copying-compatible source and fresh GitHub head before marking ready and merging.
+- Next :: Finish the copying-compatible slow gate and combined-tree quick-check; commit the main/report integration and push PR #258.
+  Mark ready and merge only after fresh GitHub quick/full checks.
+  The scoped remaining followups after this batch are #113, #180 and #251; the report and live issue bodies carry their concrete next checks.
   Update the tracker and this note as those gates complete.
 
 Scratch validation artifacts are under =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881=.
