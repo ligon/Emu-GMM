@@ -49,8 +49,8 @@ It is a deterministic counterexample, not a coverage study or an estimator redes
 
 * Review boundary and next action
 
-Before changing the model protocol, run a small weighted unbalanced-panel oracle comparing raw/preprojected moment means, their AD derivatives, and their cluster covariance contributions.
-Then pin the consumer's intended residual contribution and projection population; this is a statistical contract decision, not an API naming choice.
+The weighted unbalanced-panel oracle above establishes matching means/derivatives and differing covariance contributions.
+Next pin the consumer's intended residual contribution and projection population; this is a statistical contract decision, not an API naming choice.
 The proposed API is additive, but its unsupported analytical-model behavior and manifold no-retrace guarantee need to be agreed before calling the complete issue implemented.
 Issue 113 remains active with this concrete implementation boundary.
 

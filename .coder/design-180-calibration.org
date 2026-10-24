@@ -27,9 +27,13 @@ No statistic, covariance, inversion or persistence implementation is replaced.
 Batch data generation is new harness code, using seed 180 and the existing linear fixture's distribution.
 The actual native consumer summary's missing convergence provenance remains a separate acceptance item; this study does not fill it in.
 
-* Next action
+* Completed study and remaining action
 
-Run a small harness smoke, then a separate bounded Slurm calibration with 600 repeated datasets of 220 rows.
-Keep the original consumer output and inferential reference (native df=21 versus subvector df=1) distinct.
+The seeded study ran on 600 repeated datasets of 220 rows in Slurm job 40439291.
+Both grids covered the truth in 582/600 draws, with 600 decidable draws, no invalid/nonconverged draws, common-point p-value parity and NPZ query parity.
+The declared four-MCSE band passed; this is bounded fixed-curve evidence rather than a profiled-set coverage claim.
+The same snapshot passed quick-check and all slow tests, and the job completed with exit 0.
+Regenerate event-complete native consumer output or preserve its missing-convergence uncertainty explicitly.
+Keep native df=21 versus the older subvector df=1 distinct.
 
 -- Sue

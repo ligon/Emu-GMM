@@ -17,7 +17,7 @@ These are dispositions and next actions, not a claim that the residuals have all
 | Zero-weight support | Convention | mask>0 defines support even at weight0; document without changing statistics. |
 | Fixed-tau branch changes | Confirmed | Offdiag 0 ->3e-12 at tau1 changes ridge diag [3.5,6.5] ->[2,8]; freeze anchor branch. |
 | Diagonal detector scale | Confirmed | Scale1e-14 correlated matrix misclassified by absolute floor; make detector relative. |
-| PD floor scale | Decision needed | Absolute floor1 changes tau; retain signed-spectrum safety pending explicit numerical policy. |
+| PD floor scale | Owner decision | Retain the existing absolute PD safety floor; signed-spectrum safety remains. |
 | Negative/nonfinite penalty | Confirmed | Negative c yields negative p and NaN sqrt; eager validation and explicit traced failure policy. |
 | Factory tree mismatch | Resolved | PR254 merged; static structure/shape guard. |
 | TR gauge_floor | Dead knob | Public compatibility argument unused; clarify/deprecate without artificial curvature. |
@@ -40,7 +40,7 @@ These require input guards, rather than silently clipping IDs or variance.
 
 TR false convergence and LM false saddle advisories are a coherent first solver fix; see worktree ledger Section20.
 Group validation, anchored ridge context, persistence and parameter naming/binding are separate change sets so their contracts remain reviewable.
-A negative traced penalty requires a named invalid-input behavior or checked error; it must not be silently clipped.
+The owner chose checked errors for negative/nonfinite evaluated penalties, including runtime errors under JIT; coefficients must not be silently clipped.
 
 Support at zero weight follows the existing ledger Section15: observability is mask-defined, while weights define exposure and contribution.
 Changing that convention would change both moment covariance and derivative/moment covariance and needs a separate statistical decision.

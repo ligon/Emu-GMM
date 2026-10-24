@@ -12,7 +12,9 @@ Retrieval began at 2026-10-24 15:54 UTC: connector open searches plus the pagina
 There were eleven open issues and two open draft PRs.
 The five active recent issues are #113, #141, #180, #191, and #251; six older open issues are metadata-only in this pass.
 Recently closed issues were inventoried for reconciliation, without reopening or claiming a fresh acceptance audit of every closed item.
-No labels/assignees are set on the active five; #113 and #141 have milestone v2.1.
+No assignees are set on the active five.
+Issue #113 carries =missing-feature= and =from-seasonality=; the other four have no labels.
+Issues #113 and #141 have milestone v2.1.
 
 * Workspace and allocation
 
@@ -56,16 +58,18 @@ The clean three-way merge preserves main's newer quotient-MCAR note; the apparen
 Merged as =a6da415c52097c58c53482652719ed33f6334dc9=, then synchronized node-local main and the durable mirror.
 The issue remains open for its other requirements.
 
-** PR #255 -- integration under verification
+** PR #255 -- merged after integration verification
 
 Reviewed exact head =e88c4ed8c31e9d6c3d74bacd5a018ec27ddacd03=.
 Independent review found no blocker within the complete balanced paired-bundle, fixed-stratum, no-FPC scope.
 The only conflict with current main is the ledger append: preserve Sections 15-17 and append Section 18.
 The integrated tracked tree is =cf4ee3e3c776f0ff619fd5874332fd7ab8f1652e=.
 Snapshot SHA256: =e3046d430753ba21dbbe1d1263a434cc7bdd9d38b395bc562d72bb522b821582=.
-Free validation job 40439155 runs quick-check and the slow suite on a separate 16-CPU/48-GiB slice; its immutable snapshot avoids editing a tree under test.
+Free validation job 40439289 completed quick-check and the slow suite on a separate 12-CPU/48-GiB slice, exit 0.
+Its predecessor 40439155 was cancelled when validation switched to parallel settings.
+Fresh GitHub quick-check and every full-suite shard passed on =19ed2b4=; merged as =e22ad7af7578ade0f3254a6b617eedeab4b489db= and synchronized to the durable mirror.
 
-The PR body predates later confirmation evidence on issue #251.
+The original PR body predated later confirmation evidence on issue #251; it now records the completed evidence and scope limits.
 Both published script hashes, all four logs, Slurm accounting, the supplied aggregator and an independent aggregation were checked.
 At rho=+0.8: 50/50 point fits, 1000/1000 valid refits, mean analytic/refit SE 0.100347/0.095911 versus target 0.10, Wald coverage 49/50 and 48/50.
 At rho=-0.8: the same denominators, SE 0.300623/0.294846 versus target 0.30, coverage 49/50 and 47/50.
@@ -84,7 +88,7 @@ Zero-weight support counts are an explicit mask-observability convention (ledger
 ** #141
 
 #252 implements and calibrates the pure StratifiedCovariance case.
-The issue's title/body still includes that completed scope; after mixed work, reconcile against every acceptance condition.
+The issue title/body was narrowed to the remaining mixed scope, preserving the completed pure-design work and original acceptance criteria.
 A naive reuse of the augmented pseudo-measure with binary support and unit weights would give the wrong fixed-mode exposure projection.
 The mixed extension must retain original weighted exposure and sampling centering, as well as TT/SS/TS partition, FPC, dof and ablation settings.
 
@@ -115,7 +119,7 @@ The next independent check separates a preprojected instrument's FWL moment iden
 Coverage reconciliation: five recent issues examined (three primary partially addressed, one in progress, one needs contract/oracle), plus six older open issues inventoried but not technically reassessed.
 The twenty recently closed issue records were retrieved for historical reconciliation; this pass does not claim a fresh full acceptance audit of those closures.
 
-* Execution update
+* Execution update -- 2026-10-24 17:12 UTC snapshot
 
 PR #255 integration is committed as =19ed2b4= and pushed to its original GitHub branch after quick-check.
 Free job 40439289 completed all lint/type/non-slow/slow checks on exact tree =cf4ee3e3=, exit 0, in 13:17; its predecessor 40439155 was deliberately cancelled before completion when validation switched to the repository-supported parallel test settings.
@@ -139,7 +143,10 @@ The actual historical native consumer artifact still lacks convergence provenanc
 
 The owner chose to retain the absolute PD safety floor and raise an error for invalid evaluated penalty coefficients, including JIT calls.
 The remaining #191 candidate combines relative TR rank/stagnation, metric-correct LM advisories, validated group layouts, used-mask/atomic persistence, parameter ownership/mask dtypes, frozen ridge mode, and explicit invalid penalty errors.
-Each cluster has a separate frozen worktree and targeted regression evidence; the combined tree awaits its full gate.
+Each cluster has a separate frozen worktree and targeted regression evidence.
+The combined corrected tree =cc1210d0754adf4cbf2d4b19efb6f8a6fa9a9c52= passed quick-check in job 40439616; the slow suite is running.
+Checked scalar/native constructors and factory reuse pass independent regressions.
+A confirmed compatibility restriction for constructors that erase leaf identity is awaiting an owner decision before publication: such fits previously worked and now refuse unproven ownership.
 
 Priority-account usage began at 72605.86/1500000 SUs; all dispatched compute uses free co_carleton allocations.
 Initial serial jobs 40439155,40439235,40439236,40439249 were deliberately cancelled and replaced by bounded parallel gates; no infrastructure failure is implied.
@@ -147,7 +154,9 @@ Source snapshots and logs remain in the shared scratch directory recorded above.
 
 * Action journal
 
-2026-10-24: merged #254; synchronized GitHub, local main and durable mirror; dispatched independent reviews of both PRs, then residual #191 audit and #141 grounding.
+2026-10-24: merged #254 and #255; synchronized GitHub, local main and durable mirror; dispatched independent reviews, residual #191 fixes and #141 extension.
+PR #256 awaits fresh CI; PR #257 contains the reproducible #113/#180 evidence.
+Issue #251 now tracks only its unsupported design/calibration residual, and #180 records the completed known-DGP study separately from missing native provenance.
 No external comments were sent.
 
 -- Sue
