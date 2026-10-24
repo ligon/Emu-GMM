@@ -156,12 +156,15 @@ The initial combined slow gate caught two gauge-convergence classification regre
 The revised model-gain plus existing-ftol certificate passed independent regressions and full quick/slow validation in job 40440319.
 The copying-constructor regression was then removed through lawful registered output mapping, unique identity and fresh-owner guards; independent naming, actual estimate, factory reuse and alias controls passed.
 The owner accepted strict checks; the final candidate preserves copying support as well.
-Final copying-compatible source snapshot =93c4e420= passed quick-check in job 40441138; its slow suite is running.
+Final copying-compatible source snapshot =93c4e420= passed quick-check and all slow tests in job 40441138 (exit 0).
+Integrated source/report tree =634bc950= passed quick-check in job 40441970 (exit 0), including the #113 oracle and 24-draw #180 persistence/calibration smoke.
+The smoke supplements the recorded 600-draw study; it does not replace it.
+Only Org validation-status wording changed after this integrated gate.
 The first attempt 40440582 stopped before pytest on a typing error; object-interface casts corrected it and targeted mypy/Black passed.
 No failed or interrupted run is counted as a green gate.
 
 Current main =76fb9a2= contains merged PRs #254, #255, #256 and #257 and is integrated into this branch.
-The final release gate is quick-check on the combined source/report tree followed by fresh GitHub quick-check and every full-suite shard on the pushed PR #258 head.
+Fresh GitHub quick-check and every full-suite shard on the pushed PR #258 head remain required before merge.
 After this batch, the remaining recent issue queue is #113, #180 and #251 as specified above.
 
 Priority-account usage began at 72605.86/1500000 SUs; all dispatched compute uses free co_carleton allocations.
@@ -171,7 +174,7 @@ Source snapshots and logs remain in the shared scratch directory recorded above.
 * Action journal
 
 2026-10-24: merged PRs #254, #255, #256 and #257 after reviewed-head checks and synchronized GitHub, node-local main and durable mirror after each merge.
-Issue #141 is closed; issue191 is addressed by the PR #258 candidate and may close only after its final gates and merge.
+Issue #141 is closed; issue #191 is addressed by the PR #258 candidate and may close only after its final gates and merge.
 Issue #251 now tracks its remaining design/calibration scope, and #180 records completed known-DGP evidence separately from native provenance/protocol work.
 Issue #113 retains its concrete oracle and additive contract proposal.
 No external comments were sent.

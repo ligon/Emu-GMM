@@ -23,18 +23,19 @@ The inventory and bounded acceptance evidence are in PR #257, branch =backlog/20
   Corrected solver tree =f2d34f3b= uses the existing ftol observed-cost rule plus objective-relative unresolvable model gain for valid rejected proposals.
   It preserves invalid/high-improvement failure; the two gauge tests and new scaling/nonlinearity/ftol guards pass focused checks.
   Corrected source snapshot =4e02b2ce= passed quick-check and all slow tests in job 40440319, exit 0.
-  The copying-compatible combined source needs a fresh immutable quick/slow gate and GitHub checks.
+  The copying-compatible combined source passed fresh immutable quick/slow checks; fresh GitHub checks remain required.
   Its initial gate 40440582 stopped at a mypy PyTreeDef comparison error before pytest; object-interface casts corrected the typing without changing runtime behavior, and targeted mypy/Black passed.
   The new ownership implementation changes params.py and its regressions, with corresponding ledger/verification/handoff updates.
-  Last committed checkpoint is =c0a6ba5=; the final update preserves copying constructors and passed quick-check on source tree =93c4e420= in job 40441138.
-  Its slow suite is running; current main =76fb9a2= is integrated and the report/handoff refresh awaits its combined quick-check.
+  Source checkpoint is =c0a6ba5=; the final update preserves copying constructors and passed quick-check and all slow tests on source tree =93c4e420= in job 40441138 (exit 0).
+  Current main =76fb9a2= is integrated; tree =634bc950= passed quick-check plus #113 oracle and 24-draw #180 smoke in job 40441970 (exit 0).
+  Only Org status wording changed after the integrated gate.
   The code branch is =fix/191-robustness-final=, based on =cfc6ec3=; fresh GitHub checks remain required before merge.
 - Residual 251 :: The reviewed fixed, balanced paired-bundle bootstrap slice does not implement random-stratum/FPC or broader design support.
 - Residual 180 :: The known-DGP study has 582/600 truth coverage on both grids, full denominators and NPZ query parity.
   The actual native consumer artifact still lacks profile-convergence provenance; do not infer it from finite p-values.
 - Residual 113 :: The FWL oracle matches means/AD derivatives while covariance contributions differ materially.
   The additive aux proposal still needs the contribution/projection contract and manifold no-retrace acceptance; no model protocol change is implemented.
-- Next :: Finish the copying-compatible slow gate and combined-tree quick-check; commit the main/report integration and push PR #258.
+- Next :: Push PR #258; local source and integrated gates passed, and main/report integration is committed.
   Mark ready and merge only after fresh GitHub quick/full checks.
   The scoped remaining followups after this batch are #113, #180 and #251; the report and live issue bodies carry their concrete next checks.
   Update the tracker and this note as those gates complete.
