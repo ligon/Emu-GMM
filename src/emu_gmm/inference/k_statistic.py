@@ -68,6 +68,10 @@ For :class:`StratifiedCovariance`, the derivative/moment cross-covariance
 instead uses the same pair-supported PSU totals, within-cell centering,
 finite-PSU correction, and optional FPC as the Neyman moment covariance.
 The exact per-cell expression is in ``docs/k-stratified-cross-cov.org``.
+For :class:`DesignAwareCovariance`, the augmented derivative/moment vector
+uses the original moment partition and weighted exposure. Its cross block
+retains the selected random- or fixed-stratum TT/SS/TS assembly, including
+centering, FPC, and the matching finite-cluster correction.
 
 The pre-issue-#52 form divided the raw cross product by :math:`N`
 (observation count) rather than :math:`N_m\\, N_k`, which made
@@ -125,6 +129,7 @@ previous thin-QR form).
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from numbers import Integral
 from types import SimpleNamespace
 from typing import Any
@@ -376,6 +381,73 @@ def _sigma_jm_stratified_from_contributions(
     return cross.reshape(n_params, n_moments, n_moments)
 
 
+def _sigma_jm_design_aware_from_contributions(
+    g: Float[Array, "N M"],
+    D: Float[Array, "N M p"],
+    N_j: Float[Array, " M"],
+    mask: Float[Array, "N M"],
+    weights: Float[Array, " N"],
+    covariance: DesignAwareCovariance,
+    model: StructuralModel,
+    theta_0: ParamsLike,
+) -> Float[Array, "p M M"]:
+    """Extract the matched mixed derivative/moment covariance (ledger 19).
+
+    Preserve original weighted exposure for fixed-cell projections and
+    actual means for centered random-mode sampling. Contributions already
+    contain mask and weight, so safely undo these factors before handing
+    pseudo residuals to the unchanged covariance engines. Repeating the
+    moment partition retains TT/SS/TS semantics for every parameter block.
+    The full augmented covariance uses quadratic memory in ``(p + 1) * M``.
+    """
+    if covariance.all_design:
+        return _sigma_jm_stratified_from_contributions(
+            g, D, N_j, mask, covariance.design, model, theta_0
+        )
+    n_obs, n_moments = g.shape
+    n_params = D.shape[2]
+    if (
+        D.shape[:2] != g.shape
+        or mask.shape != g.shape
+        or weights.shape != (n_obs,)
+        or covariance.design_moment_mask.shape != (n_moments,)
+    ):
+        raise ValueError("k_statistic: incompatible mixed contribution shapes")
+    contributions = jnp.concatenate(
+        [jnp.transpose(D, (0, 2, 1)).reshape(n_obs, n_params * n_moments), g],
+        axis=1,
+    )
+    augmented_mask = jnp.tile(mask, (1, n_params + 1))
+    exposure = augmented_mask * weights[:, None]
+    residuals = jnp.where(
+        exposure != 0.0,
+        contributions / jnp.where(exposure != 0.0, exposure, 1.0),
+        0.0,
+    )
+    augmented_N_j = jnp.tile(N_j, n_params + 1)
+    means = jnp.where(
+        augmented_N_j != 0.0,
+        jnp.sum(contributions, axis=0)
+        / jnp.where(augmented_N_j != 0.0, augmented_N_j, 1.0),
+        0.0,
+    )
+    # The eager factory cannot run under trace. Repetition preserves its
+    # validated all_design flag and cell-pair geometry (ledger 19.4).
+    augmented_spec = replace(
+        covariance,
+        design_moment_mask=jnp.tile(covariance.design_moment_mask, n_params + 1),
+    )
+    pseudo_measure = SimpleNamespace(mask=augmented_mask, weights=weights)
+    augmented_covariance = augmented_spec.covariance(
+        model,
+        theta_0,
+        pseudo_measure,
+        cached_intermediates=(means, residuals, exposure, augmented_N_j),
+    )
+    cross = augmented_covariance[: n_params * n_moments, n_params * n_moments :]
+    return cross.reshape(n_params, n_moments, n_moments)
+
+
 def _N_j_from_measure(measure: Measure) -> Float[Array, " M"]:
     """Effective per-moment sample size ``N_j = sum_i d_ij w_i`` from a measure.
 
@@ -419,10 +491,9 @@ def _compute_d_tilde(
        - :class:`StratifiedCovariance` -> matched between-PSU, within-cell
          Neyman cross-covariance with the same pair support, Bessel factor,
          FPC, and per-coordinate denominator as the moment covariance.
-       - :class:`DesignAwareCovariance` -> **refused** (``ValueError``)
-         because matched derivative-moment cross covariance is not yet
-         implemented for either its random- or fixed-stratum mode;
-         supply an explicit matched ``score_cov_fn``.
+       - :class:`DesignAwareCovariance` -> derivative/moment cross block
+         of the matching augmented TT/SS/TS covariance, preserving the
+         selected random- or fixed-stratum exposure and centering rules.
        - Any other strategy (IID, synthetic) -> pairwise-overlap form via
          :func:`_sigma_jm_iid_from_contributions`. With cluster-of-size-one
          the cluster-totals form collapses to this, so the two routes
@@ -460,20 +531,14 @@ def _compute_d_tilde(
                 f"k_statistic: score_cov_fn returned shape {sigma_jm.shape}; "
                 f"expected (p={p}, M={M}, M={M})."
             )
-    elif isinstance(covariance, DesignAwareCovariance):
-        raise ValueError(
-            "k_statistic: no matched cross-covariance form is implemented "
-            "for DesignAwareCovariance. Supply score_cov_fn=... with the "
-            "matched (p, M, M) cross-covariance."
-        )
     elif hasattr(measure, "moment_contributions") and hasattr(
         measure, "jacobian_contributions"
     ):
-        if isinstance(covariance, StratifiedCovariance) and not (
-            hasattr(measure, "mask") and hasattr(measure, "weights")
-        ):
+        if isinstance(
+            covariance, StratifiedCovariance | DesignAwareCovariance
+        ) and not (hasattr(measure, "mask") and hasattr(measure, "weights")):
             raise ValueError(
-                "k_statistic: StratifiedCovariance requires empirical mask "
+                f"k_statistic: {type(covariance).__name__} requires empirical mask "
                 "and weights for matched cross-covariance; supply "
                 "score_cov_fn=... for a different measure."
             )
@@ -488,7 +553,18 @@ def _compute_d_tilde(
             n_obs = g.shape[0]
             N_j = jnp.full((M,), float(n_obs), dtype=g.dtype)
 
-        if isinstance(covariance, StratifiedCovariance):
+        if isinstance(covariance, DesignAwareCovariance):
+            sigma_jm = _sigma_jm_design_aware_from_contributions(
+                g,
+                D,
+                N_j,
+                jnp.asarray(measure.mask),  # type: ignore[attr-defined]
+                jnp.asarray(measure.weights),  # type: ignore[attr-defined]
+                covariance,
+                model,
+                theta_0,
+            )
+        elif isinstance(covariance, StratifiedCovariance):
             sigma_jm = _sigma_jm_stratified_from_contributions(
                 g,
                 D,
@@ -515,9 +591,9 @@ def _compute_d_tilde(
             )
         else:
             sigma_jm = _sigma_jm_iid_from_contributions(g, D, N_j)
-    elif isinstance(covariance, StratifiedCovariance):
+    elif isinstance(covariance, StratifiedCovariance | DesignAwareCovariance):
         raise ValueError(
-            "k_statistic: StratifiedCovariance requires empirical moment "
+            f"k_statistic: {type(covariance).__name__} requires empirical moment "
             "and Jacobian contributions for automatic cross-covariance. "
             "Supply score_cov_fn=... for a different measure."
         )
@@ -954,9 +1030,9 @@ def k_statistic(
         gauge-bearing models with ``p_id <= M < p``.)
         Also raised when no robust :math:`\\Sigma_{G,m}` route is
         available and ``strong_id_fallback`` was not set. Automatic
-        ``StratifiedCovariance`` requires empirical contributions and
-        mask/weights; ``DesignAwareCovariance`` still requires an
-        explicit matched ``score_cov_fn``.
+        ``StratifiedCovariance`` and ``DesignAwareCovariance`` require
+        empirical contributions and mask/weights unless an explicit
+        matched ``score_cov_fn`` is supplied.
 
     Notes
     -----

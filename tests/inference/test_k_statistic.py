@@ -838,8 +838,8 @@ def test_clustered_k_cross_covariance_uses_pairwise_dof_correction():
 
 # ---------------------------------------------------------------------------
 # (i) Issue #41 hardening: the strong-ID fallback is loud, score_cov_fn is
-# validated and takes precedence, and the design sandwiches are refused
-# until a matched cross-covariance form exists.
+# validated and takes precedence, and design sandwiches require matched
+# empirical contributions or an explicit cross-covariance override.
 # ---------------------------------------------------------------------------
 
 
@@ -961,7 +961,7 @@ class TestDesignSandwichRefused:
         result = k_statistic(theta_0, measure, design, model=_linear_psi, V=jnp.eye(3))
         assert np.isfinite(float(result.K))
 
-    def test_design_aware_refused(self):
+    def test_all_design_aware_matches_pure_stratified(self):
         from emu_gmm.covariance import DesignAwareCovariance, StratifiedCovariance
 
         measure, theta_0 = self._measure()
@@ -980,5 +980,8 @@ class TestDesignSandwichRefused:
             sampling=sampling,
             design_moment_mask=jnp.ones(3),
         )
-        with pytest.raises(ValueError, match="score_cov_fn"):
-            k_statistic(theta_0, measure, mixed, model=_linear_psi, V=jnp.eye(3))
+        automatic = k_statistic(
+            theta_0, measure, mixed, model=_linear_psi, V=jnp.eye(3)
+        )
+        pure = k_statistic(theta_0, measure, design, model=_linear_psi, V=jnp.eye(3))
+        np.testing.assert_array_equal(automatic.K, pure.K)
