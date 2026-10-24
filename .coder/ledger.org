@@ -1365,3 +1365,32 @@ The relative detector is tested from =1e-200= through =1e300=; the absolute PD f
    Avoid constructor validation because it would reject legitimate negative cotangents of a positive primal penalty; this is a representation distinction, not a relaxation of evaluated-coefficient validation.
 6. Open questions :: None; the human and coordinator resolved runtime errors and constructor-carrier behavior explicitly.
    General custom penalty validation and alternative covariance-floor policy are outside scope.
+
+* Section 27 -- Default whole-stratum refit bootstrap (#251)
+
+1. Task :: Extend mixed_bootstrap to default fixed_strata=False, fpc=False when sampling clusters and design strata are the same partition.
+   Reuse the owner's selected whole-stratum with-replacement experiment and state its unconditional iid-stratum target separately from conditional design TT.
+2. Existing machinery :: Search tier: git/ripgrep, issue 251 body/comments and current source/tests, grounded at =e0d9523=.
+   Section 18 and =inference/mixed_bootstrap.py:_paired_layout= / =_resample_mixed_one= own the already tested fixed-profile paired-bundle slice.
+   =inference/stratified_bootstrap.py:_cell_layout= validates PSU/cell/stratum nesting; =mixed_bootstrap.py:_ids= validates exact sampling IDs.
+   =inference/cluster_bootstrap.py:_resample_one= clones variable-size whole units with original data/masks/weights, and =_refit_bootstrap_worlds= owns labels, NaN/nonconvergence/zero-support/tau events and bounded cache clearing.
+   =covariance/stratified.py:DesignAwareCovariance= owns delegated TT/SS/TS assembly, couple ablation and the existing default-mode fixed-profile caveat (#145).
+   Tests: =tests/inference/test_mixed_bootstrap.py=, =test_cluster_bootstrap_nonconverged.py= and =tests/covariance/test_stratified.py= already pin those contracts.
+3. Definitions :: Draw S original strata independently with replacement, not PSU bundles within fixed strata.
+   For unequal exposures the estimand remains the pooled weighted ratio sum(d*w*psi)/N_j, not an equally weighted average of stratum means.
+   Numeric sampling/stratum labels may differ; require the same partition by a one-to-one correspondence and nonempty declared groups.
+   Each copied stratum, sampling cluster, design cell and PSU gets fresh independent IDs. Preserve all original row/mask/weight contents and covariance flags.
+4. Invariants :: Keep the fixed-stratum path and its stronger balanced/complete-bundle guards unchanged.
+   Whole-stratum copying permits variable row/PSU/cell counts and absent arms; shared refit events handle sampled zero-support worlds.
+   Preserve sampling.centered/dof_correction, design_moment_mask and couple. FPC remains rejected.
+   The target requires iid/exchangeable independent strata, no dominant stratum, finite moments, positive limiting support and a regular consistent estimator; cloning metadata alone cannot prove those assumptions.
+   Default TT may omit random common T profiles: the exact two-stratum alpha=(-1,+1) counterexample gives raw mixed [[0,.5],[.5,.5]] but whole-stratum mean covariance [[.5,.5],[.5,.5]].
+   Do not claim bootstrap parameter variability repairs analytic TT, J chi-square calibration or general studentization.
+   IDs embedded in arbitrary model-data columns are not rewritten automatically; reducers must use an appropriate equivariant grouping/population contract.
+5. Reuse decision :: Extend public mode dispatch and add private same-partition layout/world assembly; reuse shared cell guards, row cloning and refit result machinery rather than another bootstrap result or covariance formula.
+   Test exact enumerated pooled-ratio worlds, copied IDs/nesting, permuted labels, unequal sizes/counts/absent arms, covariance flags/decomposition and failure/event paths.
+   A bounded random-profile pilot uses T=eps, S=alpha+rho*eps+sqrt(1-rho^2)*eta; its contrast variance is tau^2/S+2*(1-rho)/(S*q), with TS=rho/(S*q).
+   Keep the earlier fixed-profile calibration explicitly scoped to its own within-stratum experiment.
+6. Open questions :: No new unit decision blocks this same-partition slice; owner comment 6375413761 already selected whole-stratum resampling.
+   FPC/without-replacement needs the actual assignment/population experiment; finer or crossing sampling partitions need a separately selected estimand and stages.
+   Broad weighted/sparse/nonlinear coverage is subsequent evidence, not established by a balanced pilot.
