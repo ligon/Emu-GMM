@@ -26,12 +26,11 @@ jobs:
   # --------------------------------------------------------------------- #
   quick-check:
     runs-on: ubuntu-latest
-    # The non-slow suite runs single-threaded here (parallel/xdist is the
-    # `full-suite` matrix's job); as the suite has grown it lands near ~30 min,
-    # so give it the same 45-min budget as full-suite to avoid a spurious
-    # mid-run cancellation. Parallelising this stage (make par-quick-check) is
-    # the durable follow-up if it creeps up again.
-    timeout-minutes: 45
+    # Run the complete non-slow gate with xdist and the thread caps below.
+    # Allow a bounded 60 minutes for setup, static checks and JAX compilation
+    # and tests: the 45-minute cap cancelled a healthy run near completion.
+    # Directory-sized full-suite shards retain their own 45-minute budgets.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
