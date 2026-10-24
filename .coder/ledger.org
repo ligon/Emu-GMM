@@ -1289,22 +1289,23 @@ Runtime values of genuinely dynamic traced IDs remain unvalidated as documented;
    The registered PyTreeDef already knows which fields are dynamic and how traversal order maps back to the root; public =tree_unflatten= can reconstruct unique opaque tokens, or value-preserving copied numeric/native leaves for checked constructors, without consulting JDC internals or comparing array values.
    =param_names= documents a flat-field labelling contract; =tests/_internal/test_params_spec_builder_phase2.py::TestAnnotationPath= pins the intentional annotation divergence, and the other params suites pin order, shape, dtype, opaque wrappers, and JIT behavior.
    =_internal/labels.py:175= normalizes explicit masks; =measures/empirical.py:785,943,958= infer float32 masks while =from_arrays= uses float64.
-3. Definitions :: A leaf owns a root field name only when registered reconstruction places its unique probe leaf directly in that field, with exactly one owner.
+3. Definitions :: A leaf owns a root field name only when registered reconstruction places its unique output leaf directly in that field, with exactly one owner.
+   Re-flattening the probe must preserve the original PyTreeDef and leaf count; a lawful, stable registration preserves the positional mapping even if its constructor copies the input leaves.
+   Each output leaf identity must occur once, and its owning field must differ by identity from the same original root field, excluding unchanged static aliases.
    Static fields receive no dynamic tokens, and a nested container's descendant does not inherit its root field's label or legacy annotation.
    The spec builder honors proven direct-field legacy annotations; =flatten_params_with_spec= intentionally maps bare annotated scalars to Euclidean as before.
    Convenience masks use float64; the low-level EmpiricalMeasure constructor retains explicit input dtypes.
 4. Invariants :: Preserve numeric leaf traversal order, scalar flattening, original treedef reconstruction, ManifoldLeaf opacity, native container geometry, and constructor invariants.
    If a checked constructor refuses opaque tokens, retry registered reconstruction with unique value-preserving JAX copies, retaining ManifoldLeaf wrappers and their geometry.
    This probe never replaces the original leaves or flatten buffer.
-   Constructors that still erase or prevent proving probe identity leave ownership unproven; native leaves remain unnamed and legacy annotations refuse rather than guess.
+   Copying constructors remain supported by mapping their registered output leaves rather than requiring input-token identity to survive construction.
+   Registrations that cannot prove unique direct ownership remain unnamed and legacy annotations refuse rather than guess; data-dependent or non-independent leaf reconstruction is outside the lawful stable PyTree contract.
    Do not synthesize labels for nested containers; the estimator's flat-field names boundary must refuse shapes it cannot name correctly.
 5. Reuse decision :: Add one small ownership helper over existing opaque PyTreeDef reconstruction and reuse its names in both spec walks and the flat-field names boundary.
    Keep the two spec walks' existing geometry decisions independent.
    Extend the existing mask normalizer and inferred-mask casts without changing observability, weights, direct constructors, or adding dependencies.
-6. Open questions :: Owner decision pending before merge: accept strict ownership refusal for constructors that erase leaf identity by copying, or defer the ownership change.
-   Independent baseline comparison confirmed that a flat copying constructor previously fitted successfully; the new refusal is an explicit compatibility restriction.
+6. Open questions :: None for the bounded implementation.
    Nested legacy annotation syntax and general nested estimator parameter labels remain unsupported rather than being invented here.
-
 * Section 24 -- Native ridge mode anchoring and relative diagonality (#191)
 
 1. Task :: Freeze the native diagonal-versus-canonical ridge choice together with tau at the factory's V0 anchor, so a covariance crossing the diagonal detector threshold cannot switch regularisation formulas inside an otherwise smooth residual.
