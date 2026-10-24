@@ -1365,3 +1365,36 @@ The relative detector is tested from =1e-200= through =1e300=; the absolute PD f
    Avoid constructor validation because it would reject legitimate negative cotangents of a positive primal penalty; this is a representation distinction, not a relaxation of evaluated-coefficient validation.
 6. Open questions :: None; the human and coordinator resolved runtime errors and constructor-carrier behavior explicitly.
    General custom penalty validation and alternative covariance-floor policy are outside scope.
+
+* Section 28 -- Event-complete projected native set artifact (#180 / #113)
+
+1. Task :: Produce a new explicitly identified current-CU/subvector native profiled-set artifact on the frozen current K-Aggregators panel, with validity events and RandomSetLaw NPZ parity.
+   It does not recover missing historical convergence or reuse the historical Fixed/full-vector reference.
+2. Existing machinery :: Search tier: source/git/ripgrep, issues 113/180, Sections 12/26 and the frozen prerequisite/data-preparation manifests.
+   =inference/confidence_set.py:profiled_k_confidence_set= owns parameter concentration, the CU/subvector reference and certified-or-FOC nuisance validity; =k_statistic= owns all K/S/J calculations.
+   =random_set_law.py:RandomSetLaw.from_k_confidence_sets= / =save= / =load= own finite-grid three-valued verdicts, invalid/nonconverged counts and inert codec.
+   =scripts/validation/random_set_calibration_180.py= already checks known-DGP coverage and persistence; it does not replace native artifact evidence.
+   Section 26's empirical reducing-model/native factory candidate owns complete sample-reduction AD, profile adapters and fresh-data compiled reuse; this experiment depends on that code passing its release gates.
+   Frozen consumer =9f587509=, legacy source =94bb6626=, exact generated/input/vendor archives and 57 wheels are in the native180-prereqs bundle, manifest digest =2cf6ad6d4d603e031ac02400afdfb4ca004a76725166fc71b9c9acb701fe479b=.
+   Data-preparation job 40446236 exported OBS and original-index maps after isolated imports with fits/inversion blocked; its 12-payload manifest digest is =484c23ea4124906cefbc47022b89b3f99d50becd0d36c2ea0501d4ef9e42f650=.
+3. Definitions :: Present panel N=236088, M=43, characteristics=5, pi=10, K=2, 45 products and 5460 markets; masks/weights are all one and the bipartite graph is connected.
+   The owner already requests joint product/market FE projection of exp(-c0-s*c_dir*zeta)*Y at each current parameter.
+   Existing logp/zetaZ/pi/instrument blocks have product/market means at most 4.80e-14; no further transformation or changed population is selected.
+   Use an unweighted retained-panel Schur reduction: C is product/market incidence counts, S=Dp-C*diag(1/n_market)*C', a=S^+*(sum_product(y)-C*(sum_market(y)/n_market)), b=(sum_market(y)-C'*a)/n_market.
+   Drop only the one known connected-component gauge in the product-side 45-by-45 solve; retained eigenvalues are separated from zero (minimum 4048.40 in the frozen oracle).
+   Return per-row projected y-a[product]-b[market]; never materialize an N-by-N projector on the real panel.
+4. Invariants :: Compute coefficients from the actual measure's group keys and current theta inside aux; no frozen theta-dependent effects or stopped auxiliary derivatives.
+   Original observation columns are followed by explicit product/market keys; retain the original instrument endpoint so appended keys cannot become moments.
+   Validate frozen input hashes, dimensions, finite warm components, connected grouping and unweighted retained support before fitting; reject dimension mismatch instead of truncating/padding A or zeroing pi.
+   Compare the Schur reducer against independent dummy-design/NumPy projection on a small unbalanced panel and against the frozen real-panel oracle before scientific fits.
+   Use the public profiler and covariance/K interfaces; an optimizer protocol wrapper may record returned OptimizerInfo but must not reinterpret the profiler's certified-or-FOC event rule.
+   Retain original nuisance solver tolerances rtol=atol=1e-9 and max_steps=1500; use current CU concentration, package default regularization and no new nuisance penalty.
+   Save grid/alpha/statistic/dofs/p-values/membership/topology/edge flags and separate invalid/nonconverged indices/counts, plus per-point optimizer provenance, source/env/input hashes and timing/RSS.
+   Finite p-values do not override unknown verdicts. One native artifact is not a coverage study; emptiness is grid-limited, not global.
+5. Reuse decision :: Reuse the existing reducing-model hook, native geometry, public profiled set and RandomSetLaw codec.
+   Add a consumer-specific validation driver with a small JAX Schur auxiliary reducer because the historical row-only driver cannot project its theta-dependent outcome.
+   The data-preparation source already supplies an independent Schur oracle; use it for verification, not as frozen theta-dependent model state.
+   First time two grid points (public inversion requires >=2), then budget the remaining seven-point artifact from measured cost. Use isolated immutable Slurm jobs and exact staged dependencies.
+6. Open questions :: The optional protocol preference may still steer the user-authorized work; absent a different choice, the stated assumption is current CU/subvector for the new artifact.
+   Historical runtime/input identity and convergence cannot be reconstructed from available pins; preserve that limitation.
+   General disconnected graphs, changed weighting/population, broad weak-ID coverage and continuous-domain emptiness are outside this experiment.
