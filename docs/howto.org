@@ -378,7 +378,13 @@ An =adaptive_J.converged=False= result has not met the requested Monte Carlo pre
 
 ** The trick: a bootstrap is just =estimate()= on a resampled =Measure=
 
-There's no monolithic =bootstrap_se= function, and that's deliberate. Because variance construction is orthogonal to integration, /resampling is a measure-construction concern/: =cluster_bootstrap= builds a fresh =EmpiricalMeasure= from the drawn clusters, pairs it with a matching =ClusteredCovariance=, and re-runs the ordinary pipeline. For a pure =StratifiedCovariance=, =stratified_bootstrap= instead draws PSUs with replacement inside each =(stratum, arm)= cell, preserving every cell's PSU count and rebuilding the matched covariance. Every declared PSU and cell must be populated. This first stratified path requires =fpc=False=; it does not implement the mixed =DesignAwareCovariance= resampling problem.
+There's no monolithic =bootstrap_se= function, and that's deliberate.
+Because variance construction is orthogonal to integration, /resampling is a measure-construction concern/: =cluster_bootstrap= builds a fresh =EmpiricalMeasure= from the drawn clusters, pairs it with a matching =ClusteredCovariance=, and re-runs the ordinary pipeline.
+For a pure =StratifiedCovariance=, =stratified_bootstrap= draws PSUs with replacement inside each =(stratum, arm)= cell, preserving every cell's PSU count and rebuilding the matched covariance.
+Its first path requires populated PSUs and cells and =fpc=False=.
+For a mixed =DesignAwareCovariance= with =fixed_strata=True=, =mixed_bootstrap= draws whole paired sampling bundles with replacement within each stratum.
+It requires complete bundles with the same positive PSU-count vector across cells in each stratum, =design.fpc=False=, and =sampling.dof_correction=False=; each copied bundle and PSU receives a fresh ID, and the original =couple= choice is retained.
+The default random-stratum mode and FPC-adjusted resampling are outside this first mixed path.
 
 For large =n_boot=, build on the =build_estimator= factory rather than bare =estimate()= (see "Performance: estimating many times"), and let =adaptive_bootstrap= choose =n_boot= by targeting the Monte Carlo precision of the functional you care about. =examples/empirical_bootstrap.py= runs the wild and cluster bootstraps side by side.
 
