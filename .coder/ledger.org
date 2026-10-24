@@ -1197,3 +1197,170 @@ Verification against Section 19 :: *OK*: the adapter delegates TT/SS/TS to exist
 The focused mixed, pure-stratified and existing K tests passed (calibration tests excluded from this local run); the independent oracle includes fractional masks, zero-weight support, and an exactly degenerate projection trace.
 Ruff, Black and =git diff --check= pass for the changed Python files.
 The mixed calibration script completed a two-repetition smoke for both modes with finite matched and ablation outputs; statistical calibration and broad integration gates await a separate Slurm job.
+
+* Section 20 -- Solver rank guards and mixed-metric advisory (#191)
+
+1. Task :: Prevent the native trust-region solver from certifying an unchanged, nonstationary point after rejecting small-scaled full-rank PSD proposals, distinguish unwritten tCG trace entries, and make the LM curvature advisory respect mixed leaf metrics.
+2. Existing machinery :: Search tier: ripgrep, source/test inspection, and bounded direct reproductions on =a6da415=.
+   =manifolds/riemannian_tr.py:266= inspects PSD Gram eigenvalues; =:1049= uses an absolute rank cutoff; =:1152= certifies collapsed radius on gauge-bearing trees; =:1007= initializes stop-code tails to the negative-curvature code.
+   =law.py:1314= already defines a relative singular-value rank criterion for PSD factors.
+   =manifolds/riemannian_tr.py:210= provides the per-coordinate metric diagonal; =riemannian_lm.py:208= assembles the metric-raised horizontal Hessian for its eager advisory.
+   Existing guards: =tests/manifolds/test_rtr_trust_region.py= (rank loss), =test_rtr_reductions.py= (Positive), =test_rtr_pymanopt_parity.py= (quotient parity), and =test_riemannian_lm_advisory.py= (minima, saddles, advisory gating).
+3. Definitions :: A PSD factor is regular when its smallest singular value exceeds =64 * max(n, k) * eps * largest singular value=, matching the existing law diagnostic.
+   A rejected rank-invalid proposal does not establish stationarity.
+   The production TR subproblem uses the ambient metric and leaf retractions; its convergence norm uses the manifold metric.
+   For a metric-raised Hessian =H= and positive diagonal metric =G=, curvature eigenvalues are computed from the symmetric representation =sqrt(G) H invsqrt(G)=.
+4. Invariants :: Preserve Frobenius PSD/Euclidean arithmetic, genuine rank-loss rejection, gauge equivariance, the established accepted-step ftol behavior, and eager-only advisory gating.
+   Radius collapse after rejection alone never certifies convergence, and invalid proposals must report failure.
+   A valid finite rejected proposal may certify the existing gauge-bearing cost-stagnation policy only when its nonnegative predicted decrease is at most =eps * abs(cost)= and its absolute observed change is at most the existing =ftol * abs(cost)=.
+   This relative cost certificate is distinct from gradient stationarity and has no absolute objective floor.
+   Unwritten tCG stop slots use =-1= and cannot represent negative curvature.
+5. Reuse decision :: Extend the current TR proposal validity guard with the law diagnostic's relative rank convention, retain existing per-leaf metric helpers for the advisory similarity, and reuse existing stopping/status and trace surfaces.
+   Keep the unused public =gauge_floor= argument for compatibility and clarify its lack of effect instead of inventing a new solver mechanism.
+6. Open questions :: None needed for the bounded fixes.
+   A general redesign of trust-region geometry, cost-stagnation certification, or the unused =gauge_floor= API is outside this change.
+
+* Section 21 -- Explicit draw validity and atomic law persistence (#191)
+
+1. Task :: Preserve the draws-backed empirical law's persisted =used= mask, including finite excluded draws, and keep the previous filesystem artifact intact if serialization or replacement fails.
+2. Existing machinery :: Search tier: ripgrep, source/tests, and bounded issue-191 reproduction on =a6da415=.
+   =persistence.py:256= stores =LawState.used=; =:476= writes =EmpiricalLaw._used=; =:753= reads it; =:853= then discards it by reconstructing through =from_draws=.
+   =law.py:474= already accepts an explicit =used= mask; =:622= derives one from finiteness only for the =from_draws= convenience constructor.
+   =persistence.py:647= directly truncates filesystem targets, while =:639= intentionally writes file-like targets directly.
+   =tests/test_persistence.py= covers records/draws round trips, event conditioning, literal paths, BytesIO, and refusal to save conditioned laws.
+3. Definitions :: =used= is a one-dimensional boolean vector aligned with the leading draw axis; it may exclude finite rows but must not include a nonfinite row for a draws-backed law.
+   The stored mask is part of the law, not a request to recompute its population on reload.
+   Atomic path replacement means complete serialization to a sibling temporary file followed by =os.replace=; already-open handles remain caller-managed and non-atomic.
+4. Invariants :: Preserve all raw draws, mask/event alignment, names and component shapes, existing schema compatibility, and the whole-sweep versus conditioned-law distinction.
+   A failed path write must leave an existing artifact readable and unchanged and must clean its temporary file.
+   Preserve an existing target's permission bits; new artifacts honor the caller's umask through exclusive creation.
+5. Reuse decision :: Extend persistence with one private validity validator reused by save/load, and reconstruct via the existing explicit-mask =EmpiricalLaw= constructor after the current draws/events normalization.
+   Extend the existing path branch with standard-library sibling temporary creation and atomic replacement; leave file-like writes direct.
+   No new schema field, law grade, estimator path, or dependency is needed.
+6. Open questions :: None for this bounded change.
+   Wider validation of names, arbitrary events, covariance state, remote object-store transactions, or concurrent-writer conflict resolution is outside scope.
+
+* Section 22 -- Eager covariance group-layout validation (#191)
+
+1. Task :: Reject malformed clustered and stratified group IDs before casts, segment reductions, or empty-slot clipping silently drop or merge observations.
+   Validate positive declared counts, numeric one-dimensional IDs, row alignment, finite near-integer values, rounded range, PSU-to-cell/stratum nesting, and cell-to-stratum nesting.
+   Preserve declared empty slots and the existing mask-based observability convention.
+2. Existing machinery :: Search tier: ripgrep, source/tests, the issue #191 audit, and ledger git history, grounded at =a6da415c52097c58c53482652719ed33f6334dc9=.
+   =covariance/clustered.py:89,140= round IDs before cluster totals and supported-cluster corrections; =tests/covariance/test_clustered.py:326= locks acceptance of =1 - 1e-7= as the same group as 1.
+   =covariance/stratified.py:171,308= aggregate PSU totals and construct FPC; segment-max cell/stratum resolution assumes nesting but currently has no general eager guard.
+   =tests/covariance/test_stratified.py:560= locks inert unpopulated PSU slots, including FPC.
+   =covariance/stratified.py:87= already has the stricter exact-integer fixed-stratum factory validator; retain its contract.
+   =inference/stratified_bootstrap.py:37,50= has resampler-specific exact-ID and nesting checks that also require every declared PSU/cell populated; those stronger resampling requirements cannot replace a general covariance guard.
+   =measures/empirical.py:202,238,276= establish eager value checks that skip tracers; =estimator.py:667= evaluates the covariance eagerly at the anchor before building compiled residuals.
+   =inference/k_statistic.py:287= and clustered dof correction can aggregate IDs even with an externally supplied V, so those contribution entry points also need the shared guard.
+3. Definitions :: Declared counts are positive =numbers.Integral= values, excluding Python/NumPy Boolean values, and must fit the kernels' signed-int32 group index representation.
+   Counts bound IDs; they need not equal the number of populated groups or the largest populated ID plus one.
+   IDs are finite real numeric values whose distance from the nearest integer is at most =min(1e-6 + 8 * eps(dtype) * max(1, abs(round(id))), 1e-3)=; integer/bool ID arrays have zero representational tolerance.
+   The absolute floor retains the existing float64 =1-1e-7= regression; the dtype term accommodates float roundoff and the cap stays well below half a group.
+   Range and nesting checks use the same rounded IDs as the numerical kernels.
+   A PSU belongs to one cell and one stratum; a cell belongs to one stratum, including when FPC is disabled.
+   =mask > 0= defines coordinate support even when observation weight is zero; weights affect exposure and contributions, not membership or support counts.
+4. Invariants :: Validate at evaluation boundaries rather than in dataclass constructors: =jax_dataclasses= reconstructs objects using abstract or placeholder leaves during transformations.
+   Shape, dtype and static count checks remain active for tracers and abstract arrays; NumPy value/range/nesting checks run only on concrete values.
+   Never NumPy-convert tracer or abstract placeholder leaves and never add runtime callbacks.
+   Document that genuinely dynamic traced IDs must be validated eagerly before JIT/vmap; shape checks do not certify their runtime values or nesting.
+   Guard ordinary covariance, support-correction and mixed diagnostic/cross entry points before their casts or segment operations.
+   The estimator's existing eager covariance anchor supplies validation for ordinary factory construction before tracing; call-time row-shape changes still face structural checks in compiled paths.
+   Keep fixed-stratum factory exact-integer checks, the all-design shortcut's independence from unused sampling metadata, and empty-slot clipping for harmless segment-max fills.
+5. Reuse decision :: Add one private =covariance/_group_layout.py= guard for counts/IDs and rounded nesting; no existing helper combines tolerant IDs, declared gaps, and tracer-safe structural checks.
+   Add small evaluation-boundary calls in clustered/stratified/mixed covariance and the clustered K contribution helper; do not change statistical accumulation formulas.
+   Keep the fixed-stratum and bootstrap exact-ID guards because their validated domains are deliberately narrower.
+   Tests will cover negative/out-of-range/nonfinite/fractional IDs, invalid count types/values, malformed ranks and lengths, PSU split over cells/strata, cells split over strata, and an invalid-cell FPC example that previously produced a negative correction.
+   Retain the near-integer rounding regression; assert empty-slot and zero-weight-support parity, eager factory rejection before solve, direct/closed-over/dynamic valid JIT/vmap parity, and tracer-time structural rejection without NumPy conversion.
+6. Open questions :: The tolerance is an explicit compatibility policy, not a claim that arbitrary fractional labels are meaningful; the coordinator approved a bounded tolerance preserving the existing near-integer test.
+   Runtime values of genuinely dynamic traced layouts remain outside eager validation and require prior validation by the caller; this limitation must be stated on both strategy docstrings.
+   No statistical support definition, dependency, estimator formula, or kernel-time error channel changes in this slice.
+
+Verification against Section 22 :: *OK*: shared evaluation guards reject invalid concrete layouts before casts/segment operations, and existing statistical accumulation formulas remain unchanged.
+The focused group-layout and existing clustered/stratified/fixed-mode covariance tests passed, including gapped FPC and original near-integer regressions; transformed valid inputs retain eager/JIT/vmap parity.
+Targeted mypy on the four changed source modules, Ruff, Black, and =git diff --check= pass.
+Runtime values of genuinely dynamic traced IDs remain unvalidated as documented; the tests assert structural rejection and abstract-placeholder safety without claiming runtime certification.
+
+* Section 23 -- Registered parameter ownership and convenience mask dtype (#191)
+
+1. Task :: Prevent static fields and nested containers from moving legacy manifold annotations onto another parameter leaf, and normalize convenience-constructor masks to the package's float64 baseline.
+2. Existing machinery :: Search tier: ripgrep, installed jax_dataclasses registration source, source/tests, and a bounded reconstruction probe on =a6da415=.
+   =_internal/params.py:206-226= and =:343-365= zip all root dataclass fields with opaque ManifoldLeaf traversal; equal counts can conceal different ownership.
+   The registered PyTreeDef already knows which fields are dynamic and how traversal order maps back to the root; public =tree_unflatten= can reconstruct unique opaque tokens, or value-preserving copied numeric/native leaves for checked constructors, without consulting JDC internals or comparing array values.
+   =param_names= documents a flat-field labelling contract; =tests/_internal/test_params_spec_builder_phase2.py::TestAnnotationPath= pins the intentional annotation divergence, and the other params suites pin order, shape, dtype, opaque wrappers, and JIT behavior.
+   =_internal/labels.py:175= normalizes explicit masks; =measures/empirical.py:785,943,958= infer float32 masks while =from_arrays= uses float64.
+3. Definitions :: A leaf owns a root field name only when registered reconstruction places its unique probe leaf directly in that field, with exactly one owner.
+   Static fields receive no dynamic tokens, and a nested container's descendant does not inherit its root field's label or legacy annotation.
+   The spec builder honors proven direct-field legacy annotations; =flatten_params_with_spec= intentionally maps bare annotated scalars to Euclidean as before.
+   Convenience masks use float64; the low-level EmpiricalMeasure constructor retains explicit input dtypes.
+4. Invariants :: Preserve numeric leaf traversal order, scalar flattening, original treedef reconstruction, ManifoldLeaf opacity, native container geometry, and constructor invariants.
+   If a checked constructor refuses opaque tokens, retry registered reconstruction with unique value-preserving JAX copies, retaining ManifoldLeaf wrappers and their geometry.
+   This probe never replaces the original leaves or flatten buffer.
+   Constructors that still erase or prevent proving probe identity leave ownership unproven; native leaves remain unnamed and legacy annotations refuse rather than guess.
+   Do not synthesize labels for nested containers; the estimator's flat-field names boundary must refuse shapes it cannot name correctly.
+5. Reuse decision :: Add one small ownership helper over existing opaque PyTreeDef reconstruction and reuse its names in both spec walks and the flat-field names boundary.
+   Keep the two spec walks' existing geometry decisions independent.
+   Extend the existing mask normalizer and inferred-mask casts without changing observability, weights, direct constructors, or adding dependencies.
+6. Open questions :: Owner decision pending before merge: accept strict ownership refusal for constructors that erase leaf identity by copying, or defer the ownership change.
+   Independent baseline comparison confirmed that a flat copying constructor previously fitted successfully; the new refusal is an explicit compatibility restriction.
+   Nested legacy annotation syntax and general nested estimator parameter labels remain unsupported rather than being invented here.
+
+* Section 24 -- Native ridge mode anchoring and relative diagonality (#191)
+
+1. Task :: Freeze the native diagonal-versus-canonical ridge choice together with tau at the factory's V0 anchor, so a covariance crossing the diagonal detector threshold cannot switch regularisation formulas inside an otherwise smooth residual.
+   Make the diagonal detector relative to covariance scale while retaining the existing signed feasibility test and absolute-floor safety policy.
+2. Existing machinery :: Search tier: ripgrep, source/tests, issue #191 audit, and ledger git history, grounded at =a6da415c52097c58c53482652719ed33f6334dc9=.
+   =regularization.py:159= detects diagonal structure, =:173= applies both ridge formulas, =:258= chooses tau by signed-spectrum bisection, and =:401= reapplies fixed tau but currently redetects structure at each current V.
+   =regularization.py:145= owns the unchanged PD floor; =:354= tests saturation against the same input matrix, tau, detector and signed feasibility rule as the bisection.
+   =estimator.py:674-686= captures V0 and tau once and defines the single anchored application used by residuals, inference and outer-loop weighting (=735,808,899,1250=).
+   =estimator.py:1493= attaches the original resolved strategies to the factory; =studies/driver.py:579= rebuilds estimate per dataset under =anchor_per_rep=True=.
+   =tests/test_regularization.py= locks the two ridge formulas, scaling identities, signed PD repair, diagonal dispatch and saturation; =tests/test_estimator_anchor_tau.py= checks tau anchoring and custom apply-only rejection; =tests/studies/test_replicate.py::TestAnchorPerRep= locks template-shared versus per-fit anchoring.
+3. Definitions :: The canonical native ridge is =V + tau*diag(V)=; its diagonal alternative is =V + tau*(trace(V)/M)*I=.
+   A matrix is numerically diagonal when =max(abs(offdiag(V))) <= _DIAG_RTOL*mean(abs(diag(V)))=, without a unit absolute floor.
+   Evaluate that equivalent relative comparison after scaling diagonal and off-diagonal magnitudes by the largest absolute diagonal entry (use one only when that entry is exactly zero), avoiding overflow in the diagonal mean and retaining zero-matrix classification.
+   The all-zero matrix is diagonal; a matrix with zero diagonal and nonzero off-diagonal is not.
+   The detector is invariant to uniform positive scaling, but selected tau need not be scale invariant below the existing absolute PD floor.
+   =_pd_floor(V)= and all signed-spectrum feasibility/saturation rules remain unchanged.
+4. Invariants :: Extend only native =DiagonalTikhonov.apply_fixed_tau= with optional keyword-only =diagonal_mode=None=; None preserves standalone per-call detection, and an explicit scalar bool/array mode selects the existing =_apply_tau= formula.
+   At factory construction compute native mode from V0 once, retain it as a JAX scalar closure value, and pass it on every native anchored evaluation together with tau_anchor.
+   Use exact type identity for the native extension; arbitrary regularizers and native subclasses retain their existing two-argument bound =apply_fixed_tau(V,tau)= call, so custom overrides cannot be bypassed or receive a new keyword unexpectedly.
+   Keep =RegularizationStrategy.apply= and the estimator's custom-regularizer method requirement unchanged; do not wrap or replace the original regularizer in persisted factory configuration.
+   Factory reuse retains the template mode and tau; =anchor_per_rep=True= rebuilds both from each dataset through the existing path.
+   Standalone default =apply_fixed_tau= is smooth only while its detected mode stays unchanged; remove the current unconditional C1 claim and document explicit mode pinning for covariance families crossing the threshold.
+   No penalty behavior or absolute PD-floor policy changes belong to this slice.
+5. Reuse decision :: Reuse =_apply_tau= and =_is_diagonal=, changing only the latter's scale comparison and adding an optional mode argument to the native fixed application.
+   Extend the existing anchored closure, preserving its use by all weighting and inference paths; do not add a parallel covariance or regularization adapter.
+   Tests will classify correlated, diagonal, pure-off-diagonal and zero matrices at tiny, ordinary and large scales, including a scale where the old absolute detector floor misclassified correlation.
+   Compare native explicit modes with both closed-form ridge formulas and default direct apply; retain signed PD-floor and saturation regression tests.
+   Probe the actual estimator residual via an optimizer spy across a diagonal-threshold crossing, checking continuity, AD and central finite differences against the frozen-mode formula rather than copying the production closure into a test.
+   Verify template factory reuse versus =anchor_per_rep=True= with datasets whose anchor modes differ, and test custom regularizers plus native subclasses with two-argument overrides.
+6. Open questions :: No new numerical policy is required: the relative detector is separate from the explicitly retained absolute PD-floor rule, and exact-type dispatch limits the extension to native behavior.
+   A standalone caller that wants mode pinning must supply the new optional argument; default standalone calls continue to inspect their supplied V for compatibility.
+   The human's pending invalid traced-penalty choice is separate and remains untouched.
+
+Verification against Section 24 :: *OK*: native mode and tau share V0, the original regularizer remains in the factory spec, and custom/subclass overrides retain two-argument forwarding.
+The optimizer-captured production residual matches the frozen-mode formula across the detector threshold for both anchor modes, including AD/central-difference and continuity checks.
+Template reuse and fresh per-rep anchoring agree with their respective expected weighting matrices and tau values.
+The new targeted tests and existing regularization/anchor regressions pass; targeted mypy, Ruff, Black and =git diff --check= pass.
+The relative detector is tested from =1e-200= through =1e300=; the absolute PD floor and penalty source are unchanged.
+
+* Section 25 -- Native Tikhonov coefficient errors under transformations (#191)
+
+1. Task :: Make an evaluated native Tikhonov coefficient that is negative or nonfinite raise, including under JIT/vmap, while preserving native penalty arithmetic and differentiation.
+2. Existing machinery :: Search tier: source/tests, ripgrep, and bounded JAX 0.10.1 callback/AD probes on =a6da415=.
+   =penalty.py:107-127= stores c as a dynamic PyTree leaf and evaluates its quadratic via the existing manifold-aware flatten helper.
+   =estimator.py:746= consumes the penalty through its protocol and appends its square root to the residual, which currently hides invalid negative c behind NaNs.
+   =tests/test_penalty.py= pins scalar/manifold values, parameter gradients, gauge invariance, and estimator delegation.
+   Installed =jax.debug.callback= supports scalar validation under JIT, vmap and differentiation without replacing the arithmetic or adding a dependency.
+3. Definitions :: An evaluated coefficient must be a real numeric scalar, finite and nonnegative.
+   Concrete invalid coefficients raise ValueError; a compiled callback failure propagates as JAX's runtime error wrapper.
+   The user explicitly selected this error policy over a failed-fit flag, and retained the existing absolute covariance PD floor outside this task.
+4. Invariants :: Validate the original c object before converting a concrete captured value into a tracer; fixed valid captured coefficients must add no callback to the compiled residual.
+   Shape and real dtype checks remain static under transformations.
+   Custom PenaltyStrategy implementations and all regularization behavior remain unchanged.
+   Validation occurs only at penalty evaluation: JAX must be able to reconstruct a TikhonovPenalty-shaped cotangent with a negative c, or abstract/placeholder carriers, without treating that carrier as an evaluated coefficient.
+5. Reuse decision :: Extend only native TikhonovPenalty.penalty with a private concrete validator and a scalar debug callback for genuinely traced c.
+   Reuse the existing ambient flatten, quadratic, gradient method and PyTree registration.
+   Avoid constructor validation because it would reject legitimate negative cotangents of a positive primal penalty; this is a representation distinction, not a relaxation of evaluated-coefficient validation.
+6. Open questions :: None; the human and coordinator resolved runtime errors and constructor-carrier behavior explicitly.
+   General custom penalty validation and alternative covariance-floor policy are outside scope.
