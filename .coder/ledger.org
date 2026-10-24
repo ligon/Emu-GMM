@@ -1094,3 +1094,11 @@ clean output is =.coder/design-145-cell-coverage-300-2026-10-23.log=.
 Verification against Section 16 :: *OK*: the 27-world unequal-exposure example matches the integral to maximum absolute error =2.22e-16=; a real package refit agrees with the centered-covariance J contrast.
 Seed 185, 500 Gaussian-null samples with 500 worlds each at nominal 5% reject 30/500 with recentring and 0/500 with ordinary pairs J.
 The targeted tests check both covariance flags on the ordinary path, frozen shifted residual, positive-domain refusal, NaN/valid denominator, and PyTree stacking.
+
+* Section 17 -- Factory call-time parameter tree (#191)
+
+1. Task :: Reject a call-time parameter tree whose structure differs from the tree captured by =build_estimator=, before a same-length flat vector is reconstructed under the wrong template.
+2. Existing machinery :: =src/emu_gmm/estimator.py:650-666= captures the template =treedef= and manifold layout; =:1133-1162= flattens the call-time tree but discards its definition; =:1264= unflattens the fitted vector under the template. =_internal/params.py:40= and =:294= return the call-time PyTreeDef from the scalar and manifold flatteners. =tests/test_estimator_traced_measure.py= already checks same-structure factory reuse.
+3. Definitions :: Same-length flat buffers do not imply the same parameter structure. The factory's compiled residual, labels, and unflatten operation all belong to its template tree.
+4. Invariants :: Preserve same-structure calls, including different numeric values, and the scalar-vs-manifold flatten dispatch. Compare the call-time PyTreeDef before entering the solver; for manifold trees also compare each leaf's ambient shape. This is an eager structural guard and does not inspect traced numeric values.
+5. Reuse decision :: Use the flatteners' existing returned PyTreeDef and =ManifoldSpec.leaf_specs=; no new parameter codec or estimator branch is needed.
