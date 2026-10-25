@@ -1445,7 +1445,7 @@ The two compilation routes may round differently at numerically unstable boundar
 1. Task :: Produce a new explicitly identified current-CU/subvector native profiled-set artifact on the frozen current K-Aggregators panel, with validity events and RandomSetLaw NPZ parity.
    It does not recover missing historical convergence or reuse the historical Fixed/full-vector reference.
 2. Existing machinery :: Search tier: source/git/ripgrep, issues 113/180, Sections 12/26 and the frozen prerequisite/data-preparation manifests.
-   =inference/confidence_set.py:profiled_k_confidence_set= owns parameter concentration, the CU/subvector reference and certified-or-FOC nuisance validity; =k_statistic= owns all K/S/J calculations.
+   =inference/confidence_set.py:profiled_k_confidence_set= owns parameter concentration, the CU/subvector reference and mandatory resolved-FOC nuisance validity (Section 33 supersedes the original certified-or-FOC experiment policy); =k_statistic= owns all K/S/J calculations.
    =random_set_law.py:RandomSetLaw.from_k_confidence_sets= / =save= / =load= own finite-grid three-valued verdicts, invalid/nonconverged counts and inert codec.
    =scripts/validation/random_set_calibration_180.py= already checks known-DGP coverage and persistence; it does not replace native artifact evidence.
    Section 26's empirical reducing-model/native factory candidate owns complete sample-reduction AD, profile adapters and fresh-data compiled reuse; this experiment depends on that code passing its release gates.
@@ -1461,7 +1461,7 @@ The two compilation routes may round differently at numerically unstable boundar
    Original observation columns are followed by explicit product/market keys; retain the original instrument endpoint so appended keys cannot become moments.
    Validate frozen input hashes, dimensions, finite warm components, connected grouping and unweighted retained support before fitting; reject dimension mismatch instead of truncating/padding A or zeroing pi.
    Compare the Schur reducer against independent dummy-design/NumPy projection on a small unbalanced panel and against the frozen real-panel oracle before scientific fits.
-   Use the public profiler and covariance/K interfaces; an optimizer protocol wrapper may record returned OptimizerInfo but must not reinterpret the profiler's certified-or-FOC event rule.
+   Use the public profiler and covariance/K interfaces; an optimizer protocol wrapper may record returned OptimizerInfo but must record the profiler event rule that actually ran; Section 33 governs current mandatory-FOC admission, while original experiment events remain historical.
    Retain original nuisance solver tolerances rtol=atol=1e-9 and max_steps=1500; use current CU concentration, package default regularization and no new nuisance penalty.
    Save grid/alpha/statistic/dofs/p-values/membership/topology/edge flags and separate invalid/nonconverged indices/counts, plus per-point optimizer provenance, source/env/input hashes and timing/RSS.
    Finite p-values do not override unknown verdicts. One native artifact is not a coverage study; emptiness is grid-limited, not global.
@@ -1503,7 +1503,7 @@ The two compilation routes may round differently at numerically unstable boundar
 1. Task :: Repair the existing FOC quadratic form's sensitivity to coordinate units before reinterpreting any native profile.
    The saved diagnostic is unchanged; a separate corrected-guard audit will cover all seven original checkpoints.
 2. Existing machinery :: =inference/confidence_set.py:_foc_decrement= owns the scalar g' H^+ g; =_internal/pinv_eigvalrule.py= owns its fixed-count gauge inverse and must retain its existing contract and callers.
-   =tests/inference/test_profiled_confidence_set.py:TestInnerConvergenceGuard= covers exact forms, one gauge, uncertified stationary/nonstationary fits and the certified-fit superset rule.
+   =tests/inference/test_profiled_confidence_set.py:TestInnerConvergenceGuard= covers exact forms, one gauge, uncertified stationary/nonstationary fits and mandatory resolved-FOC admission; the historical certified-fit override is removed by Section 33.
    =inference/numerical_rank.py:NumericalRankPolicy= is an explicit opt-in inference policy, not an automatic FOC fallback and not the remedy here.
    Exact-producer checkpoint evaluation 40463484 matches original objective/K while its tiny c0 information is below the unscaled normal-matrix eigensolver resolution.
    Two independent congruence audits reuse the existing helper on the same g/H and agree at approximately 4.546461756 rather than the raw 0.301383892.
@@ -1511,7 +1511,8 @@ The two compilation routes may round differently at numerically unstable boundar
    Use sqrt(diag(H)) for unit-diagonal equilibration, then the same fixed-count gauge inverse; remove no additional eigenvalues.
    Preserve an exactly zero diagonal with unit scale so an axis-aligned known gauge remains admissible; an additional null is not another gauge.
    Numerical resolution of a retained scaled eigenvalue is distinct from population strength, a rank-truncation policy or a changed FOC tolerance.
-4. Invariants :: Preserve original g/H inputs, theta/anchor, objective, optimizer, default foc_tol=1e-3 and certified-or-FOC rule.
+4. Invariants :: Preserve original g/H inputs, theta/anchor, objective, optimizer and default foc_tol=1e-3.
+   The numerical-only repair preserved the historical certified-or-FOC rule; the owner-approved Section 33 now supersedes that admission rule without changing the helper.
    Reject nonfinite/negative diagonal or transformed quantities, unresolved/nonpositive retained curvature and negative/nonfinite quadratic forms as unavailable FOC certificates.
    Do not absorb extra nulls, reinterpret indefinite information as successful stationarity or label weak population identification from numerical failure.
    Sequential scaling avoids forming a potentially overflowing outer product of reciprocal diagonals.
@@ -1525,7 +1526,7 @@ The two compilation routes may round differently at numerically unstable boundar
 * Section 31 -- Bijective positive-amplitude nuisance experiment (issue 180)
 
 1. Task :: At only s=0.050088084721517094, test whether changing nuisance coordinates improves optimization of the unchanged CU criterion.
-   This is a separately declared optimization experiment, independent of the pending public FOC-validity policy decision.
+   This is a separately declared optimization experiment, independent of the subsequently approved mandatory-FOC policy in Section 33.
 2. Existing machinery :: Search tier: git/ripgrep and source/tests at 10ee43f.
    Reuse native_projected_set_180.ProjectedModel/point/load_inputs, map_model_parameters, _ProfileReducer and the production estimator/factory.
    The existing Positive manifold represents delta>0, with unit retraction differential and natural ambient derivative/covariance coordinates; its tests are tests/manifolds/test_positive.py and the estimator's Positive integration controls.
@@ -1548,7 +1549,7 @@ The two compilation routes may round differently at numerically unstable boundar
 * Section 32 -- Reject infeasible Positive trial points in native LM (issue 180)
 
 1. Task :: Test and repair native LM acceptance of a Positive trial that underflows to zero while its residual remains finite.
-   This is an optimization-domain repair, independent of the pending solver-certified versus reliable-FOC inference decision.
+   This is an optimization-domain repair, independent of the subsequently approved mandatory-FOC inference decision in Section 33.
 2. Existing machinery :: Search tier: git/ripgrep at edbbca9, including manifolds/positive.py, manifolds/riemannian_lm.py and existing Positive/LM tests.
    Positive.retraction implements x*exp(v/x); tests/manifolds/test_positive.py explicitly permits floating-point underflow in the standalone arithmetic operator.
    Native LM owns trial acceptance using cancellation-free residual reduction, damping increases on rejection and absorbing-state stagnation; tests/manifolds/test_riemannian_lm_accurate_reduction.py and test_riemannian_lm_stagnation.py cover those rules.
@@ -1585,3 +1586,13 @@ The two compilation routes may round differently at numerically unstable boundar
 5. Reuse decision :: Extend only the public profiler's admission rule and documentation/tests; reuse _foc_decrement rather than introducing another inverse or threshold.
    Extend the provenance auditor with explicit policy selection and targeted tests, preserving its historical replay mode; create a new immutable saved-array artifact with exact source/policy hashes.
 6. Open questions :: No owner decision remains for this contract. Reliable finite-interior nuisance solutions and strong identification remain unresolved scientific requirements of issue 180.
+
+** Section 33 verification
+
+OK (anchored on Sections 33.2-5): the production decrement and set-assembler function bodies remain unchanged; only profiler admission and malformed-ingredient refusal change.
+Independent source review found no replacement inverse, statistic, threshold, gauge rule, solver or nuisance optimizer.
+The targeted public-profile/numerical/law gate passed lint, formatting, types and 57 tests; the separate auditor gate passed 16 tests.
+The saved-matrix audit in exact producer environment (job 40494067, exit 0:0) yields seven unknown points and zero invalid points with unchanged statistics and old artifacts.
+Two independent source/hash/codec reviews confirm all 127 nonempty grid queries are unknown, while raw grid_empty=True remains distinct from known_empty=False.
+The fixed-grid law contains one set draw, so capacity-query n_nonconverged=1 is distinct from the profiled set's seven-point n_nonconverged count.
+No contradiction or reinvention was found against the approved contract; native finite-interior and strong-nuisance assumptions remain open scientific questions.
