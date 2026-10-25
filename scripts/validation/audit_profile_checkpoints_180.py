@@ -2,7 +2,8 @@
 
 No optimization, reference distribution or p-value is recomputed. The supplied
 plan pins each diagnostic manifest and the original assembled artifact. Reuse
-ledger Sections 29/30, the actual FOC helper, set assembler and law codec.
+ledger Sections 29/30/33, the actual FOC helper, set assembler and law codec.
+Strict FOC is the default; historical optimizer-or-FOC replay is explicit.
 """
 
 from __future__ import annotations
@@ -45,7 +46,9 @@ def load_guard(path, expected):
     return module._foc_decrement
 
 
-def audit(plan, guard, output):
+def audit(plan, guard, output, *, policy="strict_foc"):
+    if policy not in ("strict_foc", "optimizer_or_foc"):
+        raise ValueError("unknown nuisance admission policy")
     original_path = Path(plan["original_manifest"])
     if native.sha256(original_path) != plan["original_manifest_sha256"]:
         raise ValueError("original artifact manifest changed")
@@ -125,7 +128,9 @@ def audit(plan, guard, output):
         foc_ok = (
             current is not None and np.isfinite(current) and current <= _FOC_TOL_DEFAULT
         )
-        failed = not (certified or foc_ok)
+        # Reuse the production decrement; Section 33 requires it independently
+        # of raw solver certification. Preserve explicit historical replay.
+        failed = not (foc_ok or (policy == "optimizer_or_foc" and certified))
         nonconverged.append(failed)
         results.append(KStatisticResult(**diagnosis["original_statistics"]))
         records.append(
@@ -158,6 +163,7 @@ def audit(plan, guard, output):
         "interpretation": "not a refit, historical reconstruction, native coverage or continuous-domain claim; strong-nuisance/interior assumptions remain unverified",
         "plan": plan,
         "foc_tol": _FOC_TOL_DEFAULT,
+        "nuisance_admission_policy": policy,
         "points": records,
         "confidence_set": {
             f.name: getattr(cs, f.name)
@@ -175,11 +181,17 @@ def main():
     parser.add_argument("--guard", type=Path, required=True)
     parser.add_argument("--guard-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--policy",
+        choices=("strict_foc", "optimizer_or_foc"),
+        default="strict_foc",
+        help="Require passing FOC (default), or explicitly replay historical OR policy",
+    )
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text())
     guard = load_guard(args.guard, args.guard_sha256)
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    report = audit(plan, guard, args.output_dir)
+    report = audit(plan, guard, args.output_dir, policy=args.policy)
     report.update(
         plan_sha256=native.sha256(args.plan),
         guard_sha256=args.guard_sha256,

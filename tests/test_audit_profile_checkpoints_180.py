@@ -95,7 +95,10 @@ def test_reclassification_preserves_statistics_and_certified_superset(tmp_path):
     plan = _plan(tmp_path)
     output = tmp_path / "audit"
     output.mkdir()
-    report = auditor.audit(plan, lambda inner, gd: 4.0, output)
+    report = auditor.audit(
+        plan, lambda inner, gd: 4.0, output, policy="optimizer_or_foc"
+    )
+    assert report["nuisance_admission_policy"] == "optimizer_or_foc"
     cs = report["confidence_set"]
     np.testing.assert_array_equal(cs["p_grid"], [0.01, 0.01])
     assert cs["nonconverged_indices"] == (0,)
@@ -163,3 +166,39 @@ def test_audit_refuses_different_scientific_runtime(tmp_path, monkeypatch):
     output.mkdir()
     with pytest.raises(ValueError, match="runtime"):
         auditor.audit(plan, lambda inner, gd: 4.0, output)
+
+
+@pytest.mark.parametrize("decrement", [4.0, None, np.nan, np.inf])
+def test_strict_policy_requires_finite_passing_foc_even_if_certified(
+    tmp_path, decrement
+):
+    plan = _plan(tmp_path)
+    output = tmp_path / "strict-audit"
+    output.mkdir()
+    report = auditor.audit(plan, lambda inner, gd: decrement, output)
+    assert report["nuisance_admission_policy"] == "strict_foc"
+    cs = report["confidence_set"]
+    np.testing.assert_array_equal(cs["p_grid"], [0.01, 0.01])
+    assert cs["nonconverged_indices"] == (0, 1)
+    assert cs["n_nonconverged"] == 2
+    assert cs["n_invalid"] == 0
+    assert report["points"][1]["original_optimizer_certified"]
+    assert not report["points"][1]["corrected_profiler_nuisance_valid"]
+    assert report["persistence"]["point_verdicts"] == [None, None]
+    assert not report["persistence"]["known_empty_scanned_set"]
+    assert report["persistence"]["capacity_queries_checked"] == 3
+
+
+def test_strict_policy_admits_passing_foc_regardless_of_certification(tmp_path):
+    plan = _plan(tmp_path)
+    output = tmp_path / "passing-audit"
+    output.mkdir()
+    report = auditor.audit(plan, lambda inner, gd: auditor._FOC_TOL_DEFAULT, output)
+    assert report["confidence_set"]["n_nonconverged"] == 0
+    assert all(p["corrected_profiler_nuisance_valid"] for p in report["points"])
+
+
+def test_unknown_policy_is_rejected_before_creating_a_law(tmp_path):
+    with pytest.raises(ValueError, match="admission policy"):
+        auditor.audit({}, lambda inner, gd: 0.0, tmp_path, policy="typo")
+    assert not list(tmp_path.iterdir())
