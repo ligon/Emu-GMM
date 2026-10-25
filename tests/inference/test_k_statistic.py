@@ -37,7 +37,12 @@ import jax_dataclasses as jdc
 import numpy as np
 import pytest
 import scipy.stats
-from emu_gmm.covariance import AnalyticalCovariance, ClusteredCovariance, IIDCovariance
+from emu_gmm.covariance import (
+    AnalyticalCovariance,
+    ClusteredCovariance,
+    IIDCovariance,
+    SumCovariance,
+)
 from emu_gmm.examples.euler import (
     BETA_TRUE,
     GAMMA_TRUE,
@@ -834,6 +839,88 @@ def test_clustered_k_cross_covariance_uses_pairwise_dof_correction():
         score_cov_fn=lambda model, at_theta: uncorrected,
     )
     assert abs(float(via_dispatch.K) - float(old_scale.K)) > 1e-6
+
+
+@pytest.mark.parametrize("dof_correction", [False, True])
+def test_two_way_k_cross_covariance_matches_signed_cluster_totals(dof_correction):
+    """The K correction follows the same quarter + market - pair rule as V."""
+    from emu_gmm.inference.k_statistic import _compute_d_tilde
+
+    rng = np.random.default_rng(180)
+    quarter = np.repeat(np.arange(4), 3 * 2).astype(float)
+    market = np.tile(np.repeat(np.arange(3), 2), 4).astype(float)
+    n_obs = len(quarter)
+    xval = rng.normal(size=n_obs)
+    residual = (
+        rng.normal(size=4)[quarter.astype(int)]
+        + rng.normal(size=3)[market.astype(int)]
+        + rng.normal(size=n_obs)
+    )
+    theta = _OneParam(theta=0.7)
+    x = np.column_stack([xval * theta.theta + residual, xval, np.ones(n_obs)])
+    mask = np.ones((n_obs, 3))
+    mask[market == 2, 2] = 0.0
+    weights = np.linspace(0.8, 1.3, n_obs)
+    measure = EmpiricalMeasure(
+        x=jnp.asarray(x), mask=jnp.asarray(mask), weights=jnp.asarray(weights)
+    )
+    cov = SumCovariance.two_way_cluster(
+        jnp.asarray(quarter),
+        4,
+        jnp.asarray(market),
+        3,
+        dof_correction=dof_correction,
+    )
+    g = np.asarray(measure.moment_contributions(_linear_psi, theta))
+    D = np.asarray(measure.jacobian_contributions(_linear_psi, theta))
+    N_j = (mask * weights[:, None]).sum(axis=0)
+
+    def cluster_cross(ids, n_clusters):
+        totals_g = np.stack([g[ids == c].sum(axis=0) for c in range(n_clusters)])
+        totals_D = np.stack([D[ids == c].sum(axis=0) for c in range(n_clusters)])
+        numer = np.einsum("cmp,ck->pmk", totals_D, totals_g)
+        if dof_correction:
+            support = np.stack(
+                [np.any(mask[ids == c] > 0, axis=0) for c in range(n_clusters)]
+            )
+            counts = support.astype(float).T @ support.astype(float)
+            factor = np.ones_like(counts)
+            np.divide(counts, counts - 1, out=factor, where=counts >= 2)
+            numer *= factor[None, :, :]
+        return numer / (N_j[None, :, None] * N_j[None, None, :])
+
+    pair = quarter.astype(int) * 3 + market.astype(int)
+    expected = (
+        cluster_cross(quarter.astype(int), 4)
+        + cluster_cross(market.astype(int), 3)
+        - cluster_cross(pair, 12)
+    )
+    m = measure.expectation(_linear_psi, theta)
+    G = measure.jacobian(_linear_psi, theta)
+    D_auto = _compute_d_tilde(measure, cov, _linear_psi, theta, m, G, jnp.eye(3), None)
+    D_expected = np.asarray(G) - np.einsum("pmk,k->mp", expected, np.asarray(m))
+    np.testing.assert_allclose(np.asarray(D_auto), D_expected, rtol=1e-12, atol=1e-12)
+
+    via_dispatch = k_statistic(theta, measure, cov, model=_linear_psi)
+    via_supplied = k_statistic(
+        theta,
+        measure,
+        cov,
+        model=_linear_psi,
+        score_cov_fn=lambda model, at_theta: jnp.asarray(expected),
+    )
+    for name in ("K", "S", "J"):
+        assert float(getattr(via_dispatch, name)) == pytest.approx(
+            float(getattr(via_supplied, name)), rel=1e-11, abs=1e-12
+        )
+
+    iid_wrong = np.einsum("nmp,nk->pmk", D, g)
+    iid_wrong /= N_j[None, :, None] * N_j[None, None, :]
+    assert np.max(np.abs(expected - iid_wrong)) > 1e-4
+
+    unsupported = SumCovariance(terms=(IIDCovariance(),), signs=(1.0,))
+    with pytest.raises(ValueError, match="uncentered ClusteredCovariance terms"):
+        k_statistic(theta, measure, unsupported, model=_linear_psi)
 
 
 # ---------------------------------------------------------------------------

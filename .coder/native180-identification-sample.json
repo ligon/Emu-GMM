@@ -1,0 +1,53 @@
+{
+  "all_nuisance_weighted": {
+    "largest": 16.204210663706295,
+    "rank": 20,
+    "smallest_nonzero": 0.00023624794560209072
+  },
+  "c0_partial_information": 5.581309830431285e-08,
+  "column_normalized_linear_design": {
+    "largest": 3.1637316171662415,
+    "rank": 26,
+    "smallest_nonzero": 0.016618313096245976
+  },
+  "delta": 0.0008376102189528571,
+  "delta_coordinate_partial_information": 0.07955220055351551,
+  "factor_min_singular": 5.293084998220401,
+  "full_parameter_weighted": {
+    "largest": 16.20421066386959,
+    "rank": 21,
+    "smallest_nonzero": 0.00021124500710607643
+  },
+  "input_sha256": {
+    "data": "47fb95edc77cb403c5377d71e78939d7472fe5c2459b28559835aa24a8018d8e",
+    "postfit": "cc54d5b92889a62aa3bfb146e3b2986b1698fc6dcf1d97be7c493228ac62c7f7",
+    "warm": "077911639de23bc044a7362fecf07034d894bdf62603edf9234995b1508d5161"
+  },
+  "interpretation": "sample rank and original pair-covariance-weighted information only; no two-way or population lower bound",
+  "kind": "native180-frozen-sample-identification-v1",
+  "max_abs_fe_instrument_mean": {
+    "pair": 1.0260443288651849e-14,
+    "product": 3.407612418147513e-15
+  },
+  "max_abs_package_information_gap": 1.0764722446765518e-12,
+  "max_abs_package_jacobian_gap": 9.769962616701378e-15,
+  "n_moments": 43,
+  "n_pairs": 5460,
+  "n_rows": 236088,
+  "null_s": 0.050088084721517094,
+  "other_nuisance_weighted": {
+    "largest": 16.204210663348803,
+    "rank": 19,
+    "smallest_nonzero": 0.07058658971466218
+  },
+  "projected_amplitude_column_gap": 1.9958661252469716e-15,
+  "s_partial_information": 8.125632713435011e-08,
+  "s_partial_information_div_delta_squared": 0.11581725130522601,
+  "unprojected_linear_design_min_singular": 0.008180459943668771,
+  "unrestricted_linear_design": {
+    "largest": 1.804757389571681,
+    "rank": 26,
+    "smallest_nonzero": 0.008180459943668809
+  },
+  "weyl_projected_rank_lower_bound": 0.008180459943666774
+}
