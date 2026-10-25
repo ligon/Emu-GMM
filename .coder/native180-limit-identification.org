@@ -1,0 +1,202 @@
+#+TITLE: Native two-way limit and nuisance identification -- issue 180
+#+AUTHOR: Sue (GPT-6 Codex)
+#+DATE: [2026-10-25 Sun]
+
+* Result and scope
+
+The frozen panel numerically supports full column rank of the implemented projected invariant-coordinate moment design at the selected null, but it does not establish the population or cluster assumptions needed for native subvector inference.
+An all-strong, finite-interior triangular-array theorem below supplies a sufficient route to \(K\Rightarrow\chi^2_1\) when both quarter and recurring-market dependence are represented by the package's two-way covariance.
+The prior pair-only theorem is retained as a contrast, not as the scientific target.
+The actual 84-quarter-by-65-market panel does not identify a stochastic sequence, and a counterexample shows that exact fixed-effect orthogonality cannot by itself validate the pair-only covariance.
+At the saved finite trust-region point, both amplitude and interest directions have very small weighted partial information in physical coordinates, and the fit fails the mandatory first-order screen.
+The seven original grid verdicts therefore remain unknown.
+This note implements ledger Section 35 and extends [[file:native180-proof-probe.org][the bounded proof probe]].
+
+* Exact moment and identification algebra
+
+Fix \(s\), write \(\delta=\exp(-c_0)>0\), \(\Gamma=AA'\), and let \(Z\) contain the 43 frozen instruments.
+The panel's instrument columns are orthogonal to the product and quarter-by-market indicators to at most \(3.41\times10^{-15}\) and \(1.03\times10^{-14}\) in group means.
+For the exact-centering idealization \(Z'F=0\), the joint projection \(M_F\) satisfies \(Z'M_F=Z'\).
+The package's native moment vector is consequently
+\begin{equation}
+m_N(s,\delta,\Gamma,\pi)=\delta b_{s,N}-\ell_N-B_N\operatorname{vec}(\Gamma)-P_N\pi,
+\end{equation}
+where \(b_{s,N}=N^{-1}Z'(e^{-sz}Y)\), \(\ell_N=N^{-1}Z'\log p\), \(B_N=N^{-1}Z'X_\Gamma\), and \(P_N=N^{-1}Z'X_\pi\).
+The instrument/FE roundoff does not alter the recorded package-Jacobian parity below.
+Without idealized exact centering, the same affine formula holds with \(b_{s,N}^{\mathrm{proj}}=N^{-1}Z'M_F(e^{-sz}Y)\); the remaining \(\ell_N,B_N,P_N\) blocks enter after the outcome projection in the implemented model.
+The frozen auditor calculates this projected amplitude column directly from the saved Schur projector.
+This identity is about the *aggregate moment*; the package correctly retains projected row residuals for pair covariance and derivative--moment cross covariance.
+See =scripts/validation/native_projected_set_180.py:117-156= and =src/emu_gmm/measures/empirical.py:620=.
+
+Let \(T_A(\Delta A)=\operatorname{vec}(A\Delta A'+\Delta A A')\).
+For rank-two \(A\in\mathbb{R}^{5\times2}\), this tangent map has a one-dimensional rotation kernel and nine identified directions.
+On any fixed smooth quotient chart, the nuisance Jacobian is
+\begin{equation}
+G_{\eta,N}=\left[-B_NT_A,\ -\delta b_{s,N},\ -P_N\right],
+\qquad \eta=(A,c_0,\pi),\quad \dim(\eta/O(2))=20.
+\end{equation}
+The interest column is \(G_{s,N}=-\delta N^{-1}Z'(z e^{-sz}Y)\).
+For a positive-definite population cluster covariance \(\Omega\), define \(C_A=[B T_A,P]\) on the 19-dimensional factor-plus-\(\pi\) quotient.
+Pointwise local nuisance rank 20 holds exactly when \(A\) has rank two, \(C_A\) has rank 19, \(b_s\notin\operatorname{col}(C_A)\), and \(\delta>0\).
+The physical amplitude's information after removing the other nuisance directions is
+\begin{equation}
+I_{c_0\mid A,\pi}=\delta^2\left\|(I-\Pi_{\Omega^{-1/2}C_A})\Omega^{-1/2}b_s\right\|^2.
+\end{equation}
+Thus a fixed positive \(\delta\) can give pointwise rank without a useful lower information bound, and no uniform physical-\(c_0\) bound is possible over \(c_0\to\infty\) when \(b_s\) and \(\Omega^{-1}\) remain bounded.
+The interest column also vanishes at \(\delta=0\), where \(s\) disappears from the moment model.
+This is an exact algebraic obstruction to uniform identification on an unbounded amplitude domain, not evidence of an attained boundary optimum.
+
+At fixed \(s\), if the population \(43\times26\) map \([b_s,B|_{\operatorname{Sym}_5},P]\) has its smallest singular value bounded away from zero, then its aggregate moment is injective in \((\delta,\Gamma,\pi)\).
+On the rank-two PSD subset this identifies the invariant \(\Gamma\) and \(A\) up to its expected \(O(2)\) gauge, conditional on a zero moment existing.
+That rank statement alone does not make the parameter-dependent CU criterion coercive or ensure a finite sample minimum.
+
+* Target: a two-way array and matched K statistic
+
+Index rows by product \(p\), quarter \(t\in\{1,\ldots,T\}\), and recurring market \(h\in\{1,\ldots,H\}\).
+Let \(T_{th}\) be the 43-vector total of projected row contributions in intersection cell \((t,h)\), \(U_t=\sum_hT_{th}\), and \(W_h=\sum_tT_{th}\).
+The package's =SumCovariance.two_way_cluster= constructs
+\begin{equation}
+V_{2w}=N^{-2}\left(\sum_tU_tU_t'+\sum_hW_hW_h'-\sum_{t,h}T_{th}T_{th}'\right).
+\end{equation}
+Its derivative--moment analogue is the identical signed sum of the three cluster-total cross products, each divided by the package's \(N_jN_k\); the automatic K path now uses that expression for uncentered clustered summands.
+The subtraction removes the intersection component counted in both margins, and can produce an indefinite sample matrix that requires the package's regularizer.
+The frozen panel has \(T=84\), \(H=65\), and \(T H=5460\); the theorem concerns a sequence with *both* margins increasing, not replication of that one panel.
+
+Let \(r_{T,H}=(T^{-1}+H^{-1})^{-1/2}\), with \(T/H\) bounded above and away from zero and bounded product count per cell.
+This is the natural scale when nondegenerate quarter and market components both contribute; an equivalent rate can be substituted if the declared stochastic design gives a different one.
+The following assumptions are explicit proof obligations, not consequences of the FE construction or numerical rank audit.
+
+A primitive sufficient example makes the two-way law less opaque.
+Suppose \(N/(TH)\to\mu\in(0,\infty)\), \(T/H\to\rho\in(0,\infty)\), and the *population-product-effect* cell total at the null has the additive decomposition \(T_{th}^0=a_t+b_h+e_{th}\).
+Let \(a_t\), \(b_h\), and \(e_{th}\) be three mutually independent, mean-zero arrays, independent within their own index sets, with uniform \(4+\epsilon\) moments, covariance limits \(\Sigma_a,\Sigma_b,\Sigma_e\), and the corresponding Lindeberg laws.
+Then the row and column sums and ordinary LLNs give
+\begin{equation}
+r_{T,H}m^0\Rightarrow N(0,\Omega),\qquad
+r_{T,H}^2V_{2w}^0\to_p\Omega
+=\mu^{-2}\left[\frac{1}{1+\rho}\Sigma_a+\frac{\rho}{1+\rho}\Sigma_b\right].
+\end{equation}
+Indeed, \(U_t^0=H a_t+\sum_hb_h+\sum_he_{th}\), so its scaled sum of outer products tends to \(\mu^{-2}(1+\rho)^{-1}\Sigma_a\); the market term tends to \(\mu^{-2}\rho(1+\rho)^{-1}\Sigma_b\), and the intersection term is \(O_p((T+H)^{-1})\) after \(r_{T,H}^2\) scaling.
+The CLT follows by applying independent-array CLTs to \(T^{-1}\sum_ta_t\) and \(H^{-1}\sum_hb_h\); the cell remainder is negligible at this rate.
+The same calculation gives the signed derivative--moment cross-covariance limit when the centered derivative cell totals jointly admit such row, column, and cell components with the moment totals; the deterministic mean of a derivative cell total contributes only lower-order sample terms.
+This example permits correlation across all markets in a quarter and across all quarters of a market, but it is a modeling assumption, not a representation derived from the frozen panel.
+It also does not establish that estimating the product effects preserves the limits; that reduction is stated separately below.
+
+- Two-way sampling law :: At a correctly specified finite-interior truth, \(r_{T,H}m_{T,H}(s_0,\eta_0)\Rightarrow N(0,\Omega)\) for \(\Omega\succ0\), and \(r_{T,H}^2V_{2w}(s_0,\eta_0)\to_p\Omega\).
+  The quarter, market, and intersection total laws must justify the *signed* covariance convergence, including any nonzero cluster means and nonseparable interactions.
+  A row/column shock decomposition with suitably independent components, Lindeberg bounds, and negligible interaction remainder is one possible primitive route, but is not verified here.
+- Projected effects and derivatives :: Product-effect estimates and their derivatives have a locally uniform limit, and replacing them by their population counterparts changes \(r_{T,H}m\), \(r_{T,H}^2V_{2w}\), and the scaled signed derivative--moment cross covariance by \(o_p(1)\).
+  Exact instrument orthogonality removes the product effects from the aggregate sample moment; it does not prove the two covariance reductions because the quarter and market totals still contain estimated effects.
+- Local quotient identification :: On a smooth rank-two factor quotient chart, \(G_{T,H}\to_p G\), the 20-column nuisance Jacobian has full rank, and its information \(G_\eta'\Omega^{-1}G_\eta\) has a positive minimum eigenvalue.
+  For the all-strong conclusion below, the residualized interest column is also nonzero, so the full quotient rank is 21.
+  The restricted population branch is finite, interior, locally unique, and separated; local stochastic differentiability and uniform laws hold there.
+- Weighting and curvature :: The regularized covariance satisfies \(r_{T,H}^2(V^\star-V_{2w})\to_p0\) with the local derivative control required by CU, and the package's signed derivative--moment covariance has its matched \(r_{T,H}^{-2}\) limit.
+  Uniformly on shrinking neighborhoods containing the consistent restricted fit, \(r_{T,H}^{-2}\nabla_{\eta\eta}^2(Q/2)\to_p G_\eta'\Omega^{-1}G_\eta\) and \(r_{T,H}^{-2}H_\eta\to_p G_\eta'\Omega^{-1}G_\eta\).
+  A sample with zero ridge does not prove the sequence requirement.
+- Restricted optimization :: The computed restricted nuisance remains on that consistent branch and its half-criterion score obeys \(g_{\eta,T,H}/r_{T,H}=o_p(1)\), equivalently under the curvature assumptions to a squared Newton decrement \(g_\eta'H_\eta^{+}g_\eta=o_p(1)\).
+  The fixed admission ceiling 0.001 is a finite-sample screen, not this vanishing-rate guarantee.
+
+Under these assumptions, the package K statistic at the restricted fit, using =SumCovariance.two_way_cluster= for *both* the moment covariance and automatic derivative--moment correction, obeys \(K_{T,H}(s_0,\widetilde\eta)\Rightarrow\chi^2_1\).
+/Proof./ Let \(Z_0\sim N(0,I_{43})\), \(R=I-\Pi_{\Omega^{-1/2}G_\eta}\), and whiten by the limiting two-way \(\Omega\).
+The joint CLT, covariance law, local score equation, and nonsingular nuisance information give \(r_{T,H}\Omega^{-1/2}m(s_0,\widetilde\eta)=RZ_0+o_p(1)\).
+The matched correction in \(\widetilde D=G-\widehat\Sigma_{G,m}(V^\star)^{-1}m\) is \(O_p(r_{T,H}^{-1})\) under the assumed joint derivative laws, so its whitened column space converges to that of \(\Omega^{-1/2}G\).
+The package projects the whitened moment onto this column space.
+Nuisance projection has already removed 20 directions; the independent interest direction contributes a rank-one projection of \(RZ_0\), whose squared norm is \(\chi^2_1\). \(\square\)
+
+If the interest column is weak, the preceding full-rank-interest assumption must be *replaced*, not retained: require \(R_{T,H}\to_pR\) and joint convergence of the nuisance-residualized whitened moment and properly scaled corrected interest column to \((RZ_0,d)\), where \(d\in\operatorname{range}(R)\), \(\Pr(\|d\|>0)=1\), and \(d\) is independent of \(RZ_0\).
+Then the limiting rank-one K projection is \((d'RZ_0)^2/(d'd)\sim\chi^2_1\).
+This process-level corrected-derivative condition has not been established for the native two-way projected panel.
+
+* Pair-only theorem as a contrast
+
+Let \(C\to\infty\) index quarter-by-market pairs, with \(N_C/C\to\mu\in(0,\infty)\), fixed 45 products, 43 moments and a rank-two factor.
+Keep the package convention \(m_C=N_C^{-1}\sum_cT_c\) and \(V_C=N_C^{-2}\sum_cT_cT_c'\); define \(r_C=N_C/\sqrt C\) only for this proof.
+There is no new \(N\) multiplier in the implemented criterion.
+The following assumptions are sufficient, not properties verified by the frozen panel.
+
+- Projection and product effects :: Along the array, \(Z_C'F_C=0\) exactly or with error negligible after \(r_C\) normalization; the product contrast Schur matrix divided by \(C\) has eigenvalues uniformly bounded above and away from zero.
+  The 45 product-effect coefficients and their parameter derivatives have deterministic population targets and locally uniform \(O_p(C^{-1/2})\) errors.
+  Pair sizes, instrument totals, residual totals and derivatives have bounded moments sufficient for the reductions below.
+- Pair limit :: At a correctly specified finite-interior truth \((s_0,\eta_0)\), let \(T_c^0\) and \(D_c^0\) use the population product coefficients.
+  The centered moment sum obeys \(C^{-1/2}\sum_c T_c^0\Rightarrow N(0,\Omega)\), with \(\Omega\succ0\), and \(C^{-1}\sum_cT_c^0T_c^{0\prime}\to_p\Omega\).
+  Matching derivative--moment products converge to their actual joint covariance limits.
+  For the package's uncentered pair products, pair-specific means must vanish or have a separately justified negligible contribution.
+  Independent mean-zero pairs with appropriate Lindeberg and moment bounds suffice; merely allowing unspecified cross-pair dependence does not.
+- Local smoothness and rank :: Uniform laws and stochastic differentiability hold near the true point on a fixed smooth factor quotient chart, giving \(G_C\to G\) of full column rank 21, including the interest direction.
+  The factor stays rank two, \(\delta_0>0\), and the restricted population branch is locally unique and separated.
+  Uniformly on a neighborhood containing the consistent restricted fit, \(r_C^{-2}\nabla_{\eta\eta}^2(Q_C/2)\to_p G_\eta'\Omega^{-1}G_\eta\) and \(r_C^{-2}H_{\eta,C}\to_p G_\eta'\Omega^{-1}G_\eta\), with the latter positive definite on the 20-dimensional nuisance quotient.
+- Weighting :: The CU estimator and K evaluator use asymptotically equivalent ingredients: \(r_C^2V_C\to_p\Omega\), and their matched derivative--moment covariance estimates remain at the required \(r_C^{-2}\) scale.
+  Any anchored ridge or override obeys \(r_C^2(V_C^\star-V_C)\to_p0\), with local derivative control.
+  Zero ridge in this single panel does not imply that sequence condition.
+- Restricted fit :: At \(s=s_0\), the computed nuisance stays on the consistent finite-interior branch and its half-criterion score satisfies \(g_{\eta,C}/r_C=o_p(1)\).
+  Under the preceding local curvature conditions this is equivalent to a squared Newton decrement \(g_{\eta,C}'H_{\eta,C}^{+}g_{\eta,C}=o_p(1)\).
+  A fixed admission ceiling of 0.001 does not imply this rate.
+
+Under these conditions, the full-vector package K value evaluated at the restricted fit and referenced to the one interest direction satisfies \(K_C(s_0,\widetilde\eta_C)\Rightarrow\chi^2_1\).
+
+/Proof./ Write \(Z_0\sim N(0,I_{43})\), \(\Gamma_\eta=\Omega^{-1/2}G_\eta\) and \(R=I-\Pi_{\Gamma_\eta}\).
+The pair CLT, covariance law, full-rank nuisance expansion and \(o_p(1)\) scaled score yield \(r_C\Omega^{-1/2}m_C(s_0,\widetilde\eta_C)=RZ_0+o_p(1)\).
+The package's derivative--moment correction is \(O_p(r_C^{-1})\) under the stated scales, so its corrected, whitened Jacobian has the same limiting column space as \(\Omega^{-1/2}G\).
+The K value is the squared length of the whitened moment projected onto that full column space (=src/emu_gmm/inference/k_statistic.py:627-692=).
+Since \(R\) removes exactly 20 nuisance directions and the full column space adds one independent interest direction, the surviving projection of \(RZ_0\) has rank one and standard-normal coefficient.
+Its squared length is \(\chi^2_1\). \(\square\)
+
+For the product-effect reduction, put \(B_{cp}=\sum_{i\in(c,p)}Z_i\).
+The exact pair identity in the prior proof note is \(T_c-T_c^0=-B_c(\widehat a-a^0)\); the aggregate identity \(\sum_cB_c=0\) follows from product centering.
+If \(C^{-1}\sum_c\|B_c\|^2=O(1)\), \(C^{-1}\sum_c\|T_c^0\|^2=O_p(1)\), and \(\widehat a-a^0=O_p(C^{-1/2})\), Cauchy--Schwarz makes the difference between fitted and population-product covariance sums \(o_p(1)\) after division by \(C\).
+The same calculation with \(D_c\) and \(\widehat a'\) covers the derivative--moment products.
+This is conditional on the rate and moment bounds; connectedness and sample Schur rank do not prove them.
+
+The theorem deliberately assumes all 21 quotient directions strongly identified.
+If the interest column is local-to-zero, its random corrected derivative can determine the K projection.
+A sufficient *replacement* for the full-rank interest assumption, retaining strong nuisance identification and the restricted-fit expansion, requires the nuisance projection \(R_C\to_p R\) and joint convergence of the nuisance-residualized whitened moment and appropriately scaled corrected interest column to \((RZ_0,d)\), where \(d\in\operatorname{range}(R)\), \(\Pr(\|d\|>0)=1\), and \(d\) is independent of \(RZ_0\); then the limiting K value is \((d'RZ_0)^2/(d'd)\sim\chi^2_1\).
+Deriving that condition at the *estimated* nuisance requires a process-level limit for the corrected derivative and mixed parameter derivatives, not just a joint CLT at the true point.
+The original [[https://www.princeton.edu/~erp/GNYC/papers/kleibergen.pdf][Kleibergen--Mavroeidis subvector paper]] gives a \(\chi^2\) upper-bound argument under its CU assumptions; it does not supply the missing native projected-panel array conditions.
+
+* Why fixed-effect orthogonality does not validate pair-only clustering
+
+Here is a concrete counterexample using the same 65 recurring markets and fixed product count.
+For markets \(m=1,\ldots,65\), let \(b_m=1\) for 32, \(-1\) for 32 and 0 for one; choose product loadings \(a_p\) with \(\sum_pa_p=0\) and \(A_2=\sum_pa_p^2>0\).
+Use a balanced one-row-per-product-and-pair array.
+For each quarter \(t\), let \(U_t\) be independent, mean zero and unit variance, and set an instrument \(z_{ptm}=a_pb_m\) and residual \(u_{ptm}=a_pb_mU_t\).
+Both \(z\) and \(u\) have zero product and quarter-by-market means, so joint FE projection changes neither of them.
+Nevertheless, the pair total is \(T_{tm}=A_2 b_m^2U_t\).
+The variance of the sum over one quarter is \(A_2^2(\sum_m b_m^2)^2=4096A_2^2\), whereas the expected pair-only outer-product sum is \(A_2^2\sum_m b_m^4=64A_2^2\).
+As the number of quarters grows, the pair sandwich understates the actual variance by a factor of 64, despite exact FE orthogonality and a valid quarter-level CLT.
+For this construction, the market and intersection terms have equal expected sums, so the two-way inclusion--exclusion expression recovers the quarter component in expectation.
+This proves that the observed centering checks cannot establish the native pair covariance limit; it does *not* assert that the frozen data contain these shocks.
+Repeated-market shocks can create an analogous omitted cross-pair term over time.
+The frozen consumer's =tmp/cereal_gmm_estimate.py:47-63= defines \((t,m)\) pair IDs to handle correlation *within* a pair; it does not state independence across recurring markets or common quarters.
+
+* Frozen-panel identification audit
+
+The independent NumPy auditor =scripts/validation/native_identification_180.py= checks the pinned data, warm direction and exact replay postfit-array hashes before using the 43 instrument columns and saved package weighting matrix.
+It compares the analytic restricted Jacobian with the package result to maximum absolute gap \(9.77\times10^{-15}\), and \(G'\Lambda G\) with the saved GN matrix to \(1.08\times10^{-12}\).
+The all-symmetric \(43\times26\) *implemented projected* linear moment design for \((\delta,\Gamma,\pi)\) has numerical rank 26; its smallest raw singular value is 0.00818046 and its column-normalized minimum is 0.0166183.
+Its projected amplitude column differs from the unprojected idealization by Euclidean norm \(1.996\times10^{-15}\); Weyl's bound leaves the projected minimum singular value above 0.00818045994.
+Thus this frozen sample has no numerical aggregate-moment alias in those invariant coordinates at fixed \(s\), at the stated SVD threshold.
+That is stronger than local rank on the rank-two submanifold, but is neither a population rank lower bound nor evidence of a CU optimizer minimum.
+
+At the saved RTR point \(\delta=0.00083761021895\), the other 19 identified nuisance directions have smallest positive weighted singular value 0.07058659.
+After removing them, the physical \(c_0\) column has singular value 0.00023624796 and partial information \(5.58130983\times10^{-8}\); in \(\delta\) coordinates the corresponding partial information is 0.0795522.
+After removing all 20 nuisance directions, the interest-\(s\) column has singular value 0.00028505496 and partial information \(8.12563271\times10^{-8}\).
+Both columns remain nonzero in the saved sample, yet the physical-coordinate information is tiny and does not verify a uniform population bound.
+These values use the saved package metric from the *original pair-only covariance*, not a two-way metric, and the pinned replay array; the RTR fit's corrected FOC is still 5.806742996440626, so this is a rank audit of a *non-admissible* point.
+
+#+begin_src sh
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python scripts/validation/native_identification_180.py --output .coder/native180-identification-sample.json
+#+end_src
+
+The recorded JSON is =.coder/native180-identification-sample.json=, SHA256 =b21f8fd12795582eecc00684b619cb820ad96f536a2f2a91272193ab8d19b1bd=.
+Its pinned input SHA256 values and all computed ranks and partial information appear in that file.
+The auditor performs no estimation, resampling, confidence-set update or change of covariance strategy.
+
+* What is established and what remains
+
+The exact algebra gives a necessary-and-sufficient *pointwise* nuisance rank condition, and the frozen sample passes an even stronger invariant-coordinate rank check.
+The sufficient theorem states the two-way projected-panel and finite-interior conditions that would make a *two-way* \(\chi^2_1\) reference valid; the package now computes its matched K correction for uncentered clustered signed sums.
+The pair-only theorem remains conditional, and the counterexample proves that FE orthogonality and pair count cannot validate it for the declared quarter-and-market target.
+No two-way stochastic CLT, consistent signed covariance law, population singular-value bound, asymptotically negligible ridge, or stationary finite-interior restricted branch has been demonstrated for this native panel.
+The next proof obligation is a primitive quarter-and-market array model that establishes the moment, derivative and fitted-product-effect laws, followed by a branch/boundary analysis of the restricted CU criterion before any saved point is called an optimum.
+Issue #180 and the original seven unknown verdicts remain open.
+
+-- Sue
