@@ -149,6 +149,7 @@ from emu_gmm.covariance import (
     ClusteredCovariance,
     DesignAwareCovariance,
     StratifiedCovariance,
+    SumCovariance,
 )
 from emu_gmm.covariance._group_layout import validate_group_ids
 from emu_gmm.regularization import DiagonalTikhonov
@@ -501,6 +502,9 @@ def _compute_d_tilde(
        - :class:`DesignAwareCovariance` -> derivative/moment cross block
          of the matching augmented TT/SS/TS covariance, preserving the
          selected random- or fixed-stratum exposure and centering rules.
+       - :class:`SumCovariance` of uncentered clustered terms -> the same
+         signed sum of cluster-totals cross-covariances as its moment
+         covariance (including two-way clustering).
        - Any other strategy (IID, synthetic) -> pairwise-overlap form via
          :func:`_sigma_jm_iid_from_contributions`. With cluster-of-size-one
          the cluster-totals form collapses to this, so the two routes
@@ -560,7 +564,35 @@ def _compute_d_tilde(
             n_obs = g.shape[0]
             N_j = jnp.full((M,), float(n_obs), dtype=g.dtype)
 
-        if isinstance(covariance, DesignAwareCovariance):
+        if isinstance(covariance, SumCovariance):
+            sigma_jm = jnp.zeros((p, M, M), dtype=g.dtype)
+            for sign, term in zip(covariance.signs, covariance.terms, strict=True):
+                if not isinstance(term, ClusteredCovariance) or term.centered:
+                    raise ValueError(
+                        "k_statistic: automatic SumCovariance cross-covariance "
+                        "requires uncentered ClusteredCovariance terms; supply "
+                        "score_cov_fn=... for a different signed sum."
+                    )
+                if term.dof_correction and not hasattr(measure, "mask"):
+                    raise ValueError(
+                        "k_statistic: finite-cluster correction requires an "
+                        "empirical mask; supply score_cov_fn=... for this measure."
+                    )
+                sigma_jm = sigma_jm + sign * _sigma_jm_clustered_from_contributions(
+                    g,
+                    D,
+                    N_j,
+                    cluster_ids=jnp.asarray(term.cluster_ids),
+                    n_clusters=term.n_clusters,
+                    pair_correction=(
+                        term._finite_cluster_correction(
+                            jnp.asarray(measure.mask)  # type: ignore[attr-defined]
+                        )
+                        if term.dof_correction
+                        else None
+                    ),
+                )
+        elif isinstance(covariance, DesignAwareCovariance):
             sigma_jm = _sigma_jm_design_aware_from_contributions(
                 g,
                 D,
