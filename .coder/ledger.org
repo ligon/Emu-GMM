@@ -1472,3 +1472,52 @@ The two compilation routes may round differently at numerically unstable boundar
 6. Open questions :: The optional protocol preference may still steer the user-authorized work; absent a different choice, the stated assumption is current CU/subvector for the new artifact.
    Historical runtime/input identity and convergence cannot be reconstructed from available pins; preserve that limitation.
    General disconnected graphs, changed weighting/population, broad weak-ID coverage and continuous-domain emptiness are outside this experiment.
+
+* Section 29 -- Native profile diagnosis from the retained checkpoint (issue 180)
+
+1. Task :: Diagnose the unresolved null s=0.050088084721517094 using the original source, inputs, warm start, CU weighting and anchored default regularization.
+   First evaluate the exact saved nuisance checkpoint through the production estimator, without a new optimization or altered convergence claim.
+2. Existing machinery :: Search tier: git/ripgrep and source/tests at f32b77a; Sections 7/12/26/28 remain in force.
+   =inference/confidence_set.py:_ProfileReducer= and =_internal/models.py:map_model_parameters= implement the actual nuisance restriction, including complete auxiliary derivatives.
+   =estimate= constructs gradient, gn_hessian, weighting_matrix and raw moment_covariance using the original initial-point anchor; =identification_strength= reads that retained gn_hessian without re-anchoring.
+   =_foc_decrement= is the existing quotient-aware public-profiler guard; reuse its implementation rather than reproducing its pseudoinverse or threshold.
+   =tests/inference/test_profiled_confidence_set.py= covers the validity rule; =tests/inference/test_identification.py:TestBindingRidgeUsesFrozenVX= covers the anchored metric.
+   The frozen original driver and seven-point artifact retain exact checkpoint hashes, leaf descriptions, optimizer records, source/input/environment hashes and public K values.
+3. Definitions :: A checkpoint evaluation is diagnostic re-evaluation of a recorded point, not a solve, resumption or convergence certification.
+   Preserve the original optimizer record separately; the evaluation optimizer must explicitly report that it performs no optimization and cannot certify convergence.
+   The original warm nuisance remains theta_init so default regularization anchors there; theta_hat is the saved checkpoint.
+   Identification spectra use result.gn_hessian with the one known PSD-factor gauge dropped by count; small curvature in another direction is not another gauge.
+4. Invariants :: Verify manifest, checkpoint, source, environment and input identity before evaluation.
+   Validate checkpoint leaf names/order/paths/shapes/dtypes and geometry against the profiler's reduced initial tree; reject malformed or changed provenance.
+   Compare the recomputed objective and full-point public K statistic with the original artifact before scientific interpretation.
+   Never fabricate an original OptimizationResult, weaken the FOC test, change unknown membership or classify nuisance strength from a large coordinate shift alone.
+   Any finite c0 path holds other nuisance coordinates fixed and is not a reprofiled path or proof of global optimality; compute any criterion through package-owned machinery with the original anchor.
+5. Reuse decision :: Reuse estimate, the actual profile reducer/model adapter, identification_strength, _foc_decrement and public k_statistic.
+   Add only a provenance-checked validation driver and targeted controls; no package API or statistical formula change is needed for this first diagnostic.
+   A full unchanged replay or separately declared optimizer experiment follows only if this evaluation leaves a useful numerical question unresolved.
+6. Open questions :: Whether the finite-inner/interior and strong-nuisance assumptions are supported is the scientific question, not an assumption of this diagnostic.
+   A weak or escaping nuisance would require a separately specified inference/model remedy; an optimizer threshold change cannot supply identification.
+
+* Section 30 -- Numerically invariant nuisance FOC evaluation (issue 180)
+
+1. Task :: Repair the existing FOC quadratic form's sensitivity to coordinate units before reinterpreting any native profile.
+   The saved diagnostic is unchanged; a separate corrected-guard audit will cover all seven original checkpoints.
+2. Existing machinery :: =inference/confidence_set.py:_foc_decrement= owns the scalar g' H^+ g; =_internal/pinv_eigvalrule.py= owns its fixed-count gauge inverse and must retain its existing contract and callers.
+   =tests/inference/test_profiled_confidence_set.py:TestInnerConvergenceGuard= covers exact forms, one gauge, uncertified stationary/nonstationary fits and the certified-fit superset rule.
+   =inference/numerical_rank.py:NumericalRankPolicy= is an explicit opt-in inference policy, not an automatic FOC fallback and not the remedy here.
+   Exact-producer checkpoint evaluation 40463484 matches original objective/K while its tiny c0 information is below the unscaled normal-matrix eigensolver resolution.
+   Two independent congruence audits reuse the existing helper on the same g/H and agree at approximately 4.546461756 rather than the raw 0.301383892.
+3. Definitions :: With positive diagonal scales S, H_scaled=S^-1 H S^-1 and g_scaled=S^-1 g represent the same quotient quadratic form when the score annihilates the gauge.
+   Use sqrt(diag(H)) for unit-diagonal equilibration, then the same fixed-count gauge inverse; remove no additional eigenvalues.
+   Preserve an exactly zero diagonal with unit scale so an axis-aligned known gauge remains admissible; an additional null is not another gauge.
+   Numerical resolution of a retained scaled eigenvalue is distinct from population strength, a rank-truncation policy or a changed FOC tolerance.
+4. Invariants :: Preserve original g/H inputs, theta/anchor, objective, optimizer, default foc_tol=1e-3 and certified-or-FOC rule.
+   Reject nonfinite/negative diagonal or transformed quantities, unresolved/nonpositive retained curvature and negative/nonfinite quadratic forms as unavailable FOC certificates.
+   Do not absorb extra nulls, reinterpret indefinite information as successful stationarity or label weak population identification from numerical failure.
+   Sequential scaling avoids forming a potentially overflowing outer product of reciprocal diagonals.
+   Scalar/all-Euclidean FOC evaluation needs the same unit invariance; the global inverse helper's bitwise v1 path remains unchanged.
+5. Reuse decision :: Extend only _foc_decrement with coordinate equilibration and fail-closed numerical checks, retaining pinv_eigvalrule for the actual inverse and its gauge count.
+   Add adversarial quotient/unit-scaling and extra-null regressions, then re-evaluate every saved checkpoint under its original warm anchor.
+   Do not change identification_strength, sandwich construction, K/S/J formulas or the historical artifact as part of this numerical guard repair.
+6. Open questions :: Equilibration resolves the demonstrated coordinate-scale failure; it does not establish a finite interior nuisance minimizer or the profiler's strong-nuisance assumption.
+   The amplitude-zero boundary removes s from the model and requires a separately declared scientific follow-up if needed after the complete checkpoint audit.
