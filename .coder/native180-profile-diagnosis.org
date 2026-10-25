@@ -6,7 +6,7 @@
 
 Issue 180 now has a demonstrated numerical FOC defect and a separate explicit validity-policy decision.
 The corrected numerical guard has passed focused regressions and the final quick-check gate.
-The full slow suite remains in progress.
+The complete quick and slow gates passed; fresh GitHub PR checks remain in progress.
 All seven original checkpoints have been evaluated under their original source, input, warm-anchor and dependency identities, with no optimization.
 Every corrected FOC decrement exceeds the unchanged 0.001 threshold.
 The current documented certified-or-FOC rule retains only the solver-certified point, despite its corrected decrement 4.824466262573033.
@@ -67,6 +67,51 @@ The analytic negative-variance warning and negative pi partial-information reado
 No reliable analytic SE or strong-nuisance guarantee is inferred from those inversions.
 At amplitude zero the magnitude s disappears from the model; finite-interior concentration and boundary-valid inference remain scientific questions.
 
+* Single-null amplitude experiment
+
+Ledger Section 31 separately declares the bijection delta=exp(-c0)>0, c0=-log(delta), with the unchanged projected model, original physical warm anchor, CU/default regularization and native LM rtol=atol=1e-9, max_steps=1500.
+The optimization geometry changes; no model restriction, boundary point, penalty or inference reference is introduced.
+Driver SHA256: db610b7a84b510fa23e90a557f4bae699e94e2e29cf8fc99b8483c1aaaf2336b.
+Seven tiny mapping/AD/parity/domain controls pass, including one two-step native solve and genuine returned-fit parity.
+
+Scientific job 40467829 at only s=0.050088084721517094 failed 1:0 in 2:38 with the named FiniteInteriorError.
+All four package mean/covariance/weighting/objective and complete gradient/G/GN chain-rule controls passed before optimization, under the exact original scientific package and dependency identities.
+The sole LM solve returned after nine steps with done=False, status=stagnated, stagnated=True and delta exactly zero through underflow.
+The raw returned half-criterion is 97.45745041682882; it is not a finite-interior fit or a value at optimized nuisance on the boundary.
+The driver saved raw leaves, optimizer info and domain events, refused the physical map and produced no postfit inference or K test.
+No clipping, extra iterations, restart, second solver or automatic retry was used.
+
+This positive-amplitude attempt did not establish a finite-interior stationary nuisance solution.
+It does not prove a global boundary optimum or strong nuisance identification, and it leaves the original seven-point statistics/classifications unchanged.
+The existing Positive retraction unit tests explicitly recognize floating-point underflow; no package retraction/solver change is made in this experiment.
+The failed process is retained as failed evidence, not reported as a completed optimization or green scientific validation.
+
+Frozen run: native180-amplitude-20261025.
+Config SHA256: c11dc8b845becb0bc28c260dcb38a94069d7c8f7ab0e4cde8f783a4a4cbc43b2.
+Launcher SHA256: b551ca501245aae61d6a3717b2bf2e6a621bda941bf7a0ff71fd6fd707ef332d.
+Launch inventory SHA256: 0893f80b89f7f759c6b9615bf9d13c619e8c7c3239da32330e65ba1fd623be00.
+Raw failure payloads: results/job-40467829; both independent scientific and operational failure audits passed.
+Report SHA256: 7150d60558f4b1e7e3294cd5c15abb18b5d004023ff53519900bbfeb4242ee19.
+Raw checkpoint SHA256: d5370b6934831a5fd00566dcf76f64f0e9368b8e9469d9ea44df8a0141d53c69.
+Separate audit: audits/job-40467829; manifest SHA256 f681b372e63b953e8c1d77561a81f2b6b5a34711ddd469195b3402a58df191e4; audit inventory SHA256 5eed0df3259d5a034182643938a5b9dce7b43a210bef134a84cba2d68836e09c.
+The independent array check uses NumPy 2.4.6; the original scientific producer remains pinned to NumPy 2.4.3.
+All 15 original result/log/index files and the old producer payloads remain hash-identical.
+The audit metadata manifest was refreshed when root reran its writer; the final inventory above was independently rechecked afterward, without rerunning the writer.
+
+* Separate Positive trial-domain repair in progress
+
+The accepted zero proposal exposed a separate native LM feasibility defect.
+Draft PR 263 checks finite strict positivity of existing Positive trial blocks before acceptance, preserving valid-trial arithmetic, the original damping search and the no-Positive path.
+It changes no retraction/metric/tolerance/inference formula and introduces no clipping or parameter floor.
+Its independent ledger-anchored review and ten targeted regressions pass; its immutable full gate is job 40469532 and fresh GitHub checks remain pending.
+Candidate optimizer source SHA256: 2012895306aa64c5c8b42672909cee849bb5a71d73f7c075eefe6cb9a1f92c26.
+
+A separately declared source-identified native amplitude experiment is running in job 40469837, with the same original null/warm anchor/tolerances/1500-step cap and a 30-minute budget.
+It retains the exact original scientific package and loads the candidate optimizer externally through a pinned wrapper whose protocol explicitly identifies the changed executing solver.
+This is not an original-solver replay; the first failed run remains unchanged.
+Stage: native180-amplitude-guarded-20261025; config SHA256 632b0c0a61dc738eda2f41e38c256361b53d18500447fd659faea68952fe67f8.
+The new result is pending and does not change the existing seven-point law or the pending owner validity-policy choice.
+
 * Evidence identities
 
 Base main: f32b77af43bb0f6e5be41edccd8e6246e3fcf7bf.
@@ -102,9 +147,14 @@ Adversarial numerical controls fail on the original code and pass after the repa
 Lint, formatting and mypy passed for the changed source/tests.
 Final quick-check job 40465324 completed 0:0 in 10:25 on source archive SHA256 0d79b27bfc95aa695620b084e12d79cf292282fbb3dce4e97aff8194220a31fa.
 The full gate is job 40465007, snapshot SHA256 9ca0b58a42c9819f4640a0808fb86cc01afef125c86e43f6fcfa07d0b0eeb7f4.
-Its quick-check passed; slow tests are pending.
+It completed quick-check and the entire slow suite, exit 0:0 in 21:17.
 That full snapshot has the same production guard, before the auditor's additional provenance checks; final quick-check covers the strengthened auditor and all added controls.
-Only report status text has changed after the final quick-check snapshot.
+Only report status text changed after the numerical-repair quick-check snapshot.
+The separate amplitude driver/tests passed the complete non-slow gate in job 40467627, exit 0:0 in 11:17, archive SHA256 5a8c87483a5d26f7787aada0c81e95ed6e0a4a5e4aabf8ba10d8ec42d1a50acc.
+Its source/package implementation is the reviewed numerical-repair head; the amplitude addition changes no package code.
+Ledger Section 31 was separately committed as edbbca9 after that gate.
+Final amplitude precommit quick-check job 40468793 completed 0:0 in 14:47, archive SHA256 2df1c291b306b0429176bbec2c1901422e20b000e740eaa84ba4f2263864700c.
+Only report/status wording followed the final gate; the driver/test byte hashes remain unchanged.
 The earlier grounding quick-check 40463286 passed before ledger commit bcdf12c and is not the release gate for the corrected guard.
 All new jobs use free co_carleton; fc_jevons baseline was 72605.86 SUs of 1500000 at 2026-10-25 01:40 UTC.
 

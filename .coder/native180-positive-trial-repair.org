@@ -27,6 +27,8 @@ Ledger Section 32 was separately published as a6a6cb3 after targeted make quick-
 Candidate src/emu_gmm/manifolds/riemannian_lm.py SHA256: 2012895306aa64c5c8b42672909cee849bb5a71d73f7c075eefe6cb9a1f92c26.
 New tests/manifolds/test_riemannian_lm_positive_trials.py SHA256: 383d28a4b507f6de98ae089344a0a4ad57122b367cab85404d15ca30c4640f9c.
 
+The reproducible amplitude driver/tests and full failed-run report are published on branch investigation/180-amplitude at 83ff817; its complete non-slow gate passed separately.
+
 Ten targeted tests pass: zero/overflow rejection, all Positive blocks without restricting negative Euclidean values, two rejected zero proposals without premature stagnation, healthy positive-root recovery and one-argument/traced-args parity.
 The earlier combined existing reduction/stagnation/Positive controls also passed.
 The final source differs from the worker's tested implementation only by its required ledger citation comment; root Black/Ruff and targeted lint/type/pytest make quick-check pass on these exact bytes.

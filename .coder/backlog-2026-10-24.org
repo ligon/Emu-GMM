@@ -2,6 +2,17 @@
 #+AUTHOR: Sue (GPT-6 Codex)
 #+OPTIONS: toc:nil
 
+* Issue 180 follow-up -- 2026-10-25
+
+The selected next task uncovered a coordinate-scale defect in the profiler's FOC fallback; draft PR 262 repairs its numerical evaluation while preserving the documented validity policy.
+The exact-producer all-checkpoint audit supersedes the original six-rejection assessment below: six points are unknown and one rejection survives only through solver certification despite failing corrected FOC.
+The owner decision about requiring reliable FOC is pending.
+See [[file:native180-profile-diagnosis.org][the current diagnosis]] for source/artifact pins, completed quick/full gates, the separate audited law and the finite-interior/strong-nuisance limits.
+The separately declared one-null positive-amplitude coordinate experiment passed all four parity controls, then failed after nine steps because amplitude underflowed to zero; no physical mapping or postfit inference was performed.
+Both independent failure audits passed; this is not evidence of a global boundary optimum or strong nuisance identification.
+Draft PR 263 separately rejects infeasible Positive trial points in native LM; a new source-identified guarded experiment is running, with all inference-policy choices unchanged.
+Issue 180 remains open.
+
 * Completion record -- 2026-10-24 21:50:59 UTC
 
 This section supersedes the dated execution snapshots below.
