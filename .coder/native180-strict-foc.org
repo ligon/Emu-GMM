@@ -1,0 +1,78 @@
+#+TITLE: Mandatory nuisance FOC -- issue 180
+#+AUTHOR: Sue (GPT-6 Codex)
+#+DATE: [2026-10-25 Sun]
+
+* Approved contract
+
+The owner selected mandatory passing FOC for every profiled inference point on 2026-10-25.
+A finite, numerically resolved squared Newton decrement must satisfy lambda^2 <= foc_tol, whose default remains 0.001.
+Optimizer certification cannot override a failed or unavailable check; an uncertified fit with passing FOC remains admissible subject to the other validity requirements.
+Missing, malformed, nonfinite or unresolved ingredients leave membership unknown through n_nonconverged, with raw p-values retained.
+This deliberately replaces the historical solver-certified OR FOC compatibility rule.
+
+The numerical _foc_decrement body and _assemble_set body are unchanged from main b943d7d.
+The public guard removes the optimizer-certification override and refuses conversion failures in malformed legacy/custom FOC ingredients.
+The global inverse, gauge count, covariance/K/S/J formulas, warm anchors, solver settings and tolerance remain unchanged.
+Ledger Section 33 grounds reuse and the required checks; Sections 29-32 retain the earlier diagnostic and numerical-repair provenance.
+
+* Scientific consequence
+
+All seven genuine saved-checkpoint decrements fail 0.001, ranging from 4.044426890784993 to 5.695148915793941.
+Strict admission therefore yields seven unknown points, zero invalid-statistic points and no known accepted or rejected points.
+Every one of the 127 nonempty scanned-grid capacity queries is unknown; full-grid capacity is NaN with no decidable draw.
+The scanned set is not known empty.
+The raw grid_empty event remains True, separate from that validity-qualified verdict.
+A capacity query counts n_nonconverged=1 because this law has one seven-point set draw; the profiled set itself counts seven failed FOC points.
+Raw optimizer records, original fit checkpoints and package-computed K/S/J/p-values/degrees of freedom remain preserved.
+
+No new fits, nuisance optimization, panel loading, changed inference reference or p-value calculation is needed for this policy audit.
+Passing FOC is necessary, not sufficient: finite-interior concentration and strong nuisance identification remain unestablished on this native example.
+The failed amplitude experiments remain failed scientific evidence; this policy change establishes neither a boundary optimum nor native coverage.
+Issue 180 remains open for reliable native nuisance concentration and its scientific interpretation.
+
+* Reproducible verification
+
+The saved-array auditor defaults to strict_foc and records that policy explicitly.
+Historical optimizer_or_foc replay requires explicit selection; frozen historical scripts and artifact bytes remain intact.
+Focused tests exercise certified large/unavailable FOC, malformed inputs, uncertified passing FOC, tolerance equality, raw-p retention and unknown-law persistence.
+The provenance auditor also tests strict and historical policies separately and rejects an unknown policy before law creation.
+
+The artifact and source-release identities are recorded below.
+
+-- Sue
+
+* Strict saved-array artifact
+
+Free Slurm job 40494067 completed with exit 0:0 in 58 seconds, using two CPUs and 8 GiB (step peak RSS 1,881,272 KiB).
+The immutable stage is /global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-strict-foc-20261025.
+Its scripts/strict-foc.slurm replays into a fresh job-specific results directory; do not replay a writer over the retained job output.
+No panel inputs were staged or read, and no fit or statistic was recomputed.
+The original scientific package's 71 Python files, Python 3.11.6, all 59 installed distributions including NumPy 2.4.3, and numerical environment were verified exactly.
+The new admission source is explicitly external and separately pinned; this is a policy audit of original genuine gradient/GN arrays, not a replay of the original optimizer.
+The recorded local paths have durable retained-path counterparts with identical hashes for review after node cleanup.
+
+- Production confidence_set module :: dacc762564130741f8b812d5d9fd8fda51198c0748fae482418ae4d3d65a4169
+- Audit driver :: 17093e50e5335817408bcac39248dda0a7ba53839541cb93f881826c015f3d8a
+- Configuration :: 21f6127d912b7e17b4cbf8945868229cad9d5baf8bea7ec3ce0ee22818b32dbd
+- Staging inventory :: 79b67b37526ab976d65b38cc12ce2c2d9127048e2402cd3f137d6bde6013b487
+- Result index :: results/job-40494067/index.json; SHA256 84064a216bf1a6a7c8c5c6d5fc092b7b005af5ba6a835a43c2b34be67748a3ad
+- Strict audit :: results/job-40494067/strict-foc-audit/audit.json; SHA256 3c72036702d9a84aee2c6e5409ffcf56e71079b9b077c9b5cfe0efa9cc409686
+- Strict law :: results/job-40494067/strict-foc-audit/corrected-guard-law.npz; SHA256 e03d0ec9c604e5560c2cae9a596083c0053bf42cde5b5c56c0631c455e471825
+- Event verifier :: results/job-40494067/strict-event-verification.json; SHA256 cfc6963eee7c488dfbcc097e531dc24c10870ba968fe1f9c74919195e3297b4b
+- Output inventory :: results/job-40494067/SHA256SUMS; SHA256 7f9c85f16695fa4e1bc01ece24a770f955aa4178f4b228f64ea34c5986000db9
+
+The artifact verifier enumerates all 127 nonempty grid queries and compares all original raw statistics and optimizer records.
+Two independent result reviews passed.
+The independent worker review also checked all seven genuine diagnosis/matrix hashes, original source/runtime/statistic identities, all payload inventories and every law query without fits or FOC recalculation.
+Independent root review checked the nine new output files, ten staged files, 34 old saved-output files and seven old staging files against their inventories, plus every original diagnosis and matrix hash.
+It loaded the retained law and independently enumerated all 127 unknown queries without recalculating any FOC or statistic.
+The independent codec review uses NumPy 2.4.6; the scientific audit itself uses the exact producer's NumPy 2.4.3.
+The original assembly manifest remains 38dd948a4422556e3b535e0b6c4e0f7a4afb258a4abc3e9417aa40a3fc8ac6aa; the historical OR-policy audit and law remain 0406b91750b3d1acc43c94d938d425a7d090ce5c041dad632d0fbcf8fba9362d and a344b12c7a278064374f0b245eca6024511dd9df952b70fa5cfc5d161efda65c.
+
+* Source release
+
+PR 264 passed all 11 configured GitHub Actions jobs at reviewed head c936bf416b5c7c5e1cbde0af2ae12879de916d40 (run 40198966067).
+The GitHub merge commit is 7cb3c10b36ebdf20783ece292be066a4481a464c.
+Its tree is a5294ed2327ba7a93124ab4105232568251498e6, exactly the prospective reviewed merge tree and tested head tree.
+No source or test Python files changed after the green head.
+Two independent artifact reviews and one independent auditor review passed without new fits or FOC recomputation.

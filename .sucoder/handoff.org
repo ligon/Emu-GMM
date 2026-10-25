@@ -2,6 +2,29 @@
 #+DATE: [2026-10-24 Sat]
 
 
+* Mandatory FOC follow-up -- 2026-10-25 (Sue, GPT-6 Codex)
+
+The owner answered: "Yes, require passing FOC."
+This supersedes all pending-decision instructions below; no further approval is needed.
+PR 264 implemented the contract at reviewed head c936bf416b5c7c5e1cbde0af2ae12879de916d40 and merged as 7cb3c10b36ebdf20783ece292be066a4481a464c.
+All eleven fresh configured CI jobs passed; the merge tree a5294ed2327ba7a93124ab4105232568251498e6 matches the reviewed tested tree.
+Source and independent review passed; targeted make quick-check passed (57 profiler/numerical/law cases and 16 auditor cases, plus static checks).
+Fresh GitHub CI run 40198966067 completed green at the exact reviewed head.
+Ledger verification is separately committed as 83e99a48f924be8d96db6a44a6b1ce8c5af978d3.
+The source and test Python files are unchanged from the green reviewed head.
+
+The separate strict saved-matrix audit completed in free job 40494067, exit 0:0 in 58 seconds, two CPUs and 8 GiB.
+All seven saved original profiles are unknown through n_nonconverged; n_invalid=0, all 127 nonempty queries unknown, known_empty=False.
+No new fits or panel loads occurred; original raw statistics, optimizer records and historical artifacts are unchanged.
+The exact producer environment/source remains intact; active strict guard and auditor are separately pinned.
+Two independent artifact reviews and the separate auditor source review passed, with no fits or FOC recalculation.
+See .coder/native180-strict-foc.org and /global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-strict-foc-20261025/results/job-40494067.
+The new law SHA256 is e03d0ec9c604e5560c2cae9a596083c0053bf42cde5b5c56c0631c455e471825.
+Issue 180 remains open for reliable finite-interior native nuisance concentration and strong-nuisance assumptions, not an owner policy decision.
+The dated history below records earlier work; verify current state from git log/status and the issue body before future scientific work.
+The only remaining issue 180 task is reliable finite-interior native nuisance concentration and assessment of the strong-nuisance reference assumptions.
+All previous numerical repairs and failed scientific experiments remain preserved below and in the linked reports.
+
 * Current issue 180 handoff -- 2026-10-25 (Sue, GPT-6 Codex)
 
 The numerical source repairs are merged: PR 262 as ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b; PR 263 as 4a61883693265228e593d213e1768d12a29e8dc5.

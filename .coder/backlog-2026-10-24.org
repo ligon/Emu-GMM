@@ -4,10 +4,17 @@
 
 * Issue 180 follow-up -- completed numerical repairs, 2026-10-25
 
+The owner approved mandatory finite, numerically resolved passing nuisance FOC for every profile.
+PR 264 merged as 7cb3c10b36ebdf20783ece292be066a4481a464c after all 11 fresh CI jobs passed at reviewed head c936bf4.
+The separate strict saved-array audit (job 40494067) makes all seven original profiles unknown, with n_invalid=0 and all 127 nonempty queries undecidable; its law SHA256 is e03d0ec9c604e5560c2cae9a596083c0053bf42cde5b5c56c0631c455e471825.
+The historical artifacts remain byte-identical; see [[file:native180-strict-foc.org][the strict-policy report]].
+Issue 180 stays open for reliable finite-interior concentration and strong-nuisance evidence.
+
 PR 262 merged as ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b and PR 263 merged as 4a61883693265228e593d213e1768d12a29e8dc5 after reviewed-head quick/full CI gates passed.
 They repair coordinate-scale false FOC passes and acceptance of infeasible Positive trial points, preserving the documented solver-certified OR FOC validity rule.
 The exact-producer seven-checkpoint audit supersedes the historical six-rejection assessment below: six points are unknown and one rejection survives only through solver certification despite failing corrected FOC.
-The owner decision about requiring reliable FOC remains pending; under that rule all seven points would be unknown.
+The owner subsequently approved mandatory finite, numerically resolved passing FOC for every profile.
+All seven original points are unknown under that rule; [[file:native180-strict-foc.org][the strict-policy report]] records implementation and the separate saved-array artifact.
 
 Two source-identified amplitude experiments passed their four preflight equivalence controls but failed to supply a valid native fit.
 The first returned zero amplitude by underflow; the guarded solver kept amplitude positive but stagnated, then failed physical-chart GN parity at an extreme numerical scale.

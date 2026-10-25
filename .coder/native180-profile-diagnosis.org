@@ -4,16 +4,18 @@
 
 * Current result
 
-Issue 180 now has a demonstrated numerical FOC defect and a separate explicit validity-policy decision.
+Issue 180 has two merged numerical repairs and an owner-approved requirement for passing nuisance FOC at every profiled point.
 The numerical FOC repair merged through PR 262 as ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b after all fresh quick/full CI gates passed.
 The independent Positive trial-domain repair merged through PR 263 as 4a61883693265228e593d213e1768d12a29e8dc5, with all fresh quick/full CI gates green at reviewed head 44272d3583300f78bed64bc51fb7dec71e0798b9.
-Neither repair changes the documented solver-certified OR FOC validity rule; the owner decision about that compatibility contract remains pending.
+Those two numerical repairs preserved the historical solver-certified OR FOC rule.
+The owner subsequently approved replacing that rule with mandatory finite, numerically resolved passing FOC; ledger Section 33 records the contract.
 All seven original checkpoints have been evaluated under their original source, input, warm-anchor and dependency identities, with no optimization.
 Every corrected FOC decrement exceeds the unchanged 0.001 threshold.
-The current documented certified-or-FOC rule retains only the solver-certified point, despite its corrected decrement 4.824466262573033.
-The owner has been asked whether to require a reliable numerical FOC for every package-produced profile; no policy change has been made while that choice is pending.
+The historical certified-or-FOC audit retained only the solver-certified point, despite its corrected decrement 4.824466262573033.
+Strict FOC admission leaves all seven original points unknown, including the solver-certified point.
+See [[file:native180-strict-foc.org][the strict-policy report]] for implementation, verification and the separate saved-array artifact.
 
-| Global index | Magnitude s | Original raw FOC | Equilibrated FOC | Raw optimizer certified | Current OR-policy verdict |
+| Global index | Magnitude s | Original raw FOC | Equilibrated FOC | Raw optimizer certified | Historical OR-policy verdict |
 |--------------+-------------+------------------+------------------+-------------------------+---------------------------|
 | 0 | 0 | 8.619497360325008e-6 | 4.0932596160455725 | False | unknown |
 | 1 | 0.050088084721517094 | 0.30138389168299934 | 4.546461756368343 | False | unknown |
@@ -24,15 +26,15 @@ The owner has been asked whether to require a reliable numerical FOC for every p
 | 6 | 2.0035233888606836 | 6.016461469699277e-7 | 4.551177177102752 | False | unknown |
 
 All original K/S/J values, p-values, degrees of freedom and fit checkpoints remain unchanged.
-Under the current OR rule the separate audited law has six nonconverged point indices [0,1,2,3,4,6], no invalid-statistic points and no accepted points.
+Under the historical OR rule the separate audited law has six nonconverged point indices [0,1,2,3,4,6], no invalid-statistic points and no accepted points.
 It passes all 127 capacity-query round trips; exact-grid membership is unknown except for the policy-retained rejection at index 5.
 The scanned set is not known empty; full-grid capacity remains unknown.
-Requiring reliable FOC would also make index 5 unknown; that is a separate policy decision, not an effect of numerical equilibration alone.
+The approved mandatory-FOC policy also makes index 5 unknown; this contract change is separate from the numerical equilibration repair.
 Neither the old nor new artifact establishes continuous-domain emptiness, native coverage or the profiler's strong-nuisance/interior assumptions.
 
 * Diagnostic and repair contract
 
-Ledger Sections 29/30 govern this work; Sections 7/12/26/28 retain their definitions and restrictions.
+Ledger Sections 29/30 govern the numerical diagnostic; Section 33 governs the subsequent admission-policy change; Sections 7/12/26/28 retain their definitions and restrictions.
 The old seven-point artifact is preserved byte-for-byte as historical evidence, with its original convergence assessment superseded by this audit.
 
 Evaluate each saved nuisance checkpoint through the production estimator with its original reduced warm theta_init, CU weighting and default anchored regularization.
@@ -44,7 +46,8 @@ Verify the scientific driver, package files, Python, installed distributions, nu
 
 The repair changes only _foc_decrement: diagonal coordinate equilibration followed by the existing fixed-count gauge inverse, with no additional directions discarded.
 Retained curvature unresolved at machine precision, materially negative information and invalid quadratic forms cannot supply a FOC certificate.
-The objective, initial-point anchor, FOC tolerance, optimizer and existing certified-fit override remain unchanged.
+That numerical repair left the objective, initial-point anchor, FOC tolerance, optimizer and historical certified-fit override unchanged.
+The subsequent mandatory-FOC change removes the override while preserving those numerical and scientific settings.
 The global inverse helper, identification_strength and sandwich construction are untouched.
 The resolution test is numerical certification, not a population-strength classification or opt-in inference-rank truncation.
 
@@ -132,7 +135,7 @@ Audit manifest SHA256: 2645a2d4160e1a0ed0f3e1689e3c92306fc1fb0d6c6115a2be0987b99
 Audit inventory SHA256: c2ac325c6e62f01e0492f81d3bd8d5dcea8d33b809a2085e543b1d75b155c09a.
 Both independent scientific/operational reviews passed; all thirteen payload hashes, seventeen guarded files and fifteen first-run files remain unchanged.
 The scientific runtime uses exact NumPy 2.4.3; secondary saved-array audits use NumPy 2.4.6.
-The original seven-point law and the pending owner validity-policy choice remain unchanged.
+The original seven-point law remains unchanged; the owner subsequently approved mandatory passing FOC, recorded separately in the strict-policy report.
 
 * Evidence identities
 
@@ -209,4 +212,5 @@ Independent local slow partition 40472478 completed 0:0 in 15:17.
 The redundant local combined job 40469532 was deliberately retired at 43:53 after every full-suite CI shard passed; its unfinished local run is not counted as a completed pass.
 
 All scientific burst jobs have ended; no native confidence verdict or strong-nuisance claim was added after either failed optimization experiment.
-Issue 180 remains open for the explicit owner validity-policy decision and reliable native nuisance concentration.
+Issue 180 remains open for reliable finite-interior native nuisance concentration and the strong-nuisance reference assumptions.
+The owner validity-policy decision is complete; the strict-policy report records its implementation.
