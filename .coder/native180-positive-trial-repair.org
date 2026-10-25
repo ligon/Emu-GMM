@@ -1,0 +1,60 @@
+#+TITLE: Positive trial feasibility -- issue 180
+#+AUTHOR: Sue (GPT-6 Codex)
+#+DATE: [2026-10-25 Sun]
+
+* Demonstrated defect and repair
+
+The original amplitude experiment at s=0.050088084721517094 passed all four package objective/covariance/derivative equivalence controls, then returned delta=0 by underflow after nine LM steps.
+The driver correctly refused physical mapping and inference; this was a numerical domain failure, not a boundary estimate.
+The original scientific report SHA256 is 7150d60558f4b1e7e3294cd5c15abb18b5d004023ff53519900bbfeb4242ee19.
+
+Ledger Section 32 grounds the new solver repair; the prior model and inference commitments remain in force.
+A tiny smooth residual atan(1000*(x-0.001)), initialized at Positive x=1, reproduces the defect: the first LM proposal underflows to zero and decreases the finite residual cost, so the original solver accepts it.
+The defect reproduces through legacy scalar, ManifoldLeaf scalar and mixed Positive/Euclidean parameter routes.
+The standalone Positive retraction tests already acknowledge floating-point underflow; no change to that arithmetic operator is made.
+
+Native LM now checks its existing Positive leaf blocks for finite, strictly positive proposed values before accepting a trial.
+An infeasible trial is rejected and the unchanged damping search continues.
+A zero trial differing from the current positive point is not an absorbing null step.
+The no-Positive acceptance expression and all valid trial arithmetic remain unchanged.
+No clipping, parameter floor, extra iteration, tolerance/ftol change, metric change, covariance formula or inference policy is introduced.
+Invalid initial points and other manifold domains remain outside this slice.
+
+* Verification
+
+Source base: edbbca9017fa360206af99827eeef4fd2604ceac, including the reviewed numerical FOC repair.
+Ledger Section 32 was separately published as a6a6cb3 after targeted make quick-check passed.
+Candidate src/emu_gmm/manifolds/riemannian_lm.py SHA256: 2012895306aa64c5c8b42672909cee849bb5a71d73f7c075eefe6cb9a1f92c26.
+New tests/manifolds/test_riemannian_lm_positive_trials.py SHA256: 383d28a4b507f6de98ae089344a0a4ad57122b367cab85404d15ca30c4640f9c.
+
+Ten targeted tests pass: zero/overflow rejection, all Positive blocks without restricting negative Euclidean values, two rejected zero proposals without premature stagnation, healthy positive-root recovery and one-argument/traced-args parity.
+The earlier combined existing reduction/stagnation/Positive controls also passed.
+The final source differs from the worker's tested implementation only by its required ledger citation comment; root Black/Ruff and targeted lint/type/pytest make quick-check pass on these exact bytes.
+Independent review confirms the ledger's acceptance/damping/gauge/inference invariants.
+A hard positive start may still overshoot to a tiny representable positive value and stagnate; domain correctness is not a convergence guarantee.
+
+Full immutable gate: job 40469532, eight CPUs/64 GiB, quick-check followed by the entire slow suite, currently running.
+Snapshot SHA256: e8bf82640e36d83e5f8506ce8d878f628888faafeda9ced3c1496b99b0a2d65b.
+Only report/status text follows that snapshot; no package or test behavior changed afterward.
+Fresh GitHub head checks remain required before merge.
+
+* Separately declared native experiment
+
+A new source-identified experiment is submitted as job 40469837, eight CPUs/64 GiB/30 minutes on free co_carleton.
+It repeats only the original failed null and original physical warm nuisance, with unchanged CU/default anchor, native tolerances and 1500-step cap.
+It retains the exact original scientific package/model/native driver/dependencies and loads the candidate LM as an explicitly pinned external module.
+The wrapper amends the scientific protocol to identify the candidate source, original package solver source, wrapper and rationale; the original package map alone is not presented as the executing solver identity.
+The first failed experiment and its frozen stage/results remain unchanged.
+
+Run: /global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-amplitude-guarded-20261025.
+Config SHA256: 632b0c0a61dc738eda2f41e38c256361b53d18500447fd659faea68952fe67f8.
+Launcher SHA256: 1282d67ca2a1a245a38a7340650ea798fa331dac15f12015ab4f72ecd74fa3bc.
+Wrapper SHA256: fe94fd3833c27032bc1b5f0e19373c39dc539797533af02071967891ef07f6a8.
+Launch inventory SHA256: 670d990508d2443b32026ff3be4f3fa393e48edde992b15f648d9f913281c383.
+
+Root and independent source/provenance/loader review passed; five metadata controls and ready preflight passed without panel reads or fitting.
+The new scientific result is pending; the experiment is not an original-solver replay or a confidence-set calculation.
+A finite returned point or small FOC alone cannot establish strong nuisance identification or a finite-interior nuisance minimum.
+The owner decision about requiring reliable FOC for profiled inference remains pending and is not implemented here.
+
+-- Sue
