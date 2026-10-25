@@ -1596,3 +1596,32 @@ The saved-matrix audit in exact producer environment (job 40494067, exit 0:0) yi
 Two independent source/hash/codec reviews confirm all 127 nonempty grid queries are unknown, while raw grid_empty=True remains distinct from known_empty=False.
 The fixed-grid law contains one set draw, so capacity-query n_nonconverged=1 is distinct from the profiled set's seven-point n_nonconverged count.
 No contradiction or reinvention was found against the approved contract; native finite-interior and strong-nuisance assumptions remain open scientific questions.
+
+* Section 34 -- Bounded native restricted trust-region proof probe (issue 180)
+
+1. Task :: At the unresolved null s=0.050088084721517094, test whether the unchanged projected-panel restricted CU objective has a finite-interior stationary local solution in the original c0 coordinates.
+   Retain a genuine optimizer result, evaluate quotient-aware first-order and true-curvature evidence, and compare the returned criterion with existing finite candidates without claiming population coverage.
+2. Existing machinery :: Search tier: source/git/ripgrep, Sections 28-33 and saved native reports at d4d17bd.
+   =scripts/validation/native_projected_set_180.py:load_inputs= owns frozen input checks and the projected native model; =native_profile_diagnostics_180.py:restore_checkpoint= and =validate_producer= own source/checkpoint parity.
+   =inference/confidence_set.py:_ProfileReducer= and =_internal/models.py:map_model_parameters= implement the actual restricted model; =build_estimator= owns CU objective, the warm-point ridge anchor and postfit g/H/V.
+   =riemannian_tr= is the tested true-Hessian manifold optimizer; =riemannian_lm._horizontal_curvature_eigenvalues= computes horizontal Hessian extrema; =_foc_decrement= is the strict equilibrated fixed-gauge admission screen.
+   =scripts/validation/native_projected_set_180.py:RecordingOptimizer= writes genuine raw parameters and OptimizerInfo before postfit interpretation.
+3. Definitions :: This is a new solver experiment, not a replay of the original LM or Positive-amplitude trials and not a new inference reference.
+   The restricted parameter is (A,c0,pi) on PSDFixedRank(5,2) x Euclidean(1) x Euclidean(10), with one known factor gauge; s is held at the exact stored null.
+   The package gradient is the gradient of one-half the criterion and H=G'Lambda G; lambda^2=g'H^+g measures scaled first-order error, not second-order or global optimality.
+4. Invariants :: Verify original producer source/environment/input identities before the solve, and keep the original physical warm nuisance, CU weighting, default anchored regularization, model, null, penalty=None and FOC tolerance unchanged.
+   Use a separately named source/solver identity and bounded free Slurm job; preflight against the original checkpoint before solving, then save the returned raw checkpoint/info before postfit curvature or FOC checks.
+   A finite passing FOC and nonnegative local true curvature support only sample local admissibility. Strong nuisance identification, cluster/FE asymptotics and coverage require independent arguments.
+   Original seven unknown verdicts remain unchanged; a failed new experiment supplies no replacement point or confidence-set update.
+5. Reuse decision :: Add only a reproducible validation driver and small controls around public estimator/optimizer machinery; never hand-roll the criterion, variance, K statistic or SE.
+   One bounded physical-coordinate RTR solve is the first falsification probe. Later boundary/branch comparisons use package evaluation under the original anchor and are separately labeled as fixed-candidate, not global proofs.
+6. Open questions :: Whether a finite-interior stationary nuisance exists and is reached, whether a different branch or delta->0 has lower criterion, and whether the native clustered projected moments satisfy the strong-nuisance subvector limit remain open.
+
+** Section 34 verification
+
+The frozen-source, exact-input preflight reproduced the original checkpoint criterion and K/S/J/p-value vector before the sole RTR solve.
+The bounded physical-coordinate RTR run returned a genuine saved checkpoint after 200 steps; its postfit wrapper failed only on NumPy's length-one scalar conversion, so the immutable raw record and ingredient arrays were replayed separately with zero new optimizer steps.
+The exact-environment replay verified all saved ingredients, finite amplitude, rank-two factor, FOC and true curvature; its corrected decrement 5.806742996440626 fails 0.001, and its Q=108.96719305737658 exceeds the original lower-Q checkpoint.
+The replay's smallest identified nuisance information eigenvalue is 5.5813092236640076e-08, which is sample and scale-dependent, not a population lower bound.
+The exact frozen instrument/FE algebra cancels pair effects from pair totals but retains estimated product effects, so a cluster CLT, covariance/cross-covariance LLN and dependence model remain proof obligations.
+No original scientific source, original seven-point law, tolerance or inference reference was altered; the native issue remains open.
