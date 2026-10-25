@@ -2,6 +2,45 @@
 #+DATE: [2026-10-24 Sat]
 
 
+* Current issue 180 handoff -- 2026-10-25 (Sue, GPT-6 Codex)
+
+The numerical source repairs are merged: PR 262 as ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b; PR 263 as 4a61883693265228e593d213e1768d12a29e8dc5.
+Both reviewed heads passed fresh configured quick-check and every full-suite CI shard before merge.
+The final documentation-only update follows those source merges; source/test behavior is unchanged.
+Main is the active branch; verify git log/status for the documentation commit and live head on resumption.
+
+The numerical FOC repair equilibrates parameter units before the unchanged gauge-count inverse and refuses unresolved curvature certificates.
+The Positive-domain repair rejects nonfinite or nonpositive Positive proposals through the existing damping search, without clipping or changing valid trials, metrics, thresholds or inference.
+Current reports: .coder/native180-profile-diagnosis.org and .coder/native180-positive-trial-repair.org; ledger Sections 29-32 remain in force.
+
+All seven original native checkpoint FOC checks fail the unchanged 0.001 threshold.
+The existing solver-certified OR FOC policy yields six unknowns and one conditional rejection at index 5, whose corrected FOC is 4.824466262573033.
+The owner has been asked whether every profile should require a finite, numerically resolved passing FOC, even when the solver reports convergence; that choice is still pending.
+Do not implement the compatibility change without the answer.
+If approved, change the public guard/docs/tests and produce a separate strict-policy law from the already retained genuine arrays; all seven points then become unknown without new fits or changed raw statistics.
+The original OR-policy audit and native artifacts must remain unchanged.
+
+Neither source-identified amplitude experiment supplied a valid native nuisance fit.
+Job 40467829 failed after nine steps with exact zero amplitude and no physical mapping; job 40469837 kept amplitude positive but stagnated after 924 steps, then failed GN chart parity because physical curvature underflowed.
+The guarded genuine amplitude array audit gives FOC=86.0803652781 and criterion 242.37181956381386, worse than the old finite saved point 102.68441377762007.
+No global boundary optimum, finite-interior concentration, nuisance strength or native coverage is established.
+The bounded experiments are complete. Further optimizer comparisons need a separately declared protocol; model/domain or inference-reference changes require an owner decision.
+
+All scientific burst jobs ended and their two independent failure audits passed.
+Local slow partition 40472478 completed 0:0 in 15:17; redundant combined gate 40469532 was retired at 43:53 after completed full-suite CI evidence and is not counted as a pass.
+PR 263 source archive e8bf82640e36d83e5f8506ce8d878f628888faafeda9ced3c1496b99b0a2d65b matches every Python file at reviewed head 44272d3583300f78bed64bc51fb7dec71e0798b9; manifest digest 1909179838f43719193b800eae8a0321c9835126723e1c67979c7e03e4fe2356.
+Reproducible amplitude driver/tests and first-failure report are durably published on investigation/180-amplitude at 83ff817dd3bfb37feb84e54da163019b326367da.
+
+Shared evidence root: /global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881.
+Corrected original law: native180-all-checkpoints-20261025/results/job-40465613; law SHA256 a344b12c7a278064374f0b245eca6024511dd9df952b70fa5cfc5d161efda65c.
+First failure audit: native180-amplitude-20261025/audits/job-40467829; inventory 5eed0df3259d5a034182643938a5b9dce7b43a210bef134a84cba2d68836e09c.
+Guarded failure audit: native180-amplitude-guarded-20261025/audits/job-40469837; inventory c2ac325c6e62f01e0492f81d3bd8d5dcea8d33b809a2085e543b1d75b155c09a.
+Earlier draft notes/tests were preserved in local named stashes and exact shared payloads under native180-preserved-drafts-20261025, inventory af5b3288b22d737739f4ef58438bf713ce9e0bf22a7b147ffdaadb2ec8faa8d2.
+Use SHA-only verification for frozen audit directories; their writers must not be replayed over retained metadata.
+
+The parent condo allocation 40438881 remains held; release it with sucoder release when no further session work is wanted.
+The dated sections below are historical and are superseded by this entry and the linked reports.
+
 * Active issue 180 diagnosis -- 2026-10-25 (Sue, GPT-6 Codex)
 
 This entry supersedes the native-convergence assessment in the completed-batch history below.

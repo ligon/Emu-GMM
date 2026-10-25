@@ -35,14 +35,17 @@ The final source differs from the worker's tested implementation only by its req
 Independent review confirms the ledger's acceptance/damping/gauge/inference invariants.
 A hard positive start may still overshoot to a tiny representable positive value and stagnate; domain correctness is not a convergence guarantee.
 
-Full immutable gate: job 40469532, eight CPUs/64 GiB, quick-check followed by the entire slow suite, currently running.
+The complete fresh GitHub quick-check and all full-suite shards passed at reviewed head 44272d3583300f78bed64bc51fb7dec71e0798b9, CI run 40157176706.
+PR 263 merged as 4a61883693265228e593d213e1768d12a29e8dc5; the prospective/merged tree 88ea6a56597a74d3cc69a5e1e33d4d43d8867bfa matches the original tested tree after retargeting to main.
+The redundant local combined job 40469532 was retired at 43:53 after all full-suite CI shards passed and is not counted as completed validation.
+Independent local slow partition 40472478 passed 0:0 in 15:17 against the same immutable source.
 Snapshot SHA256: e8bf82640e36d83e5f8506ce8d878f628888faafeda9ced3c1496b99b0a2d65b.
 Only report/status text follows that snapshot; no package or test behavior changed afterward.
-Fresh GitHub head checks remain required before merge.
+Only report/status Org files follow the reviewed source head; no package or test behavior changed afterward.
 
 * Separately declared native experiment
 
-A new source-identified experiment is submitted as job 40469837, eight CPUs/64 GiB/30 minutes on free co_carleton.
+The separately source-identified experiment 40469837 ran with eight CPUs/64 GiB/30 minutes on free co_carleton and failed its postsolve GN parity check, exit 1:0 in 8:22.
 It repeats only the original failed null and original physical warm nuisance, with unchanged CU/default anchor, native tolerances and 1500-step cap.
 It retains the exact original scientific package/model/native driver/dependencies and loads the candidate LM as an explicitly pinned external module.
 The wrapper amends the scientific protocol to identify the candidate source, original package solver source, wrapper and rationale; the original package map alone is not presented as the executing solver identity.
@@ -55,7 +58,14 @@ Wrapper SHA256: fe94fd3833c27032bc1b5f0e19373c39dc539797533af02071967891ef07f6a8
 Launch inventory SHA256: 670d990508d2443b32026ff3be4f3fa393e48edde992b15f648d9f913281c383.
 
 Root and independent source/provenance/loader review passed; five metadata controls and ready preflight passed without panel reads or fitting.
-The new scientific result is pending; the experiment is not an original-solver replay or a confidence-set calculation.
+The guard retained strictly positive delta=1.1821544870382914e-257 (mapped c0=591.5970302893323), but LM stagnated after 924 steps without certification.
+The final recorded GN parity failure is amplitude H[delta,delta]=4.986457930578551 versus a rounded physical entry of zero; the implied physical diagonal is below float64 range.
+The full physical postsolve matrix was not retained and was not reconstructed by the independent audit.
+Saved genuine amplitude arrays yield FOC=86.0803652781 under the pinned helper; the objective 242.37181956381386 also exceeds the older saved finite point 102.68441377762007.
+There is no completed fit summary, K test or confidence verdict from this failed run.
+Report SHA256 f448158f9e09505828124b6ad0e05c322a9116fd9a12fea9a8496b3a6f38ac30; amplitude arrays SHA256 227cf8f3e1cb62cc96c0da1eb730987b15d674081ed1d3d90d798177d488a549.
+Both independent audits passed; frozen audit inventory c2ac325c6e62f01e0492f81d3bd8d5dcea8d33b809a2085e543b1d75b155c09a preserves all seventeen guarded and fifteen original experiment files.
+The experiment is not an original-solver replay, a boundary optimum or a confidence-set calculation.
 A finite returned point or small FOC alone cannot establish strong nuisance identification or a finite-interior nuisance minimum.
 The owner decision about requiring reliable FOC for profiled inference remains pending and is not implemented here.
 

@@ -5,8 +5,9 @@
 * Current result
 
 Issue 180 now has a demonstrated numerical FOC defect and a separate explicit validity-policy decision.
-The corrected numerical guard has passed focused regressions and the final quick-check gate.
-The complete quick and slow gates passed; fresh GitHub PR checks remain in progress.
+The numerical FOC repair merged through PR 262 as ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b after all fresh quick/full CI gates passed.
+The independent Positive trial-domain repair merged through PR 263 as 4a61883693265228e593d213e1768d12a29e8dc5, with all fresh quick/full CI gates green at reviewed head 44272d3583300f78bed64bc51fb7dec71e0798b9.
+Neither repair changes the documented solver-certified OR FOC validity rule; the owner decision about that compatibility contract remains pending.
 All seven original checkpoints have been evaluated under their original source, input, warm-anchor and dependency identities, with no optimization.
 Every corrected FOC decrement exceeds the unchanged 0.001 threshold.
 The current documented certified-or-FOC rule retains only the solver-certified point, despite its corrected decrement 4.824466262573033.
@@ -98,19 +99,40 @@ The independent array check uses NumPy 2.4.6; the original scientific producer r
 All 15 original result/log/index files and the old producer payloads remain hash-identical.
 The audit metadata manifest was refreshed when root reran its writer; the final inventory above was independently rechecked afterward, without rerunning the writer.
 
-* Separate Positive trial-domain repair in progress
+* Positive trial-domain repair and guarded experiment
 
-The accepted zero proposal exposed a separate native LM feasibility defect.
-Draft PR 263 checks finite strict positivity of existing Positive trial blocks before acceptance, preserving valid-trial arithmetic, the original damping search and the no-Positive path.
-It changes no retraction/metric/tolerance/inference formula and introduces no clipping or parameter floor.
-Its independent ledger-anchored review and ten targeted regressions pass; its immutable full gate is job 40469532 and fresh GitHub checks remain pending.
-Candidate optimizer source SHA256: 2012895306aa64c5c8b42672909cee849bb5a71d73f7c075eefe6cb9a1f92c26.
+PR 263 repairs acceptance of a Positive retraction that rounds to zero or infinity while its residual cost still decreases.
+It checks existing Positive trial blocks for finite, strictly positive values before accepting a proposal, retaining the original damping search and all valid-trial/no-Positive arithmetic.
+It changes no retraction, metric, tolerance, iteration cap, parameter floor or inference policy.
+Ten focused regressions and existing reduction/stagnation/Positive controls pass; independent source review confirms ledger Section 32.
+Candidate optimizer SHA256: 2012895306aa64c5c8b42672909cee849bb5a71d73f7c075eefe6cb9a1f92c26.
 
-A separately declared source-identified native amplitude experiment is running in job 40469837, with the same original null/warm anchor/tolerances/1500-step cap and a 30-minute budget.
-It retains the exact original scientific package and loads the candidate optimizer externally through a pinned wrapper whose protocol explicitly identifies the changed executing solver.
-This is not an original-solver replay; the first failed run remains unchanged.
-Stage: native180-amplitude-guarded-20261025; config SHA256 632b0c0a61dc738eda2f41e38c256361b53d18500447fd659faea68952fe67f8.
-The new result is pending and does not change the existing seven-point law or the pending owner validity-policy choice.
+The separately declared guarded experiment 40469837 failed 1:0 in 8:22 after all four preflight controls passed.
+It preserved the original null, warm nuisance, CU/default anchor, tolerances and 1500-step cap.
+Its exact original scientific package is retained; a pinned external optimizer/wrapper explicitly identifies the changed executing solver, not an original-solver replay.
+The eight preflight matrix payloads are byte-identical to the first experiment.
+
+The guard kept delta finite and strictly positive at 1.1821544870382914e-257, mapped c0=591.5970302893323.
+The sole LM call nevertheless stopped at 924 steps, done=False, status=stagnated.
+A genuine amplitude-result matrix payload was retained before the final GN chain-rule parity assertion failed: amplitude entry [10,10]=4.986457930578551, while the recorded transformed physical entry is zero.
+The implied physical diagonal has log10 approximately -513.1569, below float64's subnormal range.
+The full physical postsolve matrix was not retained; the independent audit combines the recorded assertion with saved-array range checks and does not reconstruct that missing result.
+
+Applying the pinned FOC helper only to the saved genuine amplitude g/H gives 86.0803652781, far above 0.001.
+The delta score is 8.70156560, with A/pi score norms approximately 45.7943/20.9816.
+The saved objective 242.37181956381386 matches twice the raw optimizer half-criterion and exceeds the old saved finite point's 102.68441377762007.
+There is no completed fit summary, successful returned-fit parity, K test or confidence verdict from this experiment.
+These failures establish neither an interior optimum nor a global boundary optimum, nuisance strength or native coverage.
+No clipping, penalty, restart, extra iterations, third solver attempt or changed inference reference was used.
+
+Guarded run: native180-amplitude-guarded-20261025/results/job-40469837.
+Report SHA256: f448158f9e09505828124b6ad0e05c322a9116fd9a12fea9a8496b3a6f38ac30.
+Genuine amplitude arrays SHA256: 227cf8f3e1cb62cc96c0da1eb730987b15d674081ed1d3d90d798177d488a549.
+Audit manifest SHA256: 2645a2d4160e1a0ed0f3e1689e3c92306fc1fb0d6c6115a2be0987b9918644c8.
+Audit inventory SHA256: c2ac325c6e62f01e0492f81d3bd8d5dcea8d33b809a2085e543b1d75b155c09a.
+Both independent scientific/operational reviews passed; all thirteen payload hashes, seventeen guarded files and fifteen first-run files remain unchanged.
+The scientific runtime uses exact NumPy 2.4.3; secondary saved-array audits use NumPy 2.4.6.
+The original seven-point law and the pending owner validity-policy choice remain unchanged.
 
 * Evidence identities
 
@@ -173,3 +195,18 @@ The preflight reads provenance and existing small payloads, never panel inputs o
 A replay creates a new job-specific output directory and leaves old producer and audit artifacts intact.
 
 -- Sue
+
+* Final source-release verification
+
+PR 262 reviewed head 10ee43f14c54f08da368e15bc68fd40a94543b41 passed CI run 40154425982; merge ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b has the reviewed source tree 4049f0ab9ce9558a3dd749858223a767c6e040a3.
+PR 263 reviewed head 44272d3583300f78bed64bc51fb7dec71e0798b9 passed CI run 40157176706; its prospective/merged source tree is 88ea6a56597a74d3cc69a5e1e33d4d43d8867bfa, unchanged when retargeted to main.
+Only report/status Org files follow those reviewed source heads.
+
+The PR 263 immutable source archive is e8bf82640e36d83e5f8506ce8d878f628888faafeda9ced3c1496b99b0a2d65b.
+All 262 Python source/test files match that head exactly; their manifest digest is 1909179838f43719193b800eae8a0321c9835126723e1c67979c7e03e4fe2356.
+Targeted make quick-check passed before every substantive commit; final configured CI quick-check and every full-suite shard passed before merge.
+Independent local slow partition 40472478 completed 0:0 in 15:17.
+The redundant local combined job 40469532 was deliberately retired at 43:53 after every full-suite CI shard passed; its unfinished local run is not counted as a completed pass.
+
+All scientific burst jobs have ended; no native confidence verdict or strong-nuisance claim was added after either failed optimization experiment.
+Issue 180 remains open for the explicit owner validity-policy decision and reliable native nuisance concentration.

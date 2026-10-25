@@ -2,16 +2,19 @@
 #+AUTHOR: Sue (GPT-6 Codex)
 #+OPTIONS: toc:nil
 
-* Issue 180 follow-up -- 2026-10-25
+* Issue 180 follow-up -- completed numerical repairs, 2026-10-25
 
-The selected next task uncovered a coordinate-scale defect in the profiler's FOC fallback; draft PR 262 repairs its numerical evaluation while preserving the documented validity policy.
-The exact-producer all-checkpoint audit supersedes the original six-rejection assessment below: six points are unknown and one rejection survives only through solver certification despite failing corrected FOC.
-The owner decision about requiring reliable FOC is pending.
-See [[file:native180-profile-diagnosis.org][the current diagnosis]] for source/artifact pins, completed quick/full gates, the separate audited law and the finite-interior/strong-nuisance limits.
-The separately declared one-null positive-amplitude coordinate experiment passed all four parity controls, then failed after nine steps because amplitude underflowed to zero; no physical mapping or postfit inference was performed.
-Both independent failure audits passed; this is not evidence of a global boundary optimum or strong nuisance identification.
-Draft PR 263 separately rejects infeasible Positive trial points in native LM; a new source-identified guarded experiment is running, with all inference-policy choices unchanged.
-Issue 180 remains open.
+PR 262 merged as ec6a1ada2aedcb41d3aa115c4475a40f3cf5760b and PR 263 merged as 4a61883693265228e593d213e1768d12a29e8dc5 after reviewed-head quick/full CI gates passed.
+They repair coordinate-scale false FOC passes and acceptance of infeasible Positive trial points, preserving the documented solver-certified OR FOC validity rule.
+The exact-producer seven-checkpoint audit supersedes the historical six-rejection assessment below: six points are unknown and one rejection survives only through solver certification despite failing corrected FOC.
+The owner decision about requiring reliable FOC remains pending; under that rule all seven points would be unknown.
+
+Two source-identified amplitude experiments passed their four preflight equivalence controls but failed to supply a valid native fit.
+The first returned zero amplitude by underflow; the guarded solver kept amplitude positive but stagnated, then failed physical-chart GN parity at an extreme numerical scale.
+The saved genuine amplitude matrices remain nonstationary, FOC approximately 86.08; neither experiment establishes a global boundary optimum or strong nuisance identification.
+Both independent failure audits passed and original bytes remain preserved.
+See [[file:native180-profile-diagnosis.org][the final diagnosis]] and [[file:native180-positive-trial-repair.org][the domain repair report]] for exact source/artifact identities, completed gates and limitations.
+Issue 180 remains open; its current body retains the residual and all earlier acceptance history.
 
 * Completion record -- 2026-10-24 21:50:59 UTC
 
