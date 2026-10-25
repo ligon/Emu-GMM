@@ -1,0 +1,92 @@
+#+TITLE: Native restricted-fit proof probe -- issue 180
+#+AUTHOR: Sue (GPT-6 Codex)
+#+DATE: [2026-10-25 Sun]
+
+* Scope
+
+The strict-FOC policy leaves all seven original native grid points unknown.
+This note separates an exact fixed-effect identity, one bounded sample optimization experiment, and the assumptions still needed for a native subvector limit theorem.
+The experiment holds \(s=0.050088084721517094\) and optimizes the original physical nuisance \((A,c_0,\pi)\), retaining the original model, warm point, CU weighting and default anchored regularization.
+It cannot change the seven-point RandomSetLaw or establish coverage.
+Ledger Section 34 records the reuse decision and immutable settings.
+
+* Exact fixed-effect identity on the frozen panel
+
+Let \(F\) contain the product and quarter-by-market indicators, \(M_F=I-P_F\), \(Z\) the 43 frozen instruments, \(y_\theta\) the transformed outcome and \(q_\theta\) the remaining modeled terms.
+The frozen columns of \(Z\) are orthogonal to both indicator sets: the largest absolute product and pair group means are \(3.41\times10^{-15}\) and \(1.03\times10^{-14}\).
+These values are recorded in the frozen =native180-data-prep/results/job-40446236-report.json= under =preprojected_block_means.instruments= (input SHA256 =9939853c1691d1af6ddd05bbf505b3a7b0d8aea8a3c6974c61cdc09b9cec4307=).
+Thus \(Z'M_F=Z'\) up to floating-point error, and the implemented projected moment obeys
+\[
+m(\theta)=N^{-1}Z'M_F(y_\theta-q_\theta)=N^{-1}Z'(y_\theta-q_\theta).
+\]
+Since \(F\) and \(Z\) are frozen, differentiating gives the same identity for the parameter Jacobian.
+The source still differentiates through the full joint projection; this algebra is a check, not a request to replace its implementation.
+
+The cancellation does not extend to pair covariance contributions.
+Writing \(a_p(\theta)\) for fitted product effects and \(b_c(\theta)\) for pair effects, the projected total for pair \(c\) is
+\[
+T_c(\theta)=\sum_{i\in c}Z_i(y_{\theta i}-q_{\theta i})-\sum_p a_p(\theta)\sum_{i\in(c,p)}Z_i.
+\]
+The \(b_c\) term vanishes because \(\sum_{i\in c}Z_i=0\); its derivative vanishes for the same reason.
+The 45 product effects are shared across pairs and remain in \(T_c\) and its derivative.
+At the frozen warm point, projected and unprojected moment means agree within \(5.13\times10^{-16}\), but their pair-cluster covariance matrices differ by 32.3 percent in relative Frobenius norm.
+The implementation correctly retains projected row residuals for covariance assembly.
+
+Conditional on exact centering \(Z'F=0\) in an asymptotic sequence, the fixed-effect calculation yields a useful reduction.
+For each pair, define \(B_{cp}=\sum_{i\in(c,p)}Z_i\), and let \(T_c^0\) use the population product projection coefficient \(a_p^0(\theta)\) in place of its estimated counterpart.
+If the number of product effects stays fixed, the product-effect Schur matrix has eigenvalues of order \(N\), the pair sizes and required moments are uniformly controlled, and \(\widehat a-a^0=O_p(N^{-1/2})\), then \(T_c-T_c^0=-B_c(\widehat a-a^0)\).
+Under a corresponding bound on the average \(\|B_c\|\|T_c^0\|\), the difference between the estimated and population-product cluster covariance sums is lower order than their \(O_p(N)\) leading term.
+The same argument must hold for \(\widehat a'(\theta)-a^{0\prime}(\theta)\) to cover the Jacobian--moment cross covariance.
+These are conditional algebra and rate requirements, not claims established by the frozen panel's sample Schur rank.
+
+* Conditions a native reference still needs
+
+The restricted nuisance has 20 identified directions: nine from the \(5\times2\) factor after its one gauge, one from \(c_0\), and ten from \(\pi\).
+The interest parameter \(s\) has one direction; the claimed subvector reference is \(K\sim\chi^2_1\), with 43 moment coordinates.
+For that reference, a native proof must specify a triangular-array panel design and show a joint CLT for pair totals of the projected moments and their Jacobian, a matching covariance LLN, and consistency of the derivative--moment cross covariance used by the package K statistic.
+It must account for estimation of the fixed 45 product effects and their derivatives; exact cancellation of pair effects makes the 5,460 pair coefficients irrelevant to pair totals under the frozen instrument orthogonality.
+It must justify independence or sufficiently weak cross-pair dependence.
+The observed 5,460 pairs are 84 quarters by 65 recurring market codes, so common quarter shocks and repeated-market dependence are substantive possibilities.
+A read-only warm-point two-way covariance sensitivity was roughly nine times the pair-only trace after grand-mean centering; it is exploratory because the point is nonstationary and neither dependence model has been validated.
+
+The theorem also needs a stable finite-interior restricted branch, a population lower bound on nuisance quotient information, and optimization error that vanishes at the required stochastic rate.
+The package's fixed \(\lambda^2\leq0.001\) screen is a numerical admission rule, not that rate condition.
+A sample stationary point with nonnegative true horizontal curvature would establish only local sample evidence; it would not exclude a lower branch or the \(c_0\to\infty\) amplitude-zero boundary.
+Ridge regularization must be asymptotically nonbinding or explicitly accounted for.
+The original warm anchor and all seven saved endpoints use zero ridge, so a possible general anchored-fit/direct-K mismatch is not the cause of their failed FOCs.
+The existing MCAR note explicitly does not prove joint clustered and missing-data asymptotics.
+The relevant implementation anchors are =scripts/validation/native_projected_set_180.py:117= for the joint projection, =src/emu_gmm/measures/empirical.py:659= for its moment path, =src/emu_gmm/covariance/clustered.py:106= for pair-total covariance, and =src/emu_gmm/inference/k_statistic.py:292= and =:584= for the derivative--moment cross covariance and dispatch.
+=docs/design.org:171= explicitly withholds automatic influence-function validity for generic reductions, and =docs/mcar-asymptotics.org:16= excludes joint cluster/missing-data theory.
+
+* Experiment and evidence
+
+The new validation driver uses one physical-coordinate =riemannian_tr= restricted solve with at most 200 outer steps and ten inner CG steps per outer step, on an eight-CPU/64-GiB free Slurm allocation with a 90-minute wall cap.
+It verifies the original source, dependencies, inputs, manifest and checkpoint, then saves the genuine raw optimizer result before evaluating FOC, true horizontal curvature and sample nuisance information.
+Any result here remains a sample diagnostic; the original seven-point law is unchanged.
+
+The first allocation, Slurm job 40498228 on n0037.savio4, failed before staging when a read of the pinned source archive returned an I/O error.
+The coordinator verified the archive hash immediately afterward; the observation and the bounded rerun are recorded in the host bulletin.
+Job 40498230 on n0038.savio4 passed original source/input/checkpoint/objective/K parity and completed its single RTR solve in 188.2 seconds.
+The solver accepted 195 of 200 steps and returned =max_iterations=, =done=False= and a half-criterion of 54.483596528688544.
+The raw checkpoint was saved before postfit interpretation.
+The first diagnostic wrapper then failed on converting the length-one \(c_0\) array to a scalar under NumPy 2.4.3; this did not alter the returned iterate, its raw optimizer record, or the saved postfit arrays.
+
+Job 40498497 on n0072.savio4 used the original scientific package and exact dependency set to evaluate that saved checkpoint with =CheckpointEvaluation=, which performs zero optimizer steps.
+It reproduced all stored postfit ingredient arrays and the original checkpoint parity, then completed with exit 0:0.
+The physical \(c_0\) is 7.084957698204365, giving representable amplitude \(\exp(-c_0)=0.0008376102189528571\); the factor has rank two.
+The criterion \(Q=108.96719305737658\) is 6.28277927975651 above the original lower-criterion LM checkpoint's \(Q=102.68441377762007\).
+The corrected squared FOC decrement is 5.806742996440626, far above the unchanged 0.001 screen; therefore this finite point is *not* an admissible concentrated nuisance fit.
+The true horizontal Hessian extrema are approximately \(1.69\times10^{-14}\) and 245.7249, so this point has no detected negative-curvature direction, but that does not cure its first-order failure.
+The 20-dimensional identified nuisance information has smallest sample eigenvalue \(5.58\times10^{-8}\) under the fit's weighting; the scale-dependent sample value does not establish population strong identification.
+The original LM checkpoint also fails the same FOC screen (4.54646), so neither saved branch supports the native subvector reference.
+The seven-point strict RandomSetLaw remains seven unknowns.
+All named immutable experiment stages below are under =/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/=.
+
+- Original scientific source archive :: SHA256 =200c20a5d5293ac7ab1746723ecdab6a0bbb81bdd85e4154cc21018847442b93=.
+- First RTR protocol :: =native180-rtr-20261025/config.json= SHA256 =096b94ad3ccc11a51e558179e9d4c44dfb56cabd4cf3dd78f8bad00c4b2cc1b3=; raw checkpoint SHA256 =6560cd57d2dd1ae9b82878172500029aac74bb7c79f79f7b3297752029ac59c0=; postfit arrays SHA256 =cc54d5b92889a62aa3bfb146e3b2986b1698fc6dcf1d97be7c493228ac62c7f7=.
+- Exact-environment replay :: =native180-rtr-replay-20261025/config.json= SHA256 =83334846ed0ab08c230b33130b195c7b69dd413009485f03d88b4b7c654bad19=; =results/job-40498497/experiment/rtr-probe.json= SHA256 =d214e23c4b9041317bf3b5481364a82d07d8f0a35b4fb8effb2c596d47d8077c=.
+
+The next sample-optimization question is whether a deliberately separate RTR restart from the old lower-criterion checkpoint can reach a finite stationary branch, and how that branch compares with the amplitude-zero limit.
+The theory question is whether the pair-cluster limit and a uniform 20-dimensional nuisance lower bound hold under a declared asymptotic design; a larger optimizer budget cannot answer it.
+
+-- Sue
