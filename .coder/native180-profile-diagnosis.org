@@ -1,0 +1,125 @@
+#+TITLE: Native profile diagnosis -- issue 180
+#+AUTHOR: Sue (GPT-6 Codex)
+#+DATE: [2026-10-24 Sat]
+
+* Current result
+
+Issue 180 now has a demonstrated numerical FOC defect and a separate explicit validity-policy decision.
+The corrected numerical guard has passed focused regressions and the final quick-check gate.
+The full slow suite remains in progress.
+All seven original checkpoints have been evaluated under their original source, input, warm-anchor and dependency identities, with no optimization.
+Every corrected FOC decrement exceeds the unchanged 0.001 threshold.
+The current documented certified-or-FOC rule retains only the solver-certified point, despite its corrected decrement 4.824466262573033.
+The owner has been asked whether to require a reliable numerical FOC for every package-produced profile; no policy change has been made while that choice is pending.
+
+| Global index | Magnitude s | Original raw FOC | Equilibrated FOC | Raw optimizer certified | Current OR-policy verdict |
+|--------------+-------------+------------------+------------------+-------------------------+---------------------------|
+| 0 | 0 | 8.619497360325008e-6 | 4.0932596160455725 | False | unknown |
+| 1 | 0.050088084721517094 | 0.30138389168299934 | 4.546461756368343 | False | unknown |
+| 2 | 0.10017616944303419 | 9.163499588471275e-6 | 4.989881358246432 | False | unknown |
+| 3 | 0.20035233888606838 | 2.223963716788528e-5 | 5.695148915793941 | False | unknown |
+| 4 | 0.5008808472151709 | 8.757002728099123e-6 | 4.044426890784993 | False | unknown |
+| 5 | 1.0017616944303418 | 3.247016600299163 | 4.824466262573033 | True | conditional rejection via solver certificate |
+| 6 | 2.0035233888606836 | 6.016461469699277e-7 | 4.551177177102752 | False | unknown |
+
+All original K/S/J values, p-values, degrees of freedom and fit checkpoints remain unchanged.
+Under the current OR rule the separate audited law has six nonconverged point indices [0,1,2,3,4,6], no invalid-statistic points and no accepted points.
+It passes all 127 capacity-query round trips; exact-grid membership is unknown except for the policy-retained rejection at index 5.
+The scanned set is not known empty; full-grid capacity remains unknown.
+Requiring reliable FOC would also make index 5 unknown; that is a separate policy decision, not an effect of numerical equilibration alone.
+Neither the old nor new artifact establishes continuous-domain emptiness, native coverage or the profiler's strong-nuisance/interior assumptions.
+
+* Diagnostic and repair contract
+
+Ledger Sections 29/30 govern this work; Sections 7/12/26/28 retain their definitions and restrictions.
+The old seven-point artifact is preserved byte-for-byte as historical evidence, with its original convergence assessment superseded by this audit.
+
+Evaluate each saved nuisance checkpoint through the production estimator with its original reduced warm theta_init, CU weighting and default anchored regularization.
+The custom evaluation optimizer performs zero steps and returns done=False; the original optimizer record remains separate and unchanged.
+Reuse _ProfileReducer and map_model_parameters, including complete FE auxiliary differentiation.
+Use identification_strength without a V_star override and retain genuine estimator g/H/G/Lambda/V ingredients.
+Require original objective and public K/S/J/p-value/dof parity before interpreting an evaluation.
+Verify the scientific driver, package files, Python, installed distributions, numerical environment, inputs, manifest and checkpoint against producer provenance.
+
+The repair changes only _foc_decrement: diagonal coordinate equilibration followed by the existing fixed-count gauge inverse, with no additional directions discarded.
+Retained curvature unresolved at machine precision, materially negative information and invalid quadratic forms cannot supply a FOC certificate.
+The objective, initial-point anchor, FOC tolerance, optimizer and existing certified-fit override remain unchanged.
+The global inverse helper, identification_strength and sandwich construction are untouched.
+The resolution test is numerical certification, not a population-strength classification or opt-in inference-rank truncation.
+
+* Why the first assessment was unreliable
+
+At s=0.050088084721517094 the saved c0 is 16.529278810318544 and partial information is 4.475117815858999e-20.
+Its quotient condition diagnostic is about 2.26e17.
+The unscaled normal-matrix eigensolver can sort the physical level direction below numerical factor-gauge roundoff; removing one smallest eigenvalue then removes the wrong direction.
+Synthetic PSD Gram regressions reproduce false stationary certificates when the true decrement is four.
+
+A separate fixed-A/pi/s section moved c0 by offsets 0,-4,-1,1,4,8 while preserving the original anchor and allowing CU covariance to change with theta.
+Its criterion spans only 4.9244e-8 across c0=12.529278810318544 through 24.529278810318544, while the raw FOC varies from about 4.45 to 8.6e-6.
+This section is neither a reprofiled path nor evidence of a global boundary optimum.
+Two equivalent coordinate transformations -- unit-diagonal equilibration and delta=exp(-c0) -- agree near 4.54646 throughout the section.
+The c0 partial information divided by exp(-2*c0) is about 1.018482633e-5 throughout; much of the level flatness is coordinate scaling, not proof of exact structural rank loss.
+The unit-diagonal joint identified spectrum spans about 0.0009923 through 7.7196.
+These independent small-matrix transformations used NumPy 2.4.6, distinct from the producer's NumPy 2.4.3; the complete seven-point audit below uses the exact producer environment.
+
+At this point tau is zero and both raw-meat/Vstar-indefinite flags are false.
+The analytic negative-variance warning and negative pi partial-information readouts require numerical-conditioning scrutiny; neither establishes negative population information.
+No reliable analytic SE or strong-nuisance guarantee is inferred from those inversions.
+At amplitude zero the magnitude s disappears from the model; finite-interior concentration and boundary-valid inference remain scientific questions.
+
+* Evidence identities
+
+Base main: f32b77af43bb0f6e5be41edccd8e6246e3fcf7bf.
+Branch: investigation/180-profile-diagnostics; ledger commit bcdf12c is published to the durable mirror.
+Scientific source archive SHA256: 200c20a5d5293ac7ab1746723ecdab6a0bbb81bdd85e4154cc21018847442b93.
+Original scientific driver SHA256: 3245f11e50bc843ba9bbd40014aec1cec54dad7e2655ddfbcb4739e2b5051e0a.
+Original assembled manifest SHA256: 38dd948a4422556e3b535e0b6c4e0f7a4afb258a4abc3e9417aa40a3fc8ac6aa.
+Diagnostic driver SHA256: 835eafa8be70b2431910531352ec6406fbe60a89fde286059c3d10729cb67f57.
+Corrected guard module SHA256: 1a6261dfc4b41d4be3ffee6aa4e2d88deda6ccd5e459ed19791c72f30b1d85f0.
+Auditor SHA256: 8b3bd6d767123ed2cea03aca2b1835f581a9188a0dbcca893db9124546882bba.
+
+Shared evidence root:
+/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881.
+
+First diagnosis: native180-diagnosis-20261025/results/job-40463484/diagnosis.json.
+SHA256: dbd4a9753075c64465621ed7c3d22ad54a65459a983c6a87fd08204d066b6db5.
+Job 40463484 completed 0:0 in 2:44 with peak step RSS 7,566,896 KiB.
+Independent review verified all six payloads, unchanged original warm anchor/checkpoint and objective/statistic parity.
+
+Complete audit: native180-all-checkpoints-20261025/results/job-40465613.
+Job 40465613 completed 0:0 in 8:05.
+Index SHA256: bfcf58036c53b4b1a746ab4554c2aad9fc38b17c78565817d464e40d411d2585.
+Post-audit plan SHA256: 5b8b918d546cb2b52b95c4aa45889a2918124f328ee1eddf52ce3876f252b99b.
+Audit JSON SHA256: 0406b91750b3d1acc43c94d938d425a7d090ce5c041dad632d0fbcf8fba9362d.
+Separate law SHA256: a344b12c7a278064374f0b245eca6024511dd9df952b70fa5cfc5d161efda65c.
+The complete directory SHA256SUMS, immutable launcher/config/PLAN and retained per-point arrays permit independent review.
+No fit, p-value or reference distribution was recomputed by the saved-matrix auditor.
+
+* Verification and reproducibility
+
+Targeted diagnostic, provenance, numerical-scaling and existing non-slow profiler tests passed.
+Adversarial numerical controls fail on the original code and pass after the repair.
+Lint, formatting and mypy passed for the changed source/tests.
+Final quick-check job 40465324 completed 0:0 in 10:25 on source archive SHA256 0d79b27bfc95aa695620b084e12d79cf292282fbb3dce4e97aff8194220a31fa.
+The full gate is job 40465007, snapshot SHA256 9ca0b58a42c9819f4640a0808fb86cc01afef125c86e43f6fcfa07d0b0eeb7f4.
+Its quick-check passed; slow tests are pending.
+That full snapshot has the same production guard, before the auditor's additional provenance checks; final quick-check covers the strengthened auditor and all added controls.
+Only report status text has changed after the final quick-check snapshot.
+The earlier grounding quick-check 40463286 passed before ledger commit bcdf12c and is not the release gate for the corrected guard.
+All new jobs use free co_carleton; fc_jevons baseline was 72605.86 SUs of 1500000 at 2026-10-25 01:40 UTC.
+
+To reproduce the complete endpoint evaluation, inspect the retained PLAN/config and submit the frozen launcher to a separate job.
+It uses eight CPUs, 64 GiB, the exact offline producer environment and a 30-minute cap.
+
+#+begin_src sh
+native_all=/global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881/native180-all-checkpoints-20261025
+cd "$native_all"
+sha256sum --check scripts/SHA256SUMS
+python3 scripts/stage_and_run.py --check-only
+sbatch --chdir="$native_all" --export=ALL,TMPDIR=/tmp scripts/all-checkpoints.slurm
+#+end_src
+
+The preflight reads provenance and existing small payloads, never panel inputs or fits.
+A replay creates a new job-specific output directory and leaves old producer and audit artifacts intact.
+
+-- Sue
