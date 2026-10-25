@@ -1566,3 +1566,22 @@ The two compilation routes may round differently at numerically unstable boundar
    If a later native experiment is justified, declare a new source/solver identity and preserve the failed original experiment; no silent retry of its frozen protocol.
 6. Open questions :: This numerical guard may prevent a particular infeasible accepted trial; it cannot establish a finite nuisance minimizer, strong identification or valid inference.
    Initial invalid points, other manifold domains and broader optimizer redesign are outside this slice.
+
+* Section 33 -- Mandatory resolved nuisance FOC (issue 180)
+
+1. Task :: Apply the owner's 2026-10-25 decision: every profiled point requires a finite, numerically resolved FOC decrement at or below foc_tol, regardless of optimizer certification.
+   Reclassify the seven original saved diagnostic arrays into a separate strict-policy RandomSetLaw; preserve original fits, statistics and historical artifacts.
+2. Existing machinery :: Search tier: git/ripgrep and source/tests at b943d7d, with ledger history and Sections 28-32 inspected.
+   inference/confidence_set.py:_foc_decrement owns equilibrated fixed-gauge evaluation; profiled_k_confidence_set owns nuisance admission and _assemble_set owns unknown events.
+   tests/inference/test_profiled_confidence_set.py:TestInnerConvergenceGuard and test_foc_numerical_scaling.py cover the existing policy and numerical certificate.
+   scripts/validation/audit_profile_checkpoints_180.py already verifies original checkpoint provenance, reuses _foc_decrement/_assemble_set and round-trips RandomSetLaw across all nonempty grid queries.
+3. Definitions :: A passing nuisance FOC means an available finite lambda^2=g'H^+g <= foc_tol (default 1e-3), after the existing coordinate equilibration and fixed-count gauge checks.
+   Missing, malformed, nonfinite, unresolved or excessive FOC means an unknown point through n_nonconverged, even when inner.converged is True.
+   Optimizer certification remains raw provenance; an uncertified point with a passing FOC is admissible subject to the other existing validity checks.
+4. Invariants :: Preserve the helper's numerical resolution policy, gauge count, solver settings, warm anchors, objective, covariance/K/S/J/p-values and tolerance.
+   Passing FOC is necessary, not sufficient for finite-interior strong-nuisance inference; it cannot establish a boundary optimum or native coverage.
+   All seven original corrected decrements exceed 1e-3: strict output must have seven unknown, zero invalid, no known empty set and all 127 nonempty grid queries unknown.
+   Preserve old artifacts byte-identically; historical OR-policy replay must be explicitly distinguished from the new mandatory-FOC audit.
+5. Reuse decision :: Extend only the public profiler's admission rule and documentation/tests; reuse _foc_decrement rather than introducing another inverse or threshold.
+   Extend the provenance auditor with explicit policy selection and targeted tests, preserving its historical replay mode; create a new immutable saved-array artifact with exact source/policy hashes.
+6. Open questions :: No owner decision remains for this contract. Reliable finite-interior nuisance solutions and strong identification remain unresolved scientific requirements of issue 180.
