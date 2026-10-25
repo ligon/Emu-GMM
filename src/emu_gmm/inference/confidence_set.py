@@ -100,16 +100,62 @@ def _foc_decrement(inner: Any, gauge_dim: int) -> float | None:
     near-zero Hessian directions (a ``PSDFixedRank`` nuisance's gauge orbit) are
     dropped BY COUNT via the same :func:`pinv_eigvalrule` rule the sandwich
     bread uses. Returns ``None`` when the result lacks the gradient / GN-Hessian
-    ingredients (e.g. a hand-built result), so the caller falls back to the
-    optimiser's ``converged`` flag.
+    ingredients (e.g. a hand-built result), or when finite-precision arithmetic
+    cannot resolve the identified curvature, so the caller falls back to the
+    optimiser's ``converged`` flag. Coordinate equilibration keeps a tiny
+    physical direction from sorting below the numerical gauge eigenvalue
+    merely because its parameter uses different units (issue 180; ledger 30).
     """
     g = getattr(inner, "gradient", None)
     H = getattr(inner, "gn_hessian", None)
     if g is None or H is None:
         return None
     g_arr = jnp.asarray(g)
-    H_pinv = pinv_eigvalrule(jnp.asarray(H), drop_smallest=int(gauge_dim))
-    return float(jnp.dot(g_arr, H_pinv @ g_arr))
+    H_arr = jnp.asarray(H)
+    if (
+        g_arr.ndim != 1
+        or H_arr.shape != (g_arr.size, g_arr.size)
+        or g_arr.size == 0
+        or jnp.iscomplexobj(g_arr)
+        or jnp.iscomplexobj(H_arr)
+        or not bool(jnp.all(jnp.isfinite(g_arr)))
+        or not bool(jnp.all(jnp.isfinite(H_arr)))
+    ):
+        return None
+    H_arr = 0.5 * H_arr + 0.5 * H_arr.T
+    diagonal = jnp.diag(H_arr)
+    if bool(jnp.any(diagonal < 0)):
+        return None
+    # Congruence preserves g' H^+ g on the identified quotient. Divide
+    # sequentially instead of forming 1 / diag(H) or its outer product, which
+    # can overflow for otherwise representable small curvature. An exact zero
+    # diagonal may belong to a known axis-aligned gauge; leave that axis alone.
+    scale = jnp.where(diagonal > 0, jnp.sqrt(diagonal), 1.0)
+    scaled_H = (H_arr / scale[:, None]) / scale[None, :]
+    scaled_g = g_arr / scale
+    if not bool(jnp.all(jnp.isfinite(scaled_H))) or not bool(
+        jnp.all(jnp.isfinite(scaled_g))
+    ):
+        return None
+    eigenvalues = jnp.linalg.eigvalsh(scaled_H)
+    retained = eigenvalues[int(gauge_dim) :]
+    if retained.size == 0:
+        return None
+    # This is a numerical-resolution check, not a strength cutoff or rank
+    # truncation: retain EXACTLY the original gauge count, or decline the FOC
+    # certificate. Extra unresolved directions must never disappear as gauges.
+    resolution = (
+        g_arr.size * jnp.finfo(scaled_H.dtype).eps * jnp.max(jnp.abs(eigenvalues))
+    )
+    if (
+        not bool(jnp.all(jnp.isfinite(eigenvalues)))
+        or bool(eigenvalues[0] < -resolution)
+        or not bool(retained[0] > resolution)
+    ):
+        return None
+    H_pinv = pinv_eigvalrule(scaled_H, drop_smallest=int(gauge_dim))
+    decrement = float(jnp.dot(scaled_g, H_pinv @ scaled_g))
+    return decrement if np.isfinite(decrement) and decrement >= 0 else None
 
 
 @dataclass(frozen=True)
@@ -771,6 +817,13 @@ def profiled_k_confidence_set(
     points are unreliable). The decrement is dimensionless, so the asymptotic
     reference's ``score = o_p(1)`` requirement — far looser than machine-
     precision certification — sets the tolerance, not the solver.
+
+    The decrement is evaluated after diagonal coordinate equilibration, with
+    the same fixed gauge count. If the retained scaled curvature is unresolved
+    at machine precision, or the quadratic form is nonfinite or negative, no
+    FOC certificate is available. An uncertified fit is then counted as
+    nonconverged. This numerical check neither drops extra directions nor
+    establishes weak population identification; it does not change ``foc_tol``.
 
     **CU-only validity (#187).** The same FOC argument requires the nuisance
     to be concentrated under the *CUE* criterion; a non-CU
