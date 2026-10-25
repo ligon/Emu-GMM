@@ -1544,3 +1544,25 @@ The two compilation routes may round differently at numerically unstable boundar
    Measure a bounded immutable eight-CPU job before choosing any native trust-region comparison or broader scan.
 6. Open questions :: Whether a finite interior stationary nuisance solution exists and whether it is strongly identified remain the scientific questions.
    At delta=0 the magnitude s disappears; this experiment excludes that boundary and cannot supply boundary-valid inference.
+
+* Section 32 -- Reject infeasible Positive trial points in native LM (issue 180)
+
+1. Task :: Test and repair native LM acceptance of a Positive trial that underflows to zero while its residual remains finite.
+   This is an optimization-domain repair, independent of the pending solver-certified versus reliable-FOC inference decision.
+2. Existing machinery :: Search tier: git/ripgrep at edbbca9, including manifolds/positive.py, manifolds/riemannian_lm.py and existing Positive/LM tests.
+   Positive.retraction implements x*exp(v/x); tests/manifolds/test_positive.py explicitly permits floating-point underflow in the standalone arithmetic operator.
+   Native LM owns trial acceptance using cancellation-free residual reduction, damping increases on rejection and absorbing-state stagnation; tests/manifolds/test_riemannian_lm_accurate_reduction.py and test_riemannian_lm_stagnation.py cover those rules.
+   The static per-leaf plan and _is_positive already identify scalar/legacy Positive leaves; reuse them rather than introducing a new manifold protocol.
+   Real-data acceptance requires the optimized Positive sigma to remain strictly positive; its existing tolerances are immutable.
+3. Definitions :: A Positive point is finite and strictly greater than zero; a zero-valued retraction output is floating-point failure, not a newly admitted boundary point.
+   The smooth interior example r(x)=atan(1000*(x-0.001)) from x=1 has a positive root, but its initial linearized step can underflow the exponential retraction.
+   Reject infeasible trials and allow existing damping/backtracking to seek a representable positive proposal; do not clip or alter the objective.
+4. Invariants :: Preserve valid trial retractions, cancellation-free reduction, damping policy, iteration/tolerance/ftol settings, gauge handling and all-Euclidean behavior.
+   A rejected zero proposal differs from the current positive point and is not an absorbing null step; no false stagnation or convergence may be introduced.
+   Check Positive trial finiteness and strict positivity before accepting it, including the native traced-args path.
+   Do not change standalone Positive.retraction, metric/gradient formulas, information/inference policies or acceptance-test tolerances.
+5. Reuse decision :: Extend only native LM's existing acceptance condition with the Positive-domain predicate, using the already-built static leaf plan.
+   Add a tiny regression that fails on the recorded baseline, a healthy interior recovery check and traced-args parity; retain existing stagnation and real-data contracts.
+   If a later native experiment is justified, declare a new source/solver identity and preserve the failed original experiment; no silent retry of its frozen protocol.
+6. Open questions :: This numerical guard may prevent a particular infeasible accepted trial; it cannot establish a finite nuisance minimizer, strong identification or valid inference.
+   Initial invalid points, other manifold domains and broader optimizer redesign are outside this slice.
