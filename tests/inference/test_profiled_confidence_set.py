@@ -18,7 +18,7 @@ Coverage (the issue's acceptance criteria):
 (d) The ``k_confidence_set(..., profile=[...])`` hook delegates identically;
     validation of the profile spec and the misuse guards.
 
-(f) Validity guards: a non-converged inner nuisance fit is excluded from the
+(f) Validity guards: a failed/unavailable inner nuisance FOC is excluded from the
     set, counted, and flagged (#186); a non-CU ``nuisance_weighting`` emits a
     once-per-call ``UserWarning`` (#187).
 """
@@ -40,6 +40,7 @@ from emu_gmm import (
     EmpiricalMeasure,
     Fixed,
     IIDCovariance,
+    RandomSetLaw,
     build_estimator,
     estimate,
     k_confidence_set,
@@ -588,8 +589,8 @@ def _stub_estimate(nonconverged_calls: frozenset[int]):
     """A deterministic stand-in for the inner ``estimate`` (#186 test route).
 
     Returns the warm start (``theta_init``) as ``theta_hat`` — no
-    optimisation — with ``converged=False`` on the call indices named in
-    ``nonconverged_calls`` (the profiled loop makes exactly one inner
+    optimisation — with a failing FOC and ``converged=False`` on the call
+    indices named in ``nonconverged_calls`` (the profiled loop makes exactly one inner
     ``estimate`` call per grid point, in grid order). This keeps the guard
     tests fast and makes the non-converged grid point exactly reproducible.
     """
@@ -600,6 +601,8 @@ def _stub_estimate(nonconverged_calls: frozenset[int]):
         return SimpleNamespace(
             theta_hat=kwargs["theta_init"],
             converged=calls["n"] not in nonconverged_calls,
+            gradient=jnp.array([1.0 if calls["n"] in nonconverged_calls else 0.0]),
+            gn_hessian=jnp.eye(1),
         )
 
     return fake
@@ -618,8 +621,8 @@ def _stub_estimate_foc(*, converged, gradient, gn_hessian, manifold_spec=None):
         return SimpleNamespace(
             theta_hat=kwargs["theta_init"],
             converged=converged,
-            gradient=jnp.asarray(gradient, dtype=float),
-            gn_hessian=jnp.asarray(gn_hessian, dtype=float),
+            gradient=gradient,
+            gn_hessian=gn_hessian,
             manifold_spec=manifold_spec,
         )
 
@@ -636,7 +639,7 @@ def _cu_warnings(record) -> list:
 
 
 class TestInnerConvergenceGuard:
-    """#186: a non-converged inner fit is excluded, counted, and flagged."""
+    """#186/#180: failed/unavailable FOC is unknown, regardless of certification."""
 
     def test_nonconverged_point_excluded_counted_and_flagged(self, monkeypatch):
         import emu_gmm.estimator as estimator_mod
@@ -746,10 +749,11 @@ class TestInnerConvergenceGuard:
         assert cs.n_nonconverged == len(grid)  # lambda^2 = 9 >> foc_tol
         assert not cs.in_set.any()
 
-    def test_certified_point_kept_even_if_foc_large(self, monkeypatch):
-        # Superset-accept: a CERTIFIED fit is trusted regardless of the
-        # decrement, so the rework never *excludes* a previously-included
-        # point (no regression on the certified path).
+    def test_certified_point_with_large_foc_is_unknown_and_roundtrips(
+        self, monkeypatch, tmp_path
+    ):
+        # Certification can be a cost/step stop. It cannot override the
+        # directly evaluated FOC required by the subvector reference.
         import emu_gmm.estimator as estimator_mod
 
         measure = _guard_measure()
@@ -768,8 +772,109 @@ class TestInnerConvergenceGuard:
             IIDCovariance(),
             _iv_model,
             profile=["theta_s"],
+            keep_results=True,
         )
-        assert cs.n_nonconverged == 0
+        assert cs.n_nonconverged == len(grid)
+        assert cs.nonconverged_indices == tuple(range(len(grid)))
+        assert cs.n_invalid == 0
+        assert np.isfinite(cs.p_grid).all()
+        assert cs.p_grid[1] > cs.alpha
+        assert not cs.in_set.any()
+        assert cs.results is not None
+        np.testing.assert_array_equal(cs.p_grid, [r.p_K for r in cs.results])
+        law = RandomSetLaw.from_k_confidence_sets([cs])
+        path = tmp_path / "failed-foc.npz"
+        law.save(path)
+        restored = RandomSetLaw.load(path)
+        np.testing.assert_array_equal(restored.draws[0].p_grid, cs.p_grid)
+        assert restored.draws[0].nonconverged_indices == cs.nonconverged_indices
+        for point in grid:
+            assert (
+                restored.point_verdicts(point) == law.point_verdicts(point) == (None,)
+            )
+        capacity = restored.capacity(grid)
+        assert capacity.n_decidable == 0 and capacity.n_nonconverged == 1
+        assert np.isnan(capacity.estimate)
+
+    @pytest.mark.parametrize(
+        "gradient,gn_hessian",
+        [
+            (None, None),
+            (None, [[1.0]]),
+            ([0.0], None),
+            ([[0.0]], [[1.0]]),
+            ([0.0, 0.0], [[1.0]]),
+            (["invalid"], [[1.0]]),
+            ([0.0], [["invalid"]]),
+            ([np.nan], [[1.0]]),
+            ([0.0], [[np.inf]]),
+            ([0.0, 0.0], [[1.0, 1.0], [1.0, 1.0]]),
+        ],
+        ids=[
+            "missing-both",
+            "missing-score",
+            "missing-curvature",
+            "malformed-score",
+            "shape-mismatch",
+            "nonnumeric-score",
+            "nonnumeric-curvature",
+            "nonfinite-score",
+            "nonfinite-curvature",
+            "unresolved-curvature",
+        ],
+    )
+    def test_certification_cannot_override_unavailable_foc(
+        self, monkeypatch, gradient, gn_hessian
+    ):
+        import emu_gmm.estimator as estimator_mod
+
+        grid = np.linspace(1.46, 1.54, 3)
+        monkeypatch.setattr(
+            estimator_mod,
+            "estimate",
+            _stub_estimate_foc(
+                converged=True, gradient=gradient, gn_hessian=gn_hessian
+            ),
+        )
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            _guard_measure(),
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+        )
+        assert cs.n_nonconverged == len(grid)
+        assert cs.n_invalid == 0
+        assert np.isfinite(cs.p_grid).all()
+        assert not cs.in_set.any()
+
+    @pytest.mark.parametrize("certified", [False, True])
+    @pytest.mark.parametrize("at_boundary", [False, True])
+    def test_foc_tolerance_includes_equality_regardless_of_certification(
+        self, monkeypatch, certified, at_boundary
+    ):
+        import emu_gmm.estimator as estimator_mod
+
+        # Exactly representable lambda^2=1/4 avoids a decimal roundoff tie.
+        monkeypatch.setattr(
+            estimator_mod,
+            "estimate",
+            _stub_estimate_foc(converged=certified, gradient=[1.0], gn_hessian=[[4.0]]),
+        )
+        tolerance = 0.25 if at_boundary else np.nextafter(0.25, 0.0)
+        grid = np.linspace(1.46, 1.54, 3)
+        cs = profiled_k_confidence_set(
+            lambda g: IVParams(theta_s=g, theta_w=-0.7),
+            grid,
+            _guard_measure(),
+            IIDCovariance(),
+            _iv_model,
+            profile=["theta_s"],
+            foc_tol=tolerance,
+        )
+        assert cs.n_nonconverged == (0 if at_boundary else len(grid))
+        assert bool(cs.in_set[1]) == at_boundary
 
     def test_foc_decrement_quadratic_form_and_gauge_drop(self):
         # Unit test of the decrement: lambda^2 = g' H^+ g, gauge-aware.
@@ -792,7 +897,7 @@ class TestInnerConvergenceGuard:
         ) == pytest.approx(
             1.0
         )  # 0 (dropped) + 2^2/4
-        # missing ingredients -> None, so the caller falls back to `converged`.
+        # Missing ingredients -> None: no FOC certificate is available.
         assert _foc_decrement(SimpleNamespace(converged=True), 0) is None
 
     @pytest.mark.slow

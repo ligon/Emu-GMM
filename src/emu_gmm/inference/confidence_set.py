@@ -39,7 +39,7 @@ Design notes (upstreamed from the Seasonality consumer's prototype,
   ``invalid_indices`` and the summary — it never silently becomes
   either acceptance or rejection. If invalid points border a component,
   treat that boundary as unreliable. On the profiled path a
-  **non-converged inner nuisance fit is the same event class** (#186):
+  **failed or unavailable nuisance FOC is the same event class** (#186/#180):
   its p-value is finite but its reference distribution is invalid, so
   the point is likewise excluded, counted (``n_nonconverged`` /
   ``nonconverged_indices``), and flagged in the summary.
@@ -101,8 +101,8 @@ def _foc_decrement(inner: Any, gauge_dim: int) -> float | None:
     dropped BY COUNT via the same :func:`pinv_eigvalrule` rule the sandwich
     bread uses. Returns ``None`` when the result lacks the gradient / GN-Hessian
     ingredients (e.g. a hand-built result), or when finite-precision arithmetic
-    cannot resolve the identified curvature, so the caller falls back to the
-    optimiser's ``converged`` flag. Coordinate equilibration keeps a tiny
+    cannot resolve the identified curvature. An unavailable decrement cannot
+    certify a profiled point. Coordinate equilibration keeps a tiny
     physical direction from sorting below the numerical gauge eigenvalue
     merely because its parameter uses different units (issue 180; ledger 30).
     """
@@ -196,15 +196,15 @@ class KConfidenceSet:
     invalid_indices : tuple of int
         Grid indices whose p-value was NaN.
     n_nonconverged : int
-        Number of grid points whose inner nuisance re-optimisation did
-        not converge (#186; profiled path only — always 0 for the
+        Number of grid points whose inner nuisance fit did not supply a
+        passing, resolved FOC (#186/#180; profiled path only — always 0 for the
         fixed-curve :func:`k_confidence_set`). Such points carry a
         finite but *unreliable* p-value (the :math:`\\chi^2_{d_I}`
         reference requires the concentrated nuisance score to vanish),
         so they are excluded from the set exactly like the NaN-p
         invalid points and listed in ``nonconverged_indices``.
     nonconverged_indices : tuple of int
-        Grid indices whose inner nuisance fit did not converge.
+        Grid indices whose inner nuisance FOC failed or was unavailable.
     results : tuple of KStatisticResult, or None
         The full per-grid-point decompositions, retained only when
         ``keep_results=True`` was passed.
@@ -256,7 +256,7 @@ class KConfidenceSet:
         if self.n_nonconverged:
             lines.append(
                 f"  WARNING: {self.n_nonconverged} grid point(s) had a "
-                f"non-converged inner nuisance fit (indices "
+                f"non-converged inner nuisance fit (failed or unavailable FOC; indices "
                 f"{list(self.nonconverged_indices)}); their p-values are "
                 f"unreliable and they were excluded from the set — "
                 f"boundaries adjacent to them are unreliable."
@@ -536,7 +536,7 @@ def _assemble_set(
     (``profiled_k_confidence_set``) — so the classification is identical.
 
     ``nonconverged`` (profiled path only, #186) is an optional boolean mask
-    over the grid marking points whose inner nuisance fit did not converge.
+    over the grid marking points whose nuisance FOC failed or was unavailable.
     They are the same event class as NaN p-values — the p-value is finite
     but its reference distribution is invalid — so they are treated exactly
     like invalid points (excluded, never interpolated against, surfaced),
@@ -759,9 +759,10 @@ def profiled_k_confidence_set(
         value) alongside the set, for inspecting the concentrated nuisance path.
     foc_tol : float, default 1e-3
         Dimensionless tolerance on the inner squared Newton decrement
-        :math:`\lambda^2 = g' H^{+} g` below which the concentrated nuisance FOC
-        is treated as satisfied even if the optimiser did not certify
-        convergence (see the *Inner convergence guard* note). Genuine optima
+        :math:`\lambda^2 = g' H^{+} g` at or below which the concentrated nuisance
+        FOC is treated as satisfied. A finite, resolved passing decrement is
+        required regardless of optimiser certification (see the *Inner
+        convergence guard* note). Genuine optima
         land at the float noise floor (~1e-16) and a real stall is O(1)+, so the
         default sits well inside that gap; the bar is what the asymptotic
         subvector reference needs (score ``o_p(1)``), not solver precision.
@@ -805,12 +806,14 @@ def profiled_k_confidence_set(
     report ``converged=False`` — hitting ``max_steps`` or the #156 ftol
     cost-stagnation stop — and that certification is platform-sensitive, so
     keying on the boolean alone excluded good optima and punched holes in the
-    set. A grid point is therefore kept when EITHER the optimiser certified
-    convergence OR the scale-free squared Newton decrement
+    set. Conversely, optimiser certification can reflect cost or step
+    stagnation without a vanishing nuisance score. A grid point therefore
+    requires a finite, numerically resolved squared Newton decrement
     :math:`\lambda^2 = g' H^{+} g` (:func:`_foc_decrement`, from the inner
-    ``gradient`` and ``gn_hessian``) is ``<= foc_tol`` — i.e. the concentrated
-    score genuinely vanishes. Only when BOTH fail (a real stall) is the point
-    treated like a NaN-p invalid one: excluded, counted in
+    ``gradient`` and ``gn_hessian``) that is ``<= foc_tol``. Optimiser
+    certification cannot override a failed or unavailable check, and an
+    uncertified fit with a passing check remains admissible. Otherwise the
+    point is excluded and counted in
     :attr:`KConfidenceSet.n_nonconverged` /
     :attr:`~KConfidenceSet.nonconverged_indices`, never interpolated against,
     and flagged by :meth:`KConfidenceSet.summary` (boundaries adjacent to such
@@ -821,8 +824,10 @@ def profiled_k_confidence_set(
     The decrement is evaluated after diagonal coordinate equilibration, with
     the same fixed gauge count. If the retained scaled curvature is unresolved
     at machine precision, or the quadratic form is nonfinite or negative, no
-    FOC certificate is available. An uncertified fit is then counted as
-    nonconverged. This numerical check neither drops extra directions nor
+    FOC certificate is available. The point is then counted as nonconverged,
+    even if the optimiser certified convergence. Missing or malformed FOC
+    ingredients are likewise unavailable; there is no legacy certified-only
+    fallback. This numerical check neither drops extra directions nor
     establishes weak population identification; it does not change ``foc_tol``.
 
     **CU-only validity (#187).** The same FOC argument requires the nuisance
@@ -907,25 +912,23 @@ def profiled_k_confidence_set(
         # noise floor) yet fail to CERTIFY convergence -- riemannian_lm hitting
         # ``max_steps`` or the #156 ftol cost-stagnation stop -- and that
         # certification is platform-sensitive, which previously excluded good
-        # optima and punched holes in the set. So keep a point when EITHER the
-        # optimiser certified OR the scale-free Newton decrement
-        # lambda^2 = g' H^+ g is negligible (``foc_tol``); exclude (count as
-        # non-converged) only when BOTH fail -- a real stall. The asymptotic
+        # optima and punched holes in the set. Certification can also reflect
+        # cost/step stagnation without a passing FOC. Require a finite resolved
+        # lambda^2 = g' H^+ g <= foc_tol, regardless of inner.converged (#180).
+        # A failed or unavailable check is unknown, with raw p-values retained.
+        # The asymptotic
         # reference only needs the score ``o_p(1)``, a far looser bar than
         # machine-precision certification, so ``foc_tol`` is a statistical
-        # tolerance, not a solver one. The grid loop is host-eager so the flags
-        # are concrete; guard the bool(...) coercion like the estimator does in
-        # case a traced flag ever leaks through -- an undecidable flag counts as
-        # NOT certified (then the FOC decrement decides).
-        try:
-            certified = bool(inner.converged)
-        except (jax.errors.TracerBoolConversionError, TypeError):
-            certified = False
+        # tolerance, not a solver one.
         spec_nuisance = getattr(inner, "manifold_spec", None)
         gd_nuisance = 0 if spec_nuisance is None else int(spec_nuisance.total_gauge_dim)
-        lam2 = _foc_decrement(inner, gd_nuisance)
+        try:
+            lam2 = _foc_decrement(inner, gd_nuisance)
+        except (TypeError, ValueError):
+            # Malformed legacy/custom ingredients cannot supply a certificate.
+            lam2 = None
         foc_ok = lam2 is not None and np.isfinite(lam2) and lam2 <= foc_tol
-        nonconverged.append(not (certified or foc_ok))
+        nonconverged.append(not foc_ok)
         theta_prof = reducer.recombine(theta_full_init, inner.theta_hat)
         # The nuisance is concentrated, so reference K/J to the SUBVECTOR null
         # distribution via k_statistic's own `interest=` surface (#176/#179):

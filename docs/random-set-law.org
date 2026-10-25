@@ -7,7 +7,11 @@ The carrier rejects those point summaries explicitly.
 * Membership and events
 
 =coverage(theta0)= queries an *exact scanned grid point*.
-At that point a draw has one of three verdicts: accepted, rejected, or unknown because its p-value was invalid or its profiled nuisance fit did not converge.
+At that point a draw has one of three verdicts: accepted, rejected, or unknown because its p-value was invalid or its profiled nuisance FOC failed or was unavailable.
+Every profiled point requires a finite, numerically resolved squared Newton decrement at or below =foc_tol=, regardless of the optimizer's convergence flag.
+An uncertified fit with a passing FOC remains admissible; missing ingredients or unresolved curvature leave the point unknown, with its raw p-value retained.
+This replaces the earlier certified-or-FOC rule; optimizer certification alone no longer supplies a valid profiled verdict.
+Passing the FOC does not establish a finite interior minimum or strong nuisance identification.
 The reported estimate divides accepted draws by draws with a valid verdict; =n_invalid= and =n_nonconverged= explain unknown verdicts.
 =capacity(points)= applies the same rule to a nonempty finite subset of the grid: any valid accepted point establishes a hit, all valid rejected points establish a miss, and otherwise the draw is unknown.
 Both queries return =SetQueryReport= with original =n_total=, selected =n_used=, decidable count, hit count, event counts, and an estimate (NaN when no draw is decidable).
