@@ -367,6 +367,11 @@ class _RiemannianLM:
                 f"parameter buffer: total_ambient_dim={total_ambient}, "
                 f"sum(block sizes)={running}, len(theta_flat)={K}"
             )
+        positive_blocks = tuple(
+            (offset, size)
+            for offset, size, _shape, manifold in plan
+            if _is_positive(manifold)
+        )
 
         # Gauge lambda-floor (Phase-3 item 2). Exactly 0 when there is no
         # gauge structure -> scalar/v1 path is bitwise unchanged
@@ -562,6 +567,21 @@ class _RiemannianLM:
                 reduction = jnp.sum((r - r_new) * (r + r_new))
 
                 improved = reduction > 0.0
+                if positive_blocks:
+                    # Positive-domain acceptance (ledger Section 32).
+                    # A mathematically positive exponential retraction can
+                    # underflow to zero or overflow while r_new stays finite.
+                    # Reject that trial and keep the existing damping search;
+                    # this is not an absorbing null step. With no Positive
+                    # leaves the original acceptance expression is unchanged.
+                    positive_valid = jnp.asarray(True)
+                    for offset, size in positive_blocks:
+                        proposed = _block(x_new, offset, size)
+                        positive_valid = jnp.logical_and(
+                            positive_valid,
+                            jnp.all(jnp.isfinite(proposed) & (proposed > 0)),
+                        )
+                    improved = jnp.logical_and(improved, positive_valid)
                 x_out = jnp.where(improved, x_new, x)
                 lam_decreased = jnp.maximum(jnp.maximum(1e-12, lam_floor), 0.5 * lam)
                 lam_out = jnp.where(improved, lam_decreased, 2.0 * lam)

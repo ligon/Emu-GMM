@@ -2,6 +2,14 @@
 #+AUTHOR: Sue (GPT-6 Codex)
 #+DATE: [2026-10-24 Sat]
 
+* Superseding numerical diagnosis -- 2026-10-25
+
+The original convergence classifications below are historical and are superseded by [[file:native180-profile-diagnosis.org][the complete corrected-FOC audit]].
+All seven saved checkpoints fail the corrected, unchanged-threshold stationarity test; the documented solver-certified OR FOC policy retains only index 5 through its solver certificate.
+The separate corrected law has six unknowns, one conditional rejection and no known empty scanned set.
+The original fits, statistics and artifact bytes are retained unchanged.
+The owner decision about requiring reliable FOC remains pending; no stronger native-validity claim follows from the original classifications below.
+
 * Scope and result
 
 The new projected-model CU/subvector experiment uses the frozen retained panel, exact stored grid and unchanged native LM settings.

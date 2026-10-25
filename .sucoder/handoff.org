@@ -2,6 +2,61 @@
 #+DATE: [2026-10-24 Sat]
 
 
+* Active issue 180 diagnosis -- 2026-10-25 (Sue, GPT-6 Codex)
+
+This entry supersedes the native-convergence assessment in the completed-batch history below.
+Root main remains f32b77a; draft PR 262 branch investigation/180-profile-diagnostics is at 10ee43f.
+The numerical FOC defect is repaired by coordinate equilibration before the unchanged gauge-count inverse; no solver, threshold, objective, anchor or validity policy changed.
+Final quick-check job 40465324 passed 0:0 in 10:25; full quick/slow job 40465007 passed 0:0 in 21:17.
+GitHub checks for PR 262 are still running; do not merge until the reviewed head is green.
+
+All seven original fits were re-evaluated without optimization under exact original package/input/environment identities and warm anchors, job 40465613, completed 0:0 in 8:05.
+Corrected FOC decrements range 4.044-5.695, all above the unchanged 0.001 tolerance.
+The documented solver-certified OR FOC policy yields six unknowns and one conditional rejection at index 5 (raw solver done=True, corrected FOC=4.824466262573033).
+The owner has been asked whether reliable FOC must be required even for solver-certified fits; this required compatibility decision is still pending.
+Do not implement that policy change without the answer.
+Neither classification establishes known emptiness, strong nuisance identification, finite-interior concentration or native coverage.
+Original seven-point bytes and statistics are unchanged; the separate corrected audit preserves all 127 law-query round trips.
+Current report: .coder/native180-profile-diagnosis.org; ledger Sections 29-30; issue 180 body has the same residual and preserved history.
+
+An independent single-null delta=exp(-c0)>0 optimization-coordinate experiment was run at s=0.050088084721517094; it failed the declared interior check as recorded below.
+Worktree /local/job40438881/tmp/issue180-amplitude, branch investigation/180-amplitude, has prior-art ledger Section 31 separately published as edbbca9, with reviewed driver/tests awaiting their final precommit gate.
+Exactly one original-warm LM solve is allowed after four package objective/derivative parity controls, same CU/default anchor, rtol=atol=1e-9, max_steps=1500, no penalty or clipping.
+The frozen stage native180-amplitude-20261025 passed root/independent review and metadata preflight; scientific job 40467829 failed 1:0 in 2:38 after all four preflight controls passed.
+Its sole LM solve returned delta=0 by underflow after nine steps, done=False, status=stagnated; raw leaves/info/domain events are retained, physical mapping and inference were refused.
+Do not retry automatically or interpret this failed attempt as a global boundary optimum. Both independent failure audits passed; separate audit inventory SHA256 5eed0df3259d5a034182643938a5b9dce7b43a210bef134a84cba2d68836e09c.
+Driver SHA256 db610b7a84b510fa23e90a557f4bae699e94e2e29cf8fc99b8483c1aaaf2336b; config SHA256 c11dc8b845becb0bc28c260dcb38a94069d7c8f7ab0e4cde8f783a4a4cbc43b2.
+Its immutable full quick-check source gate is job 40467627, archive SHA256 5a8c87483a5d26f7787aada0c81e95ed6e0a4a5e4aabf8ba10d8ec42d1a50acc, completed 0:0 in 11:17.
+Keep exact original scientific archive/environment and load the corrected FOC helper externally; never overwrite the historical package or artifacts.
+The seven tiny controls and final postsolve parity/preservation review passed; inspect the actual job result before scientific interpretation.
+An amplitude result is not a confidence-set or boundary-validity claim; s disappears from the model at delta=0.
+
+Shared evidence root: /global/scratch/users/ligon/emu-gmm-backlog-20261024-job40438881.
+Complete corrected audit: native180-all-checkpoints-20261025/results/job-40465613.
+Audit JSON SHA256: 0406b91750b3d1acc43c94d938d425a7d090ce5c041dad632d0fbcf8fba9362d.
+Separate law SHA256: a344b12c7a278064374f0b245eca6024511dd9df952b70fa5cfc5d161efda65c.
+The parent condo allocation 40438881 remains active; no completed scientific burst remains held.
+
+* Positive trial-domain repair -- 2026-10-25 (Sue)
+
+Draft PR 263 is stacked on PR 262; branch fix/180-positive-trial-domain at 902992f33077e4fe5d3e7b48ea3ecb9b815c5ce5, worktree /local/job40438881/tmp/issue180-positive-trial.
+Ledger Section 32 is separately published as a6a6cb3.
+It repairs accepted Positive trials that underflow to zero or overflow while the residual cost remains finite, without clipping or changing valid trials, metrics, damping or inference.
+Ten targeted regressions, existing reduction/stagnation/Positive controls and independent review pass; fresh complete quick/slow gate 40469532 and GitHub checks are pending.
+Full snapshot SHA256 e8bf82640e36d83e5f8506ce8d878f628888faafeda9ced3c1496b99b0a2d65b; solver SHA256 2012895306aa64c5c8b42672909cee849bb5a71d73f7c075eefe6cb9a1f92c26.
+Report in that branch: .coder/native180-positive-trial-repair.org.
+
+A new guarded native amplitude experiment is running as job 40469837, free eight CPUs/64 GiB/30 minutes, same original null/warm nuisance/tolerances/1500-step cap.
+Its stage native180-amplitude-guarded-20261025 preserves the exact old package and pins the changed external optimizer plus explicit protocol wrapper; it is not an original-solver replay.
+Config SHA256 632b0c0a61dc738eda2f41e38c256361b53d18500447fd659faea68952fe67f8.
+Audit its actual result before any inference/identification interpretation; no automatic extension or retry.
+The owner question about requiring reliable FOC remains pending and does not block these compatible numerical repairs.
+Merge only reviewed heads after green full checks; retarget PR 263 to main after PR 262, verifying unchanged tested merge tree.
+
+Final amplitude driver precommit quick-check 40468793 passed 0:0 in 14:47 on archive 2df1c291b306b0429176bbec2c1901422e20b000e740eaa84ba4f2263864700c.
+Driver/test source bytes remain db610b7a/03195ed7; only report/status text followed.
+The frozen scientific first-run failure is preserved, with both independent audits and all original15 payloads hash-identical.
+
 * Recent-backlog batch completed -- 2026-10-24 (Sue, GPT-6 Codex)
 
 Branch: =main=.
