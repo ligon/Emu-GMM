@@ -43,6 +43,7 @@ This document deliberately interleaves settled architecture, planned design, pro
 |----------------+-------------------------+------------------------------------------------------------+----------------------------------|
 | Regularization | =DiagonalTikhonov=      | Adaptive ridge on \(V\); signed-spectrum feasibility       | =regularization.py=              |
 | Penalty        | =TikhonovPenalty=       | In-objective parameter penalty \(Q_\mu + p(\theta)\)       | =penalty.py=                     |
+|                | =ResidualPenalty=       | Squared-norm parameter penalty with explicit residual rows | =penalty.py=                    |
 |----------------+-------------------------+------------------------------------------------------------+----------------------------------|
 | Optimizers     | =optimistix_lm=         | JAX-native Levenberg--Marquardt (default)                  | =optimizer.py=                   |
 |                | =scipy_lm=              | SciPy LM fallback; not jit/vmap-compatible                 | =optimizer.py=                   |
@@ -431,6 +432,16 @@ The objective function is then evaluated strictly as the squared Euclidean \(L_2
 The GMM estimator is defined as:
 \[ \hat{\theta} = \arg\min_{\theta \in \Theta} Q_\mu(\theta) \]
 Framing the objective as a pure sum-of-squares allows the system to bypass general-purpose quasi-Newton optimizers and interface directly with high-performance non-linear least-squares solvers (Levenberg-Marquardt, trust-region reflective) [cite:@nocedal-wright06]. These solvers exploit the structure to approximate local updates efficiently using only first derivatives --- derivatives that JAX provides exactly through the residual function \(y_\mu(\theta)\), including the dependence of \(L_\mu\) on \(\theta\) when the weighting strategy calls for it (see below).
+
+** Parameter penalties
+
+An in-objective penalty is separate from covariance regularization and data moments.
+For \(p(\theta)=\|r_p(\theta)\|^2\), the estimator appends \(r_p\) to the whitened data residual.
+=ResidualPenalty(residual_fn)= derives the scalar penalty and its gradient from a fixed-length real vector; for a coefficient-block ridge, use =ResidualPenalty(lambda theta: theta.coefficients.array)=, including \(\sqrt c\) when a positive coefficient is desired.
+Third-party =PenaltyStrategy= implementations may expose =residuals(theta)= with squared norm equal to =penalty(theta)=.
+Scalar-only implementations, including =TikhonovPenalty=, retain the historical \(\sqrt{p+10^{-30}}\) row for compatibility; its Gauss--Newton contribution can have much lower rank even when the scalar objective and gradient are correct (issue #268).
+Choose =ResidualPenalty= explicitly for a quadratic block's full least-squares curvature; changing a residual representation can change trajectories on a nonlinear CU objective.
+Penalty rows affect the solve and full-objective diagnostics; data moment counts, moment covariance, the reported data criterion and inference ingredients remain data-only.
 
 ** The Weighting Strategy Interface
 The choice of weighting policy is encoded as an explicit object that the optimization loop consults at every evaluation. Four strategies cover the standard cases:

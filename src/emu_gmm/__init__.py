@@ -113,7 +113,7 @@ from emu_gmm.measures import (
 from emu_gmm.numerics import ridge_inverse
 from emu_gmm.optimizer import linear_solver, optimistix_lm, scipy_lm
 from emu_gmm.parameter_space import ParameterSpace, on
-from emu_gmm.penalty import PenaltyStrategy, TikhonovPenalty
+from emu_gmm.penalty import PenaltyStrategy, ResidualPenalty, TikhonovPenalty
 from emu_gmm.persistence import (
     FactorySpec,
     LawState,
@@ -194,6 +194,7 @@ __all__ = [
     # Numerics helpers
     "ridge_inverse",
     # Penalty (in-objective parameter penalty)
+    "ResidualPenalty",
     "TikhonovPenalty",
     # Optimisers
     "optimistix_lm",

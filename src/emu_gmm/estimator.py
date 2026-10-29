@@ -101,7 +101,7 @@ from emu_gmm.optimizer import (
     linear_solver,
     optimistix_lm,
 )
-from emu_gmm.penalty import PenaltyStrategy
+from emu_gmm.penalty import PenaltyStrategy, _residual_vector
 from emu_gmm.regularization import DiagonalTikhonov, _is_diagonal
 from emu_gmm.runtime import maybe_warn_cpu_oversubscription
 from emu_gmm.types import (
@@ -770,6 +770,8 @@ def _build_estimator(
     # the legacy closure path are both thin bindings of this core, so
     # the two execution models agree by construction (float-identical;
     # not bit-for-bit, because the jit boundaries differ).
+    penalty_residuals = getattr(penalty, "residuals", None)
+
     def _residual_core(
         theta_flat: Float[Array, " K"],
         measure_arg: Measure,
@@ -798,6 +800,9 @@ def _build_estimator(
         y = weighting_for_solve.whitening_residual(m, V_star, theta)
         if penalty is None:
             return y
+        if callable(penalty_residuals):
+            extra = _residual_vector(penalty_residuals(theta))
+            return jnp.concatenate([y, extra])
         # The objective is ||y||^2 + p(theta); appending sqrt(p)
         # as a residual row reproduces it exactly under ||.||^2.
         # p is C^infty and >= 0, but sqrt(p) has a singular
@@ -1663,9 +1668,12 @@ def estimate(
     penalty : :class:`PenaltyStrategy`, optional
         In-objective parameter penalty. When supplied, the criterion
         becomes :math:`Q_{\\mu,\\mathrm{pen}}(\\theta) = Q_\\mu(\\theta) +
-        p(\\theta)` and the NLLS residual gets :math:`\\sqrt{p(\\theta)}`
-        appended so the LM Jacobian picks up the parameter-space ridge
-        via JAX AD. ``penalty=None`` preserves v1 behaviour bitwise.
+        p(\\theta)`. If the strategy exposes ``residuals(theta)``, those
+        rows are appended directly, retaining their Gauss--Newton curvature
+        (as in ``ResidualPenalty``). Scalar-only strategies retain the
+        :math:`\\sqrt{p(\\theta)+10^{-30}}` fallback.
+        Penalty rows do not enter moment counts, covariance or the J statistic.
+        ``penalty=None`` preserves v1 behaviour bitwise.
     linear : bool, optional
         Assert that the **whitened** moment condition is affine in
         :math:`\\theta`, so the least-squares minimiser is reached in a single
@@ -1686,8 +1694,9 @@ def estimate(
         ``Identity()``, or ``IteratedWeighting()``, **not** the default
         ``ContinuouslyUpdated`` (which makes even a linear moment a nonlinear
         program and so raises :class:`ValueError`). Any in-objective ``penalty``
-        must itself be affine in :math:`\\theta` (a quadratic Tikhonov penalty
-        is). If you want the step *verified* --- taken only when a first-order
+        must have affine residuals in :math:`\\theta` (for example, a ridge
+        expressed with ``ResidualPenalty``). If you want the step *verified*
+        --- taken only when a first-order
         certificate holds, with a fall-back iterative solve otherwise --- pass
         ``optimizer=linear_solver(verify=True)`` instead of ``linear=True``.
     jacobian_memory : {"default", "bounded"}

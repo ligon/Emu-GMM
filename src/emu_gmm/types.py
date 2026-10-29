@@ -382,7 +382,7 @@ class Diagnostics:
     # residual. With IteratedWeighting, ``r`` is the CU fallback at the
     # returned point, not the fixed-weight inner solver's residual;
     # a large norm alone does not say the inner solve failed. A supplied
-    # penalty contributes its appended :math:`\\sqrt{p(\\theta)}` row;
+    # penalty contributes its appended vector rows or scalar square-root row;
     # without a penalty this is the data-only gradient norm.
     final_objective: Float[Array, ""]
     final_gradient_norm: Float[Array, ""]
@@ -441,7 +441,7 @@ class Diagnostics:
     #   - ``'grad_norm'``: ``||grad (1/2) ||r||^2||`` at theta_hat,
     #     where ``r`` is the *full* residual vector the optimiser saw.
     #     When ``penalty`` is supplied this includes the penalty
-    #     contribution from the appended ``sqrt(p+eps)`` row; when
+    #     contribution from its appended penalty residuals; when
     #     ``penalty=None`` it reduces to ``||grad (1/2) ||y||^2||``.
     #     Mirrors ``final_gradient_norm``.
     #   - ``'step_norm'``: norm of the last accepted step, if the

@@ -201,6 +201,25 @@ manifold parameters, loudly. If you'd rather the one-step be /verified/ (taken
 only when a first-order certificate holds, with an iterative fall-back), pass
 =optimizer=linear_solver(verify=True)= instead. See =examples/panel_regression.py=.
 
+** Parameter penalties
+
+For a quadratic penalty on a parameter block, provide its residual vector through =penalty=:
+
+#+begin_src python
+from emu_gmm import ResidualPenalty
+
+weight = 1.0
+penalty = ResidualPenalty(lambda theta: jnp.sqrt(weight) * theta.s.array)
+# Pass penalty=penalty to estimate() or build_estimator().
+#+end_src
+
+This adds \(\text{weight}\,\|s\|^2\) to the optimization objective and preserves the block's full Gauss--Newton curvature, including at \(s=0\).
+The callback must return a real one-dimensional array of fixed length.
+Keep these rows out of =psi=: the package appends them only to the optimization residual, leaving data moment counts, covariance and J ingredients separate.
+=result.diagnostics.final_objective_full= includes the penalty; =result.objective_value= and =diagnostics.final_objective_data= report the data criterion.
+Existing scalar =PenaltyStrategy= implementations, including =TikhonovPenalty=, retain their scalar square-root representation for compatibility.
+That representation can converge slowly even for a quadratic penalty (issue #268); use =ResidualPenalty= when the residual decomposition is available.
+
 * Putting it together: the smallest complete program
 
 #+begin_src python

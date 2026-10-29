@@ -14,23 +14,24 @@ parameter-space penalty added directly to the criterion:
    Q_{\\mu,\\mathrm{pen}}(\\theta)
      = Q_\\mu(\\theta) + p(\\theta).
 
-This module defines the public protocol :class:`PenaltyStrategy` plus the
-default :class:`TikhonovPenalty` implementation. The estimator wires the
-penalty into the residual vector by appending :math:`\\sqrt{p(\\theta)}` as
-an extra residual row so the existing NLLS surface (and its LM Jacobian)
-still applies; JAX AD handles the chain rule through the square-root.
+This module defines the public protocol :class:`PenaltyStrategy`, the
+default :class:`TikhonovPenalty`, and :class:`ResidualPenalty` for custom
+least-squares penalties. The estimator appends ``residuals(theta)`` when
+available, preserving their Gauss--Newton curvature. Scalar-only penalties
+retain the single :math:`\\sqrt{p(\\theta)+10^{-30}}` residual fallback.
 
 This is architecturally distinct from
 :class:`emu_gmm.regularization.DiagonalTikhonov`, which lives on the
 covariance side (PD-restoration of :math:`V`). The penalty here acts on
-:math:`\\theta` directly and enters the criterion, the gradient, and the
-information matrix.
+:math:`\\theta` directly and enters the criterion, gradient and optimization
+curvature. The reported data-only GN matrix remains separate.
 
 See ``docs/design.org`` and GitHub issue #7 for context.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
 import jax
@@ -42,6 +43,18 @@ from jaxtyping import Array, Float
 from emu_gmm._internal.params import flatten_params_for_ad
 
 ParamsLike = Any
+
+
+def _residual_vector(value: Any) -> Float[Array, " R"]:
+    residuals = jnp.asarray(value)
+    real_numeric = jnp.issubdtype(residuals.dtype, jnp.integer) or jnp.issubdtype(
+        residuals.dtype, jnp.floating
+    )
+    if residuals.ndim != 1 or not real_numeric:
+        raise ValueError(
+            "penalty.residuals(theta) must return a one-dimensional real array"
+        )
+    return residuals
 
 
 def _check_coefficient_metadata(shape: tuple[int, ...], dtype: Any) -> None:
@@ -81,12 +94,46 @@ class PenaltyStrategy(Protocol):
     - :meth:`gradient` --- :math:`\\nabla_\\theta p(\\theta)` as a pytree
       with the same structure as ``theta``. Provided for callers that
       want the gradient without re-tracing through ``jax.grad``; the
-      estimator itself relies on AD through :meth:`penalty`.
+      estimator itself relies on AD through the penalty residuals.
+
+    An implementation may additionally expose ``residuals(theta) -> (R,)``
+    with ``sum(residuals(theta)**2) == penalty(theta)``. The estimator uses
+    these rows directly instead of the scalar square-root fallback. Their
+    length must be fixed across parameter values. They affect optimization
+    only, never data moment counts, covariance or the J statistic.
     """
 
     def penalty(self, theta: ParamsLike) -> Float[Array, ""]: ...
 
     def gradient(self, theta: ParamsLike) -> ParamsLike: ...
+
+
+@jdc.pytree_dataclass
+class ResidualPenalty:
+    """Parameter penalty defined by a real residual vector (issue #268).
+
+    ``residual_fn(theta)`` returns a one-dimensional array of fixed length;
+    its squared norm is the penalty. For a ridge on a coefficient block,
+    use ``ResidualPenalty(lambda theta: theta.coefficients.array)`` or
+    include the square root of a positive ridge weight in that function.
+    Keeping the rows separate preserves the block's Gauss--Newton curvature,
+    including at a zero penalty. The callable is static for JIT purposes.
+    """
+
+    residual_fn: Callable[[ParamsLike], Float[Array, " R"]] = jdc.static_field()  # type: ignore[attr-defined]
+
+    def residuals(self, theta: ParamsLike) -> Float[Array, " R"]:
+        """Return the optimization-only penalty rows."""
+        return _residual_vector(self.residual_fn(theta))
+
+    def penalty(self, theta: ParamsLike) -> Float[Array, ""]:
+        """Return the squared norm, without a square root at the origin."""
+        residuals = self.residuals(theta)
+        return jnp.sum(residuals * residuals)
+
+    def gradient(self, theta: ParamsLike) -> ParamsLike:
+        """Return the scalar penalty gradient in the parameter PyTree."""
+        return jax.grad(self.penalty)(theta)
 
 
 @jdc.pytree_dataclass
@@ -121,8 +168,9 @@ class TikhonovPenalty:
     well-defined on the quotient (it shrinks the scale of
     :math:`\\Gamma = A A^\\top`, not a gauge-arbitrary coordinate). A
     consumer wanting to penalise only a *specific* leaf (e.g. a coefficient
-    sub-block) should supply its own :class:`PenaltyStrategy` reading that
-    leaf directly; this class ridges the whole ambient vector uniformly.
+    sub-block) can use :class:`ResidualPenalty` reading that leaf directly;
+    this class ridges the whole ambient vector uniformly and retains its
+    scalar square-root representation for compatibility.
 
     Parameters
     ----------
@@ -161,4 +209,4 @@ class TikhonovPenalty:
         return jax.grad(self.penalty)(theta)
 
 
-__all__ = ["PenaltyStrategy", "TikhonovPenalty"]
+__all__ = ["PenaltyStrategy", "ResidualPenalty", "TikhonovPenalty"]
