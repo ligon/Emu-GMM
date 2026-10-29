@@ -1,0 +1,185 @@
+#+TITLE: Native product-effect reduction and amplitude boundary -- issue 180
+#+DATE: [2026-10-29 Thu]
+
+* Result and scope
+
+This continues [[file:native180-limit-identification.org][the conditional native two-way limit]] without a new fit or a changed inference rule.
+Two gaps can be sharpened analytically: consistent estimated product effects suffice to preserve the scaled two-way covariance under explicit cluster-energy bounds, and the fixed-ray CU criterion has a finite amplitude-zero limit whenever its limiting regularized covariance is positive definite.
+Neither result proves that the native restricted problem attains an interior minimum.
+The seven original grid points remain unknown.
+Ledger Section 37 records the scope and source anchors.
+
+* Estimated product effects in the two-way covariance
+
+Use the full-mask, unit-weight native setting, fixed product count \(P\), \(N/(TH)\to\mu>0\), and \(r^2=(T^{-1}+H^{-1})^{-1}\).
+Let \(B_{th}\in\mathbb R^{M\times P}\) have column \(p\) equal to the instrument total for product \(p\) in intersection cell \((t,h)\).
+Assume the instruments sum to zero within each intersection cell and over all rows of each product, as in the exact-centering idealization of the prior note.
+If \(T^0_{th}\) uses a deterministic population product coefficient \(a^0\), replacing it by the fitted coefficient gives the exact identity
+\[
+T_{th}-T^0_{th}=-B_{th}e,\qquad e=\widehat a-a^0.
+\]
+Cell effects disappear from this identity because the cell instrument total is zero.
+Also \(\sum_{th}B_{th}=0\), so the aggregate moment is unchanged by this replacement, even when \(e\) depends on every observation.
+
+Let \(\mathcal G\) contain all quarter groups, all recurring-market groups, and all intersection cells.
+For any cell array, subscript \(g\) denotes summation over that group; give quarter and market groups sign \(+1\), and intersections sign \(-1\).
+Define unsigned energies
+\[
+\mathcal E_X=\frac{r^2}{N^2}\sum_{g\in\mathcal G}\|X_g\|_F^2,
+\qquad
+\mathcal E_B=\frac{r^2}{N^2}\sum_{g\in\mathcal G}\|B_g\|_F^2.
+\]
+Suppose \(\mathcal E_{T^0}=O_p(1)\), \(\mathcal E_B=O_p(1)\), and \(\|e\|=o_p(1)\).
+Writing \(\Delta_g=-B_ge\), one has \(\mathcal E_\Delta\leq\|e\|^2\mathcal E_B=o_p(1)\).
+The triangle inequality and Cauchy--Schwarz give
+\[
+\left\|\frac{r^2}{N^2}\sum_g\operatorname{sign}(g)
+ (T_gT_g'-T_g^0T_g^{0\prime})\right\|_F
+\leq 2\sqrt{\mathcal E_{T^0}\mathcal E_\Delta}+\mathcal E_\Delta=o_p(1).
+\]
+Thus the fitted-product and population-product two-way covariances have the same scaled limit.
+The bound uses unsigned energies, so it remains valid for an indefinite signed assembly and requires no independence between \(e\), \(B\), and \(T^0\).
+
+For parameter derivatives in a fixed local quotient chart, the data and hence \(B\) do not depend on the parameter.
+Consequently \(D_g-D_g^0=-B_g E\), where \(E=\partial\widehat a/\partial\theta'-\partial a^0/\partial\theta'\), and derivative arrays may be vectorized for the Frobenius norm.
+If \(\mathcal E_{D^0}=O_p(1)\) and \(\|E\|_F=o_p(1)\), the corresponding derivative energy tends to zero.
+Expanding each derivative--moment product bounds its scaled difference by
+\[
+\sqrt{\mathcal E_{\Delta D}\mathcal E_{T^0}}
++\sqrt{\mathcal E_{D^0}\mathcal E_\Delta}
++\sqrt{\mathcal E_{\Delta D}\mathcal E_\Delta}=o_p(1).
+\]
+This is exactly the replacement needed for the matched signed K cross covariance; it does not establish its population limit or weak-interest process independence.
+Uniform versions of these assumptions give the same conclusion at a random consistent restricted fit.
+Pointwise bounds alone do not justify substitution of an estimated parameter.
+
+The energy assumptions are compatible with ordinary bounded-size cells: \(\sum_{th}\|B_{th}\|_F^2=O_p(TH)\) implies, by summing within each margin,
+\[
+\sum_t\|B_t\|_F^2\leq H\sum_{th}\|B_{th}\|_F^2,
+\qquad
+\sum_h\|B_h\|_F^2\leq T\sum_{th}\|B_{th}\|_F^2.
+\]
+Since \(r^2=TH/(T+H)\), these inequalities imply \(\mathcal E_B=O_p(1)\); the same argument applies to \(T^0\) and \(D^0\) under their cell second-moment bounds.
+Only consistency of the product coefficients and derivatives is needed here, rather than a cell-count square-root rate.
+Approximate instrument centering requires additional bounds on its aggregate and cell-effect errors; small group means on one frozen panel do not establish such rates.
+
+* A primitive route to the auxiliary coefficient rate
+
+For cell \(c=(t,h)\), let \(n_c\) be its \(P\)-vector of product counts, \(n_{c+}>0\) its row count, \(y_c(\theta)\) its vector of product outcome sums, and \(y_{c+}(\theta)\) its total.
+The existing Schur reducer has
+\[
+S=\sum_c S_c,\quad S_c=\operatorname{diag}(n_c)-n_cn_c'/n_{c+},
+\qquad
+h(\theta)=\sum_c h_c(\theta),\quad
+h_c=y_c-n_c y_{c+}/n_{c+}.
+\]
+With a fixed orthonormal product-contrast basis \(Q\),
+\[
+\widehat a(\theta)=Q(Q'SQ)^{-1}Q'h(\theta).
+\]
+Empty cells can instead contribute zero to both sums, provided that convention is specified before taking expectations.
+
+A sufficient primitive construction is that each cell's count and outcome data are the same measurable function of \((U_t,V_h,E_{th})\), where the three families are mutually independent and iid within each family, with fixed laws and a fixed cell function as the margins grow.
+Suppose the entries of \(S_c\), \(h_c(\theta)\), and the required outcome derivatives have finite second moments, and \(Q'\mathbb E[S_c]Q\succ0\).
+Cells sharing neither index are then independent.
+Counting the possibly dependent cell pairs shows that the variance of each cell average is \(O(T^{-1}+H^{-1})\).
+Chebyshev's inequality and matrix inversion on the fixed contrast space yield, pointwise,
+\[
+\widehat a(\theta)-a^0(\theta)=O_p(r^{-1}),\qquad
+a^0(\theta)=Q(Q'\mathbb E[S_c]Q)^{-1}Q'\mathbb E[h_c(\theta)].
+\]
+The same argument gives this rate for a fixed number of outcome derivatives, since the count matrix is parameter-independent.
+On a compact interior parameter neighborhood, integrable Lipschitz envelopes for these cell functions give uniform consistency by a finite-net LLN argument.
+Uniform second-moment envelopes for the relevant \(B,T^0,D^0\) cells then supply the uniform energy bounds above.
+These are sufficient assumptions on a specified array; sample connectedness does not replace the population Schur bound.
+
+This auxiliary argument does not derive a native CLT for instrument-weighted residuals.
+In particular, globally preprojected covariates or instruments are not automatically functions of just \((U_t,V_h,E_{th})\); their own projection replacement must be justified before applying a cell-array theorem.
+[[https://www.cemmap.ac.uk/wp-content/legacy/uploads/main-1.pdf][Davezies, D'Haultfoeuille and Guyonvarch (2018), Sections 2--4]] provide empirical-process and variance results under separately exchangeable, dissociated arrays, with a nondegenerate limiting covariance for inference.
+Those assumptions require a declared sampling model; they do not follow from the names of the two cluster keys.
+The native quarter sequence may require a time-dependence model beyond this sufficient construction.
+
+* Exact CU behavior on a fixed amplitude ray
+
+Fix \(s,A,\pi\), set \(\delta=e^{-c_0}>0\), and retain the original panel and the original ridge anchor.
+The implemented auxiliary projection is linear in the outcome.
+Therefore the row contribution is exactly \(\psi_i(\delta)=\delta u_i-v_i\), where
+\[
+u_i=Z_i[M_F(e^{-sz}Y)]_i,\qquad v_i=Z_iq_i(A,\pi).
+\]
+This identity uses the implemented projection of the outcome and does not require exact instrument centering.
+For any fixed collection of uncentered clustered summands with fixed signs and dof factors, including pair-only and quarter-plus-market-minus-pair,
+\[
+m(\delta)=\delta b-d,\qquad
+V(\delta)=\delta^2V_{uu}-\delta(V_{uv}+V_{vu})+V_{vv}.
+\]
+Here \(b=N^{-1}\sum_i u_i\), \(d=N^{-1}\sum_i v_i\), and each covariance coefficient is the corresponding signed cluster product with the package's \(N^{-2}\) normalization.
+No sample-size multiplier is added to the criterion.
+
+For native =DiagonalTikhonov=, both tau and the diagonal/additive mode are frozen at the original warm anchor.
+Its application is a fixed *linear map on the current covariance*,
+\[
+\mathcal L(V)=V+\tau\operatorname{diag}(V)
+\quad\hbox{or}\quad
+\mathcal L(V)=V+\tau\frac{\operatorname{tr}(V)}M I.
+\]
+The additive branch does not mean a parameter-independent \(\tau I\) ridge.
+Thus \(V^\star(\delta)=\mathcal L(V(\delta))\) is still quadratic in amplitude.
+This follows from =estimator.py:_apply_anchored= and =regularization.py:DiagonalTikhonov.apply_fixed_tau=; custom regularizers need a separate argument.
+
+If \(C_0=\mathcal L(V_{vv})\succ0\), ordinary inverse continuity gives
+\[
+\lim_{\delta\downarrow0}Q(\delta)=d'C_0^{-1}d<\infty.
+\]
+If \(C_\infty=\mathcal L(V_{uu})\succ0\), then similarly
+\[
+\lim_{\delta\to\infty}Q(\delta)=b'C_\infty^{-1}b<\infty.
+\]
+Each positive-definite endpoint also ensures a neighborhood where that ray's covariance is invertible.
+There is no assertion that it stays positive definite between the endpoints, especially for a signed assembly.
+Whenever either endpoint condition holds, the criterion is not coercive along that escaping physical-\(c_0\) ray.
+An interior minimum may nevertheless exist; finite limits alone locate neither the infimum nor a global minimizer, and fixing \(A,\pi\) is not profiling them.
+Singular or indefinite endpoints require separate analysis rather than these formulas or an automatic ridge re-anchor.
+
+On an interval with \(\Lambda(\delta)=V^\star(\delta)^{-1}\succ0\), direct differentiation gives
+\[
+Q'(\delta)=2b'\Lambda m
+-m'\Lambda\frac{dV^\star}{d\delta}\Lambda m.
+\]
+The second term is the CU weight derivative and must be retained.
+If the derivative at zero is positive, nearby positive amplitudes have a larger criterion than that fixed-ray endpoint; a negative derivative reverses that local comparison.
+A zero derivative requires higher-order analysis.
+None of these signs determines a reprofiled branch without controlling the other nuisance directions.
+
+The physical half-criterion score and its GN diagonal satisfy
+\[
+g_{c_0}=-\frac\delta2 Q'(\delta),\qquad
+H_{c_0c_0}=\delta^2 b'\Lambda(\delta)b.
+\]
+Hence a bounded nonzero amplitude derivative produces an arbitrarily small physical score as \(c_0\to\infty\), even though
+\[
+\frac{g_{c_0}^2}{H_{c_0c_0}}
+=\frac{Q'(\delta)^2}{4b'\Lambda(\delta)b}
+\longrightarrow\frac{Q'(0)^2}{4b'C_0^{-1}b},
+\]
+provided the denominator is positive.
+On a full-rank nuisance quotient, Cauchy--Schwarz gives \(g'H^{-1}g\geq g_{c_0}^2/H_{c_0c_0}\).
+A nonzero limit therefore prevents the resolved full FOC decrement from tending to zero merely through amplitude shrinkage, despite the vanishing unscaled physical score.
+If retained curvature becomes numerically unresolved, the production guard supplies no certificate instead.
+At exactly zero amplitude both the physical amplitude and interest moment columns vanish; this remains outside the interior inference contract.
+
+* Verification and next empirical obligation
+
+The inequalities above are deterministic conditional on their stated stochastic bounds; the Schur rate follows from the specified latent-array covariance count.
+The amplitude formulas follow from linearity of the existing model's auxiliary projection, fixed signed cluster products, and the production frozen-mode regularizer.
+An independent seed-180 NumPy algebra check on a 12-by-11 synthetic cell array verified both perturbation inequalities, the affine/quadratic identities, both endpoint limits, and the physical-score/GN ratio.
+The covariance perturbation norm was 0.013672 against its 0.084286 bound; the derivative--moment perturbation norm was 0.012159 against its 0.133831 bound.
+Across identity regularization and the two frozen-mode ridge maps, relative covariance-polynomial discrepancies were below \(3.2\times10^{-16}\), and central-difference discrepancies for the CU amplitude derivative were below \(3.6\times10^{-10}\).
+These deterministic toy-array checks verify algebra only; they are neither a native package fit nor a sampling or coverage study.
+No native statistic has been recomputed by an alternate implementation.
+No optimizer, confidence law, historical artifact, acceptance tolerance, or package runtime code changes in this continuation.
+
+The next empirical task is a separately declared finite-candidate and boundary comparison using package evaluations under the original warm anchor, with a retained genuine result for any new optimization.
+It must distinguish a fixed ray from a reprofiled boundary branch and report covariance definiteness and resolved FOC availability.
+The next theory task is to specify a native stochastic array that supplies the remaining moment/derivative process laws, population quotient-information bounds and interior branch separation.
+The present lemmas reduce those obligations; they do not certify native coverage or close issue 180.

@@ -197,6 +197,7 @@ The sufficient theorem states the two-way projected-panel and finite-interior co
 The pair-only theorem remains conditional, and the counterexample proves that FE orthogonality and pair count cannot validate it for the declared quarter-and-market target.
 No two-way stochastic CLT, consistent signed covariance law, population singular-value bound, asymptotically negligible ridge, or stationary finite-interior restricted branch has been demonstrated for this native panel.
 The next proof obligation is a primitive quarter-and-market array model that establishes the moment, derivative and fitted-product-effect laws, followed by a branch/boundary analysis of the restricted CU criterion before any saved point is called an optimum.
+The [[file:native180-fe-boundary.org][2026-10-29 continuation]] gives an explicit fitted-product-effect replacement bound, a sufficient primitive Schur-coefficient rate, and fixed-ray CU amplitude endpoint identities; the native array and interior branch obligations remain unverified.
 Issue #180 and the original seven unknown verdicts remain open.
 
 -- Sue
