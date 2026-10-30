@@ -425,7 +425,9 @@ def _resample_one(
         cluster_ids_b = jnp.asarray(np.concatenate(boot_cluster_ids, axis=0))
         n_clusters_b = int(len(boot_x_rows))
 
-    boot_measure = EmpiricalMeasure(x=x_b, mask=mask_b, weights=weights_b)
+    boot_measure = EmpiricalMeasure(
+        x=x_b, mask=mask_b, weights=weights_b, labels=measure.labels
+    )
     boot_cov = ClusteredCovariance(
         cluster_ids=cluster_ids_b,
         n_clusters=n_clusters_b,

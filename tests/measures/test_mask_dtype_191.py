@@ -33,7 +33,8 @@ def test_mask_normalizer_uses_float64(mask):
     np.testing.assert_array_equal(normalized, np.ones((3, 2)))
 
 
-def test_all_convenience_constructors_use_the_same_mask_dtype_and_trace():
+@pytest.mark.parametrize("labelled", [False, True])
+def test_convenience_constructors_share_mask_dtype_and_trace_with_same_labels(labelled):
     traces = []
 
     @jax.jit
@@ -41,7 +42,11 @@ def test_all_convenience_constructors_use_the_same_mask_dtype_and_trace():
         traces.append(True)
         return measure.expectation(lambda x, theta: x - theta, jnp.zeros(2))
 
-    for measure in _measures():
+    # Labelled and plain inputs have distinct static metadata (#132).
+    # Mask normalization must not retrace within either metadata group.
+    measures = [m for m in _measures() if (m.labels is not None) == labelled]
+    assert measures
+    for measure in measures:
         assert measure.mask.dtype == jnp.float64
         np.testing.assert_array_equal(measure.mask, np.ones((3, 2)))
         np.testing.assert_array_equal(mean(measure), [3.0, 4.0])

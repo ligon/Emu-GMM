@@ -200,9 +200,11 @@ J_stat = result.J_stat                            # already a Python float
 
 * Cluster-robust path
 
-ManifoldGMM keeps =cluster_ids= on the =MomentRestriction= and the
-driver dispatches automatically. In Emu-GMM clustering is a separate
-strategy on the same =EmpiricalMeasure=:
+ManifoldGMM v2 keeps =cluster_ids= on =ClusteredSampling=, attached to
+=EmpiricalDGP=; the v1 interface kept them on =MomentRestriction=.
+In Emu-GMM clustering is a separate strategy on the same =EmpiricalMeasure=.
+Match the reference's centering explicitly: ManifoldGMM's =omega_hat=
+defaults to =centered=True=, while Emu's covariance default is =False=.
 
 #+BEGIN_SRC python
 from emu_gmm import ClusteredCovariance
@@ -213,6 +215,8 @@ result = estimate(
     covariance=ClusteredCovariance(
         cluster_ids=cluster_ids_jax,
         n_clusters=int(cluster_ids_jax.max()) + 1,
+        centered=True,                 # match ManifoldGMM omega_hat's default
+        dof_correction=False,          # the reference has no G/(G-1) multiplier
     ),
     theta_init=Theta(theta=jnp.zeros(M)),
 )
@@ -224,6 +228,46 @@ architectural commitments (=CLAUDE.md=, point 1): the same
 without changes elsewhere in the pipeline. Both covariance
 implementations apply the same double-where guard so that =NaN= cells
 at masked-out positions cannot poison =V_X=.
+
+For compound =(time, market)= clusters, encode each /pair/ once into a
+one-dimensional integer vector before construction. Do not flatten a two-column
+label array; that changes the dependence units. For example:
+
+#+BEGIN_SRC python
+import pandas as pd
+
+keys = pd.MultiIndex.from_arrays([time_ids, market_ids], names=["time", "market"])
+codes, clusters = pd.factorize(keys)
+cluster_ids_jax = jnp.asarray(codes)
+#+END_SRC
+
+** Comparing the two covariance conventions (issue #18)
+
+With complete moments and unit weights, ManifoldGMM reports =Omega= for
+sqrt(N)-scaled moments; Emu reports =V= for the mean moment vector, so
+=V = Omega / N=. The corresponding quadratic criteria agree when /both/
+moments and covariance use their package's convention. Use Emu's package-built
+=V= for =Fixed(V0=V)= and read its objective directly; add no N multiplier to
+Emu's criterion. The common-N conversion is not a general porting recipe for
+unequal per-moment observability or non-unit weights.
+
+=scripts/validation/clustered_parity_18.py= optionally compares the actual
+ManifoldGMM/DGP and Emu covariance/criterion paths at identical moment arrays.
+It accepts a private NPZ containing =emu_moments=, =legacy_moments= and dense
+=cluster_ids=, and writes a JSON report with input/source hashes, installed
+versions, numerical errors and a separate bitwise-equality flag:
+
+#+BEGIN_SRC sh
+PYTHONPATH=src python scripts/validation/clustered_parity_18.py private-bundle.npz --output parity.json
+#+END_SRC
+
+The tool performs no fit and establishes no parameter recovery, convergence or
+inference calibration. Reduction order and the legacy numerical PSD projection
+can change last bits, so numerical agreement is reported separately from
+bitwise equality. Corrected Nielsen inputs must be pinned explicitly; the
+original #18 J targets came from duplicated-share data and are obsolete.
+The recorded corrected-data comparison and its scope are in
+[[file:../../.coder/clustered-parity-18.json][the #18 parity report]].
 
 * Weighting policy
 

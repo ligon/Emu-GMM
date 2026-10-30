@@ -878,6 +878,65 @@ class OptimizationResult:
             "summary": summary,
         }
 
+    def to_frame(self, *, backend: str = "pandas") -> dict[str, Any]:
+        """Labelled optimization readouts as pandas, Polars or DataMat.
+
+        Includes :meth:`to_pandas` payloads and the available data ingredient
+        matrices: ``moment_covariance``, ``weighting_matrix``,
+        ``moment_jacobian`` and ``gn_hessian``. Polars makes index levels
+        explicit columns; DataMat uses its native MultiIndex axes. Variable
+        names and observation-axis names remain available on :attr:`labels`.
+        """
+        import numpy as np
+
+        from emu_gmm._internal.frames import materialise
+
+        payloads = self.to_pandas()
+        assert self.labels is not None
+        moments = list(self.labels.moment_names)
+        parameters = list(_result_param_names(self))
+        for name, value, rows, cols, row_axis, col_axis in (
+            (
+                "moment_covariance",
+                self.moment_covariance,
+                moments,
+                moments,
+                "moment",
+                "moment_dual",
+            ),
+            (
+                "weighting_matrix",
+                self.weighting_matrix,
+                moments,
+                moments,
+                "moment",
+                "moment_dual",
+            ),
+            (
+                "moment_jacobian",
+                self.moment_jacobian,
+                moments,
+                parameters,
+                "moment",
+                "parameter",
+            ),
+            (
+                "gn_hessian",
+                self.gn_hessian,
+                parameters,
+                parameters,
+                "parameter",
+                "parameter_dual",
+            ),
+        ):
+            if value is not None:
+                payloads[name] = pd.DataFrame(
+                    np.asarray(value),
+                    index=pd.Index(rows, name=row_axis),
+                    columns=pd.Index(cols, name=col_axis),
+                )
+        return {name: materialise(value, backend) for name, value in payloads.items()}
+
     def _main_namespace_hazards(self) -> list[str]:
         """Names of provenance objects whose classes/callables live in
         ``__main__`` --- the pickle-portability hazard (#23).

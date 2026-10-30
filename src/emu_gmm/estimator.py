@@ -1539,6 +1539,15 @@ def _build_estimator(
             # above), so ``converged`` reflects the inner solves alone.
             converged = True
 
+        result_labels = label_context
+        current_labels = getattr(measure_call, "labels", None)
+        if isinstance(current_labels, labels_mod.LabelContext):
+            result_labels = dataclasses.replace(
+                label_context,
+                variable_names=current_labels.variable_names,
+                obs_name=current_labels.obs_name,
+                variable_axis_names=current_labels.variable_axis_names,
+            )
         return OptimizationResult(
             theta_hat=theta_hat,
             objective_value=J_stat,
@@ -1556,7 +1565,7 @@ def _build_estimator(
             weighting=weighting,
             regularization=regularization,
             diagnostics=diagnostics,
-            labels=label_context,
+            labels=result_labels,
             # ``unflatten_spec`` is the manifold_spec for the manifold-aware
             # (v2) path and ``None`` for v1 / all-scalar trees (set above
             # alongside the treedef). Threading it onto the result drives the

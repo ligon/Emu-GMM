@@ -251,6 +251,59 @@ print(float(result.objective_value), result.n_overid)
 That is the entire integration surface: define =psi=, define =Params=,
 build a measure, pick a covariance, call =estimate=.
 
+* Optional trust-region preconditioning
+
+For a poorly scaled manifold problem already using =riemannian_tr=, try
+=riemannian_tr(precon="diagonal")=. This uses the Gauss--Newton diagonal
+as a positive preconditioner projected onto the horizontal subspace.
+The default =precon="identity"= retains the existing solver arithmetic.
+
+#+begin_src python
+from emu_gmm import riemannian_tr
+
+result = estimate(psi, measure, parameters=initial, covariance=covariance,
+                  optimizer=riemannian_tr(precon="diagonal"))
+info = result.diagnostics.optimizer_info
+print(info.tr_trace.tcg_iters[:int(info.steps)])
+#+end_src
+
+The true-Hessian model, original trust radius, stopping tolerances and statistical
+queries remain unchanged. The preconditioner adds one residual Jacobian per
+outer step; reduced inner Hessian-vector products do not guarantee a wall-clock
+speedup on every problem. Its machine-epsilon diagonal floor is numerical
+preconditioning, independently of covariance regularisation.
+An entrywise diagonal depends on the factor's gauge representative: compare
+converged =Gamma= invariants across rotated factors, rather than iteration traces.
+Reverse-mode differentiation through the solver remains unsupported (#77).
+
+* Optional labelled dataframe boundaries
+
+=EmpiricalMeasure.from_frame= accepts pandas, Polars and DataMat frames, and one-variable Series/DataVec inputs.
+Polars and DataMat are optional packages; neither is required for ordinary array or pandas use.
+Use a moment-shaped mask when \(M\ne D\), just as with array inputs:
+
+#+begin_src python
+measure = EmpiricalMeasure.from_frame(frame, weights=weights, mask=moment_mask)
+result = estimate(psi, measure, parameters=initial, covariance=covariance,
+                  moment_names=("euler", "instrumented_euler"))
+print(result.labels.variable_names)       # original data-column labels
+print(result.labels.obs_name)             # index name, or MultiIndex names
+diagnostics = result.to_frame(backend="polars")
+moment_covariance = diagnostics["moment_covariance"]
+coefficients = result.asymptotic().coef_frame(backend="datamat")
+covariance_table = result.asymptotic().cov_frame(backend="pandas")
+#+end_src
+
+Indexed weights and masks align to the data's observation keys; missing keys or an ambiguous reordering of duplicate keys raise an error.
+This alignment is the =from_frame= contract; legacy =from_pandas= calls keep positional auxiliary inputs.
+Arrays and Polars carriers have positional rows. Mask columns always follow moment order, independently of data-column names.
+The input's variable names and axis names remain on =result.labels=, including MultiIndex tuples. Moment outputs retain moment names, and coefficient/covariance outputs retain parameter names.
+=to_frame= includes the optimization summary and moment diagnostics, plus the available =moment_covariance=, =weighting_matrix=, =moment_jacobian= and =gn_hessian= matrices with their own axis labels. It never recomputes those ingredients.
+Polars has no index: exported index levels become columns named after the original levels, with =index= (one level) or =index_i= (multiple levels) for unnamed axes.
+Non-string data-column labels or index-column collisions that Polars cannot represent losslessly raise an error; pandas/DataMat outputs retain those labels.
+DataMat outputs use its native MultiIndex convention, including tuple-wrapped labels on a one-level axis. No dataframe operations occur inside JIT, vmap or AD.
+The existing =result.to_pandas()= and =law.coef_table= remain available with their original output formats.
+
 * What you get back: =OptimizationResult= and =AsymptoticLaw=
 
 The fit result holds optimization quantities; =result.asymptotic()= adds

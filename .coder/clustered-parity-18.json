@@ -1,0 +1,109 @@
+{
+  "artifact_directory": "/global/home/users/ligon/emu-gmm-validation/clustered-parity-18-20261030-job40608477",
+  "artifact_sha256": {
+    "bundle.npz": "07c3ebcecfcd1f601a33ce46e9fd1ac3bcb29806fac85ce3ba6a33241d157a3d",
+    "provenance.json": "fbf10a314872cfd558d43e0a26e1542096ec00dcea2b41d33fc7494a8e48263e",
+    "comparison.json": "8f3c15bfbef7004e3bdf6b13854d108e3f69c523aaa06967d517856c01d6ca9e",
+    "build_bundle.py": "4379d2dd4dec4771b0208c9bb964b5fe32fac133c13cb77ca47027d22a09ab57",
+    "compare_boundary.py": "ddd1a2bda888b056d55bd96873de970ada19bb9aa11cbcb5e8b5a5d9726959d0"
+  },
+  "native_input_provenance": {
+    "description": "Corrected current Nielsen panel; homogeneous K=2, no demographic Pi/FWL or Bartik-demographic instruments; cluster s=(t,m).",
+    "window": [
+      2004,
+      2024
+    ],
+    "rank": 2,
+    "N": 236088,
+    "M": 26,
+    "n_clusters": 5460,
+    "moment_arrays_bitwise_equal": false,
+    "point_source": "/global/home/users/ligon/mirrors/K-Aggregators/var/board_emu/homog_2004-2024_d0_K2.npz",
+    "point_refitted": false,
+    "limitation": "The stored parameter point is evaluated on the current corrected panel. This is boundary parity at identical inputs, not a new fit or reproduction of the historical reported J.",
+    "files": {
+      "/global/home/users/ligon/mirrors/nielsen-cereal-data/data/clean/market_panel.parquet": "0e38532f3f1c90f60c3bebf1dbe4f089d895a90c2a45ce7c305b4ad343ec7d82",
+      "/global/home/users/ligon/mirrors/K-Aggregators/var/board_emu/homog_2004-2024_d0_K2.npz": "e0e7d570bcbacb95fbb79740ba496dc472cf557ca0fc02b4268a87fdc8011646",
+      "/global/home/users/ligon/mirrors/K-Aggregators/tmp/cereal_data_nielsen.py": "dddfa4445290896b8869e74a07f71e6406edc0505aa6d6cd92fc86f3557ede49",
+      "/global/home/users/ligon/mirrors/K-Aggregators/tmp/cereal_emu_estimate.py": "6de66c80dbdeb681a18a4d7fece4703e4bfdb78532929dd0ad392700232b16f6",
+      "/global/home/users/ligon/mirrors/K-Aggregators/tmp/cereal_gmm_estimate.py": "8bd59cb8fd5e45565b84dcc4898cad972fd1b4b8c52531e950da0f78912690fb",
+      "/tmp/emu-gmm-18-native-bundle.npz": "07c3ebcecfcd1f601a33ce46e9fd1ac3bcb29806fac85ce3ba6a33241d157a3d"
+    }
+  },
+  "boundary_comparison": {
+    "bundle_sha256": "07c3ebcecfcd1f601a33ce46e9fd1ac3bcb29806fac85ce3ba6a33241d157a3d",
+    "source_sha256": "ddd1a2bda888b056d55bd96873de970ada19bb9aa11cbcb5e8b5a5d9726959d0",
+    "installed_distribution_versions": {
+      "emu-gmm": "0.3.0",
+      "manifoldgmm": "0.3.0a3",
+      "DGP_Protocol": "0.1.0a0",
+      "jax": "0.10.1",
+      "numpy": "2.4.3"
+    },
+    "executed_sources": {
+      "emu_gmm.measures.empirical": {
+        "path": "/local/job40608477/mirrors/Emu-GMM/src/emu_gmm/measures/empirical.py",
+        "sha256": "eb9ba3a18d523f9dcb7ef149b5613a6a28182eeeef62ec003e4fb4258605717e"
+      },
+      "emu_gmm.covariance.clustered": {
+        "path": "/local/job40608477/mirrors/Emu-GMM/src/emu_gmm/covariance/clustered.py",
+        "sha256": "d253542d1352e6a1276219ee7a83024d5887f2cd9cda08861d6f89166d61aa66"
+      },
+      "emu_gmm.covariance._outer_product": {
+        "path": "/local/job40608477/mirrors/Emu-GMM/src/emu_gmm/covariance/_outer_product.py",
+        "sha256": "d9909f7a19ba68c1f1558e082c673b0e5a0de4b96716ccdd99dbc308b71f2b22"
+      },
+      "emu_gmm._internal.cholesky": {
+        "path": "/local/job40608477/mirrors/Emu-GMM/src/emu_gmm/_internal/cholesky.py",
+        "sha256": "2bea8e31f32ab661d82b67a1116eec56ad679802da98f0943ef4aece1c61d2e7"
+      },
+      "manifoldgmm.econometrics.gmm": {
+        "path": "/global/home/users/ligon/mirrors/ManifoldGMM/src/manifoldgmm/econometrics/gmm.py",
+        "sha256": "c966969e71632b8ed799b03df10b32f11379cbb484c31cc6de1140c5d2fe144b"
+      },
+      "manifoldgmm.econometrics.moment_restriction": {
+        "path": "/global/home/users/ligon/mirrors/ManifoldGMM/src/manifoldgmm/econometrics/moment_restriction.py",
+        "sha256": "eb780adc358dabcf48d3d4cc5e2886716040465e64e2fe05890064b6ad35e77e"
+      },
+      "dgp_protocol.sampling": {
+        "path": "/global/home/users/ligon/mirrors/K-Aggregators/.venv/lib/python3.11/site-packages/dgp_protocol/sampling.py",
+        "sha256": "b5adda7c6e53811f0bf2f9d69cc8813cd81a368f67d57a88db125012b4240679"
+      }
+    },
+    "source_identity_note": "PYTHONPATH may override installed distributions; executed source paths and hashes, rather than distribution stamps, identify the code",
+    "comparisons": [
+      {
+        "N": 236088,
+        "M": 26,
+        "n_clusters": 5460,
+        "centered": false,
+        "scope": "complete moments; unit weights; no dof correction; identical point",
+        "moment_max_relative_error": 1.7302734002139814e-17,
+        "mean_max_relative_error": 3.6948425779535013e-16,
+        "covariance_max_relative_error": 1.1662170308437627e-15,
+        "covariance_bitwise_equal_after_scale_conversion": false,
+        "emu_criterion": 1905.9478447659362,
+        "legacy_criterion": 1905.9478447659344,
+        "criterion_relative_error": 9.543752251884115e-16,
+        "covariance_condition": 80.22940794886667,
+        "refitted": false
+      },
+      {
+        "N": 236088,
+        "M": 26,
+        "n_clusters": 5460,
+        "centered": true,
+        "scope": "complete moments; unit weights; no dof correction; identical point",
+        "moment_max_relative_error": 1.7302734002139814e-17,
+        "mean_max_relative_error": 3.6948425779535013e-16,
+        "covariance_max_relative_error": 1.0724886289466903e-15,
+        "covariance_bitwise_equal_after_scale_conversion": false,
+        "emu_criterion": 2892.326322569432,
+        "legacy_criterion": 2892.326322569433,
+        "criterion_relative_error": 4.716763948846032e-16,
+        "covariance_condition": 79.24450526183435,
+        "refitted": false
+      }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 """Polymorphic-input adapter and axis-label tracking.
 
-The framework accepts data inputs as :class:`pandas.DataFrame`,
+The framework accepts pandas, optional Polars/DataMat frames and vectors,
 :class:`haliax.NamedArray`, or plain :class:`jax.numpy.ndarray`, and
 emits labelled outputs (typically :class:`haliax.NamedArray`) carrying
 coordinate strings derived from those inputs. This module is the bridge.
@@ -26,9 +26,11 @@ from typing import Any
 
 import haliax as ha
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float
 
 from . import axes as axes_mod
+from .frames import as_pandas, numeric_values
 
 # Pandas is optional at runtime (it's a v1 dep, but we don't want
 # this module to fail at import time if pandas changes its public API).
@@ -46,14 +48,15 @@ class LabelContext:
     """Axis labels for one estimation run.
 
     Not a JAX PyTree; lives outside ``jit`` / ``vmap`` boundaries as a
-    static closure variable. All fields are tuples (hashable) so the
-    whole struct is hashable for use as a static argument to ``jit``.
+    static closure variable. Its axis metadata is immutable and hashable,
+    so the whole struct is usable as a static argument to ``jit``.
     """
 
     param_names: tuple[str, ...] = ()
     moment_names: tuple[str, ...] = ()
-    variable_names: tuple[str, ...] = ()
-    obs_name: str | None = None
+    variable_names: tuple[Any, ...] = ()
+    obs_name: Any = None
+    variable_axis_names: tuple[Any, ...] = ()
 
     def with_moment_names(self, names: tuple[str, ...]) -> "LabelContext":
         """Return a copy with ``moment_names`` replaced."""
@@ -74,36 +77,42 @@ def _is_haliax_named(x: Any) -> bool:
 
 def normalise_x(
     x_in: Any,
-) -> tuple[Float[Array, "N D"], tuple[str, ...], str | None]:
+) -> tuple[Float[Array, "N D"], tuple[Any, ...], Any]:
     """Strip a data-input wrapper, returning the JAX array plus labels.
 
     Parameters
     ----------
     x_in
-        One of: :class:`pandas.DataFrame`, :class:`haliax.NamedArray`,
+        One of: pandas, Polars or DataMat frames/vectors, :class:`haliax.NamedArray`,
         or any object convertible via :func:`jax.numpy.asarray` to a
         2-D array.
 
     Returns
     -------
     array : (N, D) jax array
-    variable_names : tuple[str, ...]
-        Column / D-axis labels. Pandas column names if input was a
-        DataFrame; Haliax axis-1 coordinates if input was a NamedArray;
-        positional fallback (``("v_0", "v_1", ...)``) otherwise.
-    obs_name : str | None
-        Observation-axis label. Pandas index name if non-None; otherwise
-        ``None``.
+    variable_names : tuple
+        Original column / D-axis labels, including MultiIndex tuples.
+        A Haliax axis has no per-coordinate labels, so it uses the
+        positional fallback (``("v_0", "v_1", ...)``), as do plain arrays.
+    obs_name : hashable, tuple or None
+        Observation-axis name, a tuple of MultiIndex level names, or ``None``.
 
     Raises
     ------
     ValueError
         If the input cannot be coerced to a 2-D array.
     """
-    if _is_pandas_frame(x_in):
-        cols = tuple(str(c) for c in x_in.columns)
-        idx_name = x_in.index.name
-        arr = jnp.asarray(x_in.to_numpy())
+    frame = as_pandas(x_in)
+    if frame is not None:
+        if _is_pandas_series(frame):
+            frame = frame.to_frame()
+        cols = tuple(frame.columns)
+        idx_name = (
+            frame.index.names[0]
+            if frame.index.nlevels == 1
+            else tuple(frame.index.names)
+        )
+        arr = jnp.asarray(numeric_values(frame))
     elif _is_haliax_named(x_in):
         if len(x_in.axes) != 2:
             raise ValueError(
@@ -158,8 +167,13 @@ def normalise_weights(
     """
     if w_in is None:
         return jnp.ones(n)
-    if _is_pandas_series(w_in):
-        arr = jnp.asarray(w_in.to_numpy())
+    frame = as_pandas(w_in)
+    if frame is not None:
+        if _is_pandas_frame(frame) and frame.shape[1] != 1:
+            raise ValueError(
+                "normalise_weights: a dataframe must have exactly one column"
+            )
+        arr = jnp.asarray(numeric_values(frame))
     elif _is_haliax_named(w_in):
         arr = w_in.array
     else:
@@ -195,8 +209,12 @@ def normalise_mask(
     """
     if mask_in is None:
         return jnp.ones((n, m), dtype=jnp.float64)
-    if _is_pandas_frame(mask_in):
-        arr = jnp.asarray(mask_in.to_numpy())
+    frame = as_pandas(mask_in)
+    if frame is not None:
+        values = numeric_values(frame)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("normalise_mask: observability values must be finite")
+        arr = jnp.asarray(values[:, None] if _is_pandas_series(frame) else values)
     elif _is_haliax_named(mask_in):
         arr = mask_in.array
     else:

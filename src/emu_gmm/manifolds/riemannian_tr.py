@@ -57,6 +57,15 @@ The standalone Riemannian HVP and tCG helpers retain their manifold-metric
 default. A pure-JAX ``jnp.where`` NaN-guard on the ``rho`` ``0/0`` floor keeps
 ``Delta`` finite.
 
+Optional preconditioning (#166)
+------------------------------
+``precon="diagonal"`` applies a positive horizontal Gauss--Newton Jacobi
+inverse in tCG. The objective, true Hessian, original trust-radius metric and
+stopping tolerances stay unchanged. A residual Jacobian is formed once per
+outer step; fewer inner HVPs need not mean less elapsed time on every problem.
+The entrywise diagonal depends on the factor's gauge representative, so only
+converged invariants, not rotated-factor trajectories, should be compared.
+
 REVERSE-MODE AD IS NOT SUPPORTED (matches ``riemannian_lm`` / #77): the outer
 loop is a :func:`jax.lax.while_loop`, which has no reverse rule.
 """
@@ -65,7 +74,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import jax
 import jax.numpy as jnp
@@ -477,6 +486,35 @@ def _riemannian_hvp(*args: Any, **kwargs: Any) -> Any:
 # ===========================================================================
 # Truncated CG (Steihaug-Toint) -- canonical flat core + polymorphic dispatch.
 # ===========================================================================
+def _gn_diagonal_preconditioner(
+    jacobian: jnp.ndarray, plan: list, point: jnp.ndarray
+) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    """Positive horizontal Jacobi inverse, proportional to ``P diag(J'J)^-1 P``.
+
+    Normalize before squaring to avoid overflow/underflow from residual units.
+    A relative machine-epsilon floor keeps zero/weak columns positive without
+    changing the objective or its Hessian. An all-zero Jacobian gives identity
+    on the horizontal space. Nonfinite derivatives remain nonfinite.
+    """
+    scale = jnp.max(jnp.abs(jacobian))
+    scaled = jacobian / jnp.where(scale == 0.0, 1.0, scale)
+    diagonal = jnp.sum(scaled * scaled, axis=0)
+    largest = jnp.max(diagonal)
+    normalized = diagonal / jnp.where(largest == 0.0, 1.0, largest)
+    normalized = jnp.where(largest == 0.0, jnp.ones_like(normalized), normalized)
+    floored = jnp.maximum(normalized, jnp.finfo(jacobian.dtype).eps)
+    # A common positive PCG scale changes no exact-arithmetic iterate. Bound
+    # the inverse by one so finite gradients are not amplified by 1/eps into
+    # an overflowing trust-direction norm / boundary discriminant (#166).
+    inverse = jnp.min(floored) / floored
+
+    def apply(vector: jnp.ndarray) -> jnp.ndarray:
+        horizontal = _project_flat(plan, point, vector)
+        return _project_flat(plan, point, inverse * horizontal)
+
+    return apply
+
+
 def _tcg_core(
     hvp: Callable[[jnp.ndarray], jnp.ndarray],
     grad_flat: jnp.ndarray,
@@ -489,6 +527,7 @@ def _tcg_core(
     min_inner: int,
     max_tcg_steps: int,
     ambient_metric: bool = False,
+    precon: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, dict]:
     r"""Steihaug--Toint truncated CG (ported from pymanopt), flat layout.
 
@@ -497,8 +536,9 @@ def _tcg_core(
     Returns ``(eta, Heta, info)`` with ``info['num_inner']`` and
     ``info['stop_reason']``.
 
-    Eager Python loop with ``lax.cond``-free pure-JAX branch arithmetic so it
-    runs under ``jax.jit`` (the outer solve jits it). The two-regime
+    The default uses a static masked loop; preconditioning uses a traced
+    ``while_loop`` so early stops save HVPs. Both run under ``jax.jit``.
+    The two-regime
     ``kappa``/``theta`` stop and the ``d_Hd``-sign / boundary tau handling are
     pymanopt-faithful; a ``d_Hd == 0`` division guard routes the zero-curvature
     case to the boundary branch BEFORE dividing.
@@ -520,19 +560,29 @@ def _tcg_core(
     def retang(v: jnp.ndarray) -> jnp.ndarray:
         return _project_flat(plan, x, v)
 
+    # PCG directions use a residual normalized once per inner solve. This
+    # keeps their squared norms representable for both very large and very
+    # small finite gradients. Physical steps carry the scale back explicitly;
+    # the model, radius and original residual stopping test are unchanged.
+    residual_scale = jnp.asarray(1.0, dtype=dt)
     r0 = grad_flat
+    if precon is not None:
+        magnitude = jnp.max(jnp.abs(grad_flat))
+        residual_scale = jnp.where(magnitude == 0.0, 1.0, magnitude)
+        r0 = grad_flat / residual_scale
     r_r0 = inner(r0, r0)
     norm_r0 = jnp.sqrt(r_r0)
-    target = norm_r0 * jnp.minimum(norm_r0**theta, kappa)
+    original_norm = norm_r0 if precon is None else norm_r0 * residual_scale
+    target = norm_r0 * jnp.minimum(original_norm**theta, kappa)
     # Two-regime classification (traced): linear if kappa < ||r0||^theta.
-    linear_regime = kappa < (norm_r0**theta)
+    linear_regime = kappa < (original_norm**theta)
     Delta2 = Delta * Delta
 
     # Fully-traced unrolled loop with a ``stopped`` mask: once a stop fires the
     # carry freezes (subsequent iterations are no-ops via jnp.where), so the
     # static-bound Python ``for`` traces cleanly under jit. ``num_inner`` and
     # ``stop_code`` advance only while not stopped.
-    z0 = r0
+    z0 = r0 if precon is None else retang(precon(retang(r0)))
     z_r0 = inner(z0, r0)
     carry = {
         "eta": jnp.zeros_like(grad_flat),
@@ -540,17 +590,25 @@ def _tcg_core(
         "r": r0,
         "z": z0,
         "z_r": z_r0,
-        "d_Pd": z_r0,
+        "d_Pd": z_r0 if precon is None else inner(z0, z0),
         "delta": -z0,
         "e_Pe": jnp.asarray(0.0, dtype=dt),
         "e_Pd": jnp.asarray(0.0, dtype=dt),
         "model_value": jnp.asarray(0.0, dtype=dt),
-        "stopped": jnp.asarray(False),
-        "stop_code": jnp.asarray(_STOP_CODE[_MAX_INNER]),
+        "stopped": (jnp.asarray(False) if precon is None else jnp.all(r0 == 0.0)),
+        "stop_code": jnp.where(
+            False if precon is None else jnp.all(r0 == 0.0),
+            jnp.where(
+                linear_regime,
+                _STOP_CODE[_REACHED_LINEAR],
+                _STOP_CODE[_REACHED_SUPERLINEAR],
+            ),
+            _STOP_CODE[_MAX_INNER],
+        ),
         "num_inner": jnp.asarray(0),
     }
 
-    def step(c: dict, j: int) -> dict:
+    def step(c: dict, j: int | jax.Array) -> dict:
         stopped = c["stopped"]
         run = jnp.logical_not(stopped)
         delta = c["delta"]
@@ -565,7 +623,8 @@ def _tcg_core(
         d_Hd = inner(delta, Hdelta)
 
         nonzero = jnp.abs(d_Hd) > 0.0
-        alpha = jnp.where(nonzero, z_r / jnp.where(nonzero, d_Hd, 1.0), 0.0)
+        alpha_unit = jnp.where(nonzero, z_r / jnp.where(nonzero, d_Hd, 1.0), 0.0)
+        alpha = alpha_unit if precon is None else alpha_unit * residual_scale
         e_Pe_new = jnp.where(nonzero, e_Pe + 2.0 * alpha * e_Pd + alpha**2 * d_Pd, e_Pe)
 
         neg_curv = d_Hd <= 0.0
@@ -586,19 +645,30 @@ def _tcg_core(
         new_model_value = inner(new_eta, grad_flat) + 0.5 * inner(new_eta, new_Heta)
         model_inc = new_model_value >= c["model_value"]
 
-        r_new = c["r"] + alpha * Hdelta
+        r_new = c["r"] + alpha_unit * Hdelta
         norm_r = jnp.sqrt(inner(r_new, r_new))
         residual_hit = jnp.logical_and(j >= min_inner, norm_r <= target)
+        if precon is not None:
+            # Residual exhaustion is terminal even before min_inner: another
+            # iteration has a zero direction, not negative curvature.
+            residual_hit = residual_hit | jnp.all(r_new == 0.0)
         code_resid = jnp.where(
             linear_regime, _STOP_CODE[_REACHED_LINEAR], _STOP_CODE[_REACHED_SUPERLINEAR]
         )
 
-        z_new = r_new
+        z_new = r_new if precon is None else retang(precon(retang(r_new)))
         z_r_new = inner(z_new, r_new)
         beta = z_r_new / jnp.where(jnp.abs(z_r) > 0.0, z_r, 1.0)
         delta_new = retang(-z_new + beta * delta)
-        e_Pd_new = beta * (e_Pd + alpha * d_Pd)
-        d_Pd_new = z_r_new + beta * beta * d_Pd
+        if precon is None:
+            e_Pd_new = beta * (e_Pd + alpha * d_Pd)
+            d_Pd_new = z_r_new + beta * beta * d_Pd
+        else:
+            # PCG conjugacy is in the preconditioner metric; the trust region
+            # remains in the original metric. Recompute these inner products
+            # instead of using the P-norm recurrences of pymanopt's PCG loop.
+            e_Pd_new = inner(new_eta, delta_new)
+            d_Pd_new = inner(delta_new, delta_new)
 
         # Decide this iteration's outcome (only meaningful when ``run``).
         # Priority: bail (boundary) > model_increased > residual stop > continue.
@@ -649,8 +719,18 @@ def _tcg_core(
             "num_inner": c["num_inner"] + jnp.where(run, 1, 0),
         }
 
-    for j in range(int(max_tcg_steps)):
-        carry = step(carry, j)
+    if precon is None:
+        # Retain the original arithmetic and unrolling for default parity.
+        for j in range(int(max_tcg_steps)):
+            carry = step(carry, j)
+    else:
+        # A successful preconditioner should save HVPs, not only lower the
+        # reported count while an unrolled masked loop still evaluates them.
+        carry = jax.lax.while_loop(
+            lambda c: (c["num_inner"] < max_tcg_steps) & ~c["stopped"],
+            lambda c: step(c, c["num_inner"]),
+            carry,
+        )
 
     stop_code = int(carry["stop_code"]) if _is_concrete(carry["stop_code"]) else None
     info = {
@@ -716,6 +796,7 @@ def _truncated_cg(*args: Any, **kwargs: Any) -> Any:
             kappa=float(kwargs.get("kappa", 0.1)),
             min_inner=int(kwargs.get("min_inner", 1)),
             max_tcg_steps=max_inner,
+            precon=kwargs.get("precon"),
         )
         return eta, info
 
@@ -749,6 +830,7 @@ def _truncated_cg(*args: Any, **kwargs: Any) -> Any:
             min_inner=int(kwargs.get("min_inner", 1)),
             max_tcg_steps=int(kwargs["max_tcg_steps"]),
             ambient_metric=True,
+            precon=kwargs.get("precon"),
         )
         step = jnp.reshape(eta, shape) if shape != () else eta[0]
         return step, info
@@ -783,6 +865,7 @@ def _truncated_cg(*args: Any, **kwargs: Any) -> Any:
         kappa=float(kwargs.get("kappa", 0.1)),
         min_inner=int(kwargs.get("min_inner", 1)),
         max_tcg_steps=int(kwargs["max_tcg_steps"]),
+        precon=kwargs.get("precon"),
     )
     return eta, Heta, _TCGInfo(info_d)
 
@@ -860,6 +943,10 @@ class _TRTrace:
         return jnp.asarray(self._d["stop_code"], dtype=jnp.int32)
 
     @property
+    def tcg_iters(self) -> Any:
+        return jnp.asarray(self._d["tcg_iters"], dtype=jnp.int32)
+
+    @property
     def n_negcurv(self) -> Any:
         return self._n_negcurv
 
@@ -887,6 +974,7 @@ class _RiemannianTR:
     gauge_floor: float
     ftol: float
     ftol_patience: int
+    precon: Literal["identity", "diagonal"] = "identity"
 
     def __call__(
         self,
@@ -1004,6 +1092,7 @@ class _RiemannianTR:
                 "accepted",
                 "stop_code",
                 "proposed_full_rank",
+                "tcg_iters",
             )
             init_trace = {
                 k: jnp.zeros((max_steps,), dtype=jnp.float64) for k in trace_keys
@@ -1029,6 +1118,19 @@ class _RiemannianTR:
                 del done
 
                 hvp = hvp_at(x, args_in)
+                precondition = None
+                if self.precon == "diagonal":
+
+                    def residual_hat(eta: jnp.ndarray) -> jnp.ndarray:
+                        point = _retract_flat(plan, x, eta)
+                        return (
+                            residual_fn(point, args_in)
+                            if two_arg
+                            else residual_fn(point)
+                        )
+
+                    jacobian = jax.jacfwd(residual_hat)(jnp.zeros_like(x))
+                    precondition = _gn_diagonal_preconditioner(jacobian, plan, x)
                 # tCG inner solve (eager-jit; static loop bound max_tcg).
                 eta, Heta, tinfo = _tcg_core(
                     hvp,
@@ -1041,6 +1143,7 @@ class _RiemannianTR:
                     min_inner=min_inner,
                     max_tcg_steps=max_tcg,
                     ambient_metric=True,
+                    precon=precondition,
                 )
                 stop_code = jnp.asarray(tinfo["stop_code"])
                 is_negc = jnp.asarray(tinfo["stop_code"] == _STOP_CODE[_NEG_CURV])
@@ -1198,6 +1301,7 @@ class _RiemannianTR:
                     "accepted": jnp.where(accept, 1.0, 0.0),
                     "stop_code": jnp.asarray(stop_code, dtype=jnp.float64),
                     "proposed_full_rank": jnp.where(prop_valid, 1.0, 0.0),
+                    "tcg_iters": tinfo["num_inner"],
                 }
                 trace = {
                     k: trace[k].at[idx].set(jnp.asarray(upd[k], dtype=jnp.float64))
@@ -1302,6 +1406,7 @@ class _RiemannianTR:
             "accepted": trace["accepted"],
             "stop_code": trace["stop_code"],
             "proposed_full_rank": trace["proposed_full_rank"],
+            "tcg_iters": trace["tcg_iters"],
             "status": status,
             "final_objective": final_objective,
             "done": jnp.asarray(done),
@@ -1339,6 +1444,7 @@ def riemannian_tr(
     gauge_floor: float = _GAUGE_FLOOR,
     ftol: float = _FTOL,
     ftol_patience: int = _FTOL_PATIENCE,
+    precon: Literal["identity", "diagonal"] = "identity",
 ) -> _RiemannianTR:
     """Build a JAX-native Riemannian Trust Region optimiser (#152).
 
@@ -1350,7 +1456,17 @@ def riemannian_tr(
     rather than the ambient ``nk``.
     ``gauge_floor`` is retained for API compatibility and has no effect on this
     trust-region solver; the LM damping floor does not apply to tCG.
+
+    ``precon="diagonal"`` opts into a projected Gauss--Newton Jacobi
+    preconditioner, rebuilt once per outer iteration. Its positive diagonal
+    has a relative machine-epsilon floor; it changes neither the true-Hessian
+    model nor the ambient trust-radius constraint. It may reduce inner HVP
+    counts on poorly scaled problems at the cost of one residual Jacobian per
+    outer step. ``precon="identity"`` retains the existing solver arithmetic.
+    Per-step counts are available as ``info.tr_trace.tcg_iters``.
     """
+    if precon not in ("identity", "diagonal"):
+        raise ValueError("precon must be 'identity' or 'diagonal'")
     return _RiemannianTR(
         rtol=rtol,
         atol=atol,
@@ -1365,6 +1481,7 @@ def riemannian_tr(
         gauge_floor=gauge_floor,
         ftol=ftol,
         ftol_patience=ftol_patience,
+        precon=precon,
     )
 
 

@@ -1469,6 +1469,26 @@ class AsymptoticLaw(EstimatorLaw):
             table.loc[sensitive, ["t_stat", "p_value"]] = np.nan
         return table
 
+    def coef_frame(self, *, backend: str = "pandas") -> Any:
+        """Materialise :attr:`coef_table` with an optional dataframe backend."""
+        from emu_gmm._internal.frames import materialise
+
+        return materialise(self.coef_table, backend)
+
+    def cov_frame(self, *, backend: str = "pandas") -> Any:
+        """Labelled ambient parameter covariance, using the existing law query."""
+        import pandas as pd
+
+        from emu_gmm._internal.frames import materialise
+
+        names = list(self.param_names)
+        table = pd.DataFrame(
+            self.cov(),
+            index=pd.Index(names, name="parameter"),
+            columns=pd.Index(names, name="parameter_dual"),
+        )
+        return materialise(table, backend)
+
     def _objective_and_dof(self) -> tuple[float, int]:
         """``(J_stat, n_overid)`` from the live result or the persisted backing."""
         if self._result is not None:

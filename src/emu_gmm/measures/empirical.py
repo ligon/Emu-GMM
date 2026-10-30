@@ -16,12 +16,10 @@ coordinate-specific measure (see ``docs/design.org`` Section 2,
 
 with the same per-coordinate normalisation applied to the Jacobian.
 
-The class itself holds only JAX arrays --- the pandas column-name /
-index-name labels are tracked at the estimator level via
-:mod:`emu_gmm._internal.labels`. The :meth:`from_pandas` classmethod is
-a convenience for constructing the JAX arrays from a
-:class:`pandas.DataFrame`; downstream labelling is the caller's
-responsibility.
+The dynamic leaves are JAX arrays. An optional immutable ``labels`` field
+carries variable and observation-axis names as static metadata, never a
+dataframe in a compiled boundary. :meth:`from_frame` and :meth:`from_pandas`
+retain those labels for the estimator's :class:`LabelContext`.
 
 NaN-as-missing semantics
 ------------------------
@@ -365,6 +363,7 @@ class EmpiricalMeasure:
     x: Float[Array, "N D"]
     mask: Float[Array, "N M"]
     weights: Float[Array, " N"]
+    labels: labels_mod.LabelContext | None = jdc.static_field(default=None)  # type: ignore[attr-defined]
 
     def expectation_and_contributions(
         self, psi: StructuralModel, theta: ParamsLike
@@ -709,9 +708,8 @@ class EmpiricalMeasure:
         :func:`emu_gmm._internal.labels.normalise_x`,
         :func:`emu_gmm._internal.labels.normalise_weights`, and
         :func:`emu_gmm._internal.labels.normalise_mask` to produce the
-        JAX arrays stored on the measure. Pandas column-name / index-
-        name labels are tracked at the estimator level; the measure
-        itself carries only the arrays.
+        JAX arrays stored on the measure. Column and index-axis names ride
+        as immutable static metadata into the estimator's LabelContext.
 
         Parameters
         ----------
@@ -770,7 +768,10 @@ class EmpiricalMeasure:
         reflect the per-asset holder count, not the row count of the
         ambient panel.
         """
-        x_arr, _cols, _obs_name = labels_mod.normalise_x(df)
+        from emu_gmm._internal.frames import as_pandas
+
+        canonical = as_pandas(df)
+        x_arr, cols, obs_name = labels_mod.normalise_x(df)
         n = int(x_arr.shape[0])
         w_arr = labels_mod.normalise_weights(weights, n)
         _assert_finite_weights(w_arr, source="from_pandas")
@@ -783,7 +784,11 @@ class EmpiricalMeasure:
             # exposes ``shape`` as a {name: size} dict, so handle it
             # explicitly before the generic ``hasattr(mask, "shape")``
             # branch (which assumes a tuple-like).
-            if isinstance(mask, ha.NamedArray):
+            m_shape: tuple[int, ...]
+            mask_frame = as_pandas(mask)
+            if mask_frame is not None and not hasattr(mask_frame, "columns"):
+                m_shape = (len(mask_frame), 1)
+            elif isinstance(mask, ha.NamedArray):
                 m_shape = tuple(int(s) for s in mask.array.shape)
             elif hasattr(mask, "shape"):
                 m_shape = tuple(int(s) for s in mask.shape)
@@ -847,7 +852,49 @@ class EmpiricalMeasure:
             )
 
         _assert_mask_columns_supported(mask_arr, source="from_pandas")
-        return cls(x=x_arr, mask=mask_arr, weights=w_arr)
+        input_labels = None
+        if canonical is not None or isinstance(df, ha.NamedArray):
+            variable_axis_names: tuple[Any, ...]
+            if isinstance(df, ha.NamedArray):
+                variable_axis_names = (df.axes[1].name,)
+            elif canonical is not None and hasattr(canonical, "columns"):
+                variable_axis_names = tuple(canonical.columns.names)
+            else:
+                variable_axis_names = (None,)
+            input_labels = labels_mod.LabelContext(
+                variable_names=cols,
+                obs_name=obs_name,
+                variable_axis_names=variable_axis_names,
+            )
+        return cls(
+            x=x_arr,
+            mask=mask_arr,
+            weights=w_arr,
+            labels=input_labels,
+        )
+
+    @classmethod
+    def from_frame(
+        cls,
+        frame: Any,
+        weights: Any | None = None,
+        mask: Any | None = None,
+        *,
+        nan_aware: bool = True,
+    ) -> "EmpiricalMeasure":
+        """Construct from labelled frames/vectors or plain/haliax arrays.
+
+        Indexed weights/masks align by observation keys; duplicate ambiguous
+        alignments fail. Polars and plain auxiliary arrays are positional.
+        Mask columns remain in moment order, independently of data columns.
+        Missingness and validation follow :meth:`from_pandas` unchanged.
+        The legacy :meth:`from_pandas` auxiliary inputs remain positional.
+        """
+        from emu_gmm._internal.frames import align_rows
+
+        weights = align_rows(weights, frame, name="weights")
+        mask = align_rows(mask, frame, name="mask")
+        return cls.from_pandas(frame, weights=weights, mask=mask, nan_aware=nan_aware)
 
     @classmethod
     def from_nan_aware(
